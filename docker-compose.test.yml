@@ -1,0 +1,36 @@
+version: '3'
+
+services:
+  app:
+    image: bitmagnet:test
+    container_name: bitmagnet_test
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - HTTP_PORT=3000
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=bitmagnet
+      - POSTGRES_PASSWORD=bitmagnet
+      - POSTGRES_DATABASE=bitmagnet
+    depends_on:
+      - postgres
+    command:
+      - worker
+      - run
+      - --all
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bitmagnet_postgres_test
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=bitmagnet
+      - POSTGRES_PASSWORD=bitmagnet
+      - POSTGRES_DB=bitmagnet
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
