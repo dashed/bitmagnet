@@ -164,6 +164,7 @@ type TorrentContentFacetsInput struct {
 	VideoResolution graphql.Omittable[*VideoResolutionFacetInput] `json:"videoResolution,omitempty"`
 	VideoSource     graphql.Omittable[*VideoSourceFacetInput]     `json:"videoSource,omitempty"`
 	SizeRange       graphql.Omittable[*SizeRangeInput]            `json:"sizeRange,omitempty"`
+	PublishedAt     graphql.Omittable[*string]                    `json:"publishedAt,omitempty"`
 }
 
 type TorrentContentOrderByInput struct {

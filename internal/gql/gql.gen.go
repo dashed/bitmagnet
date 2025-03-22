@@ -2872,6 +2872,7 @@ input TorrentContentFacetsInput {
   videoResolution: VideoResolutionFacetInput
   videoSource: VideoSourceFacetInput
   sizeRange: SizeRangeInput
+  publishedAt: String
 }
 
 type ContentTypeAgg {
@@ -16493,7 +16494,7 @@ func (ec *executionContext) unmarshalInputTorrentContentFacetsInput(ctx context.
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"contentType", "torrentSource", "torrentTag", "torrentFileType", "language", "genre", "releaseYear", "videoResolution", "videoSource", "sizeRange"}
+	fieldsInOrder := [...]string{"contentType", "torrentSource", "torrentTag", "torrentFileType", "language", "genre", "releaseYear", "videoResolution", "videoSource", "sizeRange", "publishedAt"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -16570,6 +16571,13 @@ func (ec *executionContext) unmarshalInputTorrentContentFacetsInput(ctx context.
 				return it, err
 			}
 			it.SizeRange = graphql.OmittableOf(data)
+		case "publishedAt":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("publishedAt"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.PublishedAt = graphql.OmittableOf(data)
 		}
 	}
 

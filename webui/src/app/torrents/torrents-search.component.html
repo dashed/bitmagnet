@@ -69,7 +69,6 @@
           </nav>
         </section>
       </mat-expansion-panel>
-
       <!-- Size Filter Panel -->
       <mat-expansion-panel class="size-filter-panel">
         <mat-expansion-panel-header>
@@ -186,6 +185,20 @@
               <mat-icon>close</mat-icon>
             </button>
           </div>
+        </section>
+      </mat-expansion-panel>
+      <!-- Published Date Filter Panel -->
+      <mat-expansion-panel class="date-filter-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>
+            <mat-icon>calendar_today</mat-icon> {{ t("torrents.published_date_filter") }}
+          </mat-panel-title>
+        </mat-expansion-panel-header>
+        <section class="date-filter-section">
+          <app-time-frame-selector
+            [initialTimeFrame]="timeFrameExpression"
+            (timeFrameChanged)="onTimeFrameChanged($event)"
+          ></app-time-frame-selector>
         </section>
       </mat-expansion-panel>
       @for (facet of facets$ | async; track facet.key) {

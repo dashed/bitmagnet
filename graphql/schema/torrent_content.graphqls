@@ -80,6 +80,7 @@ input TorrentContentFacetsInput {
   videoResolution: VideoResolutionFacetInput
   videoSource: VideoSourceFacetInput
   sizeRange: SizeRangeInput
+  publishedAt: String
 }
 
 type ContentTypeAgg {
