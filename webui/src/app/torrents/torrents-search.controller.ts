@@ -66,12 +66,12 @@ const controlsToQueryVariables = (
 ): generated.TorrentContentSearchQueryVariables => {
   // Build facets object using the types we know are available
   const facets: generated.TorrentContentFacetsInput = {
-    contentType: ctrl.contentType
-      ? {
-          aggregate: true,
-          filter: [ctrl.contentType === "null" ? null : ctrl.contentType],
-        }
-      : undefined,
+    contentType: {
+      aggregate: true,
+      filter: ctrl.contentType
+        ? [ctrl.contentType === "null" ? null : ctrl.contentType]
+        : undefined,
+    },
     genre: ctrl.facets.genre.active
       ? {
           aggregate: true,
