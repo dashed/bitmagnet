@@ -64,8 +64,16 @@
 - **Component Structure**: Angular components split into HTML templates, TypeScript controllers, and SCSS styles.
 
 ## Common Patterns
-- **Size Value Conversion**: When working with file sizes, convert between units (KB, MB, GB, TB) and bytes using appropriate multipliers (1024^n).
-- **GraphQL Criteria**: Each filter needs corresponding criteria in both backend and frontend code.
+- **Size Value Conversion**: 
+  - When working with file sizes, handle both SI units (KB, MB, GB, TB with 1000^n multipliers) and binary units (KiB, MiB, GiB, TiB with 1024^n multipliers).
+  - For large values (GB/GiB and above), use careful multiplication to avoid integer overflow: `Math.floor(size * 1024 * 1024) * 1024`.
+- **GraphQL Criteria**: 
+  - Each filter needs corresponding criteria in both backend and frontend code.
+  - When adding new fields to GraphQL schema, regenerate code with `task gen-gql` and `cd webui && npm run graphql:codegen`.
+- **Date/Time Handling**:
+  - For date filters, support multiple formats (relative, special dates, absolute ranges).
+  - In Go, use `time.Time` and `time.Duration` for time operations.
+  - In TypeScript, use standardized date parsing and formatting.
 - **Responsive Design**: Use Material components and Angular's responsive services like `breakpoints.sizeAtLeast('Medium')`.
 - **Translations**: Always use translation keys (e.g., `t("torrents.size_filter")`) instead of hardcoded text.
 

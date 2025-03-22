@@ -88,10 +88,12 @@
   }
 }
 
-.size-filter-panel {
+.size-filter-panel,
+.date-filter-panel {
   margin-bottom: 14px;
   
-  .size-filter-section {
+  .size-filter-section,
+  .date-filter-section {
     margin-left: 0 !important;
   }
   

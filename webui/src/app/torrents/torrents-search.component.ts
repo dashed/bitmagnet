@@ -26,6 +26,8 @@ import { intParam, stringListParam, stringParam } from "../util/query-string";
 import { AppModule } from "../app.module";
 import { DocumentTitleComponent } from "../layout/document-title.component";
 import { IntEstimatePipe } from "../pipes/int-estimate.pipe";
+import { TimeFrameSelectorComponent } from "../dates/time-frame-selector.component";
+import { TimeFrame } from "../dates/parse-timeframe";
 import { TorrentsBulkActionsComponent } from "./torrents-bulk-actions.component";
 import { contentTypeList, contentTypeMap } from "./content-types";
 import {
@@ -67,6 +69,7 @@ import {
     TorrentsBulkActionsComponent,
     TorrentsTableComponent,
     IntEstimatePipe,
+    TimeFrameSelectorComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -102,6 +105,7 @@ export class TorrentsSearchComponent implements OnInit, OnDestroy {
   maxSizeControl = new FormControl<number | null>(null);
   minSizeUnitControl = new FormControl<string>("MiB");
   maxSizeUnitControl = new FormControl<string>("MiB");
+  timeFrameExpression = "";
 
   result = emptyResult;
 
@@ -208,6 +212,15 @@ export class TorrentsSearchComponent implements OnInit, OnDestroy {
     }
 
     return bytes;
+  }
+
+  // Handle time frame selection change
+  onTimeFrameChanged(timeFrame: TimeFrame): void {
+    if (timeFrame.isValid) {
+      this.timeFrameExpression = timeFrame.expression;
+      this.controller.setPublishedAt(this.timeFrameExpression);
+      this.dataSource.refresh();
+    }
   }
 
   updateSizeFilter(): void {
@@ -341,6 +354,8 @@ const initControls: TorrentSearchControls = {
 const paramsToControls = (params: Params): TorrentSearchControls => {
   const queryString = stringParam(params, "query");
   const activeFacets = stringListParam(params, "facets");
+  const publishedAt = stringParam(params, "published_at");
+
   let selectedTorrent: TorrentSelection | undefined;
   const selectedTorrentParam = stringParam(params, "torrent");
   if (selectedTorrentParam) {
@@ -457,6 +472,7 @@ const paramsToControls = (params: Params): TorrentSearchControls => {
     page: intParam(params, "page") ?? 1,
     selectedTorrent,
     sizeRange,
+    publishedAt,
     facets: facets.reduce<TorrentSearchControls["facets"]>((acc, facet) => {
       const active = activeFacets?.includes(facet.key) ?? false;
       const filter = stringListParam(params, facet.key);
@@ -598,6 +614,7 @@ const controlsToParams = (
     content_type: ctrl.contentType,
     order: orderBy?.field,
     desc,
+    published_at: ctrl.publishedAt,
     ...sizeParams,
     ...(ctrl.selectedTorrent
       ? {
