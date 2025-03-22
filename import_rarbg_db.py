@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+"""
+Import RARBG SQLite database into bitmagnet.
+
+This script reads a RARBG SQLite database, transforms the data into the format expected by bitmagnet, and sends it to the bitmagnet server.
+
+Sources:
+- https://btdig.com/A2CA83E177DF5CB1966DFC1D262BC751E4987405
+- https://www.reddit.com/r/PiratedGames/comments/13wjasv/rarbg_torrents_shut_down/jmd5sbf/
+
+"""
 
 import random
 import sqlite3
