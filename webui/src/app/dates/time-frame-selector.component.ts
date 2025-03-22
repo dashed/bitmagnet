@@ -7,8 +7,8 @@ import {
   OnInit,
   Output,
 } from "@angular/core";
-import { CommonModule } from "@angular/common";
-import { FormControl, ReactiveFormsModule } from "@angular/forms";
+import { CommonModule, JsonPipe } from "@angular/common";
+import { FormControl, FormGroup, ReactiveFormsModule } from "@angular/forms";
 import { MatButtonModule } from "@angular/material/button";
 import { MatFormFieldModule } from "@angular/material/form-field";
 import { MatInputModule } from "@angular/material/input";
@@ -17,7 +17,13 @@ import { MatChipsModule } from "@angular/material/chips";
 import { MatIconModule } from "@angular/material/icon";
 import { MatTooltipModule } from "@angular/material/tooltip";
 import { MatDatepickerModule } from "@angular/material/datepicker";
-import { MatNativeDateModule } from "@angular/material/core";
+import {
+  MatNativeDateModule,
+  provideNativeDateAdapter,
+  MAT_DATE_FORMATS,
+} from "@angular/material/core";
+import { MatTabsModule } from "@angular/material/tabs";
+import { MatDividerModule } from "@angular/material/divider";
 import { TranslocoModule } from "@jsverse/transloco";
 import {
   Subject,
@@ -32,11 +38,25 @@ import {
   timeFramePresets,
 } from "./parse-timeframe";
 
+// Custom date format to match our app's style
+export const MY_DATE_FORMATS = {
+  parse: {
+    dateInput: "MM/DD/YYYY",
+  },
+  display: {
+    dateInput: "MMM D, YYYY",
+    monthYearLabel: "MMM YYYY",
+    dateA11yLabel: "LL",
+    monthYearA11yLabel: "MMMM YYYY",
+  },
+};
+
 @Component({
   selector: "app-time-frame-selector",
   standalone: true,
   imports: [
     CommonModule,
+    JsonPipe,
     ReactiveFormsModule,
     MatButtonModule,
     MatFormFieldModule,
@@ -47,107 +67,137 @@ import {
     MatTooltipModule,
     MatDatepickerModule,
     MatNativeDateModule,
+    MatTabsModule,
+    MatDividerModule,
     TranslocoModule,
+  ],
+  providers: [
+    provideNativeDateAdapter(),
+    { provide: MAT_DATE_FORMATS, useValue: MY_DATE_FORMATS },
   ],
   template: `
     <ng-container *transloco="let t">
       <div class="time-frame-container">
-        <div class="time-frame-inputs">
-          <mat-form-field subscriptSizing="dynamic" class="time-frame-input">
-            <mat-label>{{ t("dates.time_frame") }}</mat-label>
-            <input
-              matInput
-              type="text"
-              [formControl]="timeFrameControl"
-              [placeholder]="t('dates.time_frame_placeholder')"
-              [matTooltip]="t('dates.time_frame_tooltip')"
-            />
-            <button
-              *ngIf="timeFrameControl.value"
-              matSuffix
-              mat-icon-button
-              aria-label="Clear"
-              (click)="clearTimeFrame()"
-            >
-              <mat-icon>close</mat-icon>
-            </button>
-          </mat-form-field>
-
-          <mat-form-field subscriptSizing="dynamic" class="preset-selector">
-            <mat-label>{{ t("dates.presets") }}</mat-label>
-            <mat-select (selectionChange)="onPresetSelected($event)">
-              <mat-option
-                *ngFor="let preset of timeFramePresets"
-                [value]="preset.value"
+        <!-- Tabbed interface for filtering options -->
+        <mat-tab-group
+          animationDuration="0ms"
+          (selectedTabChange)="onTabChange($event)"
+          [selectedIndex]="activeTabIndex"
+          class="filter-tabs"
+        >
+          <!-- Quick Presets Tab -->
+          <mat-tab [label]="t('dates.quick_presets')">
+            <div class="preset-buttons">
+              <button
+                *ngFor="let preset of commonPresets"
+                mat-stroked-button
+                [class.selected]="timeFrameControl.value === preset.value"
+                (click)="onPresetSelected({ value: preset.value })"
               >
                 {{ preset.label }}
-              </mat-option>
-            </mat-select>
-          </mat-form-field>
-
-          <button
-            mat-stroked-button
-            color="primary"
-            class="calendar-button"
-            (click)="toggleDatePicker()"
-            [matTooltip]="t('dates.date_picker')"
-          >
-            <mat-icon>calendar_today</mat-icon>
-            {{ t("dates.calendar") }}
-          </button>
-        </div>
-
-        <!-- Date Range Picker -->
-        <div class="date-picker-container" *ngIf="showDatePicker">
-          <div class="date-range-picker">
-            <div class="date-picker-field">
-              <mat-form-field subscriptSizing="dynamic">
-                <mat-label>{{ t("dates.start_date") }}</mat-label>
-                <input
-                  matInput
-                  [matDatepicker]="startPicker"
-                  [formControl]="startDateControl"
-                />
-                <mat-datepicker-toggle
-                  matSuffix
-                  [for]="startPicker"
-                ></mat-datepicker-toggle>
-                <mat-datepicker #startPicker></mat-datepicker>
-              </mat-form-field>
+              </button>
             </div>
 
-            <div class="date-picker-field">
-              <mat-form-field subscriptSizing="dynamic">
-                <mat-label>{{ t("dates.end_date") }}</mat-label>
-                <input
-                  matInput
-                  [matDatepicker]="endPicker"
-                  [formControl]="endDateControl"
-                  [min]="startDateControl.value"
-                />
-                <mat-datepicker-toggle
-                  matSuffix
-                  [for]="endPicker"
-                ></mat-datepicker-toggle>
-                <mat-datepicker #endPicker></mat-datepicker>
+            <mat-divider></mat-divider>
+
+            <div class="more-presets-section">
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>{{ t("dates.more_presets") }}</mat-label>
+                <mat-select (selectionChange)="onPresetSelected($event)">
+                  <mat-option
+                    *ngFor="let preset of morePresets"
+                    [value]="preset.value"
+                  >
+                    {{ preset.label }}
+                  </mat-option>
+                </mat-select>
               </mat-form-field>
             </div>
+          </mat-tab>
 
-            <div class="date-picker-actions">
+          <!-- Calendar Tab -->
+          <mat-tab [label]="t('dates.date_range')">
+            <div class="date-range-container">
+              <mat-form-field appearance="outline" class="date-range-field">
+                <mat-label>{{ t("dates.select_date_range") }}</mat-label>
+                <mat-date-range-input
+                  [formGroup]="dateRange"
+                  [rangePicker]="rangePicker"
+                >
+                  <input
+                    matStartDate
+                    formControlName="start"
+                    [placeholder]="t('dates.start_date')"
+                  />
+                  <input
+                    matEndDate
+                    formControlName="end"
+                    [placeholder]="t('dates.end_date')"
+                  />
+                </mat-date-range-input>
+                <mat-hint>{{ t("dates.date_range_hint") }}</mat-hint>
+                <mat-datepicker-toggle
+                  matIconSuffix
+                  [for]="rangePicker"
+                ></mat-datepicker-toggle>
+                <mat-date-range-picker #rangePicker></mat-date-range-picker>
+
+                <mat-error
+                  *ngIf="
+                    dateRange.controls.start.hasError('matStartDateInvalid')
+                  "
+                >
+                  {{ t("dates.invalid_start_date") }}
+                </mat-error>
+                <mat-error
+                  *ngIf="dateRange.controls.end.hasError('matEndDateInvalid')"
+                >
+                  {{ t("dates.invalid_end_date") }}
+                </mat-error>
+              </mat-form-field>
+
               <button
                 mat-raised-button
                 color="primary"
-                (click)="applyDateRange()"
-                [disabled]="!startDateControl.value || !endDateControl.value"
+                class="apply-button"
+                [disabled]="
+                  !dateRange.valid ||
+                  !dateRange.value.start ||
+                  !dateRange.value.end
+                "
+                (click)="applyDateRangePicker()"
               >
                 {{ t("general.apply") }}
               </button>
-              <button mat-stroked-button (click)="toggleDatePicker()">
-                {{ t("general.cancel") }}
+            </div>
+          </mat-tab>
+
+          <!-- Custom Expression Tab -->
+          <mat-tab [label]="t('dates.custom')">
+            <div class="custom-expression">
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>{{ t("dates.time_frame") }}</mat-label>
+                <input
+                  matInput
+                  type="text"
+                  [formControl]="timeFrameControl"
+                  [placeholder]="t('dates.time_frame_placeholder')"
+                  (keyup.enter)="updateTimeFrameAndEmit(timeFrameControl.value)"
+                />
+                <mat-hint>{{ t("dates.custom_time_hint") }}</mat-hint>
+              </mat-form-field>
+
+              <button
+                mat-raised-button
+                color="primary"
+                class="apply-button"
+                (click)="updateTimeFrameAndEmit(timeFrameControl.value)"
+              >
+                {{ t("general.apply") }}
               </button>
             </div>
-          </div>
-        </div>
+          </mat-tab>
+        </mat-tab-group>
 
         <!-- Active time frame display -->
         <div
@@ -158,10 +208,8 @@ import {
             timeFrameControl.value
           "
         >
-          <mat-chip highlighted color="primary">
-            <span class="time-frame-label"
-              >{{ t("dates.selected_range") }}:</span
-            >
+          <mat-chip highlighted color="primary" class="range-chip">
+            <mat-icon>event</mat-icon>
             <span class="time-frame-value">{{
               formatTimeFrameDescription(currentTimeFrame)
             }}</span>
@@ -187,81 +235,68 @@ import {
       .time-frame-container {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 16px;
       }
 
-      .time-frame-inputs {
+      .filter-tabs {
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .preset-buttons {
         display: flex;
         flex-wrap: wrap;
-        gap: 16px;
-        align-items: flex-start;
+        gap: 8px;
+        margin: 16px 0;
       }
 
-      .time-frame-input {
-        flex-grow: 1;
-        min-width: 200px;
+      .preset-buttons button {
+        margin: 4px;
+        min-width: 110px;
       }
 
-      .preset-selector {
-        min-width: 150px;
+      .preset-buttons button.selected {
+        background-color: rgba(0, 0, 0, 0.08);
+        font-weight: 500;
       }
 
-      .calendar-button {
-        height: 36px;
-        margin-top: 4px;
+      .more-presets-section {
+        margin: 16px 0;
       }
 
-      .date-picker-container {
-        background-color: rgba(0, 0, 0, 0.03);
-        border-radius: 8px;
-        padding: 16px;
-        margin: 8px 0;
-        animation: fadeIn 0.2s ease-in-out;
+      .full-width {
+        width: 100%;
       }
 
-      @keyframes fadeIn {
-        from {
-          opacity: 0;
-          transform: translateY(-10px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
-      }
-
-      .date-range-picker {
+      .date-range-container {
+        padding: 16px 0;
         display: flex;
         flex-direction: column;
         gap: 16px;
       }
 
-      .date-picker-field {
+      .date-range-field {
         width: 100%;
       }
 
-      .date-picker-field mat-form-field {
-        width: 100%;
-      }
-
-      .date-picker-actions {
+      .custom-expression {
+        padding: 16px 0;
         display: flex;
-        gap: 12px;
-        margin-top: 8px;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .apply-button {
+        align-self: flex-start;
       }
 
       .selected-time-frame {
-        margin-top: 4px;
+        margin-top: 8px;
       }
 
-      .selected-time-frame mat-chip {
-        height: auto;
+      .range-chip {
         padding: 8px 12px;
-      }
-
-      .time-frame-label {
-        font-weight: 500;
-        margin-right: 8px;
+        gap: 8px;
       }
 
       .time-frame-value {
@@ -269,27 +304,20 @@ import {
       }
 
       .error-message {
-        margin-top: 4px;
+        margin-top: 8px;
       }
 
       .error-message mat-chip {
-        height: auto;
         padding: 8px 12px;
       }
 
-      @media (min-width: 768px) {
-        .date-range-picker {
-          flex-direction: row;
-          align-items: center;
+      @media (max-width: 599px) {
+        .preset-buttons {
+          flex-direction: column;
         }
 
-        .date-picker-field {
-          width: auto;
-          flex: 1;
-        }
-
-        .date-picker-actions {
-          margin-top: 0;
+        .preset-buttons button {
+          width: 100%;
         }
       }
     `,
@@ -301,11 +329,19 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
   @Output() timeFrameChanged = new EventEmitter<TimeFrame>();
 
   timeFrameControl = new FormControl<string>("");
-  startDateControl = new FormControl<Date | null>(null);
-  endDateControl = new FormControl<Date | null>(null);
-  showDatePicker = false;
+
+  // Date range form group
+  dateRange = new FormGroup({
+    start: new FormControl<Date | null>(null),
+    end: new FormControl<Date | null>(null),
+  });
+
+  activeTabIndex = 0;
   currentTimeFrame: TimeFrame | null = null;
-  timeFramePresets = timeFramePresets;
+
+  // Split presets into common and more categories
+  commonPresets = timeFramePresets.slice(0, 6); // First 6 presets for quick access
+  morePresets = timeFramePresets.slice(6); // Remaining presets in dropdown
 
   private _manualChange = new Subject<string>();
   private _subscriptions: Subscription[] = [];
@@ -317,10 +353,12 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
       });
       this.updateTimeFrame(this.initialTimeFrame);
 
-      // If there's an initial time frame, set the date controls accordingly
+      // If there's an initial time frame, set the date range control accordingly
       if (this.currentTimeFrame?.isValid) {
-        this.startDateControl.setValue(this.currentTimeFrame.startDate);
-        this.endDateControl.setValue(this.currentTimeFrame.endDate);
+        this.dateRange.setValue({
+          start: this.currentTimeFrame.startDate,
+          end: this.currentTimeFrame.endDate,
+        });
       }
     }
 
@@ -332,10 +370,12 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
           if (value !== null) {
             this.updateTimeFrame(value);
 
-            // Update date pickers when text input changes
+            // Update date range picker when text input changes
             if (this.currentTimeFrame?.isValid) {
-              this.startDateControl.setValue(this.currentTimeFrame.startDate);
-              this.endDateControl.setValue(this.currentTimeFrame.endDate);
+              this.dateRange.setValue({
+                start: this.currentTimeFrame.startDate,
+                end: this.currentTimeFrame.endDate,
+              });
             }
           }
         }),
@@ -355,28 +395,20 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
     this._subscriptions = [];
   }
 
+  onTabChange(event: { index: number }): void {
+    this.activeTabIndex = event.index;
+  }
+
   onPresetSelected(event: { value: string }): void {
     this._manualChange.next(event.value);
   }
 
-  toggleDatePicker(): void {
-    this.showDatePicker = !this.showDatePicker;
+  applyDateRangePicker(): void {
+    const { start, end } = this.dateRange.value;
 
-    // If opening the date picker and we have a valid time frame,
-    // set the date controls to match the current time frame
-    if (this.showDatePicker && this.currentTimeFrame?.isValid) {
-      this.startDateControl.setValue(this.currentTimeFrame.startDate);
-      this.endDateControl.setValue(this.currentTimeFrame.endDate);
-    }
-  }
-
-  applyDateRange(): void {
-    if (!this.startDateControl.value || !this.endDateControl.value) {
+    if (!start || !end) {
       return;
     }
-
-    const startDate = this.startDateControl.value;
-    const endDate = this.endDateControl.value;
 
     // Format dates for the expression
     const formatDate = (date: Date) => {
@@ -388,22 +420,26 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
     };
 
     // Create a date range expression like "Jan 1, 2023 to Jan 31, 2023"
-    const expression = `${formatDate(startDate)} to ${formatDate(endDate)}`;
+    const expression = `${formatDate(start)} to ${formatDate(end)}`;
 
     // Update the time frame control
     this.timeFrameControl.setValue(expression);
+  }
 
-    // Close the date picker
-    this.showDatePicker = false;
+  updateTimeFrameAndEmit(value: string | null): void {
+    if (!value) {
+      this.clearTimeFrame();
+      return;
+    }
+
+    this.updateTimeFrame(value);
   }
 
   clearTimeFrame(): void {
     // Reset all controls
     this.timeFrameControl.setValue("");
-    this.startDateControl.setValue(null);
-    this.endDateControl.setValue(null);
+    this.dateRange.reset();
     this.currentTimeFrame = null;
-    this.showDatePicker = false;
 
     this.timeFrameChanged.emit({
       startDate: new Date(),
@@ -413,7 +449,10 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
     });
   }
 
-  private updateTimeFrame(value: string): void {
+  private updateTimeFrame(value: string | null): void {
+    if (!value) {
+      return;
+    }
     const timeFrame = parseTimeFrame(value);
     this.currentTimeFrame = timeFrame;
     this.timeFrameChanged.emit(timeFrame);
