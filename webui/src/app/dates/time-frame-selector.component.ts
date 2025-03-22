@@ -16,6 +16,8 @@ import { MatSelectModule } from "@angular/material/select";
 import { MatChipsModule } from "@angular/material/chips";
 import { MatIconModule } from "@angular/material/icon";
 import { MatTooltipModule } from "@angular/material/tooltip";
+import { MatDatepickerModule } from "@angular/material/datepicker";
+import { MatNativeDateModule } from "@angular/material/core";
 import { TranslocoModule } from "@jsverse/transloco";
 import {
   Subject,
@@ -43,32 +45,34 @@ import {
     MatChipsModule,
     MatIconModule,
     MatTooltipModule,
+    MatDatepickerModule,
+    MatNativeDateModule,
     TranslocoModule,
   ],
   template: `
     <ng-container *transloco="let t">
       <div class="time-frame-container">
-        <mat-form-field subscriptSizing="dynamic" class="time-frame-input">
-          <mat-label>{{ t("dates.time_frame") }}</mat-label>
-          <input
-            matInput
-            type="text"
-            [formControl]="timeFrameControl"
-            [placeholder]="t('dates.time_frame_placeholder')"
-            [matTooltip]="t('dates.time_frame_tooltip')"
-          />
-          <button
-            *ngIf="timeFrameControl.value"
-            matSuffix
-            mat-icon-button
-            aria-label="Clear"
-            (click)="clearTimeFrame()"
-          >
-            <mat-icon>close</mat-icon>
-          </button>
-        </mat-form-field>
+        <div class="time-frame-inputs">
+          <mat-form-field subscriptSizing="dynamic" class="time-frame-input">
+            <mat-label>{{ t("dates.time_frame") }}</mat-label>
+            <input
+              matInput
+              type="text"
+              [formControl]="timeFrameControl"
+              [placeholder]="t('dates.time_frame_placeholder')"
+              [matTooltip]="t('dates.time_frame_tooltip')"
+            />
+            <button
+              *ngIf="timeFrameControl.value"
+              matSuffix
+              mat-icon-button
+              aria-label="Clear"
+              (click)="clearTimeFrame()"
+            >
+              <mat-icon>close</mat-icon>
+            </button>
+          </mat-form-field>
 
-        <div class="time-frame-presets">
           <mat-form-field subscriptSizing="dynamic" class="preset-selector">
             <mat-label>{{ t("dates.presets") }}</mat-label>
             <mat-select (selectionChange)="onPresetSelected($event)">
@@ -80,20 +84,91 @@ import {
               </mat-option>
             </mat-select>
           </mat-form-field>
+
+          <button
+            mat-stroked-button
+            color="primary"
+            class="calendar-button"
+            (click)="toggleDatePicker()"
+            [matTooltip]="t('dates.date_picker')"
+          >
+            <mat-icon>calendar_today</mat-icon>
+            {{ t("dates.calendar") }}
+          </button>
         </div>
 
-        <div
-          class="active-time-frame"
-          *ngIf="currentTimeFrame && currentTimeFrame.isValid"
-        >
-          <mat-chip-listbox>
-            <mat-chip highlighted color="primary">
-              {{ formatTimeFrameDescription(currentTimeFrame) }}
-              <button matChipRemove (click)="clearTimeFrame()">
-                <mat-icon>cancel</mat-icon>
+        <!-- Date Range Picker -->
+        <div class="date-picker-container" *ngIf="showDatePicker">
+          <div class="date-range-picker">
+            <div class="date-picker-field">
+              <mat-form-field subscriptSizing="dynamic">
+                <mat-label>{{ t("dates.start_date") }}</mat-label>
+                <input
+                  matInput
+                  [matDatepicker]="startPicker"
+                  [formControl]="startDateControl"
+                />
+                <mat-datepicker-toggle
+                  matSuffix
+                  [for]="startPicker"
+                ></mat-datepicker-toggle>
+                <mat-datepicker #startPicker></mat-datepicker>
+              </mat-form-field>
+            </div>
+
+            <div class="date-picker-field">
+              <mat-form-field subscriptSizing="dynamic">
+                <mat-label>{{ t("dates.end_date") }}</mat-label>
+                <input
+                  matInput
+                  [matDatepicker]="endPicker"
+                  [formControl]="endDateControl"
+                  [min]="startDateControl.value"
+                />
+                <mat-datepicker-toggle
+                  matSuffix
+                  [for]="endPicker"
+                ></mat-datepicker-toggle>
+                <mat-datepicker #endPicker></mat-datepicker>
+              </mat-form-field>
+            </div>
+
+            <div class="date-picker-actions">
+              <button
+                mat-raised-button
+                color="primary"
+                (click)="applyDateRange()"
+                [disabled]="!startDateControl.value || !endDateControl.value"
+              >
+                {{ t("general.apply") }}
               </button>
-            </mat-chip>
-          </mat-chip-listbox>
+              <button mat-stroked-button (click)="toggleDatePicker()">
+                {{ t("general.cancel") }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active time frame display -->
+        <div
+          class="selected-time-frame"
+          *ngIf="
+            currentTimeFrame &&
+            currentTimeFrame.isValid &&
+            timeFrameControl.value
+          "
+        >
+          <mat-chip highlighted color="primary">
+            <span class="time-frame-label"
+              >{{ t("dates.selected_range") }}:</span
+            >
+            <span class="time-frame-value">{{
+              formatTimeFrameDescription(currentTimeFrame)
+            }}</span>
+            <button matChipRemove (click)="clearTimeFrame()">
+              <mat-icon>cancel</mat-icon>
+            </button>
+          </mat-chip>
         </div>
 
         <div
@@ -112,7 +187,14 @@ import {
       .time-frame-container {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 12px;
+      }
+
+      .time-frame-inputs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: flex-start;
       }
 
       .time-frame-input {
@@ -120,22 +202,95 @@ import {
         min-width: 200px;
       }
 
-      .time-frame-presets {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-
       .preset-selector {
         min-width: 150px;
       }
 
-      .error-message {
+      .calendar-button {
+        height: 36px;
+        margin-top: 4px;
+      }
+
+      .date-picker-container {
+        background-color: rgba(0, 0, 0, 0.03);
+        border-radius: 8px;
+        padding: 16px;
+        margin: 8px 0;
+        animation: fadeIn 0.2s ease-in-out;
+      }
+
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .date-range-picker {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .date-picker-field {
+        width: 100%;
+      }
+
+      .date-picker-field mat-form-field {
+        width: 100%;
+      }
+
+      .date-picker-actions {
+        display: flex;
+        gap: 12px;
         margin-top: 8px;
       }
 
-      .active-time-frame {
-        margin-top: 8px;
+      .selected-time-frame {
+        margin-top: 4px;
+      }
+
+      .selected-time-frame mat-chip {
+        height: auto;
+        padding: 8px 12px;
+      }
+
+      .time-frame-label {
+        font-weight: 500;
+        margin-right: 8px;
+      }
+
+      .time-frame-value {
+        font-weight: normal;
+      }
+
+      .error-message {
+        margin-top: 4px;
+      }
+
+      .error-message mat-chip {
+        height: auto;
+        padding: 8px 12px;
+      }
+
+      @media (min-width: 768px) {
+        .date-range-picker {
+          flex-direction: row;
+          align-items: center;
+        }
+
+        .date-picker-field {
+          width: auto;
+          flex: 1;
+        }
+
+        .date-picker-actions {
+          margin-top: 0;
+        }
       }
     `,
   ],
@@ -146,6 +301,9 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
   @Output() timeFrameChanged = new EventEmitter<TimeFrame>();
 
   timeFrameControl = new FormControl<string>("");
+  startDateControl = new FormControl<Date | null>(null);
+  endDateControl = new FormControl<Date | null>(null);
+  showDatePicker = false;
   currentTimeFrame: TimeFrame | null = null;
   timeFramePresets = timeFramePresets;
 
@@ -158,6 +316,12 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
         emitEvent: false,
       });
       this.updateTimeFrame(this.initialTimeFrame);
+
+      // If there's an initial time frame, set the date controls accordingly
+      if (this.currentTimeFrame?.isValid) {
+        this.startDateControl.setValue(this.currentTimeFrame.startDate);
+        this.endDateControl.setValue(this.currentTimeFrame.endDate);
+      }
     }
 
     // Handle form control changes
@@ -167,6 +331,12 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
         .subscribe((value) => {
           if (value !== null) {
             this.updateTimeFrame(value);
+
+            // Update date pickers when text input changes
+            if (this.currentTimeFrame?.isValid) {
+              this.startDateControl.setValue(this.currentTimeFrame.startDate);
+              this.endDateControl.setValue(this.currentTimeFrame.endDate);
+            }
           }
         }),
     );
@@ -189,11 +359,54 @@ export class TimeFrameSelectorComponent implements OnInit, OnDestroy {
     this._manualChange.next(event.value);
   }
 
+  toggleDatePicker(): void {
+    this.showDatePicker = !this.showDatePicker;
+
+    // If opening the date picker and we have a valid time frame,
+    // set the date controls to match the current time frame
+    if (this.showDatePicker && this.currentTimeFrame?.isValid) {
+      this.startDateControl.setValue(this.currentTimeFrame.startDate);
+      this.endDateControl.setValue(this.currentTimeFrame.endDate);
+    }
+  }
+
+  applyDateRange(): void {
+    if (!this.startDateControl.value || !this.endDateControl.value) {
+      return;
+    }
+
+    const startDate = this.startDateControl.value;
+    const endDate = this.endDateControl.value;
+
+    // Format dates for the expression
+    const formatDate = (date: Date) => {
+      return date.toLocaleDateString("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      });
+    };
+
+    // Create a date range expression like "Jan 1, 2023 to Jan 31, 2023"
+    const expression = `${formatDate(startDate)} to ${formatDate(endDate)}`;
+
+    // Update the time frame control
+    this.timeFrameControl.setValue(expression);
+
+    // Close the date picker
+    this.showDatePicker = false;
+  }
+
   clearTimeFrame(): void {
+    // Reset all controls
     this.timeFrameControl.setValue("");
+    this.startDateControl.setValue(null);
+    this.endDateControl.setValue(null);
     this.currentTimeFrame = null;
+    this.showDatePicker = false;
+
     this.timeFrameChanged.emit({
-      startDate: new Date(0),
+      startDate: new Date(),
       endDate: new Date(),
       expression: "",
       isValid: true,

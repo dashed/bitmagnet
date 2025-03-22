@@ -313,9 +313,11 @@ function parseAbsoluteTimeRange(expression: string): TimeFrame {
  */
 export function parseTimeFrame(expression: string): TimeFrame {
   if (!expression || expression.trim() === "") {
+    // Return current date for both start and end when empty
+    const now = new Date();
     return {
-      startDate: new Date(0),
-      endDate: new Date(),
+      startDate: now,
+      endDate: now,
       expression: "",
       isValid: true,
     };
