@@ -57,77 +57,96 @@ export type TorrentSearchControls = {
     videoSource: FacetInput<generated.VideoSource>;
   };
   sizeRange?: SizeRangeFilter;
+  publishedAt?: string;
   selectedTorrent?: TorrentSelection;
 };
 
 const controlsToQueryVariables = (
   ctrl: TorrentSearchControls,
-): generated.TorrentContentSearchQueryVariables => ({
-  input: {
+): generated.TorrentContentSearchQueryVariables => {
+  // Build facets object using the types we know are available
+  const facets: generated.TorrentContentFacetsInput = {
+    contentType: {
+      aggregate: true,
+      filter: ctrl.contentType
+        ? [ctrl.contentType === "null" ? null : ctrl.contentType]
+        : undefined,
+    },
+    genre: ctrl.facets.genre.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.genre.filter,
+        }
+      : undefined,
+    language: ctrl.facets.language.active
+      ? {
+          aggregate: ctrl.facets.language.active,
+          filter: ctrl.facets.language.filter,
+        }
+      : undefined,
+    torrentFileType: ctrl.facets.fileType.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.fileType.filter,
+        }
+      : undefined,
+    torrentSource: ctrl.facets.torrentSource.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.torrentSource.filter,
+        }
+      : undefined,
+    torrentTag: ctrl.facets.torrentTag.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.torrentTag.filter,
+        }
+      : undefined,
+    videoResolution: ctrl.facets.videoResolution.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.videoResolution.filter,
+        }
+      : undefined,
+    videoSource: ctrl.facets.videoSource.active
+      ? {
+          aggregate: true,
+          filter: ctrl.facets.videoSource.filter,
+        }
+      : undefined,
+    sizeRange: ctrl.sizeRange
+      ? {
+          min: ctrl.sizeRange.min ? Number(ctrl.sizeRange.min) : undefined,
+          max: ctrl.sizeRange.max ? Number(ctrl.sizeRange.max) : undefined,
+        }
+      : undefined,
+  };
+
+  // Create the standard input object with proper typing from the generated types
+  const inputObject: generated.TorrentContentSearchQueryInput = {
     queryString: ctrl.queryString,
     limit: ctrl.limit,
     page: ctrl.page,
     totalCount: true,
     hasNextPage: true,
     orderBy: [ctrl.orderBy],
-    facets: {
-      contentType: {
-        aggregate: true,
-        filter: ctrl.contentType
-          ? [ctrl.contentType === "null" ? null : ctrl.contentType]
-          : undefined,
-      },
-      genre: ctrl.facets.genre.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.genre.filter,
-          }
-        : undefined,
-      language: ctrl.facets.language.active
-        ? {
-            aggregate: ctrl.facets.language.active,
-            filter: ctrl.facets.language.filter,
-          }
-        : undefined,
-      torrentFileType: ctrl.facets.fileType.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.fileType.filter,
-          }
-        : undefined,
-      torrentSource: ctrl.facets.torrentSource.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.torrentSource.filter,
-          }
-        : undefined,
-      torrentTag: ctrl.facets.torrentTag.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.torrentTag.filter,
-          }
-        : undefined,
-      videoResolution: ctrl.facets.videoResolution.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.videoResolution.filter,
-          }
-        : undefined,
-      videoSource: ctrl.facets.videoSource.active
-        ? {
-            aggregate: true,
-            filter: ctrl.facets.videoSource.filter,
-          }
-        : undefined,
-      sizeRange: ctrl.sizeRange
-        ? {
-            min: ctrl.sizeRange.min ? Number(ctrl.sizeRange.min) : undefined,
-            max: ctrl.sizeRange.max ? Number(ctrl.sizeRange.max) : undefined,
-          }
-        : undefined,
-    },
-  },
-});
+    facets,
+  };
+
+  // Since publishedAt is now part of the schema and code generation,
+  // we need to handle it in a type-safe way
+  if (ctrl.publishedAt) {
+    // Use a type assertion with a clearly defined interface
+    interface PublishedAtFacets extends generated.TorrentContentFacetsInput {
+      publishedAt?: string;
+    }
+    (facets as PublishedAtFacets).publishedAt = ctrl.publishedAt;
+  }
+
+  return {
+    input: inputObject,
+  };
+};
 
 export const inactiveFacet = {
   active: false,
@@ -344,6 +363,14 @@ export class TorrentsSearchController {
       ...ctrl,
       page: 1,
       sizeRange: min || max ? { min, max } : undefined,
+    }));
+  }
+
+  setPublishedAt(timeFrame?: string) {
+    this.update((ctrl) => ({
+      ...ctrl,
+      page: 1,
+      publishedAt: timeFrame || undefined,
     }));
   }
 }
