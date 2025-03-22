@@ -87,6 +87,8 @@ export class TorrentsSearchComponent implements OnInit, OnDestroy {
   contentTypes = contentTypeList;
   orderByOptions = orderByOptions;
 
+  private isInitialLoad = true;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   facets$: Observable<FacetInfo<any, any>[]>;
 
@@ -94,6 +96,10 @@ export class TorrentsSearchComponent implements OnInit, OnDestroy {
   compactColumns = compactColumns;
 
   queryString = new FormControl("");
+  minSizeControl = new FormControl<number | null>(null);
+  maxSizeControl = new FormControl<number | null>(null);
+  minSizeUnitControl = new FormControl<string>("MiB");
+  maxSizeUnitControl = new FormControl<string>("MiB");
 
   result = emptyResult;
 
@@ -155,16 +161,132 @@ export class TorrentsSearchComponent implements OnInit, OnDestroy {
     );
   }
 
+  // Helper function to convert size to bytes based on unit
+  private sizeToBytes(size: number | null, unit: string): number | undefined {
+    if (size === null) {
+      return undefined;
+    }
+
+    let bytes: number;
+    switch (unit) {
+      // Standard SI units (KB, MB, GB, TB) - using 1000-based units
+      case "KB":
+        bytes = Math.floor(size * 1000);
+        break;
+      case "MB":
+        bytes = Math.floor(size * 1000 * 1000);
+        break;
+      case "GB":
+        bytes = Math.floor(size * 1000 * 1000) * 1000;
+        break;
+      case "TB":
+        bytes = Math.floor(size * 1000 * 1000) * 1000 * 1000;
+        break;
+
+      // Binary units (KiB, MiB, GiB, TiB) - using 1024-based units
+      case "KiB":
+        bytes = Math.floor(size * 1024);
+        break;
+      case "MiB":
+        bytes = Math.floor(size * 1024 * 1024);
+        break;
+      case "GiB":
+        bytes = Math.floor(size * 1024 * 1024) * 1024;
+        break;
+      case "TiB":
+        bytes = Math.floor(size * 1024 * 1024) * 1024 * 1024;
+        break;
+      default:
+        bytes = size;
+    }
+
+    return bytes;
+  }
+
+  updateSizeFilter(): void {
+    const minSizeBytes = this.sizeToBytes(
+      this.minSizeControl.value,
+      this.minSizeUnitControl.value || "MB",
+    );
+    const maxSizeBytes = this.sizeToBytes(
+      this.maxSizeControl.value,
+      this.maxSizeUnitControl.value || "MB",
+    );
+
+    // Update controller
+    this.controller.setSizeRange(minSizeBytes, maxSizeBytes);
+
+    // Force a refresh
+    this.dataSource.refresh();
+  }
+
+  clearSizeFilter(): void {
+    // Reset form controls
+    this.minSizeControl.setValue(null);
+    this.maxSizeControl.setValue(null);
+    this.minSizeUnitControl.setValue("MiB");
+    this.maxSizeUnitControl.setValue("MiB");
+
+    // Update controller
+    this.controller.setSizeRange(undefined, undefined);
+
+    // Force a refresh
+    this.dataSource.refresh();
+  }
+
   ngOnInit(): void {
     this.subscriptions.push(
       this.route.queryParams.subscribe((params) => {
+        // Update query string
         this.queryString.setValue(stringParam(params, "query") ?? null);
+
+        // Only load size params on first load
+        if (this.isInitialLoad) {
+          this.isInitialLoad = false;
+
+          // Get size values
+          const minSize = intParam(params, "min_size");
+          const maxSize = intParam(params, "max_size");
+
+          // Get units or defaults
+          const minSizeUnit = stringParam(params, "min_size_unit") || "MiB";
+          const maxSizeUnit = stringParam(params, "max_size_unit") || "MiB";
+
+          // Set form values
+          if (minSize !== undefined) {
+            this.minSizeControl.setValue(minSize);
+            if (
+              ["KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"].includes(
+                minSizeUnit,
+              )
+            ) {
+              this.minSizeUnitControl.setValue(minSizeUnit);
+            }
+          }
+
+          if (maxSize !== undefined) {
+            this.maxSizeControl.setValue(maxSize);
+            if (
+              ["KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"].includes(
+                maxSizeUnit,
+              )
+            ) {
+              this.maxSizeUnitControl.setValue(maxSizeUnit);
+            }
+          }
+        }
+
+        // Update controller with all params
         this.controller.update(() => paramsToControls(params));
       }),
       this.controller.controls$.subscribe((ctrl) => {
         void this.router.navigate([], {
           relativeTo: this.route,
-          queryParams: controlsToParams(ctrl),
+          queryParams: controlsToParams(
+            ctrl,
+            this.minSizeUnitControl.value || "MiB",
+            this.maxSizeUnitControl.value || "MiB",
+          ),
           queryParamsHandling: "replace",
         });
       }),
@@ -217,6 +339,101 @@ const paramsToControls = (params: Params): TorrentSearchControls => {
       tab: torrentTabSelection,
     };
   }
+
+  // Handle size range parameters
+  const minSize = intParam(params, "min_size");
+  const maxSize = intParam(params, "max_size");
+  const minSizeUnit = stringParam(params, "min_size_unit") || "MiB";
+  const maxSizeUnit = stringParam(params, "max_size_unit") || "MiB";
+
+  let minSizeBytes, maxSizeBytes;
+
+  // Convert min size to bytes
+  if (minSize !== undefined) {
+    switch (minSizeUnit) {
+      // Standard SI units (KB, MB, GB, TB) - using 1000-based units
+      case "KB":
+        minSizeBytes = minSize * 1000;
+        break;
+      case "MB":
+        minSizeBytes = minSize * 1000 * 1000;
+        break;
+      case "GB":
+        // For GB values, calculate more carefully to avoid integer overflow
+        minSizeBytes = minSize * 1000 * 1000 * 1000;
+        break;
+      case "TB":
+        // For TB values, calculate even more carefully
+        minSizeBytes = minSize * 1000 * 1000 * 1000 * 1000;
+        break;
+
+      // Binary units (KiB, MiB, GiB, TiB) - using 1024-based units
+      case "KiB":
+        minSizeBytes = minSize * 1024;
+        break;
+      case "MiB":
+        minSizeBytes = minSize * 1024 * 1024;
+        break;
+      case "GiB":
+        // For GiB values, calculate more carefully to avoid integer overflow
+        minSizeBytes = minSize * 1024 * 1024 * 1024;
+        break;
+      case "TiB":
+        // For TiB values, calculate even more carefully
+        minSizeBytes = minSize * 1024 * 1024 * 1024 * 1024;
+        break;
+      default:
+        minSizeBytes = minSize * 1024 * 1024; // Default to MiB
+    }
+  }
+
+  // Convert max size to bytes
+  if (maxSize !== undefined) {
+    switch (maxSizeUnit) {
+      // Standard SI units (KB, MB, GB, TB) - using 1000-based units
+      case "KB":
+        maxSizeBytes = maxSize * 1000;
+        break;
+      case "MB":
+        maxSizeBytes = maxSize * 1000 * 1000;
+        break;
+      case "GB":
+        // For GB values, calculate more carefully to avoid integer overflow
+        maxSizeBytes = maxSize * 1000 * 1000 * 1000;
+        break;
+      case "TB":
+        // For TB values, calculate even more carefully
+        maxSizeBytes = maxSize * 1000 * 1000 * 1000 * 1000;
+        break;
+
+      // Binary units (KiB, MiB, GiB, TiB) - using 1024-based units
+      case "KiB":
+        maxSizeBytes = maxSize * 1024;
+        break;
+      case "MiB":
+        maxSizeBytes = maxSize * 1024 * 1024;
+        break;
+      case "GiB":
+        // For GiB values, calculate more carefully to avoid integer overflow
+        maxSizeBytes = maxSize * 1024 * 1024 * 1024;
+        break;
+      case "TiB":
+        // For TiB values, calculate even more carefully
+        maxSizeBytes = maxSize * 1024 * 1024 * 1024 * 1024;
+        break;
+      default:
+        maxSizeBytes = maxSize * 1024 * 1024; // Default to MiB
+    }
+  }
+
+  const sizeRange =
+    minSize || maxSize
+      ? {
+          min: minSizeBytes,
+          max: maxSizeBytes,
+        }
+      : undefined;
+
   return {
     queryString,
     orderBy: orderByParam(params, !!queryString),
@@ -224,6 +441,7 @@ const paramsToControls = (params: Params): TorrentSearchControls => {
     limit: intParam(params, "limit") ?? defaultLimit,
     page: intParam(params, "page") ?? 1,
     selectedTorrent,
+    sizeRange,
     facets: facets.reduce<TorrentSearchControls["facets"]>((acc, facet) => {
       const active = activeFacets?.includes(facet.key) ?? false;
       const filter = stringListParam(params, facet.key);
@@ -235,7 +453,11 @@ const paramsToControls = (params: Params): TorrentSearchControls => {
   };
 };
 
-const controlsToParams = (ctrl: TorrentSearchControls): Params => {
+const controlsToParams = (
+  ctrl: TorrentSearchControls,
+  minSizeUnit = "MiB",
+  maxSizeUnit = "MiB",
+): Params => {
   let page: number | undefined = ctrl.page;
   let limit: number | undefined = ctrl.limit;
   if (page === 1) {
@@ -249,6 +471,111 @@ const controlsToParams = (ctrl: TorrentSearchControls): Params => {
   if (orderBy) {
     desc = orderBy.descending ? "1" : "0";
   }
+
+  // Handle size range params
+  let minSize: number | undefined;
+  let maxSize: number | undefined;
+
+  if (ctrl.sizeRange) {
+    // Convert bytes back to the selected unit, handling large numbers carefully
+    if (ctrl.sizeRange.min) {
+      // Convert min bytes to selected unit
+      switch (minSizeUnit) {
+        // Standard SI units (KB, MB, GB, TB) - using 1000-based units
+        case "KB":
+          minSize = Math.round(ctrl.sizeRange.min / 1000);
+          break;
+        case "MB":
+          minSize = Math.round(ctrl.sizeRange.min / (1000 * 1000));
+          break;
+        case "GB":
+          // More careful division for large numbers
+          minSize = Math.round(ctrl.sizeRange.min / 1000 / (1000 * 1000));
+          break;
+        case "TB":
+          // Even more careful division
+          minSize = Math.round(
+            ctrl.sizeRange.min / (1000 * 1000) / (1000 * 1000),
+          );
+          break;
+
+        // Binary units (KiB, MiB, GiB, TiB) - using 1024-based units
+        case "KiB":
+          minSize = Math.round(ctrl.sizeRange.min / 1024);
+          break;
+        case "MiB":
+          minSize = Math.round(ctrl.sizeRange.min / (1024 * 1024));
+          break;
+        case "GiB":
+          // More careful division for large numbers
+          minSize = Math.round(ctrl.sizeRange.min / 1024 / (1024 * 1024));
+          break;
+        case "TiB":
+          // Even more careful division
+          minSize = Math.round(
+            ctrl.sizeRange.min / (1024 * 1024) / (1024 * 1024),
+          );
+          break;
+        default:
+          minSize = ctrl.sizeRange.min;
+      }
+    }
+
+    if (ctrl.sizeRange.max) {
+      // Convert max bytes to selected unit
+      switch (maxSizeUnit) {
+        // Standard SI units (KB, MB, GB, TB) - using 1000-based units
+        case "KB":
+          maxSize = Math.round(ctrl.sizeRange.max / 1000);
+          break;
+        case "MB":
+          maxSize = Math.round(ctrl.sizeRange.max / (1000 * 1000));
+          break;
+        case "GB":
+          // More careful division for large numbers
+          maxSize = Math.round(ctrl.sizeRange.max / 1000 / (1000 * 1000));
+          break;
+        case "TB":
+          // Even more careful division
+          maxSize = Math.round(
+            ctrl.sizeRange.max / (1000 * 1000) / (1000 * 1000),
+          );
+          break;
+
+        // Binary units (KiB, MiB, GiB, TiB) - using 1024-based units
+        case "KiB":
+          maxSize = Math.round(ctrl.sizeRange.max / 1024);
+          break;
+        case "MiB":
+          maxSize = Math.round(ctrl.sizeRange.max / (1024 * 1024));
+          break;
+        case "GiB":
+          // More careful division for large numbers
+          maxSize = Math.round(ctrl.sizeRange.max / 1024 / (1024 * 1024));
+          break;
+        case "TiB":
+          // Even more careful division
+          maxSize = Math.round(
+            ctrl.sizeRange.max / (1024 * 1024) / (1024 * 1024),
+          );
+          break;
+        default:
+          maxSize = ctrl.sizeRange.max;
+      }
+    }
+  }
+
+  // Only include size unit params if we have size values
+  const sizeParams =
+    minSize || maxSize
+      ? {
+          min_size: minSize,
+          max_size: maxSize,
+          min_size_unit: minSize ? minSizeUnit : undefined,
+          max_size_unit: maxSize ? maxSizeUnit : undefined,
+        }
+      : {};
+
   return {
     query: ctrl.queryString ? encodeURIComponent(ctrl.queryString) : undefined,
     page,
@@ -256,6 +583,7 @@ const controlsToParams = (ctrl: TorrentSearchControls): Params => {
     content_type: ctrl.contentType,
     order: orderBy?.field,
     desc,
+    ...sizeParams,
     ...(ctrl.selectedTorrent
       ? {
           torrent: ctrl.selectedTorrent.infoHash,

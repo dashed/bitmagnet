@@ -141,6 +141,27 @@ func (t TorrentContentQuery) Search(
 
 	if input.Facets != nil {
 		options = append(options, torrentContentFacetsOption(*input.Facets))
+
+		// Handle size range filters
+		if sizeRange, ok := input.Facets.SizeRange.ValueOK(); ok {
+			sizeCriteria := search.SizeRangeCriteria{
+				Key: "torrent_contents.size",
+			}
+
+			if min, minOk := sizeRange.Min.ValueOK(); minOk {
+				minSize := int64(*min)
+				sizeCriteria.MinBytes = &minSize
+			}
+
+			if max, maxOk := sizeRange.Max.ValueOK(); maxOk {
+				maxSize := int64(*max)
+				sizeCriteria.MaxBytes = &maxSize
+			}
+
+			if sizeCriteria.MinBytes != nil || sizeCriteria.MaxBytes != nil {
+				options = append(options, q.Where(sizeCriteria))
+			}
+		}
 	}
 
 	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
