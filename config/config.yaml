@@ -1,0 +1,14 @@
+database:
+  postgres:
+    # Using the postgres-proxy service
+    host: postgres-proxy
+    port: 5432
+    db_name: bitmagnet
+    user: postgres
+    password: postgres
+    # Disable SSL for development
+    ssl_mode: disable
+
+# Disable DHT crawler
+dht_crawler:
+  enabled: false
