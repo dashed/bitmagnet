@@ -8,6 +8,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/consistency"
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
+	"github.com/bitmagnet-io/bitmagnet/internal/health"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,11 +25,12 @@ type consistencyParams struct {
 
 type consistencyResult struct {
 	fx.Out
-	Worker     worker.Worker        `group:"workers"`
-	Collector1 prometheus.Collector `group:"prometheus_collectors"`
-	Collector2 prometheus.Collector `group:"prometheus_collectors"`
-	Collector3 prometheus.Collector `group:"prometheus_collectors"`
-	Collector4 prometheus.Collector `group:"prometheus_collectors"`
+	Worker          worker.Worker        `group:"workers"`
+	HealthCheckOpt  health.CheckerOption `group:"health_check_options"`
+	Collector1      prometheus.Collector `group:"prometheus_collectors"`
+	Collector2      prometheus.Collector `group:"prometheus_collectors"`
+	Collector3      prometheus.Collector `group:"prometheus_collectors"`
+	Collector4      prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func newConsistency(p consistencyParams) consistencyResult {
@@ -59,6 +61,11 @@ func newConsistency(p consistencyParams) consistencyResult {
 					return nil
 				},
 			},
+		),
+		HealthCheckOpt: health.WithPeriodicCheck(
+			30*time.Second,
+			5*time.Second,
+			consistency.NewHealthCheck(metrics),
 		),
 		Collector1: metrics.ChecksTotal,
 		Collector2: metrics.ErrorsTotal,
