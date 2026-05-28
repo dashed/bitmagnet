@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
@@ -98,6 +99,12 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 					"errorRate", errorRate, "errors", verifyErrors, "checked", len(infoHashes))
 				return setProgress(ctx, d, newCursor, 0, "paused:high_error_rate")
 			}
+		}
+
+		// Check if user requested a pause before self-chaining.
+		if paused, _ := checkPaused(ctx, d); paused {
+			logger.Infow("blob migration paused by user", "cursor", newCursor)
+			return nil
 		}
 
 		if len(infoHashes) < batchSize {
@@ -236,6 +243,18 @@ func setProgress(ctx context.Context, d *dao.Query, cursor string, batchMigrated
 	}
 
 	return nil
+}
+
+func checkPaused(ctx context.Context, d *dao.Query) (bool, error) {
+	var kv model.KeyValue
+	err := d.Torrent.UnderlyingDB().WithContext(ctx).
+		Table("key_values").
+		Where("key = ?", kvKeyStatus).
+		First(&kv).Error
+	if err != nil {
+		return false, err
+	}
+	return strings.HasPrefix(kv.Value, "paused"), nil
 }
 
 func marshalJSON(v any) string {
