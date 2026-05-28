@@ -196,7 +196,7 @@ func TestBuildFileSummary(t *testing.T) {
 	assert.True(t, summary.HasVideo)
 	assert.True(t, summary.HasAudio)
 	assert.True(t, summary.HasSubtitle)
-	assert.Equal(t, model.StringArray{"mkv", "mp3", "srt", "txt"}, summary.Extensions)
+	assert.Equal(t, []string{"mkv", "mp3", "srt", "txt"}, summary.Extensions)
 }
 
 func TestBuildFileSummaryNoMedia(t *testing.T) {

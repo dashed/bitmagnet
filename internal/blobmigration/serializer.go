@@ -94,7 +94,7 @@ func BuildFileSummary(infoHash protocol.ID, files []model.TorrentFile) model.Tor
 
 	summary.FileCount = len(files)
 	exts := ExtractUniqueExtensions(files)
-	summary.Extensions = model.StringArray(exts)
+	summary.Extensions = exts
 
 	for _, f := range files {
 		size := int64(f.Size)
