@@ -29,6 +29,9 @@ type Torrent struct {
 	Files       []TorrentFile           `gorm:"foreignKey:InfoHash" json:"files"`
 	Pieces      TorrentPieces           `gorm:"foreignKey:InfoHash" json:"-"`
 	Tags        []TorrentTag            `gorm:"foreignKey:InfoHash" json:"tags"`
+	// Manually added for blob migration (not yet in gen schema):
+	FilesData []byte   `gorm:"column:files_data" json:"-"`
+	FileExts  []string `gorm:"column:file_extensions;serializer:json" json:"fileExtensions"`
 }
 
 // TableName Torrent's table name

@@ -9,6 +9,10 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+func init() {
+	model.FilesDataDeserializer = DeserializeFiles
+}
+
 var (
 	encoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
 	decoder, _ = zstd.NewReader(nil)

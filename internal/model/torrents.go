@@ -12,7 +12,16 @@ import (
 	"gorm.io/gorm"
 )
 
+// FilesDataDeserializer is set by the blobmigration package to break the import cycle.
+var FilesDataDeserializer func([]byte) ([]TorrentFile, error)
+
 func (t *Torrent) AfterFind(_ *gorm.DB) error {
+	if len(t.FilesData) > 0 && FilesDataDeserializer != nil {
+		if files, err := FilesDataDeserializer(t.FilesData); err == nil {
+			t.Files = files
+		}
+	}
+
 	if t.Files != nil {
 		sort.Slice(t.Files, func(i, j int) bool {
 			return t.Files[i].Path < t.Files[j].Path

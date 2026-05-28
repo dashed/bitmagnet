@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
@@ -104,6 +105,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 						string(c.dao.Torrent.FilesStatus.ColumnName()),
 						string(c.dao.Torrent.FilesCount.ColumnName()),
 						string(c.dao.Torrent.UpdatedAt.ColumnName()),
+						"files_data",
+						"file_extensions",
 					}),
 				}).CreateInBatches(torrentsToPersist, 100); err != nil {
 					return err
@@ -184,6 +187,15 @@ func createTorrentModel(
 		})
 	}
 
+	var filesData []byte
+	var fileExts []string
+	if len(files) > 0 {
+		if blobData, blobErr := blobmigration.SerializeFiles(files); blobErr == nil {
+			filesData = blobData
+			fileExts = blobmigration.ExtractUniqueExtensions(files)
+		}
+	}
+
 	var pieces model.TorrentPieces
 	if savePieces {
 		pieces = model.TorrentPieces{
@@ -200,6 +212,8 @@ func createTorrentModel(
 		Private:     private,
 		Pieces:      pieces,
 		Files:       files,
+		FilesData:   filesData,
+		FileExts:    fileExts,
 		FilesStatus: filesStatus,
 		FilesCount:  filesCount,
 		Sources: []model.TorrentsTorrentSource{
