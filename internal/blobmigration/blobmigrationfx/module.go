@@ -6,6 +6,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/consistency"
+	blobqueue "github.com/bitmagnet-io/bitmagnet/internal/blobmigration/queue"
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/health"
@@ -79,5 +80,6 @@ func New() fx.Option {
 		"blob_migration",
 		configfx.NewConfigModule[blobmigration.Config]("blob_migration", blobmigration.NewDefaultConfig()),
 		fx.Provide(newConsistency),
+		fx.Provide(blobqueue.New),
 	)
 }
