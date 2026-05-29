@@ -9,7 +9,9 @@
 //! It exercises connect → ping → first page of `stream_torrents_with_files` →
 //! blob decode, and checks that keyset pagination advances past the last hash.
 
-use bitmagnet_db::{connect, ping, stream_torrents_with_files, DbConfig};
+use bitmagnet_db::{
+    connect, ping, stream_torrents_for_index, stream_torrents_with_files, DbConfig,
+};
 
 #[tokio::test]
 #[ignore = "requires a live PostgreSQL (set BITMAGNET_POSTGRES_DSN)"]
@@ -37,6 +39,37 @@ async fn connect_ping_and_stream() {
             .expect("stream second page");
         if let Some(first_next) = next.first() {
             assert!(first_next.info_hash > last.info_hash);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a live PostgreSQL (set BITMAGNET_POSTGRES_DSN)"]
+async fn stream_for_index_decodes_and_paginates() {
+    let cfg = DbConfig::from_env().expect("config from env");
+    let pool = connect(&cfg).await.expect("connect");
+
+    let page = stream_torrents_for_index(&pool, None, 5)
+        .await
+        .expect("stream first index page");
+
+    for row in &page {
+        // id is the composite doc_id (hex:type:source:id).
+        assert!(row.id.contains(':'), "doc_id must be composite: {}", row.id);
+        // A present blob must decode; an absent one yields no files.
+        let files = row.files().expect("decode files blob");
+        if row.files_data.is_none() {
+            assert!(files.is_empty());
+        }
+    }
+
+    // Keyset pagination on tc.id: the next page starts strictly after the last id.
+    if let Some(last) = page.last() {
+        let next = stream_torrents_for_index(&pool, Some(&last.id), 5)
+            .await
+            .expect("stream second index page");
+        if let Some(first_next) = next.first() {
+            assert!(first_next.id > last.id);
         }
     }
 }

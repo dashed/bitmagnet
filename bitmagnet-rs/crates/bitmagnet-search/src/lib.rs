@@ -13,6 +13,7 @@
 //! - [`query`] — `tsquery`-to-Tantivy translation + `run_search` (read path).
 //! - [`facets`] — the 14 search facets + `run_facets` (read path).
 //! - [`tokenizer`] — the `TokenizeFlat` tokenizer (Task #1).
+//! - [`transform`] — PG row → proto `TorrentDocument` for the backfill bin.
 
 // `SearchServer` (in `server`) and `build_schema` (in `schema`) intentionally
 // echo their module name; the clearer call sites are worth one allow.
@@ -25,6 +26,7 @@ pub mod query;
 pub mod schema;
 pub mod server;
 pub mod tokenizer;
+pub mod transform;
 
 /// The generated `bitmagnet.v1` protobuf + gRPC bindings this sidecar serves.
 pub use bitmagnet_proto::v1 as proto;

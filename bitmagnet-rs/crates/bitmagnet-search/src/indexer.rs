@@ -19,7 +19,10 @@ use crate::schema::Fields;
 pub fn document_to_tantivy(fields: &Fields, doc: &TorrentDocument) -> TantivyDocument {
     let mut td = TantivyDocument::new();
 
-    // --- Identity: bytes term (delete key) + hex into the weight-A tier -----
+    // Composite identity = the upsert key (see `doc_id`).
+    td.add_text(fields.doc_id, doc_id(doc));
+
+    // --- Identity: bytes term (DeleteDocument key) + hex into the weight-A tier
     if !doc.info_hash.is_empty() {
         td.add_bytes(fields.info_hash, &doc.info_hash);
         td.add_text(fields.text_a, to_hex_lower(&doc.info_hash));
@@ -139,18 +142,20 @@ pub fn document_to_tantivy(fields: &Fields, doc: &TorrentDocument) -> TantivyDoc
     td
 }
 
-/// Upsert `doc`: delete any existing document with the same info hash, then add
-/// the new one. Tantivy applies the delete to documents added before it (lower
-/// opstamp), so the freshly added document survives — a correct replace.
+/// Upsert `doc`: delete any existing document with the same composite
+/// [`doc_id`], then add the new one. Tantivy applies the delete to documents
+/// added before it (lower opstamp), so the freshly added document survives — a
+/// correct replace. Keying on the composite id (not info_hash) is what lets a
+/// torrent's multiple content classifications coexist as distinct documents.
 ///
 /// The change is not visible to readers until the writer is committed.
 ///
 /// # Errors
 /// Returns a [`tantivy::TantivyError`] if the document cannot be added.
 pub fn upsert(writer: &IndexWriter, fields: &Fields, doc: &TorrentDocument) -> tantivy::Result<()> {
-    if !doc.info_hash.is_empty() {
-        writer.delete_term(Term::from_field_bytes(fields.info_hash, &doc.info_hash));
-    }
+    // Replace by composite id, NOT info_hash: one torrent can have many
+    // torrent_content rows, so keying on info_hash would clobber siblings.
+    writer.delete_term(Term::from_field_text(fields.doc_id, &doc_id(doc)));
     writer.add_document(document_to_tantivy(fields, doc))?;
     Ok(())
 }
@@ -181,6 +186,30 @@ fn add_keyword_and_tier(td: &mut TantivyDocument, keyword: Field, tier: Field, v
     }
 }
 
+/// The canonical cross-system row id — byte-identical to the PG
+/// `torrent_contents.id` generated column and Go `TorrentContent.InferID()`:
+/// `hex(info_hash):content_type:content_source:content_id`, each segment `?`
+/// when absent. This (not info_hash) is the upsert identity, because one torrent
+/// can be classified as many content rows.
+fn doc_id(doc: &TorrentDocument) -> String {
+    let content_type = bitmagnet_model::ContentType::from_proto_value(doc.content_type)
+        .map_or("?", |ct| ct.as_str());
+    let content_source = if doc.content_source.is_empty() {
+        "?"
+    } else {
+        doc.content_source.as_str()
+    };
+    let content_id = if doc.content_id.is_empty() {
+        "?"
+    } else {
+        doc.content_id.as_str()
+    };
+    format!(
+        "{}:{content_type}:{content_source}:{content_id}",
+        to_hex_lower(&doc.info_hash)
+    )
+}
+
 /// Lower-case hex encoding of `bytes`, matching Go's `InfoHash.String()` so a
 /// full-hash search tokenizes to the same single lexeme on both sides.
 fn to_hex_lower(bytes: &[u8]) -> String {
@@ -195,7 +224,7 @@ fn to_hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{document_to_tantivy, to_hex_lower, upsert};
+    use super::{delete, doc_id, document_to_tantivy, to_hex_lower, upsert};
     use crate::index::{register_tokenizer, writer};
     use crate::proto::{ContentType, TorrentDocument};
     use crate::schema::{build_schema, Fields};
@@ -283,6 +312,11 @@ mod tests {
         assert_eq!(audio, vec!["en", "fr"]);
         // Empty video_3d is skipped.
         assert!(td.get_first(fields.video_3d).is_none());
+        // Composite doc_id is stored.
+        assert_eq!(
+            td.get_first(fields.doc_id).and_then(|v| v.as_str()),
+            Some(format!("{}:software:tmdb:603", "ab".repeat(20))).as_deref()
+        );
     }
 
     #[test]
@@ -300,14 +334,29 @@ mod tests {
     }
 
     #[test]
-    fn upsert_then_count_is_one_per_info_hash() {
+    fn doc_id_matches_pg_infer_id_format() {
+        // Byte-identical to Go `TorrentContent.InferID()` / the PG generated
+        // `torrent_contents.id` column.
+        let s = sample(); // 0xAB*20, Software, "tmdb", "603"
+        assert_eq!(doc_id(&s), format!("{}:software:tmdb:603", "ab".repeat(20)));
+
+        // Unclassified torrent -> every absent segment becomes "?".
+        let mut u = sample();
+        u.content_type = ContentType::Unknown as i32;
+        u.content_source = String::new();
+        u.content_id = String::new();
+        assert_eq!(doc_id(&u), format!("{}:?:?:?", "ab".repeat(20)));
+    }
+
+    #[test]
+    fn upsert_replaces_same_doc_id() {
         let index = Index::create_in_ram(build_schema());
         register_tokenizer(&index);
         let fields = Fields::from_schema(&index.schema()).unwrap();
         let mut w = writer(&index).unwrap();
 
         upsert(&w, &fields, &sample()).unwrap();
-        upsert(&w, &fields, &sample()).unwrap(); // same info_hash -> replace
+        upsert(&w, &fields, &sample()).unwrap(); // same doc_id -> replace
         w.commit().unwrap();
 
         let reader = crate::index::reader(&index).unwrap();
@@ -318,6 +367,53 @@ mod tests {
             reader.searcher().num_docs(),
             1,
             "upsert must replace, not duplicate"
+        );
+    }
+
+    #[test]
+    fn distinct_classifications_of_one_torrent_coexist() {
+        let index = Index::create_in_ram(build_schema());
+        register_tokenizer(&index);
+        let fields = Fields::from_schema(&index.schema()).unwrap();
+        let mut w = writer(&index).unwrap();
+
+        // Same torrent (info_hash), two content classifications => two docs.
+        let a = sample(); // content_id "603"
+        let mut b = sample();
+        b.content_id = "604".to_owned(); // different doc_id, same info_hash
+        assert_eq!(a.info_hash, b.info_hash);
+        assert_ne!(doc_id(&a), doc_id(&b));
+
+        upsert(&w, &fields, &a).unwrap();
+        upsert(&w, &fields, &b).unwrap();
+        w.commit().unwrap();
+        let reader = crate::index::reader(&index).unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            2,
+            "distinct classifications of one torrent must coexist"
+        );
+
+        // Re-upserting one classification replaces only it.
+        upsert(&w, &fields, &a).unwrap();
+        w.commit().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            2,
+            "re-upsert of one classification must not duplicate"
+        );
+
+        // DeleteDocument(info_hash) clears ALL of the torrent's documents
+        // (mirrors PG's on-delete cascade from torrents -> torrent_contents).
+        delete(&w, &fields, &a.info_hash);
+        w.commit().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            0,
+            "delete-by-info_hash removes every document for the torrent"
         );
     }
 }

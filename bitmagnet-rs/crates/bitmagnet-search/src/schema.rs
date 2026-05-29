@@ -62,6 +62,7 @@ pub const BOOST_D: Score = 0.5;
 /// Field names, kept as consts so [`build_schema`] and [`Fields::from_schema`]
 /// can never drift apart.
 mod name {
+    pub(super) const DOC_ID: &str = "doc_id";
     pub(super) const INFO_HASH: &str = "info_hash";
     pub(super) const TORRENT_NAME: &str = "torrent_name";
     pub(super) const CONTENT_TITLE: &str = "content_title";
@@ -96,7 +97,8 @@ mod name {
 
 /// Every field name in the schema, in declaration order. Drives the schema
 /// completeness test.
-pub const FIELD_NAMES: [&str; 27] = [
+pub const FIELD_NAMES: [&str; 28] = [
+    name::DOC_ID,
     name::INFO_HASH,
     name::TORRENT_NAME,
     name::CONTENT_TITLE,
@@ -150,7 +152,15 @@ pub fn build_schema() -> Schema {
     let numeric: NumericOptions = (STORED | INDEXED | FAST).into();
 
     // --- Identity ---------------------------------------------------------
-    // 20-byte v1 info hash: exact-match term (delete-by-term key) + stored.
+    // Composite row id (`hex:type:source:id`) = the PG `torrent_contents.id`
+    // generated column / Go `TorrentContent.InferID()`. This is the UPSERT key:
+    // one info_hash maps to many torrent_content rows, so documents are replaced
+    // per composite id, not per info_hash. Indexed (delete-by-term) + stored
+    // (stable SearchHit id for the read path).
+    builder.add_text_field(name::DOC_ID, STRING | STORED);
+    // 20-byte v1 info hash: exact-match term + stored. Non-unique — it is the
+    // DeleteDocument key (a torrent's removal cascade-deletes all its content
+    // rows, so deleting by info_hash removes all of a torrent's documents).
     builder.add_bytes_field(
         name::INFO_HASH,
         BytesOptions::default().set_indexed().set_stored(),
@@ -203,6 +213,7 @@ pub fn build_schema() -> Schema {
 #[derive(Debug, Clone, Copy)]
 pub struct Fields {
     // Identity + stored display.
+    pub doc_id: Field,
     pub info_hash: Field,
     pub torrent_name: Field,
     pub content_title: Field,
@@ -243,6 +254,7 @@ impl Fields {
     /// any expected field — i.e. it was not produced by [`build_schema`].
     pub fn from_schema(schema: &Schema) -> tantivy::Result<Self> {
         Ok(Self {
+            doc_id: schema.get_field(name::DOC_ID)?,
             info_hash: schema.get_field(name::INFO_HASH)?,
             torrent_name: schema.get_field(name::TORRENT_NAME)?,
             content_title: schema.get_field(name::CONTENT_TITLE)?,
