@@ -1,7 +1,7 @@
 # Bitmagnet Rust Rewrite Plan: Hybrid Blob Migration & Tantivy Integration
 
-**Status:** Investigation complete, planning phase  
-**Date:** 2026-05-28 (updated with Python-verified production data)  
+**Status:** Phase 1 (Hybrid Blob) implemented — [PR #1](https://github.com/dashed/bitmagnet/pull/1); Phases 2-9 planned  
+**Date:** 2026-05-28 (updated with Python-verified production data + Phase 1 implementation)  
 **Branch:** `feat/rust-rewrite-plan`
 
 ---
@@ -15,6 +15,18 @@ Optimize and rewrite bitmagnet in phases, starting with a **Hybrid Blob migratio
 **Key architectural decision:** Use a **Rust gRPC sidecar** (not tantivy-go FFI) for search. The tantivy-go bindings lack numeric fields, faceted search, aggregations, and are pinned to Tantivy 0.22 (upstream is 0.26). A gRPC sidecar provides full Tantivy access and establishes the first Rust component of the port.
 
 **Timeline:** ~33 weeks for full port. First value at **week 0** (drop unused indexes, 14-29 GB), biggest impact at **week 3** (Hybrid Blob complete, 368 → ~132 GB), search upgrade at week 7 (Tantivy sidecar).
+
+---
+
+## Implementation Status
+
+| Phase | Status | Notes |
+|---|---|---|
+| Phase 0: Quick wins | 📋 Planned | Index drops are operational (run against the live DB), not code |
+| **Phase 1: Hybrid Blob migration** | ✅ **Implemented** (code merged, [PR #1](https://github.com/dashed/bitmagnet/pull/1)) | Built as a **zero-downtime live migration** (see [`live-migration-design.md`](./live-migration-design.md)) — dual-write + `AfterFind` hook + queue-based migration + live consistency verification + operational CLI. 42 unit tests + 4 E2E tests. **Destructive cutover (drop `torrent_files`, switch facet to JSONB containment) is deferred behind the `cleanup` safety gate and has not run.** |
+| Phases 2-9: Tantivy + Rust port | 📋 Planned | Unchanged below |
+
+> Phase 1 shipped the **live-migration variant** of the original plan rather than the "fork + stop writing rows" variant described in §Phase 1 below. The goal and disk numbers are unchanged; the *approach* keeps `torrent_files` populated (dual-write) until an explicit, verification-gated `cleanup` drops it — so rollback is "redeploy the old image" right up until cutover. See the [updated Phase 1 section](#phase-1-hybrid-blob-migration-implemented--zero-downtime-live-migration) for the as-built design.
 
 ---
 
@@ -57,7 +69,7 @@ Key findings:
 |---|---|---|---|---|
 | torrent_files (data + indexes) | **273 GB** | **0 GB** | -273 GB eliminated | — |
 | File blobs (ZSTD L3 msgpack) | 0 | **16.2 GB** | +16.2 GB | ✅ Measured: 1.0 KB avg blob, 16.8M torrents with files |
-| `file_extensions TEXT[]` + GIN | 0 | **5.6-9.4 GB** | +5.6-9.4 GB | ✅ Measured: 3.1 avg extensions/torrent |
+| `file_extensions JSONB` + GIN | 0 | **5.6-9.4 GB** | +5.6-9.4 GB | ✅ Measured: 3.1 avg extensions/torrent (as-built: JSONB + `jsonb_path_ops` GIN) |
 | `torrent_file_summary` table | 0 | **10.4-14.1 GB** | +10.4-14.1 GB | ✅ Measured: 116 bytes avg row |
 | torrent_contents | 61 GB | 61 GB | unchanged | — |
 | torrents_torrent_sources | 19 GB | 19 GB | unchanged | — |
@@ -178,41 +190,50 @@ Immediate savings from database maintenance — no application changes required.
 
 > **Note on unused index safety:** Only drop indexes that are confirmed unused via `pg_stat_user_indexes.idx_scan = 0` AND are not the sole access path for a query pattern. The `torrent_files` size and extension indexes are safe — the file type facet uses `EXISTS (... AND extension IN (...))` which hits the composite PK or unique index, not these standalone indexes.
 
-### Phase 1: Hybrid Blob Migration (Weeks 1-3, Go fork)
+### Phase 1: Hybrid Blob Migration (Implemented — Zero-Downtime Live Migration)
 
 The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) with one ZSTD-compressed MessagePack blob per torrent. **Estimated savings: ~236 GB (368 → ~132 GB).**
 
-#### 1a. Schema Changes
+**Status: ✅ implemented** in [PR #1](https://github.com/dashed/bitmagnet/pull/1). Shipped as a **zero-downtime live migration** (full design: [`live-migration-design.md`](./live-migration-design.md)) rather than the offline "fork + stop writing rows" approach originally sketched here. The defining choices:
 
-| Task | Description | Estimate |
+- **Dual-write, not cutover-on-write.** The DHT persist path writes the blob **and** keeps inserting `torrent_files` rows (same transaction). This keeps every existing query working unchanged and makes rollback trivial (redeploy the old image) right up until the explicit cleanup step.
+- **`AfterFind` hook for transparent reads.** A single GORM hook on `Torrent` deserializes `files_data` into `t.Files`, so all read paths that load files (tsvector rebuild, processor preload) are covered without touching each call site. The per-resolver / per-facet rewrites the original plan listed are deferred to cutover.
+- **Queue-based self-chaining migration** (not a one-shot script): survives restarts, retries, throttles, and reports progress — driven from the CLI.
+- **Live consistency verification + operational CLI + rollback safety gates** were added beyond the original Phase 1 scope.
+
+#### 1a. Schema Changes — ✅ done (`migrations/00021`, `00022`)
+
+| Change | As built | 
+|---|---|
+| `torrents.files_data BYTEA` | ZSTD-compressed MessagePack blob, one per torrent (~1.0 KB avg, stored in TOAST). |
+| `torrents.file_extensions JSONB` | Unique file extensions per torrent (`NOT NULL DEFAULT '[]'`). **JSONB**, not `TEXT[]` — matches the codebase `serializer:json` convention and avoids a `lib/pq` dependency. `jsonb_path_ops` GIN index (created `CONCURRENTLY` via `00022`, `-- +goose NO TRANSACTION`). |
+| `torrent_file_summary` table | Keyed by **`info_hash BYTEA`** PK (FK → `torrents`, `ON DELETE CASCADE`): `file_count, total_size, largest_file_size, extensions JSONB, has_video, has_subtitle, has_audio`. Covers filter/facet queries without decompressing blobs. |
+
+#### 1b. Application Changes — ✅ done
+
+| Area | File(s) | As built |
 |---|---|---|
-| Add `files_data BYTEA` column | ZSTD-compressed MessagePack blob on `torrents` table. Each blob holds all files for one torrent (~18 files avg, ~300-500 bytes compressed). Stored in TOAST. | 1 day |
-| Add `file_extensions TEXT[]` column | Array of unique file extensions per torrent on `torrents` table. GIN-indexed for facet queries. Replaces `EXISTS` subquery on `torrent_files`. | 1 day |
-| Add `torrent_file_summary` table | `(torrent_id, file_count, total_size, extensions, largest_file_size, has_video, has_subtitle)` — covers 90% of filter/facet queries without decompressing blobs. | 1 day |
+| Blob serializer | `internal/blobmigration/serializer.go` | `SerializeFiles`/`DeserializeFiles` (MessagePack → ZSTD L3, ~10% ratio), `ExtractUniqueExtensions`, `BuildFileSummary`. Package-level encoder/decoder. |
+| Model fields | `internal/model/torrents.gen.go` | `FilesData []byte` (`json:"-"`) and `FileExts []string` (`serializer:json`). Named `FileExts` to avoid collision with the existing `FileExtensions()` method. The `Files []TorrentFile` relation is **kept** (populated by `AfterFind`). |
+| Transparent read | `internal/model/torrents.go` | `AfterFind` deserializes `files_data` → `t.Files` via a `FilesDataDeserializer` function var (breaks the `model`↔`blobmigration` import cycle); falls back to preloaded rows on nil/error. |
+| Dual-write | `internal/dhtcrawler/persist.go` | `createTorrentModel()` sets `FilesData`/`FileExts`; the upsert adds `files_data`/`file_extensions` to `DoUpdates` **and still writes `torrent_files` rows**. |
+| Migration handler | `internal/blobmigration/queue/{handler,message}.go` | Self-chaining batch handler (cursor by `info_hash`), follows the `processor/batch` pattern. Per-batch 5% consistency sample; auto-pauses if error rate > 1%. Progress in `key_values`. |
+| CLI | `internal/app/cmd/blobmigrationcmd/command.go` | `blob-migration {start,status,pause,resume,verify,cleanup}`. |
 
-#### 1b. Application Changes (Go fork or patch set)
+#### 1c. Live consistency verification — ✅ done (`internal/blobmigration/consistency/`)
 
-| Task | File(s) | Description | Estimate |
-|---|---|---|---|
-| Modify DHT persist path | `internal/dhtcrawler/persist.go:150-185` | `createTorrentModel()` currently builds `[]TorrentFile` from `metainfo.Info`. Change to serialize file list as MessagePack → ZSTD compress → store as `files_data` blob. Populate `file_extensions` array. Stop creating `TorrentFile` rows. | 2 days |
-| Modify DHT batch insert | `internal/dhtcrawler/persist.go:99-116` | `runPersistTorrents()` currently INSERTs `torrent_files` in batches (lines 111-116). Remove this block; blob is written with the torrent row. | 1 day |
-| Update Torrent GORM model | `internal/model/torrents.gen.go:16`, `internal/model/torrents.go` | Add `FilesData []byte` and `FileExtensions []string` fields. Remove `Files []TorrentFile` relation. Add blob serialization/deserialization helpers. | 1 day |
-| Update GraphQL file resolver | `internal/gql/gqlmodel/torrent_files.go:25` | `TorrentQuery.Files()` currently calls `t.Search.TorrentFiles()`. Change to decompress blob from `torrents.files_data` and return file structs in-memory. Pagination becomes in-memory slice. | 1 day |
-| Update file type facet | `internal/database/search/facet_torrent_file_type.go`, `criteria_torrent_file_type.go` | `TorrentFileTypeCriteria()` currently delegates to `TorrentFileExtensionCriteria()` which does `EXISTS` on `torrent_files`. Change to use `torrents.file_extensions && ARRAY[...]` (GIN-indexed array containment). | 1 day |
-| Update tsvector construction | `internal/model/torrent_contents.go:101-103`, `internal/model/torrents.go:186` | `UpdateTsv()` calls `t.Torrent.fileSearchStrings()` which reads from `t.Torrent.Files`. Change `fileSearchStrings()` to deserialize from `files_data` blob instead. | 1 day |
-| Remove `TorrentFile` model usage | `internal/model/torrent_files.go`, `internal/model/torrent_files.gen.go` | `BeforeCreate` hook sets `ON CONFLICT DO NOTHING` for `torrent_files` INSERT. Model and related GORM scopes can be removed after migration. | 1 day |
+`checker.go` (field-by-field `CompareFiles`, `CheckTorrent/Batch/Random`), `live_checker.go` (continuous background sampler, auto-heals a bad blob by NULLing it to trigger re-migration), `metrics.go` (Prometheus counters/gauges), `healthcheck.go` (reports degraded when `errors_total > 0`).
 
-#### 1c. Backfill Migration
+#### 1d. Migration + cutover — ⏳ operational, **cutover deferred behind safety gate**
 
-| Task | Description | Estimate |
+| Step | Status | Notes |
 |---|---|---|
-| Write backfill script | Stream existing `torrent_files` grouped by `info_hash` → serialize as MessagePack → ZSTD compress → write to `torrents.files_data`. Batch 1000 torrents per transaction. Also populate `file_extensions` and `torrent_file_summary`. | 2 days |
-| Run backfill | 48M torrents × ~18 files avg. Estimate 4-8 hours at 1000 torrents/sec (I/O bound on reading 273 GB of `torrent_files`). | 1 day |
-| Verify completeness | Assert every torrent with `files_status != 'no_info'` has a non-null `files_data` blob. Spot-check decompressed blobs match original rows. | 0.5 day |
-| Drop `torrent_files` table | `DROP TABLE torrent_files;` — reclaims 273 GB | 1 min |
-| `VACUUM FULL torrents` | Reclaim TOAST space, compact table after adding blob column. Requires brief downtime + temporary disk (~2x torrents table = ~28 GB). | 1-2 hours |
+| Run live migration | Operational | `blob-migration start` enqueues the self-chaining job; runs while the DHT crawler keeps ingesting. `status`/`pause`/`resume` for control. |
+| Verify | Operational | `blob-migration verify --full` (or `--sample-rate`) compares blobs vs. rows; records `verified_at`. |
+| **Cleanup (destructive)** | **Not yet run** | `blob-migration cleanup --confirm` drops `torrent_files` + `VACUUM`. Refuses unless **all** gates pass: status `completed`, zero unmigrated torrents, verification < 24h old, `--confirm`. |
+| Facet → JSONB containment | Deferred to cutover | While `torrent_files` exists (dual-write), the file-type facet still uses the `EXISTS` subquery. The switch to `file_extensions` JSONB containment + the GraphQL resolver switch to blob-only reads happen at cutover, after the table is dropped. |
 
-**GO/NO-GO: Week 3** — All search/browse functionality verified? File type facet returns same results? tsvector rebuild produces identical lexemes? If yes, drop `torrent_files` and proceed.
+**GO/NO-GO (cutover):** `verify --full` reports 100% blob↔row match, no unmigrated torrents remain, and search/browse/facets validated → run `cleanup --confirm`. Until then, the system runs safely in dual-write mode.
 
 ### Phase 2: Rust Infrastructure (Weeks 3-4, can overlap with Phase 1)
 
@@ -343,10 +364,10 @@ bitmagnet-rs/
 
 | Risk | Phase | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| Blob migration data loss | Phase 1 | Low | **Critical** | Backfill with verification; keep `torrent_files` until 100% blob coverage confirmed; spot-check decompressed blobs against original rows |
-| File type facet divergence after blob migration | Phase 1 | Medium | **High** | Compare `file_extensions TEXT[]` facet results against current `EXISTS` subquery on `torrent_files` for a sample of 10K queries before dropping old table |
-| Insufficient disk for `VACUUM FULL` | Phase 1 | Low | Medium | `VACUUM FULL torrents` needs ~2x table size temporarily (~28 GB). Current PVC has ~132 GB free after blob migration. Schedule during low-traffic window |
-| tsvector rebuild produces different lexemes from blob | Phase 1 | Low | **High** | `fileSearchStrings()` must produce identical output from deserialized blob as from `[]TorrentFile`. Test with golden file comparison on 10K torrents |
+| Blob migration data loss | Phase 1 | Low | **Critical** | ✅ Mitigated: dual-write keeps `torrent_files` intact during migration; `cleanup` is gated on `verify --full` (100% blob↔row match) + `--confirm`. Rollback = redeploy old image until cutover. |
+| File type facet divergence after blob migration | Phase 1 | Medium | **High** | ✅ Deferred safely: while `torrent_files` exists (dual-write) the facet `EXISTS` subquery is unchanged. The switch to `file_extensions` JSONB containment happens only at cutover; validate facet parity before `cleanup`. |
+| Insufficient disk for `VACUUM` after cleanup | Phase 1 | Low | Medium | `cleanup` runs `VACUUM` after `DROP TABLE torrent_files`; the dropped table frees 273 GB. Schedule during a low-traffic window. |
+| tsvector rebuild produces different lexemes from blob | Phase 1 | Low | **High** | ✅ Mitigated: `AfterFind` populates `t.Files` from the blob, so `fileSearchStrings()` reads identical data. Covered by the live consistency checker (field-by-field) + E2E equivalence test (`FileExtensions()` blob-vs-rows). |
 | Tokenizer mismatch → search divergence | Phase 3 | Medium | **High** | Custom Tantivy tokenizer replicating TokenizeFlat(); exhaustive testing with real torrent names (CJK, Cyrillic) |
 | CEL → Rhai/cel-rust incompatibility | Phase 7 | Medium | **High** | Evaluate both engines in week 16; golden file testing on 10K+ samples |
 | Tantivy index > 74 GB | Phase 3 | Medium | Medium | Monitor during backfill; reduce STORED fields if needed |
@@ -370,22 +391,30 @@ bitmagnet-rs/
 
 ## Key Integration Points in Go Source
 
-### Phase 1: Hybrid Blob Migration (files to modify)
+### Phase 1: Hybrid Blob Migration — as-built ([PR #1](https://github.com/dashed/bitmagnet/pull/1))
 
-| Component | File | Line(s) | Change Required |
+**Done now (dual-write era):**
+
+| Component | File(s) | What was done |
+|---|---|---|
+| Blob serializer | `internal/blobmigration/serializer.go` | `SerializeFiles`/`DeserializeFiles` (msgpack+ZSTD), `ExtractUniqueExtensions`, `BuildFileSummary` |
+| Migration handler + CLI | `internal/blobmigration/queue/`, `internal/app/cmd/blobmigrationcmd/` | Self-chaining batch migration; `blob-migration {start,status,pause,resume,verify,cleanup}` |
+| Consistency system | `internal/blobmigration/consistency/` | `CompareFiles`/live checker/metrics/healthcheck (auto-heal on mismatch) |
+| Torrent GORM model | `internal/model/torrents.gen.go` | Added `FilesData []byte`, `FileExts []string` (`serializer:json`); `Files` relation **kept** |
+| Transparent read | `internal/model/torrents.go` | `AfterFind` deserializes blob → `t.Files` via `FilesDataDeserializer` var |
+| DHT dual-write | `internal/dhtcrawler/persist.go` | `createTorrentModel()` sets blob + exts; upsert adds them to `DoUpdates`; **still writes `torrent_files` rows** |
+| Schema | `migrations/00021`, `00022` | `files_data`, `file_extensions JSONB`, `torrent_file_summary`; GIN `CONCURRENTLY` |
+| fx wiring | `internal/app/appfx/module.go`, `internal/blobmigration/blobmigrationfx/` | Register config, queue handler, CLI command, consistency worker + collectors |
+
+**Deferred to cutover (after `cleanup` drops `torrent_files`):**
+
+| Component | File | Line(s) | Change at cutover |
 |---|---|---|---|
-| DHT torrent model builder | `internal/dhtcrawler/persist.go` | 150-185 | `createTorrentModel()` — serialize file list as blob instead of `[]TorrentFile` |
-| DHT batch persist | `internal/dhtcrawler/persist.go` | 99-116 | `runPersistTorrents()` — remove `torrent_files` INSERT block (lines 111-116) |
-| Torrent GORM model | `internal/model/torrents.gen.go` | 16 | Add `FilesData []byte`, `FileExtensions []string` fields |
-| Torrent business logic | `internal/model/torrents.go` | 107, 186 | `FileExtensions()` and `fileSearchStrings()` — read from blob instead of `Files` relation |
-| TorrentFile model | `internal/model/torrent_files.go` | 11 | `BeforeCreate` hook — model can be removed after migration |
-| TorrentFile generated model | `internal/model/torrent_files.gen.go` | 16 | `TorrentFile` struct — model can be removed after migration |
-| GraphQL file resolver | `internal/gql/gqlmodel/torrent_files.go` | 25 | `TorrentQuery.Files()` — decompress blob instead of SQL query |
-| File type facet | `internal/database/search/facet_torrent_file_type.go` | 12, 41 | Use `torrents.file_extensions` array containment instead of `torrent_files` EXISTS |
-| File extension criteria | `internal/database/search/criteria_torrent_file_type.go` | 8 | `TorrentFileTypeCriteria()` — rewrite to use GIN-indexed `TEXT[]` |
-| tsvector construction | `internal/model/torrent_contents.go` | 101-103 | `UpdateTsv()` calls `fileSearchStrings()` — must deserialize blob |
-| File type enum | `internal/model/file_type.go` | 19, 143 | `FileType`, `FileTypeFromExtension()` — unchanged but referenced by facet |
-| Processor persist | `internal/processor/persist.go` | 59-110 | Classification persist — unchanged (doesn't write `torrent_files`) |
+| GraphQL file resolver | `internal/gql/gqlmodel/torrent_files.go` | 25 | `TorrentQuery.Files()` — switch from `torrent_files` SQL to blob decompression |
+| File type facet | `internal/database/search/facet_torrent_file_type.go` | 12, 41 | Switch from `torrent_files` `EXISTS` to `file_extensions` JSONB containment |
+| File extension criteria | `internal/database/search/criteria_torrent_file_type.go` | 8 | `TorrentFileTypeCriteria()` — rewrite to JSONB-GIN containment |
+| `TorrentFile` model removal | `internal/model/torrent_files*.go` | — | Remove model/scopes once `torrent_files` is dropped |
+| Processor persist | `internal/processor/persist.go` | 59-110 | Unchanged (never wrote `torrent_files`) |
 
 ### Phases 2-9: Rust Port (files to integrate with)
 
@@ -450,8 +479,11 @@ search:
 
 ## External References
 
+- [PR #1 — Hybrid Blob migration](https://github.com/dashed/bitmagnet/pull/1) — Phase 1 implementation (12 commits, ~5.6k LOC, 42 unit + 4 E2E tests)
+- [Live migration design](./live-migration-design.md) — zero-downtime dual-write + `AfterFind` + queue migration architecture
+- [Space-savings verification](./space-savings-verification.md) + [`verify_space_savings.py`](./verify_space_savings.py) — Python verification against production data
+- [Database analysis](./bitmagnet-database-analysis.md) — 368 GB PG analysis (live measurements 2026-05-28)
 - [bitmagnet source](https://github.com/bitmagnet-io/bitmagnet) — Go, MIT license
 - [Tantivy](https://github.com/quickwit-oss/tantivy) — Rust, MIT license
 - [tantivy-go](https://github.com/anyproto/tantivy-go) — Go FFI bindings (rejected, see above)
-- [Database analysis](./bitmagnet-database-analysis.md) — 368 GB PG analysis (live measurements 2026-05-28)
 - Discord Go→Rust migration, Vinted ES→Vespa shadow traffic, InfluxData strangler fig pattern
