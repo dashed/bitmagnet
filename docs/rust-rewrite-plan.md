@@ -24,8 +24,9 @@ Optimize and rewrite bitmagnet in phases, starting with a **Hybrid Blob migratio
 |---|---|---|
 | Phase 0: Quick wins | 📋 Planned | Index drops are operational (run against the live DB), not code |
 | **Phase 1: Hybrid Blob migration** | ✅ **Implemented** (code merged, [PR #1](https://github.com/dashed/bitmagnet/pull/1)) | Built as a **zero-downtime live migration** (see [`live-migration-design.md`](./live-migration-design.md)) — dual-write + `AfterFind` hook + queue-based migration + live consistency verification + operational CLI. 42 unit tests + 4 E2E tests. **Destructive cutover (drop `torrent_files`, switch facet to JSONB containment) is deferred behind the `cleanup` safety gate and has not run.** |
-| **Phase 2: Rust infrastructure** | ✅ **Implemented** (branch `feat/rust-infrastructure`, stacked on PR #1) | `bitmagnet-rs/` Cargo workspace (5 crates: proto, common, model, db, search), `bitmagnet.v1` protobuf (tonic 0.14 / `tonic-prost`), gRPC server skeleton (all RPCs stubbed except HealthCheck), Tantivy 0.26 schema, multi-stage `Dockerfile.search` (built, 103 MB, runs non-root), `.github/workflows/rust.yml` CI. 38 tests pass incl. **Go↔Rust blob wire-compat fixtures**. Domain logic is Phase 3. |
-| Phases 3-9: Tantivy + Rust port | 📋 Planned | Unchanged below |
+| **Phase 2: Rust infrastructure** | ✅ **Implemented** (branch `feat/rust-infrastructure`, [PR #2](https://github.com/dashed/bitmagnet/pull/2)) | `bitmagnet-rs/` Cargo workspace (5 crates: proto, common, model, db, search), `bitmagnet.v1` protobuf (tonic 0.14 / `tonic-prost`), gRPC server skeleton (all RPCs stubbed except HealthCheck), Tantivy 0.26 schema, multi-stage `Dockerfile.search` (built, 103 MB, runs non-root), `.github/workflows/rust.yml` CI. 38 tests pass incl. **Go↔Rust blob wire-compat fixtures**. Domain logic is Phase 3. |
+| **Phase 3: Tantivy search sidecar MVP** | ✅ **Implemented** (branch `feat/tantivy-search-sidecar`, stacked on PR #2) | `TokenizeFlat` ported with **go-unidecode tables verbatim** (4223-fixture Go parity); schema/index/indexer + all RPCs live; **run_search** (Go tsquery port: `&` `|` `.` `!` `*`, A/B/C/D field boosts via DisjunctionMaxQuery) + **run_facets** (all 14 facets, typed aggregations); **doc_id** composite key (= Go `InferID`) so multi-classification torrents coexist; backfill CLI (drives FROM torrent_contents = PG search parity). Read RPCs proven by a server-level integration test. Live-PG backfill + 48M-doc index run are operational (deferred). 4 proto caveats noted for Phase 4 below. |
+| Phases 4-9: Shadow mode + Rust port | 📋 Planned | Unchanged below |
 
 > Phase 1 shipped the **live-migration variant** of the original plan rather than the "fork + stop writing rows" variant described in §Phase 1 below. The goal and disk numbers are unchanged; the *approach* keeps `torrent_files` populated (dual-write) until an explicit, verification-gated `cleanup` drops it — so rollback is "redeploy the old image" right up until cutover. See the [updated Phase 1 section](#phase-1-hybrid-blob-migration-implemented--zero-downtime-live-migration) for the as-built design.
 
@@ -248,20 +249,23 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 > **As-built deltas from the original sketch:** (1) the model crate proved Go↔Rust blob wire-compat with fixtures generated from the real Go `blobmigration.SerializeFiles` — note Rust must use `rmp_serde::to_vec_named` (msgpack MAP keyed `i/p/e/s`) to match `vmihailenco/msgpack`; (2) `bitmagnet-search` implements the Tantivy 0.26 schema now (the rest of search is Phase 3 stubs); (3) `published_at` is `int64` Unix seconds in the proto; (4) CI is a standalone Rust workflow — folding it into the repo's Nix flake + Taskfile is future work. The `rust-toolchain.toml` pins `channel = "stable"`; pin to an explicit version if fully reproducible Docker builds are required.
 
-### Phase 3: Tantivy Search Sidecar MVP (Weeks 4-7)
+### Phase 3: Tantivy Search Sidecar MVP
 
-Now indexes from blob data (smaller source, faster backfill since blobs are ~16 GB vs 273 GB of `torrent_files` rows).
+**Status: ✅ implemented** on branch `feat/tantivy-search-sidecar` (stacked on PR #2). As-built notes below.
 
-| Task | Description | Estimate | Depends On |
-|---|---|---|---|
-| Index schema | All field types mapped from PG model | 2 days | Workspace |
-| Custom tokenizer | Replicate TokenizeFlat() in Rust | 3-5 days | — |
-| gRPC server | tonic server: IndexDoc, BatchIndex, Delete, Search, Facets | 3 days | Proto |
-| Query translation | PG tsquery → Tantivy BooleanQuery with field boosts | 3 days | Schema, Tokenizer |
-| Faceted search | 14 facet types from bitmagnet | 3 days | Schema |
-| Aggregations | Facet counts, range aggregations | 2 days | Facets |
-| Index management | Merge policy, warmers, graceful shutdown | 2 days | gRPC server |
-| Backfill CLI | Stream from PG (now reads compressed blobs — faster), batch-index (~60 min for 48M docs) | 2 days | All above |
+| Task | As built | Status |
+|---|---|---|
+| Custom tokenizer | `TokenizeFlat` ported exactly — **go-unidecode tables transcoded verbatim** (the `deunicode` crate diverges), plus Go's `IsLetter\|IsDigit` ranges + single-rune `ToLower`; no dedupe; CJK (>U+1FFF) one token each. 4223 Go-generated fixtures, byte-for-byte parity. Registered as the index analyzer (bare, no `LowerCaser` — would break CJK transliteration). | ✅ |
+| Index schema + lifecycle | Weighted text fields `text_a..d` (A=4.0/B=2.0/C=1.5/D=0.5) + keyword facet/fast fields + numerics + `doc_id`; `open_or_create`/reader/writer; tokenizer registered via `analyzer()`. | ✅ |
+| Write RPCs + indexer | `IndexDocument`/`BatchIndex`(stream)/`DeleteDocument`/`HealthCheck`(real doc_count). **doc_id** = `hex(info_hash):ct:cs:cid` (= Go `InferID`/PG generated id) — upsert deletes by doc_id so a torrent's multiple classifications coexist; `DeleteDocument` deletes by info_hash (PG cascade). | ✅ |
+| Query translation | `run_search`: faithful Go `AppQueryToTsquery` port (byte-for-byte vs `tsquery_test.go`); operators `&`(AND)/`\|`/`.`(→`<->`)/`!`/`*`(→`:*`) with PG precedence; each lexeme → `DisjunctionMaxQuery(0.3)` of `BoostQuery` over `text_a..d`; phrases→`PhraseQuery`, prefix→`PhrasePrefixQuery`; filters/pagination/sort; `SearchHit.id = doc_id`. | ✅ |
+| Faceted search + aggregations | `run_facets`: all 14 via typed `tantivy::aggregation`; `files_count` range buckets; `file_type` folds `file_extensions`; `tmdb_id` = `content_id` where `content_source=="tmdb"`; `FacetType::ALL` order. | ✅ |
+| Backfill CLI | `src/bin/backfill.rs` + `transform.rs`: `bitmagnet-db::stream_torrents_for_index` drives **FROM `torrent_contents`** (one doc per tc = PG `tsv @@ tsquery` parity), keyset by `tc.id`; deserialize blob (Go-compatible) → proto `TorrentDocument` → Tantivy; clap flags, resume on `tc.id`. (48M-doc live run is operational, deferred.) | ✅ |
+| Read-path integration test | `tests/read_path.rs` drives `Search`+`GetFacets` through the server (free-text/sort/filter, facet counts, multi-classification doc_id). | ✅ |
+
+> **Known limitations for Phase 4 (read-agent–flagged, all degrade sensibly):** (1) the proto `SearchFilters` is flat, so Go's per-facet OR-logic (exclude a facet's own filter when aggregating it) isn't reproduced — all facets aggregate over the one filtered set; (2) no dedicated multi-valued `file_types` field, so the `file_type` facet **overcounts** a torrent with 2+ same-type extensions (folds `file_extensions`); (3) no null/Unknown facet bucket (Go has one for missing content_type/release_year); (4) multi-key sort honours only the first `SortBy` (single-key `TopDocs`; field-sorted hits carry score 0.0); (5) `SearchHit` carries the `doc_id` *components* (info_hash + content_type/source/id) so the composite is client-derivable, but there's no explicit `doc_id` field on the proto — add one to `SearchHit` for an explicit stable hit id. These matter for shadow-mode ranking/facet parity and are the first tuning items in Phase 4.
+
+> **Original estimates (for reference):** tokenizer 3-5d · schema 2d · gRPC server 3d · query translation 3d · facets 3d · aggregations 2d · index mgmt 2d · backfill 2d.
 
 ### Phase 4: Shadow Mode Go Integration (Weeks 8-10)
 
