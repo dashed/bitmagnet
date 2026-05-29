@@ -10,18 +10,40 @@ description = "Tantivy search index + gRPC sidecar for bitmagnet (Phase 1 skelet
 [dependencies]
 bitmagnet-proto = { path = "../bitmagnet-proto" }
 bitmagnet-common = { path = "../bitmagnet-common" }
+# `bitmagnet-model`: the indexer maps the proto `ContentType` enum to its
+# canonical string via `ContentType::from_proto_value`; the backfill bin also
+# decodes file blobs and builds proto docs from these domain types.
+bitmagnet-model = { path = "../bitmagnet-model" }
+# `bitmagnet-db`: keyset-paginated `stream_torrents_with_files` for the backfill
+# bin (src/bin/backfill.rs).
+bitmagnet-db = { path = "../bitmagnet-db" }
+# `tokio` is the workspace's `full` feature set, which already includes the
+# `sync` (Mutex), `macros` (#[tokio::main]/#[tokio::test]) and `rt` features the
+# server + backfill need.
 tokio.workspace = true
 tracing.workspace = true
 tonic.workspace = true
+# Tantivy 0.26 exposes aggregations at `tantivy::aggregation` with NO cargo
+# feature gate, so the read path needs no extra feature here. (The old
+# `aggregation` feature no longer exists; enabling it would fail to build.)
 tantivy.workspace = true
 # `env` (read defaults from environment) is additive on top of the workspace's
 # `derive` feature; it backs the `#[arg(env = "...")]` attributes in main.rs.
 clap = { workspace = true, features = ["env"] }
 anyhow.workspace = true
+# Stream combinators (`StreamExt`, `stream::iter`) for the backfill bin's
+# client-streaming `BatchIndex` and for consuming the DB row stream.
+futures = "0.3"
 # `tonic`'s server transport already pulls in `tokio-stream` with the `net`
 # feature; we depend on it directly to expose the Unix-domain-socket listener
-# (and the ephemeral TCP listener used by the in-process smoke test).
+# (and the ephemeral TCP listener + streaming requests used by the smoke test).
 tokio-stream = { version = "0.1", features = ["net"] }
+
+[dev-dependencies]
+# tests/tokenizer_parity.rs parses the Go-generated ground-truth corpus
+# (tests/fixtures/tokenizer_fixtures.json) as a `serde_json::Value` to assert
+# byte-for-byte parity of the `TokenizeFlat` port.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

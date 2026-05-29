@@ -44,6 +44,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 zstd = "0.13"
+# JSON — currently test-only (the tokenizer parity fixtures); pinned centrally
+# so member crates reference it via `serde_json.workspace = true`.
+serde_json = "1"
 
 # Database. NOTE: sqlx 0.7+ split the combined `runtime-tokio-rustls` feature
 # into separate `runtime-*` and `tls-*` features.

@@ -85,6 +85,179 @@ pub async fn stream_torrents_with_files(
     Ok(out)
 }
 
+/// One `torrent_contents` row joined with its torrent and (when classified) its
+/// content metadata — everything the search backfill needs to build a proto
+/// `TorrentDocument`. One value per torrent_content row (NOT per torrent): a
+/// torrent with several classifications yields several of these, each a distinct
+/// search document keyed by [`Self::id`].
+///
+/// Scalar columns keep their raw PostgreSQL types; nullable columns are
+/// `Option`. Integer columns are widened to `i64` in SQL so the backfill maps
+/// them onto the proto's `u32`/`u64`/`i64` fields uniformly. `languages` and
+/// `genres` arrive as Postgres `text[]` (the JSONB `languages` column is
+/// flattened in SQL), so no JSON decoding is needed here.
+#[derive(Debug, Clone)]
+pub struct TorrentForIndex {
+    /// `torrent_contents.id`: the generated composite PK
+    /// `hex(info_hash):content_type:content_source:content_id`. Both the keyset
+    /// cursor and the Tantivy upsert key (the sidecar's `doc_id`).
+    pub id: String,
+    /// 20-byte info hash.
+    pub info_hash: InfoHash,
+    /// Torrent display name (`torrents.name`).
+    pub torrent_name: String,
+    /// Classification key; all `None` for an unclassified torrent_content.
+    pub content_type: Option<String>,
+    pub content_source: Option<String>,
+    pub content_id: Option<String>,
+    /// Classified content title / original title (`content.*`, `None` when
+    /// unclassified or absent).
+    pub content_title: Option<String>,
+    pub original_title: Option<String>,
+    /// Release year, from the `content` table (`torrent_contents` dropped its
+    /// `release_year` in migration 00007); widened to `i64`.
+    pub release_year: Option<i64>,
+    /// Parsed video attributes.
+    pub video_resolution: Option<String>,
+    pub video_source: Option<String>,
+    pub video_codec: Option<String>,
+    pub video_3d: Option<String>,
+    pub video_modifier: Option<String>,
+    pub release_group: Option<String>,
+    /// Swarm / ordering stats (widened to `i64`).
+    pub seeders: Option<i64>,
+    pub leechers: Option<i64>,
+    /// Total torrent size in bytes (`torrents.size`).
+    pub size: i64,
+    pub files_count: Option<i64>,
+    /// `epoch(coalesce(tc.published_at, t.created_at))` in seconds.
+    pub published_at: i64,
+    /// Detected content languages (flattened from the JSONB column).
+    pub languages: Vec<String>,
+    /// Genre collection names (`content_collections` of type `genre`).
+    pub genres: Vec<String>,
+    /// Compressed file list (`NULL` when no blob is stored); decode with
+    /// [`Self::files`] to derive file paths / extensions.
+    pub files_data: Option<Vec<u8>>,
+}
+
+impl TorrentForIndex {
+    /// Decompresses and decodes [`Self::files_data`], returning an empty vec
+    /// when no blob is present.
+    pub fn files(&self) -> std::result::Result<Vec<BlobFile>, BlobError> {
+        match &self.files_data {
+            Some(blob) => deserialize_files(blob),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// SQL for [`stream_torrents_for_index`]. Drives FROM `torrent_contents` (one
+/// row = one search document), mirroring bitmagnet's `tsv @@ tsquery` search so
+/// the Tantivy index matches Postgres exactly — in particular it never indexes
+/// unclassified torrents that have no `torrent_contents` row (and would make
+/// Tantivy a superset of PG results). Keyset pagination is on the generated text
+/// PK `tc.id`, which is also the Tantivy `doc_id`. Integers are cast to
+/// `bigint`, the JSONB `languages` column is flattened to `text[]`, and genres
+/// come from a correlated `content_collections` (type `genre`) subquery.
+const STREAM_FOR_INDEX_SQL: &str = "\
+SELECT \
+tc.id AS id, \
+tc.info_hash AS info_hash, \
+t.name AS torrent_name, \
+tc.content_type AS content_type, \
+tc.content_source AS content_source, \
+tc.content_id AS content_id, \
+c.title AS content_title, \
+c.original_title AS original_title, \
+c.release_year::bigint AS release_year, \
+tc.video_resolution AS video_resolution, \
+tc.video_source AS video_source, \
+tc.video_codec AS video_codec, \
+tc.video_3d AS video_3d, \
+tc.video_modifier AS video_modifier, \
+tc.release_group AS release_group, \
+tc.seeders::bigint AS seeders, \
+tc.leechers::bigint AS leechers, \
+t.size AS size, \
+tc.files_count::bigint AS files_count, \
+CAST(EXTRACT(EPOCH FROM COALESCE(tc.published_at, t.created_at)) AS bigint) AS published_at, \
+ARRAY(SELECT jsonb_array_elements_text(tc.languages)) AS languages, \
+ARRAY( \
+SELECT cc.name FROM content_collections_content ccc \
+JOIN content_collections cc \
+ON cc.type = ccc.content_collection_type \
+AND cc.source = ccc.content_collection_source \
+AND cc.id = ccc.content_collection_id \
+WHERE ccc.content_type = tc.content_type \
+AND ccc.content_source = tc.content_source \
+AND ccc.content_id = tc.content_id \
+AND cc.type = 'genre' \
+ORDER BY cc.name \
+) AS genres, \
+t.files_data AS files_data \
+FROM torrent_contents tc \
+JOIN torrents t ON t.info_hash = tc.info_hash \
+LEFT JOIN content c \
+ON c.type = tc.content_type \
+AND c.source = tc.content_source \
+AND c.id = tc.content_id \
+WHERE ($1::text IS NULL OR tc.id > $1) \
+ORDER BY tc.id ASC \
+LIMIT $2";
+
+/// Reads up to `limit` `torrent_contents` rows whose `id` is greater than
+/// `after_id` (or from the start when `None`), ordered by `id` — one row per
+/// search document. Pass the last returned [`TorrentForIndex::id`] back as
+/// `after_id` for the next page. Uses the runtime [`sqlx::query`] API, so it
+/// compiles without a live database.
+pub async fn stream_torrents_for_index(
+    pool: &PgPool,
+    after_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<TorrentForIndex>> {
+    let after = after_id.map(str::to_owned);
+
+    let rows = sqlx::query(STREAM_FOR_INDEX_SQL)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw: Vec<u8> = row.try_get("info_hash")?;
+        let info_hash =
+            InfoHash::from_slice(&raw).map_err(|e| DbError::Decode(format!("info_hash: {e}")))?;
+        out.push(TorrentForIndex {
+            id: row.try_get("id")?,
+            info_hash,
+            torrent_name: row.try_get("torrent_name")?,
+            content_type: row.try_get("content_type")?,
+            content_source: row.try_get("content_source")?,
+            content_id: row.try_get("content_id")?,
+            content_title: row.try_get("content_title")?,
+            original_title: row.try_get("original_title")?,
+            release_year: row.try_get("release_year")?,
+            video_resolution: row.try_get("video_resolution")?,
+            video_source: row.try_get("video_source")?,
+            video_codec: row.try_get("video_codec")?,
+            video_3d: row.try_get("video_3d")?,
+            video_modifier: row.try_get("video_modifier")?,
+            release_group: row.try_get("release_group")?,
+            seeders: row.try_get("seeders")?,
+            leechers: row.try_get("leechers")?,
+            size: row.try_get("size")?,
+            files_count: row.try_get("files_count")?,
+            published_at: row.try_get("published_at")?,
+            languages: row.try_get("languages")?,
+            genres: row.try_get("genres")?,
+            files_data: row.try_get("files_data")?,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +314,58 @@ mod tests {
         assert!(STREAM_SQL.contains("ORDER BY info_hash ASC"));
         assert!(STREAM_SQL.contains("LIMIT $2"));
         assert!(STREAM_SQL.contains("files_data"));
+    }
+
+    #[test]
+    fn for_index_files_round_trip() {
+        let original = vec![BlobFile {
+            index: 0,
+            path: "a.mkv".to_owned(),
+            extension: "mkv".to_owned(),
+            size: 10,
+        }];
+        let blob = serialize_files(&original).unwrap();
+        let row = TorrentForIndex {
+            id: "0123456789abcdef0123456789abcdef01234567:movie:tmdb:1".to_owned(),
+            info_hash: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+            torrent_name: "t".to_owned(),
+            content_type: Some("movie".to_owned()),
+            content_source: Some("tmdb".to_owned()),
+            content_id: Some("1".to_owned()),
+            content_title: Some("Title".to_owned()),
+            original_title: None,
+            release_year: Some(2020),
+            video_resolution: Some("1080p".to_owned()),
+            video_source: None,
+            video_codec: None,
+            video_3d: None,
+            video_modifier: None,
+            release_group: None,
+            seeders: Some(5),
+            leechers: Some(1),
+            size: 10,
+            files_count: Some(1),
+            published_at: 1_600_000_000,
+            languages: vec!["en".to_owned()],
+            genres: vec!["Action".to_owned()],
+            files_data: Some(blob),
+        };
+        assert_eq!(row.files().unwrap(), original);
+    }
+
+    #[test]
+    fn for_index_sql_shape() {
+        // Drives from torrent_contents (one row = one search doc), joins
+        // torrents + content, keysets on the composite PK tc.id.
+        assert!(STREAM_FOR_INDEX_SQL.contains("FROM torrent_contents tc"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("JOIN torrents t ON t.info_hash = tc.info_hash"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("LEFT JOIN content c"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("tc.id > $1"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("ORDER BY tc.id ASC"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("LIMIT $2"));
+        // Genres via content_collections (type 'genre'); JSONB languages flattened.
+        assert!(STREAM_FOR_INDEX_SQL.contains("content_collections_content ccc"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("cc.type = 'genre'"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("jsonb_array_elements_text(tc.languages)"));
     }
 }

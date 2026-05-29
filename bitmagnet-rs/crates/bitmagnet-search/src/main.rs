@@ -57,10 +57,12 @@ async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
     let args = Args::parse();
 
-    let service = SearchServiceServer::new(SearchServer::default());
+    let server = SearchServer::open(&args.index_path)
+        .with_context(|| format!("opening search index at {}", args.index_path.display()))?;
+    let service = SearchServiceServer::new(server);
     info!(
         index_path = %args.index_path.display(),
-        "bitmagnet-search starting (Phase 1 skeleton: only HealthCheck is implemented)"
+        "bitmagnet-search starting (write path + HealthCheck live; Search/GetFacets pending read path)"
     );
 
     match Listen::parse(&args.addr) {

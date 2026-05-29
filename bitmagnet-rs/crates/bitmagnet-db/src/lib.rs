@@ -5,8 +5,10 @@
 //!   or explicit fields (mirrors `internal/database/postgres.Config`).
 //! * [`connect`] / [`ping`] — build a [`PgPool`] and health-check it.
 //! * [`stream_torrents_with_files`] + [`TorrentWithBlob`] — keyset-paginated
-//!   read of torrents together with their compressed `files_data` blob, for the
-//!   Phase 3 search backfill.
+//!   read of torrents together with their compressed `files_data` blob.
+//! * [`stream_torrents_for_index`] + [`TorrentForIndex`] — keyset-paginated read
+//!   of `torrent_contents` joined with torrents + content (one row per search
+//!   document), for the Phase 3 search backfill.
 //!
 //! All queries use the runtime [`sqlx::query`] API (not the compile-time
 //! `query!` macros), so the crate builds and tests green without a live
@@ -22,7 +24,9 @@ mod stream;
 pub use config::DbConfig;
 pub use error::{DbError, Result};
 pub use pool::{connect, ping};
-pub use stream::{stream_torrents_with_files, TorrentWithBlob};
+pub use stream::{
+    stream_torrents_for_index, stream_torrents_with_files, TorrentForIndex, TorrentWithBlob,
+};
 
 /// Re-exported so callers can name the pool type without depending on `sqlx`
 /// directly.
