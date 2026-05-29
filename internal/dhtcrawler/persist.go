@@ -188,7 +188,9 @@ func createTorrentModel(
 	}
 
 	var filesData []byte
+
 	var fileExts []string
+
 	if len(files) > 0 {
 		if blobData, blobErr := blobmigration.SerializeFiles(files); blobErr == nil {
 			filesData = blobData

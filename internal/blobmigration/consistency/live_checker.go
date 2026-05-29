@@ -15,6 +15,7 @@ type LiveChecker struct {
 	logger     *zap.SugaredLogger
 	metrics    *Metrics
 	stopCh     chan struct{}
+	cancel     context.CancelFunc
 }
 
 func NewLiveChecker(
@@ -35,30 +36,37 @@ func NewLiveChecker(
 }
 
 func (lc *LiveChecker) Start() {
-	go lc.run()
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.cancel = cancel
+
+	go lc.run(ctx)
 }
 
 func (lc *LiveChecker) Stop() {
+	if lc.cancel != nil {
+		lc.cancel()
+	}
+
 	close(lc.stopCh)
 }
 
-func (lc *LiveChecker) run() {
+func (lc *LiveChecker) run(ctx context.Context) {
 	ticker := time.NewTicker(lc.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-lc.stopCh:
 			return
 		case <-ticker.C:
-			lc.check()
+			lc.check(ctx)
 		}
 	}
 }
 
-func (lc *LiveChecker) check() {
-	ctx := context.Background()
-
+func (lc *LiveChecker) check(ctx context.Context) {
 	summary, err := CheckRandom(ctx, lc.dao, lc.sampleSize)
 	if err != nil {
 		lc.logger.Errorw("consistency check failed", "error", err)

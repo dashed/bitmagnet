@@ -73,21 +73,26 @@ func DeserializeFiles(data []byte) ([]model.TorrentFile, error) {
 
 func ExtractUniqueExtensions(files []model.TorrentFile) []string {
 	seen := make(map[string]struct{})
-	var exts []string
+
+	var exts []string //nolint:prealloc // preserves nil return for empty input
 
 	for _, f := range files {
 		ext := model.FileExtensionFromPath(f.Path)
 		if !ext.Valid {
 			continue
 		}
+
 		if _, ok := seen[ext.String]; ok {
 			continue
 		}
+
 		seen[ext.String] = struct{}{}
+
 		exts = append(exts, ext.String)
 	}
 
 	sort.Strings(exts)
+
 	return exts
 }
 
@@ -103,6 +108,7 @@ func BuildFileSummary(infoHash protocol.ID, files []model.TorrentFile) model.Tor
 	for _, f := range files {
 		size := int64(f.Size)
 		summary.TotalSize += size
+
 		if size > summary.LargestFileSize {
 			summary.LargestFileSize = size
 		}
@@ -113,6 +119,7 @@ func BuildFileSummary(infoHash protocol.ID, files []model.TorrentFile) model.Tor
 		if !ft.Valid {
 			continue
 		}
+
 		switch ft.FileType {
 		case model.FileTypeVideo:
 			summary.HasVideo = true
