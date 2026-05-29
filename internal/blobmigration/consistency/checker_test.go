@@ -8,6 +8,8 @@ import (
 )
 
 func TestCompareFilesMatch(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{Index: 0, Path: "movie/video.mkv", Size: 1024000},
 		{Index: 1, Path: "movie/subs.srt", Size: 5000},
@@ -21,6 +23,8 @@ func TestCompareFilesMatch(t *testing.T) {
 }
 
 func TestCompareFilesMismatchPath(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{
 		{Index: 0, Path: "movie/video.mkv", Size: 1024000},
 	}
@@ -37,6 +41,8 @@ func TestCompareFilesMismatchPath(t *testing.T) {
 }
 
 func TestCompareFilesMismatchSize(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{
 		{Index: 0, Path: "file.bin", Size: 100},
 	}
@@ -53,6 +59,8 @@ func TestCompareFilesMismatchSize(t *testing.T) {
 }
 
 func TestCompareFilesMissingInBlob(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{
 		{Index: 0, Path: "file.bin", Size: 100},
 	}
@@ -70,6 +78,8 @@ func TestCompareFilesMissingInBlob(t *testing.T) {
 }
 
 func TestCompareFilesExtraInBlob(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{
 		{Index: 0, Path: "file.bin", Size: 100},
 		{Index: 1, Path: "extra.txt", Size: 50},
@@ -87,6 +97,8 @@ func TestCompareFilesExtraInBlob(t *testing.T) {
 }
 
 func TestCompareFilesDifferentOrder(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{
 		{Index: 2, Path: "c.txt", Size: 300},
 		{Index: 0, Path: "a.txt", Size: 100},
@@ -104,6 +116,8 @@ func TestCompareFilesDifferentOrder(t *testing.T) {
 }
 
 func TestCompareFilesEmpty(t *testing.T) {
+	t.Parallel()
+
 	result := CompareFiles([]model.TorrentFile{}, []model.TorrentFile{})
 	assert.True(t, result.Match)
 	assert.Equal(t, 0, result.BlobFiles)
@@ -112,6 +126,8 @@ func TestCompareFilesEmpty(t *testing.T) {
 }
 
 func TestCompareFilesBlobEmptyRowsNot(t *testing.T) {
+	t.Parallel()
+
 	blob := []model.TorrentFile{}
 	rows := []model.TorrentFile{
 		{Index: 0, Path: "file.bin", Size: 100},

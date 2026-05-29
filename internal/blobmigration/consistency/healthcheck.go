@@ -18,8 +18,8 @@ func NewHealthCheck(metrics *Metrics) health.Check {
 			if err := metrics.ErrorsTotal.Write(&m); err != nil {
 				return fmt.Errorf("reading error metric: %w", err)
 			}
-			if m.Counter != nil && m.Counter.GetValue() > 0 {
-				return fmt.Errorf("blob consistency errors detected: %.0f", m.Counter.GetValue())
+			if m.GetCounter() != nil && m.GetCounter().GetValue() > 0 {
+				return fmt.Errorf("blob consistency errors detected: %.0f", m.GetCounter().GetValue())
 			}
 			return nil
 		},

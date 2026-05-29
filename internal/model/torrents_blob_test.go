@@ -3,11 +3,10 @@ package model
 import (
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 type testCompactFile struct {
@@ -19,15 +18,19 @@ type testCompactFile struct {
 
 func makeTestBlob(t *testing.T, files []testCompactFile) []byte {
 	t.Helper()
+
 	raw, err := msgpack.Marshal(files)
 	require.NoError(t, err)
+
 	enc, _ := zstd.NewWriter(nil)
+
 	return enc.EncodeAll(raw, nil)
 }
 
-func TestAfterFindWithBlobData(t *testing.T) {
+func TestAfterFindWithBlobData(t *testing.T) { //nolint:paralleltest // mutates global FilesDataDeserializer
 	orig := FilesDataDeserializer
 	FilesDataDeserializer = testDeserialize
+
 	defer func() { FilesDataDeserializer = orig }()
 
 	blob := makeTestBlob(t, []testCompactFile{
@@ -50,9 +53,10 @@ func TestAfterFindWithBlobData(t *testing.T) {
 	assert.Equal(t, "b/second.txt", torrent.Files[1].Path)
 }
 
-func TestAfterFindWithNilBlob(t *testing.T) {
+func TestAfterFindWithNilBlob(t *testing.T) { //nolint:paralleltest // mutates global FilesDataDeserializer
 	orig := FilesDataDeserializer
 	FilesDataDeserializer = testDeserialize
+
 	defer func() { FilesDataDeserializer = orig }()
 
 	existing := []TorrentFile{
@@ -73,9 +77,10 @@ func TestAfterFindWithNilBlob(t *testing.T) {
 	assert.Equal(t, "z.mp4", torrent.Files[1].Path)
 }
 
-func TestAfterFindWithEmptyBlob(t *testing.T) {
+func TestAfterFindWithEmptyBlob(t *testing.T) { //nolint:paralleltest // mutates global FilesDataDeserializer
 	orig := FilesDataDeserializer
 	FilesDataDeserializer = testDeserialize
+
 	defer func() { FilesDataDeserializer = orig }()
 
 	existing := []TorrentFile{
@@ -94,9 +99,10 @@ func TestAfterFindWithEmptyBlob(t *testing.T) {
 	assert.Equal(t, "keep.txt", torrent.Files[0].Path)
 }
 
-func TestAfterFindWithCorruptBlob(t *testing.T) {
+func TestAfterFindWithCorruptBlob(t *testing.T) { //nolint:paralleltest // mutates global FilesDataDeserializer
 	orig := FilesDataDeserializer
 	FilesDataDeserializer = testDeserialize
+
 	defer func() { FilesDataDeserializer = orig }()
 
 	existing := []TorrentFile{
@@ -115,9 +121,10 @@ func TestAfterFindWithCorruptBlob(t *testing.T) {
 	assert.Equal(t, "fallback.txt", torrent.Files[0].Path)
 }
 
-func TestAfterFindWithNilDeserializer(t *testing.T) {
+func TestAfterFindWithNilDeserializer(t *testing.T) { //nolint:paralleltest // mutates global FilesDataDeserializer
 	orig := FilesDataDeserializer
 	FilesDataDeserializer = nil
+
 	defer func() { FilesDataDeserializer = orig }()
 
 	blob := makeTestBlob(t, []testCompactFile{
@@ -142,14 +149,17 @@ func TestAfterFindWithNilDeserializer(t *testing.T) {
 
 func testDeserialize(data []byte) ([]TorrentFile, error) {
 	dec, _ := zstd.NewReader(nil)
+
 	raw, err := dec.DecodeAll(data, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	var compact []testCompactFile
 	if err := msgpack.Unmarshal(raw, &compact); err != nil {
 		return nil, err
 	}
+
 	files := make([]TorrentFile, len(compact))
 	for i, c := range compact {
 		files[i] = TorrentFile{
@@ -162,5 +172,6 @@ func testDeserialize(data []byte) ([]TorrentFile, error) {
 			Size: c.Size,
 		}
 	}
+
 	return files, nil
 }

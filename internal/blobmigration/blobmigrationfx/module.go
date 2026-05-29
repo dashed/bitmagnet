@@ -36,6 +36,7 @@ type consistencyResult struct {
 
 func newConsistency(p consistencyParams) consistencyResult {
 	metrics := consistency.NewMetrics()
+
 	var lc *consistency.LiveChecker
 
 	return consistencyResult{
@@ -51,8 +52,14 @@ func newConsistency(p consistencyParams) consistencyResult {
 						return err
 					}
 					interval := time.Duration(p.Config.Consistency.IntervalMs) * time.Millisecond
-					lc = consistency.NewLiveChecker(q, interval, p.Config.Consistency.SampleSize, p.Logger, metrics)
-					lc.Start()
+					lc = consistency.NewLiveChecker(
+						q,
+						interval,
+						p.Config.Consistency.SampleSize,
+						p.Logger,
+						metrics,
+					)
+					lc.Start() //nolint:contextcheck // lifecycle ctx, not startup ctx
 					return nil
 				},
 				OnStop: func(context.Context) error {

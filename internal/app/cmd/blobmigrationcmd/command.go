@@ -25,6 +25,10 @@ const (
 	kvKeyTotal      = "blob_migration:total_count"
 	kvKeyStartedAt  = "blob_migration:started_at"
 	kvKeyVerifiedAt = "blob_migration:verified_at"
+
+	statusRunning   = "running"
+	statusPaused    = "paused"
+	statusCompleted = "completed"
 )
 
 type Params struct {
@@ -51,6 +55,7 @@ func New(p Params) (Result, error) {
 			p.cleanupCmd(),
 		},
 	}
+
 	return Result{Command: cmd}, nil
 }
 
@@ -76,15 +81,20 @@ func (p Params) startCmd() *cli.Command {
 			}
 
 			status, _ := getKV(ctx, d, kvKeyStatus)
-			if status == "running" {
-				return fmt.Errorf("migration is already running; use 'status' to check progress or 'pause' to stop")
+			if status == statusRunning {
+				return fmt.Errorf(
+					"migration is already running; use 'status' to check progress or 'pause' to stop",
+				)
 			}
 
 			var cursor string
 			if ctx.Bool("resume") {
 				cursor, _ = getKV(ctx, d, kvKeyCursor)
 				if cursor == "" {
-					_, _ = fmt.Fprintln(ctx.App.Writer, "No checkpoint found, starting from the beginning.")
+					_, _ = fmt.Fprintln(
+						ctx.App.Writer,
+						"No checkpoint found, starting from the beginning.",
+					)
 				} else {
 					_, _ = fmt.Fprintf(ctx.App.Writer, "Resuming from cursor: %s\n", cursor)
 				}
@@ -99,7 +109,7 @@ func (p Params) startCmd() *cli.Command {
 			}
 
 			now := time.Now()
-			if err := upsertKV(ctx, d, kvKeyStatus, "running", now); err != nil {
+			if err := upsertKV(ctx, d, kvKeyStatus, statusRunning, now); err != nil {
 				return err
 			}
 			if err := upsertKV(ctx, d, kvKeyTotal, strconv.FormatInt(totalCount, 10), now); err != nil {
@@ -126,7 +136,11 @@ func (p Params) startCmd() *cli.Command {
 				return fmt.Errorf("enqueuing job: %w", err)
 			}
 
-			_, _ = fmt.Fprintf(ctx.App.Writer, "Migration started. Total torrents with files: %d\n", totalCount)
+			_, _ = fmt.Fprintf(
+				ctx.App.Writer,
+				"Migration started. Total torrents with files: %d\n",
+				totalCount,
+			)
 			return nil
 		},
 	}
@@ -215,14 +229,17 @@ func (p Params) pauseCmd() *cli.Command {
 			}
 
 			status, _ := getKV(ctx, d, kvKeyStatus)
-			if status != "running" {
+			if status != statusRunning {
 				return fmt.Errorf("migration is not running (current status: %s)", status)
 			}
 
-			if err := upsertKV(ctx, d, kvKeyStatus, "paused", time.Now()); err != nil {
+			if err := upsertKV(ctx, d, kvKeyStatus, statusPaused, time.Now()); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintln(ctx.App.Writer, "Migration paused. Current batch will finish, but no new batches will be queued.")
+			_, _ = fmt.Fprintln(
+				ctx.App.Writer,
+				"Migration paused. Current batch will finish, but no new batches will be queued.",
+			)
 			return nil
 		},
 	}
@@ -246,13 +263,13 @@ func (p Params) resumeCmd() *cli.Command {
 			}
 
 			status, _ := getKV(ctx, d, kvKeyStatus)
-			if !strings.HasPrefix(status, "paused") {
+			if !strings.HasPrefix(status, statusPaused) {
 				return fmt.Errorf("migration is not paused (current status: %s)", status)
 			}
 
 			cursor, _ := getKV(ctx, d, kvKeyCursor)
 
-			if err := upsertKV(ctx, d, kvKeyStatus, "running", time.Now()); err != nil {
+			if err := upsertKV(ctx, d, kvKeyStatus, statusRunning, time.Now()); err != nil {
 				return err
 			}
 
@@ -305,7 +322,11 @@ func (p Params) verifyCmd() *cli.Command {
 					return fmt.Errorf("counting migrated torrents: %w", err)
 				}
 				sampleSize = int(count)
-				_, _ = fmt.Fprintf(ctx.App.Writer, "Running full verification on %d torrents...\n", sampleSize)
+				_, _ = fmt.Fprintf(
+					ctx.App.Writer,
+					"Running full verification on %d torrents...\n",
+					sampleSize,
+				)
 			} else {
 				var count int64
 				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
@@ -342,7 +363,11 @@ func (p Params) verifyCmd() *cli.Command {
 					_, _ = fmt.Fprintf(ctx.App.Writer, "  Mismatch: %s (blob=%d, rows=%d)\n",
 						detail.InfoHash, detail.BlobFiles, detail.RowFiles)
 				}
-				return fmt.Errorf("verification found %d mismatches and %d errors", summary.Mismatches, summary.Errors)
+				return fmt.Errorf(
+					"verification found %d mismatches and %d errors",
+					summary.Mismatches,
+					summary.Errors,
+				)
 			}
 
 			now := time.Now()
@@ -385,7 +410,10 @@ func (p Params) cleanupCmd() *cli.Command {
 				return fmt.Errorf("cleanup aborted: one or more safety gates failed")
 			}
 
-			_, _ = fmt.Fprintln(ctx.App.Writer, "\nAll safety gates passed. Dropping torrent_files table...")
+			_, _ = fmt.Fprintln(
+				ctx.App.Writer,
+				"\nAll safety gates passed. Dropping torrent_files table...",
+			)
 
 			db := d.Torrent.UnderlyingDB().WithContext(ctx.Context)
 			if err := db.Exec("DROP TABLE IF EXISTS torrent_files").Error; err != nil {
@@ -411,8 +439,9 @@ type gate struct {
 	passed      bool
 }
 
-func (p Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool) {
+func (Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool) {
 	var gates []gate
+
 	allPassed := true
 
 	fail := func(desc string) {
@@ -425,7 +454,7 @@ func (p Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool)
 
 	// Gate 1: migration completed
 	status, _ := getKV(ctx, d, kvKeyStatus)
-	if status == "completed" {
+	if status == statusCompleted {
 		pass("Migration status is 'completed'")
 	} else {
 		fail(fmt.Sprintf("Migration status is '%s', expected 'completed'", status))
@@ -450,11 +479,14 @@ func (p Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool)
 		fail("No verification timestamp found (run 'blob-migration verify' first)")
 	} else {
 		t, parseErr := time.Parse(time.RFC3339, verifiedAt)
-		if parseErr != nil {
+
+		switch {
+		case parseErr != nil:
 			fail(fmt.Sprintf("Invalid verification timestamp: %s", verifiedAt))
-		} else if time.Since(t) > 24*time.Hour {
-			fail(fmt.Sprintf("Verification is stale (%s ago); re-run 'blob-migration verify'", time.Since(t).Truncate(time.Minute)))
-		} else {
+		case time.Since(t) > 24*time.Hour:
+			staleFor := time.Since(t).Truncate(time.Minute)
+			fail(fmt.Sprintf("Verification is stale (%s ago); re-run 'blob-migration verify'", staleFor))
+		default:
 			pass(fmt.Sprintf("Verification passed at %s", verifiedAt))
 		}
 	}
@@ -476,11 +508,13 @@ func getKV(ctx *cli.Context, d *dao.Query, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return kv.Value, nil
 }
 
 func upsertKV(ctx *cli.Context, d *dao.Query, key, value string, now time.Time) error {
 	kv := model.KeyValue{Key: key, Value: value, CreatedAt: now, UpdatedAt: now}
+
 	return d.Torrent.UnderlyingDB().WithContext(ctx.Context).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
