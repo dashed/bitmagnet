@@ -136,7 +136,7 @@ func (c processor) persist(ctx context.Context, payload persistPayload) error {
 // one of a torrent's contents leaves a stale document until the next backfill.
 // Mapping those to per-document deletes is a follow-up.
 func (c processor) indexToSearchSidecar(ctx context.Context, payload persistPayload) {
-	if c.tantivy == nil {
+	if c.searchIndexer == nil {
 		return
 	}
 
@@ -151,18 +151,30 @@ func (c processor) indexToSearchSidecar(ctx context.Context, payload persistPayl
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), searchIndexTimeout)
 		defer cancel()
 
-		for i := range contents {
-			if _, err := c.tantivy.IndexDocument(ctx, tantivy.BuildDocument(contents[i])); err != nil {
-				c.logSearchIndexError("index", err)
-			}
-		}
-
-		for _, infoHash := range deleteInfoHashes {
-			if _, err := c.tantivy.DeleteDocument(ctx, infoHash.Bytes()); err != nil {
-				c.logSearchIndexError("delete", err)
-			}
-		}
+		c.indexBatch(ctx, contents, deleteInfoHashes)
 	}()
+}
+
+// indexBatch performs the dual-write synchronously: it upserts a document per
+// torrent_content and deletes each torrent by info hash. Split from
+// indexToSearchSidecar (which owns the goroutine + timeout) so it is directly
+// unit-testable. Errors are logged, never returned.
+func (c processor) indexBatch(
+	ctx context.Context,
+	contents []model.TorrentContent,
+	deleteInfoHashes []protocol.ID,
+) {
+	for i := range contents {
+		if _, err := c.searchIndexer.IndexDocument(ctx, tantivy.BuildDocument(contents[i])); err != nil {
+			c.logSearchIndexError("index", err)
+		}
+	}
+
+	for _, infoHash := range deleteInfoHashes {
+		if _, err := c.searchIndexer.DeleteDocument(ctx, infoHash.Bytes()); err != nil {
+			c.logSearchIndexError("delete", err)
+		}
+	}
 }
 
 func (c processor) logSearchIndexError(op string, err error) {

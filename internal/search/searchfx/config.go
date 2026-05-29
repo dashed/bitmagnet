@@ -19,9 +19,9 @@ type Config struct {
 	// Address of the sidecar: a Unix socket ("unix:///run/bitmagnet/search.sock")
 	// or a TCP "host:port".
 	Address string
-	// Mode is the router strategy when Enabled: postgres | shadow | canary |
+	// Engine is the router strategy when Enabled: postgres | shadow | canary |
 	// tantivy. Ignored (forced to postgres) when Enabled is false.
-	Mode string `validate:"omitempty,oneof=postgres shadow canary tantivy"`
+	Engine string `validate:"omitempty,oneof=postgres shadow canary tantivy"`
 	// SampleRate in [0,1] is the fraction of queries shadow-compared. Out-of-range
 	// values are handled gracefully by the router (>=1 always, <=0 never).
 	SampleRate float64
@@ -42,7 +42,7 @@ func NewDefaultConfig() Config {
 	return Config{
 		Enabled:          false,
 		Address:          "unix:///run/bitmagnet/search.sock",
-		Mode:             string(router.ModePostgres),
+		Engine:           string(router.ModePostgres),
 		SampleRate:       1,
 		CanaryPercent:    0,
 		Timeout:          5 * time.Second,
@@ -65,7 +65,7 @@ func (c Config) tantivyConfig() tantivy.Config {
 // disabled the router is forced to ModePostgres, so a stale/configured Mode can
 // never cause the router to touch the (absent) sidecar.
 func (c Config) routerConfig() router.Config {
-	mode := router.Mode(c.Mode)
+	mode := router.Mode(c.Engine)
 	if !c.Enabled {
 		mode = router.ModePostgres
 	}

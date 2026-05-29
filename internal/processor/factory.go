@@ -6,7 +6,6 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
-	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 )
@@ -19,9 +18,9 @@ type Params struct {
 	Dao              lazy.Lazy[*dao.Query]
 	BlockingManager  lazy.Lazy[blocking.Manager]
 	Logger           *zap.SugaredLogger
-	// Tantivy is the search sidecar client for the dual-write; nil when the
-	// "search" feature is disabled (provided by searchfx).
-	Tantivy *tantivy.Client `optional:"true"`
+	// SearchIndexer dual-writes to the Tantivy sidecar; nil when the "search"
+	// feature is disabled (provided by processorfx from searchfx's client).
+	SearchIndexer SearchIndexer `optional:"true"`
 }
 
 type Result struct {
@@ -55,7 +54,7 @@ func New(p Params) Result {
 				blockingManager: bm,
 				runner:          w,
 				defaultWorkflow: p.ClassifierConfig.Workflow,
-				tantivy:         p.Tantivy,
+				searchIndexer:   p.SearchIndexer,
 				logger:          p.Logger,
 			}, nil
 		}),

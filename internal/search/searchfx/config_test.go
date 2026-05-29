@@ -21,7 +21,7 @@ func TestRouterConfigForcesPostgresWhenDisabled(t *testing.T) {
 
 	c := NewDefaultConfig()
 	c.Enabled = false
-	c.Mode = string(router.ModeShadow) // configured mode is ignored when disabled
+	c.Engine = string(router.ModeShadow) // configured mode is ignored when disabled
 
 	assert.Equal(t, router.ModePostgres, c.routerConfig().Mode)
 }
@@ -31,7 +31,7 @@ func TestRouterConfigUsesModeWhenEnabled(t *testing.T) {
 
 	c := NewDefaultConfig()
 	c.Enabled = true
-	c.Mode = string(router.ModeShadow)
+	c.Engine = string(router.ModeShadow)
 	c.SampleRate = 0.25
 	c.LogDiscrepancies = true
 
