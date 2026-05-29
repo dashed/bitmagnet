@@ -8,35 +8,35 @@ The bitmagnet database is **genuinely large, not bloated**. The primary driver i
 
 ## Database Overview
 
-| Property | Value |
-|----------|-------|
-| PostgreSQL | 16.13 (Alpine) |
-| Database size | 367 GB |
-| PVC size | 398 GB (includes 31 GB stale `bitmagnet_backup.dump` from Jan 14) |
-| PVC allocation | 500 Gi |
-| Total rows (torrent_files) | 871,727,107 |
-| Total torrents | 47,928,340 |
+| Property                   | Value                                                             |
+| -------------------------- | ----------------------------------------------------------------- |
+| PostgreSQL                 | 16.13 (Alpine)                                                    |
+| Database size              | 367 GB                                                            |
+| PVC size                   | 398 GB (includes 31 GB stale `bitmagnet_backup.dump` from Jan 14) |
+| PVC allocation             | 500 Gi                                                            |
+| Total rows (torrent_files) | 871,727,107                                                       |
+| Total torrents             | 47,928,340                                                        |
 
 ## Size Breakdown by Table
 
 ### Top 4 Tables (366 GB / 99.7% of database)
 
-| Table | Total | Data | Indexes | Rows | % of DB |
-|-------|-------|------|---------|------|---------|
-| torrent_files | **272 GB** | 118 GB | 154 GB | 871M | 74% |
-| torrent_contents | **61 GB** | 21 GB (+12 GB TOAST) | 28 GB | 48M | 17% |
-| torrents_torrent_sources | **19 GB** | 8 GB | 11 GB | 75M | 5% |
-| torrents | **14 GB** | 7 GB | 7 GB | 48M | 4% |
+| Table                    | Total      | Data                 | Indexes | Rows | % of DB |
+| ------------------------ | ---------- | -------------------- | ------- | ---- | ------- |
+| torrent_files            | **272 GB** | 118 GB               | 154 GB  | 871M | 74%     |
+| torrent_contents         | **61 GB**  | 21 GB (+12 GB TOAST) | 28 GB   | 48M  | 17%     |
+| torrents_torrent_sources | **19 GB**  | 8 GB                 | 11 GB   | 75M  | 5%      |
+| torrents                 | **14 GB**  | 7 GB                 | 7 GB    | 48M  | 4%      |
 
 ### Remaining Tables (<1 GB each)
 
-| Table | Total | Rows |
-|-------|-------|------|
-| torrent_hints | 493 MB | 3.9M |
-| queue_jobs | 261 MB | — |
-| content | 202 MB | — |
-| content_attributes | 117 MB | — |
-| content_collections_content | 66 MB | — |
+| Table                       | Total  | Rows |
+| --------------------------- | ------ | ---- |
+| torrent_hints               | 493 MB | 3.9M |
+| queue_jobs                  | 261 MB | —    |
+| content                     | 202 MB | —    |
+| content_attributes          | 117 MB | —    |
+| content_collections_content | 66 MB  | —    |
 
 ## Root Cause: `save_files_threshold: 500000`
 
@@ -48,11 +48,11 @@ This controls how many file records are saved per torrent. Each torrent can cont
 
 ### Upstream data points for comparison
 
-| User | Torrents | save_files_threshold | DB Size |
-|------|----------|---------------------|---------|
-| Upstream FAQ estimate | 10M | 100 (default) | ~50 GB |
-| GitHub user (issue #191) | 22M | 1000 | 159 GB (torrent_files only) |
-| **Our deployment** | **48M** | **500,000** | **367 GB** |
+| User                     | Torrents | save_files_threshold | DB Size                     |
+| ------------------------ | -------- | -------------------- | --------------------------- |
+| Upstream FAQ estimate    | 10M      | 100 (default)        | ~50 GB                      |
+| GitHub user (issue #191) | 22M      | 1000                 | 159 GB (torrent_files only) |
+| **Our deployment**       | **48M**  | **500,000**          | **367 GB**                  |
 
 ## Index Analysis
 
@@ -60,12 +60,12 @@ Indexes consume **more space than data** in the largest table:
 
 ### torrent_files Indexes (154 GB total)
 
-| Index | Size | Purpose |
-|-------|------|---------|
+| Index                                  | Size      | Purpose                                    |
+| -------------------------------------- | --------- | ------------------------------------------ |
 | torrent_files_pkey `(info_hash, path)` | **95 GB** | Composite PK — wide because `path` is TEXT |
-| torrent_files_info_hash_index_key | **45 GB** | Unique index on `(info_hash, index)` |
-| torrent_files_size_idx | 8 GB | Search by file size |
-| torrent_files_extension_idx | 6 GB | Search by file extension |
+| torrent_files_info_hash_index_key      | **45 GB** | Unique index on `(info_hash, index)`       |
+| torrent_files_size_idx                 | 8 GB      | Search by file size                        |
+| torrent_files_extension_idx            | 6 GB      | Search by file extension                   |
 
 **The composite PK is the single biggest space consumer** (95 GB). The `info_hash` (20 bytes) is stored 3x per file row: once in the data, twice in the two indexes. Upstream issue #191 notes that replacing the composite PK with a serial integer would save ~40% of index space (~60 GB).
 
@@ -77,18 +77,19 @@ Indexes consume **more space than data** in the largest table:
 
 **Bloat is NOT the main issue.** Estimated table bloat is ~2 GB total:
 
-| Table | Dead Tuples | Dead % | Estimated Bloat | Last Autovacuum |
-|-------|-------------|--------|-----------------|-----------------|
-| torrents_torrent_sources | 14.4M | 19.2% | 1.3 GB | 2026-04-23 |
-| torrent_files | 1.1M | 0.1% | 147 MB | 2026-01-14 |
-| torrent_contents | 817K | 1.7% | 363 MB | 2026-01-14 |
-| torrents | 868K | 1.8% | 129 MB | 2026-01-14 |
+| Table                    | Dead Tuples | Dead % | Estimated Bloat | Last Autovacuum |
+| ------------------------ | ----------- | ------ | --------------- | --------------- |
+| torrents_torrent_sources | 14.4M       | 19.2%  | 1.3 GB          | 2026-04-23      |
+| torrent_files            | 1.1M        | 0.1%   | 147 MB          | 2026-01-14      |
+| torrent_contents         | 817K        | 1.7%   | 363 MB          | 2026-01-14      |
+| torrents                 | 868K        | 1.8%   | 129 MB          | 2026-01-14      |
 
 ### Autovacuum Concern
 
 Default `autovacuum_vacuum_scale_factor = 0.2` means vacuum triggers after 20% of rows are dead. For `torrent_files` (871M rows), that's **174M dead rows** before vacuum fires — far too high. The table hasn't been autovacuumed since January.
 
 **Recommendation**: Set per-table autovacuum thresholds:
+
 ```sql
 ALTER TABLE torrent_files SET (autovacuum_vacuum_scale_factor = 0.01);
 ALTER TABLE torrent_contents SET (autovacuum_vacuum_scale_factor = 0.02);
@@ -99,35 +100,37 @@ ALTER TABLE torrents_torrent_sources SET (autovacuum_vacuum_scale_factor = 0.02)
 
 **Almost none** — this is a known gap in bitmagnet:
 
-| Mechanism | Exists? | Scope |
-|-----------|---------|-------|
-| Queue job GC | Yes | Only `queue_jobs` table |
-| Classifier delete rules | Yes | Can delete by content type (e.g., XXX) or banned keywords |
-| Time-based retention / TTL | **No** | All torrents kept forever |
-| Dead torrent pruning | **No** | Zero-seeder torrents not cleaned |
-| Database size limit | **No** | No auto-pause at size threshold |
-| VACUUM scheduling | **No** | Relies on default autovacuum |
-| Index maintenance | **No** | No REINDEX scheduling |
+| Mechanism                  | Exists? | Scope                                                     |
+| -------------------------- | ------- | --------------------------------------------------------- |
+| Queue job GC               | Yes     | Only `queue_jobs` table                                   |
+| Classifier delete rules    | Yes     | Can delete by content type (e.g., XXX) or banned keywords |
+| Time-based retention / TTL | **No**  | All torrents kept forever                                 |
+| Dead torrent pruning       | **No**  | Zero-seeder torrents not cleaned                          |
+| Database size limit        | **No**  | No auto-pause at size threshold                           |
+| VACUUM scheduling          | **No**  | Relies on default autovacuum                              |
+| Index maintenance          | **No**  | No REINDEX scheduling                                     |
 
 ## Upstream Known Issues (All OPEN)
 
-| Issue | Title | Key Insight |
-|-------|-------|-------------|
-| [#191](https://github.com/bitmagnet-io/bitmagnet/issues/191) | Database size optimizations | Composite PK wastes ~40% of index space. Maintainer: "not top priority" |
-| [#187](https://github.com/bitmagnet-io/bitmagnet/issues/187) | Allow setting database size limit | Request to auto-pause DHT at limit. No implementation |
-| [#186](https://github.com/bitmagnet-io/bitmagnet/issues/186) | Document disk space requirements | Real-world: 5-30 KB per torrent depending on config |
-| [#495](https://github.com/bitmagnet-io/bitmagnet/issues/495) | Create a way to limit disk usage | User ran out of 100GB. No solution beyond disabling crawler |
+| Issue                                                        | Title                             | Key Insight                                                             |
+| ------------------------------------------------------------ | --------------------------------- | ----------------------------------------------------------------------- |
+| [#191](https://github.com/bitmagnet-io/bitmagnet/issues/191) | Database size optimizations       | Composite PK wastes ~40% of index space. Maintainer: "not top priority" |
+| [#187](https://github.com/bitmagnet-io/bitmagnet/issues/187) | Allow setting database size limit | Request to auto-pause DHT at limit. No implementation                   |
+| [#186](https://github.com/bitmagnet-io/bitmagnet/issues/186) | Document disk space requirements  | Real-world: 5-30 KB per torrent depending on config                     |
+| [#495](https://github.com/bitmagnet-io/bitmagnet/issues/495) | Create a way to limit disk usage  | User ran out of 100GB. No solution beyond disabling crawler             |
 
 ## Recommended Actions
 
 ### Immediate (no data loss, no downtime)
 
 1. **Delete stale `bitmagnet_backup.dump`** — 31 GB, from January 14
+
    ```bash
    kubectl exec -n bitmagnet sts/bitmagnet-postgres -- rm /var/lib/postgresql/data/bitmagnet_backup.dump
    ```
 
 2. **VACUUM torrents_torrent_sources** — reclaim 1.3 GB bloat
+
    ```sql
    VACUUM ANALYZE torrents_torrent_sources;
    ```
@@ -137,6 +140,7 @@ ALTER TABLE torrents_torrent_sources SET (autovacuum_vacuum_scale_factor = 0.02)
 ### Medium-term (configuration change, requires restart)
 
 4. **Reduce `save_files_threshold`** from 500,000 to 100-1000
+
    - Won't delete existing data but stops future growth
    - At 1000: still captures full file lists for most torrents
    - At 100 (default): only stores first 100 files per torrent
@@ -148,6 +152,7 @@ ALTER TABLE torrents_torrent_sources SET (autovacuum_vacuum_scale_factor = 0.02)
 ### Long-term (significant effort)
 
 6. **Purge old torrent_files data** for torrents already stored above new threshold
+
    ```sql
    -- Example: keep only first 1000 files per torrent, delete the rest
    -- CAUTION: This deletes data. Test on backup first.
@@ -164,16 +169,17 @@ ALTER TABLE torrents_torrent_sources SET (autovacuum_vacuum_scale_factor = 0.02)
 
 ## Capacity Projection
 
-| Scenario | Growth Rate | Time to Fill 500 GB PVC |
-|----------|------------|------------------------|
-| Current (threshold=500K) | ~2-3 GB/day | ~1-2 months |
-| Threshold=1000 | ~0.5-1 GB/day | ~6-12 months |
-| Threshold=100 (default) | ~0.2-0.5 GB/day | ~1-2 years |
-| DHT crawler disabled | 0 | Never |
+| Scenario                 | Growth Rate     | Time to Fill 500 GB PVC |
+| ------------------------ | --------------- | ----------------------- |
+| Current (threshold=500K) | ~2-3 GB/day     | ~1-2 months             |
+| Threshold=1000           | ~0.5-1 GB/day   | ~6-12 months            |
+| Threshold=100 (default)  | ~0.2-0.5 GB/day | ~1-2 years              |
+| DHT crawler disabled     | 0               | Never                   |
 
 ## Configuration Reference
 
 Current deployment settings (`ansible/inventory/group_vars/k3s_cluster/bitmagnet.yml`):
+
 - `bitmagnet_dht_save_files_threshold: 500000`
 - `bitmagnet_dht_save_pieces: false` (good)
 - `bitmagnet_postgres_memory_limit: 16Gi`
@@ -188,52 +194,52 @@ Investigation conducted 2026-05-24. All options preserve 100% data completeness.
 
 ### Option Comparison
 
-| Approach | Est. DB Size | Savings | Effort | Risk | Notes |
-|----------|-------------|---------|--------|------|-------|
-| **Current baseline** | **367 GB** | — | — | — | PVC: 398 GB (incl. 31 GB stale dump) |
-| **A. ZFS ZSTD-1** | ~147 GB | 60% | Moderate | Low | Transparent, no app changes |
-| **B. Hybrid Blob (DB only)** | ~111-117 GB | 68-70% | 2-3 weeks | Low | Best ROI, stays in PG |
-| **B + PG summary** | ~123-132 GB | 64-66% | 2-3 weeks | Low | Covers 90% of queries |
-| **B + Manticore** | ~161-197 GB | 46-56% | 3-4 weeks | Low-Med | Full FTS on file paths |
-| **B + Tantivy** | ~148-191 GB | 48-60% | 3-4 weeks | Low-Med | Embedded, no ext. service |
-| **B + A (ZFS)** | ~48-53 GB | 86% | 3-4 weeks | Low-Med | Blob + filesystem compression |
-| **B + Manticore + A** | ~65-79 GB | 78-82% | 4-5 weeks | Medium | Full solution + ZFS |
-| **C. Normalize info_hash FK** | ~287 GB | 22% | Significant | Medium | Stacks with others |
-| **D. ClickHouse** | 22-28 GB | 92-94% | 4-6 weeks | Medium | Best compression, complex ops |
+| Approach                      | Est. DB Size | Savings | Effort      | Risk    | Notes                                |
+| ----------------------------- | ------------ | ------- | ----------- | ------- | ------------------------------------ |
+| **Current baseline**          | **367 GB**   | —       | —           | —       | PVC: 398 GB (incl. 31 GB stale dump) |
+| **A. ZFS ZSTD-1**             | ~147 GB      | 60%     | Moderate    | Low     | Transparent, no app changes          |
+| **B. Hybrid Blob (DB only)**  | ~111-117 GB  | 68-70%  | 2-3 weeks   | Low     | Best ROI, stays in PG                |
+| **B + PG summary**            | ~123-132 GB  | 64-66%  | 2-3 weeks   | Low     | Covers 90% of queries                |
+| **B + Manticore**             | ~161-197 GB  | 46-56%  | 3-4 weeks   | Low-Med | Full FTS on file paths               |
+| **B + Tantivy**               | ~148-191 GB  | 48-60%  | 3-4 weeks   | Low-Med | Embedded, no ext. service            |
+| **B + A (ZFS)**               | ~48-53 GB    | 86%     | 3-4 weeks   | Low-Med | Blob + filesystem compression        |
+| **B + Manticore + A**         | ~65-79 GB    | 78-82%  | 4-5 weeks   | Medium  | Full solution + ZFS                  |
+| **C. Normalize info_hash FK** | ~287 GB      | 22%     | Significant | Medium  | Stacks with others                   |
+| **D. ClickHouse**             | 22-28 GB     | 92-94%  | 4-6 weeks   | Medium  | Best compression, complex ops        |
 
 ### Hybrid Blob: Precise Disk Accounting
 
 The earlier "40-50 GB" estimate was incorrect — it didn't fully account for `torrent_contents` (61 GB) which stays unchanged. Here's the precise breakdown:
 
-| Component | Current | After Blob Migration | Change |
-|-----------|---------|---------------------|--------|
-| **torrent_files** (data + indexes) | **272 GB** | **0 GB** | **-272 GB eliminated** |
-| File blobs (ZSTD in TOAST) | 0 | 12-16 GB | +12-16 GB |
-| `file_extensions TEXT[]` + GIN | 0 | 4-6 GB | +4-6 GB |
-| torrent_contents | 61 GB | 61 GB | unchanged |
-| torrents_torrent_sources | 19 GB | 19 GB | unchanged |
-| torrents (base table) | 14 GB | 14 GB | unchanged |
-| Other tables | 1 GB | 1 GB | unchanged |
-| **Database total** | **367 GB** | **~111-117 GB** | **-250 to -256 GB** |
+| Component                          | Current    | After Blob Migration | Change                 |
+| ---------------------------------- | ---------- | -------------------- | ---------------------- |
+| **torrent_files** (data + indexes) | **272 GB** | **0 GB**             | **-272 GB eliminated** |
+| File blobs (ZSTD in TOAST)         | 0          | 12-16 GB             | +12-16 GB              |
+| `file_extensions TEXT[]` + GIN     | 0          | 4-6 GB               | +4-6 GB                |
+| torrent_contents                   | 61 GB      | 61 GB                | unchanged              |
+| torrents_torrent_sources           | 19 GB      | 19 GB                | unchanged              |
+| torrents (base table)              | 14 GB      | 14 GB                | unchanged              |
+| Other tables                       | 1 GB       | 1 GB                 | unchanged              |
+| **Database total**                 | **367 GB** | **~111-117 GB**      | **-250 to -256 GB**    |
 
 With optional additions:
 
-| Addition | Extra Disk | Extra RAM | Purpose |
-|----------|-----------|-----------|---------|
-| PG summary table | +12-15 GB | shared | Extension/size filters, facet counts |
-| Manticore Search (columnar) | +50-80 GB | 2-4 GB | Full FTS on file paths |
-| Tantivy (embedded) | +37-74 GB | 8-16 GB | Full FTS, no external service |
-| DuckDB analytics | +0 GB | 2-8 GB | Analytical queries on Parquet blobs |
+| Addition                    | Extra Disk | Extra RAM | Purpose                              |
+| --------------------------- | ---------- | --------- | ------------------------------------ |
+| PG summary table            | +12-15 GB  | shared    | Extension/size filters, facet counts |
+| Manticore Search (columnar) | +50-80 GB  | 2-4 GB    | Full FTS on file paths               |
+| Tantivy (embedded)          | +37-74 GB  | 8-16 GB   | Full FTS, no external service        |
+| DuckDB analytics            | +0 GB      | 2-8 GB    | Analytical queries on Parquet blobs  |
 
 ### Projected Total with Search Engine
 
-| Configuration | DB Size | Search Index | Total Disk | Total RAM |
-|--------------|---------|-------------|------------|-----------|
-| **Blob + PG summary** | ~120 GB | included | **~120 GB** | shared |
-| **Blob + Manticore** | ~115 GB | 50-80 GB | **~165-195 GB** | +2-4 GB |
-| **Blob + Tantivy** | ~115 GB | 37-74 GB | **~150-190 GB** | +8-16 GB |
-| **Blob + PG summary + ZFS** | ~48 GB | included | **~48 GB** | shared |
-| **Blob + Manticore + ZFS** | ~46 GB | 20-32 GB | **~66-78 GB** | +2-4 GB |
+| Configuration               | DB Size | Search Index | Total Disk      | Total RAM |
+| --------------------------- | ------- | ------------ | --------------- | --------- |
+| **Blob + PG summary**       | ~120 GB | included     | **~120 GB**     | shared    |
+| **Blob + Manticore**        | ~115 GB | 50-80 GB     | **~165-195 GB** | +2-4 GB   |
+| **Blob + Tantivy**          | ~115 GB | 37-74 GB     | **~150-190 GB** | +8-16 GB  |
+| **Blob + PG summary + ZFS** | ~48 GB  | included     | **~48 GB**      | shared    |
+| **Blob + Manticore + ZFS**  | ~46 GB  | 20-32 GB     | **~66-78 GB**   | +2-4 GB   |
 
 Note: ZFS compression applies to both the database and any on-disk search index (Manticore columnar compresses further under ZFS).
 
@@ -244,10 +250,10 @@ Note: ZFS compression applies to both the database and any on-disk search index 
 Move PostgreSQL data directory to a ZFS volume with ZSTD compression. Completely transparent to PostgreSQL and bitmagnet — no code changes, no schema migration.
 
 | Algorithm | Est. Size | Savings | CPU Impact |
-|-----------|-----------|---------|------------|
-| LZ4 | ~216 GB | 41% | Near-zero |
-| ZSTD-1 | ~147 GB | 60% | Low |
-| ZSTD-3 | ~130 GB | 65% | Moderate |
+| --------- | --------- | ------- | ---------- |
+| LZ4       | ~216 GB   | 41%     | Near-zero  |
+| ZSTD-1    | ~147 GB   | 60%     | Low        |
+| ZSTD-3    | ~130 GB   | 65%     | Moderate   |
 
 **Implementation**: Create ZFS pool on the NVMe drives (currently ext4 on md2 RAID-1), set `recordsize=8K` for PostgreSQL alignment, `pg_basebackup` to new volume, update mount points.
 
@@ -287,6 +293,7 @@ Replace 20-byte BYTEA `info_hash` in torrent_files (and other tables) with a 4-b
 Move only `torrent_files` to ClickHouse (columnar database). Keep everything else in PostgreSQL.
 
 **Estimated size**: 22-28 GB for 871M rows:
+
 - info_hash (20B random): ~14-15 GB (incompressible)
 - path (TEXT, redundant prefixes): ~6-10 GB (ZSTD excels here)
 - extension (~100 unique): ~50 MB (LowCardinality dictionary encoding)
@@ -313,19 +320,20 @@ Can be queried by DuckDB on demand. Excellent for archival. Combine with Hybrid 
 
 These can be applied today without forking bitmagnet:
 
-| Action | Savings | Effort | Risk |
-|--------|---------|--------|------|
-| Drop `torrent_files_size_idx` | 8 GB | Trivial | Low (ORDER BY size slower) |
-| LZ4 TOAST on torrent_contents | ~2 GB | Trivial | None |
-| Tune autovacuum (scale_factor 0.01-0.02) | Prevents future bloat | Trivial | None |
-| Delete stale `bitmagnet_backup.dump` | 31 GB | Trivial | None |
-| VACUUM ANALYZE torrents_torrent_sources | 1.3 GB | Trivial | None |
+| Action                                   | Savings               | Effort  | Risk                       |
+| ---------------------------------------- | --------------------- | ------- | -------------------------- |
+| Drop `torrent_files_size_idx`            | 8 GB                  | Trivial | Low (ORDER BY size slower) |
+| LZ4 TOAST on torrent_contents            | ~2 GB                 | Trivial | None                       |
+| Tune autovacuum (scale_factor 0.01-0.02) | Prevents future bloat | Trivial | None                       |
+| Delete stale `bitmagnet_backup.dump`     | 31 GB                 | Trivial | None                       |
+| VACUUM ANALYZE torrents_torrent_sources  | 1.3 GB                | Trivial | None                       |
 
 **Total quick wins: ~42 GB with zero risk.**
 
 ### Query Pattern Analysis
 
 From the bitmagnet Go source code, `torrent_files` is accessed via:
+
 - **Writes**: `INSERT ON CONFLICT DO NOTHING` (batch 100) — append-only, never updated
 - **Reads**: `WHERE info_hash IN (...)` for hydration (preloading files for a set of torrents)
 - **Filters**: `EXISTS (SELECT 1 FROM torrent_files WHERE info_hash = t.info_hash AND extension IN (...))` for content type search
@@ -335,19 +343,20 @@ Key insight: the append-only write pattern and info_hash-grouped reads make this
 
 ### Rust Rewrite Assessment
 
-| Component | Rust Benefit | Effort | Worth It? |
-|-----------|-------------|--------|-----------|
-| DHT Crawler | Moderate (~50% memory savings) | 2-4 weeks | Only if rewriting anyway |
-| Classifier | High (DFA regex, faster) | 2-3 weeks | Best ROI for Rust |
-| Database Layer | Depends on target store | 4-8 weeks | Only if changing store |
-| API Server | Marginal | 3-4 weeks | No |
-| Web UI | N/A (React) | 0 | Keep as-is |
+| Component      | Rust Benefit                   | Effort    | Worth It?                |
+| -------------- | ------------------------------ | --------- | ------------------------ |
+| DHT Crawler    | Moderate (~50% memory savings) | 2-4 weeks | Only if rewriting anyway |
+| Classifier     | High (DFA regex, faster)       | 2-3 weeks | Best ROI for Rust        |
+| Database Layer | Depends on target store        | 4-8 weeks | Only if changing store   |
+| API Server     | Marginal                       | 3-4 weeks | No                       |
+| Web UI         | N/A (React)                    | 0         | Keep as-is               |
 
 **Recommendation**: Fork-and-patch in Go (2-3 weeks) over full Rust rewrite (3-6 months). Optionally add Rust classifier via FFI later.
 
 ### Recommended Strategy: Hybrid Blob Fork + Manticore Search
 
 **Phase 1 — Hybrid Blob fork (2-3 weeks)**:
+
 - Fork bitmagnet (Go), replace `torrent_files` (871M rows, 272 GB) with ZSTD-compressed blobs per torrent
 - Add `file_extensions TEXT[]` + GIN index on `torrents` for facet queries
 - Add `torrent_file_summary` table for extension/size/count queries (12-15 GB)
@@ -356,29 +365,32 @@ Key insight: the append-only write pattern and info_hash-grouped reads make this
 - **Result: 367 GB → ~115 GB database**
 
 **Phase 2 — Add Manticore Search (1-2 weeks)**:
+
 - Deploy Manticore with columnar storage for file-path FTS
 - Index file paths from blobs at crawl time
 - Single C++ binary, 2-4 GB RAM, SQL-like queries, official Go SDK
 - **Result: +50-80 GB search index. Total: ~165-195 GB**
 
 **Phase 3 — Optional: ZFS compression (1-2 days)**:
+
 - Transparent 60% compression on both database and search index
 - **Result: ~66-78 GB total. 79-82% reduction from original 367 GB**
 
 **Optional — DuckDB analytics**:
+
 - Embedded, queries compressed Parquet blobs directly — no storage overhead
 - Covers analytical queries: extension distributions, size histograms, aggregations
 - 2-8 GB RAM, official Go driver. Add when analytical queries are needed.
 
 ### End-State Projections
 
-| Configuration | DB | Search | **Total** | Reduction |
-|--------------|-----|--------|-----------|-----------|
-| **Blob + PG summary** | ~120 GB | included | **~120 GB** | 67% |
-| **Blob + Manticore** | ~115 GB | 50-80 GB | **~165-195 GB** | 47-55% |
-| **Blob + Manticore + ZFS** | ~46 GB | 20-32 GB | **~66-78 GB** | 79-82% |
-| **Blob + Quickwit** | ~115 GB | 37-74 GB | **~150-190 GB** | 48-59% |
-| Current (do nothing) | 367 GB | — | **367 GB** | 0% |
+| Configuration              | DB      | Search   | **Total**       | Reduction |
+| -------------------------- | ------- | -------- | --------------- | --------- |
+| **Blob + PG summary**      | ~120 GB | included | **~120 GB**     | 67%       |
+| **Blob + Manticore**       | ~115 GB | 50-80 GB | **~165-195 GB** | 47-55%    |
+| **Blob + Manticore + ZFS** | ~46 GB  | 20-32 GB | **~66-78 GB**   | 79-82%    |
+| **Blob + Quickwit**        | ~115 GB | 37-74 GB | **~150-190 GB** | 48-59%    |
+| Current (do nothing)       | 367 GB  | —        | **367 GB**      | 0%        |
 
 ---
 
@@ -400,16 +412,16 @@ Search queries execute `WHERE torrent_contents.tsv @@ tsquery` with `ts_rank_cd(
 
 ### Impact Assessment
 
-| Feature | Tables Used | Query-time? | Breaks with Blobs? | Criticality | Mitigation |
-|---------|------------|-------------|---------------------|-------------|------------|
-| **Full-text search** (main search bar) | `torrent_contents.tsv` GIN | Yes | **NO** — tsvector is pre-computed | Critical | None needed |
-| **Content type facet** (movie/tv/music) | `torrent_contents.content_type` | Yes | **NO** | Critical | None needed |
-| **Language/genre/resolution facets** | `torrent_contents` + `content` | Yes | **NO** | High | None needed |
-| **File Type facet** (video/audio/subtitle) | `torrent_files.extension` via EXISTS | Yes | **YES** | High | Denormalize into `torrents.extensions[]` |
-| **File browsing** (per-torrent file list) | `torrent_files` direct SELECT | Yes | **YES** | Medium | Decompress blob in GraphQL resolver |
-| **tsvector rebuild** (reprocessing) | `torrent_files` via Preload | No (async) | **YES** — needs adaptation | Medium | Decompress blob during reprocessing |
-| **DHT persistence** (write path) | `torrent_files` INSERT | No (write) | **YES** — this is the benefit | N/A | Replace row INSERTs with blob writes |
-| **Torznab API** | No torrent_files refs | Yes | **NO** | Medium | None needed |
+| Feature                                    | Tables Used                          | Query-time? | Breaks with Blobs?                | Criticality | Mitigation                               |
+| ------------------------------------------ | ------------------------------------ | ----------- | --------------------------------- | ----------- | ---------------------------------------- |
+| **Full-text search** (main search bar)     | `torrent_contents.tsv` GIN           | Yes         | **NO** — tsvector is pre-computed | Critical    | None needed                              |
+| **Content type facet** (movie/tv/music)    | `torrent_contents.content_type`      | Yes         | **NO**                            | Critical    | None needed                              |
+| **Language/genre/resolution facets**       | `torrent_contents` + `content`       | Yes         | **NO**                            | High        | None needed                              |
+| **File Type facet** (video/audio/subtitle) | `torrent_files.extension` via EXISTS | Yes         | **YES**                           | High        | Denormalize into `torrents.extensions[]` |
+| **File browsing** (per-torrent file list)  | `torrent_files` direct SELECT        | Yes         | **YES**                           | Medium      | Decompress blob in GraphQL resolver      |
+| **tsvector rebuild** (reprocessing)        | `torrent_files` via Preload          | No (async)  | **YES** — needs adaptation        | Medium      | Decompress blob during reprocessing      |
+| **DHT persistence** (write path)           | `torrent_files` INSERT               | No (write)  | **YES** — this is the benefit     | N/A         | Replace row INSERTs with blob writes     |
+| **Torznab API**                            | No torrent_files refs                | Yes         | **NO**                            | Medium      | None needed                              |
 
 ### Key Finding: Full-Text Search Survives
 
@@ -427,10 +439,13 @@ CREATE INDEX ON torrents USING GIN (file_extensions);
 ```
 
 The facet query changes from:
+
 ```sql
 EXISTS (SELECT 1 FROM torrent_files WHERE info_hash = t.info_hash AND extension IN ('mkv','mp4'))
 ```
+
 To:
+
 ```sql
 torrents.file_extensions && ARRAY['mkv','mp4']
 ```
@@ -467,13 +482,13 @@ CREATE TABLE torrent_file_summary (
 
 Best fit for homelab if full file-path FTS is needed:
 
-| Metric | Value |
-|--------|-------|
-| Index size | 50-80 GB (columnar mode) |
-| RAM | 2-4 GB |
-| Query latency | <50ms |
-| Features | FTS, facets, filters, range queries |
-| Complexity | Low (single C++ binary) |
+| Metric        | Value                               |
+| ------------- | ----------------------------------- |
+| Index size    | 50-80 GB (columnar mode)            |
+| RAM           | 2-4 GB                              |
+| Query latency | <50ms                               |
+| Features      | FTS, facets, filters, range queries |
+| Complexity    | Low (single C++ binary)             |
 
 4x faster than Elasticsearch at 1.7B documents. Columnar storage keeps RAM minimal. SQL-like query language. Official Go SDK.
 
@@ -481,81 +496,82 @@ Best fit for homelab if full file-path FTS is needed:
 
 Best if zero external dependencies is a priority:
 
-| Metric | Value |
-|--------|-------|
-| Index size | 37-74 GB |
-| RAM | 8-16 GB |
-| Query latency | <50ms |
-| Features | FTS, facets, filters, range queries |
-| Complexity | Very low (embedded library) |
+| Metric        | Value                               |
+| ------------- | ----------------------------------- |
+| Index size    | 37-74 GB                            |
+| RAM           | 8-16 GB                             |
+| Query latency | <50ms                               |
+| Features      | FTS, facets, filters, range queries |
+| Complexity    | Very low (embedded library)         |
 
 Production-tested Go bindings (`anyproto/tantivy-go`). Rust FFI adds build complexity. Immutable data model (delete + reindex to update).
 
 #### Search Engine Comparison
 
-| Engine | Index Size | RAM | Latency | Facets | API | Effort | Verdict |
-|--------|-----------|-----|---------|--------|-----|--------|---------|
-| **Manticore** | 50-80 GB | 2-4 GB | <50ms | Full | SQL + ES-compat | Low-Med | **Best overall** |
-| **Quickwit** | 37-74 GB | Very low | <50ms | Full | ES-compatible | Med | **Best API, Datadog risk** |
-| **Tantivy** | 37-74 GB | 8-16 GB | <50ms | Full | Library (FFI) | Medium | **Best for Rust rewrite** |
-| **PG Summary** | 12-15 GB | Shared | 10-100ms | Partial | SQL | Low | **Best default** |
-| DuckDB | 0 GB extra | 2-8 GB | 1-10s | Manual | SQL | Low | Analytics only |
-| OpenSearch | ~240 GB | 64-96 GB | <50ms | Full | ES-native | High | Overkill |
-| Typesense | 100-150 GB | 120-160 GB | 2-10ms | Full | REST | Low | Too much RAM |
-| Meilisearch | 370-740 GB | 120-250 GB | <50ms | Full | REST | Medium | Not viable at 871M |
-| Bleve | 3.7-7.4 TB | Massive | 50-100ms | Basic | Go lib | Low | Not viable |
-| Sonic | Small | <100 MB | <10ms | No | Custom | Low | Missing features |
+| Engine         | Index Size | RAM        | Latency  | Facets  | API             | Effort  | Verdict                    |
+| -------------- | ---------- | ---------- | -------- | ------- | --------------- | ------- | -------------------------- |
+| **Manticore**  | 50-80 GB   | 2-4 GB     | <50ms    | Full    | SQL + ES-compat | Low-Med | **Best overall**           |
+| **Quickwit**   | 37-74 GB   | Very low   | <50ms    | Full    | ES-compatible   | Med     | **Best API, Datadog risk** |
+| **Tantivy**    | 37-74 GB   | 8-16 GB    | <50ms    | Full    | Library (FFI)   | Medium  | **Best for Rust rewrite**  |
+| **PG Summary** | 12-15 GB   | Shared     | 10-100ms | Partial | SQL             | Low     | **Best default**           |
+| DuckDB         | 0 GB extra | 2-8 GB     | 1-10s    | Manual  | SQL             | Low     | Analytics only             |
+| OpenSearch     | ~240 GB    | 64-96 GB   | <50ms    | Full    | ES-native       | High    | Overkill                   |
+| Typesense      | 100-150 GB | 120-160 GB | 2-10ms   | Full    | REST            | Low     | Too much RAM               |
+| Meilisearch    | 370-740 GB | 120-250 GB | <50ms    | Full    | REST            | Medium  | Not viable at 871M         |
+| Bleve          | 3.7-7.4 TB | Massive    | 50-100ms | Basic   | Go lib          | Low     | Not viable                 |
+| Sonic          | Small      | <100 MB    | <10ms    | No      | Custom          | Low     | Missing features           |
 
 #### Quickwit (Tantivy-as-a-service)
 
 Quickwit is a distributed search engine built on Tantivy, with an Elasticsearch-compatible API:
 
-| Metric | Value |
-|--------|-------|
-| Index size | 37-74 GB (same Tantivy compression) |
-| RAM | Very low (stateless compute, index on object storage) |
-| Query latency | <50ms (with hotcache) |
-| Features | FTS, facets, filters, range queries, ES-compatible API |
-| Storage | Requires S3-compatible layer (Garage or MinIO) |
-| Benchmarked | 6.1B documents, 300 QPS single node |
-| Go integration | Any ES Go client (massive ecosystem) |
-| Risk | **Acquired by Datadog (early 2025)** — open-source future uncertain |
+| Metric         | Value                                                               |
+| -------------- | ------------------------------------------------------------------- |
+| Index size     | 37-74 GB (same Tantivy compression)                                 |
+| RAM            | Very low (stateless compute, index on object storage)               |
+| Query latency  | <50ms (with hotcache)                                               |
+| Features       | FTS, facets, filters, range queries, ES-compatible API              |
+| Storage        | Requires S3-compatible layer (Garage or MinIO)                      |
+| Benchmarked    | 6.1B documents, 300 QPS single node                                 |
+| Go integration | Any ES Go client (massive ecosystem)                                |
+| Risk           | **Acquired by Datadog (early 2025)** — open-source future uncertain |
 
 **Pros vs Manticore**: ES-compatible API (huge Go ecosystem), Tantivy-level compression (37-74 GB vs 50-80 GB), very low RAM (stateless).
 **Cons vs Manticore**: Requires S3-compatible layer (Garage/MinIO = extra service), Datadog acquisition risk, batch indexing (not real-time), designed for logs (may lack general search polish).
 
 #### Manticore vs Quickwit vs Tantivy: Decision Matrix
 
-| Factor | Manticore | Quickwit | Tantivy |
-|--------|-----------|----------|---------|
-| **Deployment** | **Single binary** | 2 services (Quickwit + Garage) | Embedded (FFI) |
-| **RAM** | **2-4 GB** | Very low | 8-16 GB |
-| **Index size** | 50-80 GB | **37-74 GB** | **37-74 GB** |
-| **API** | SQL + ES-compat | **Full ES-compat** | Library only |
-| **Real-time indexing** | **Native** | Batch (seconds) | Manual commits |
-| **Go integration** | Official SDK | **Any ES client** | CGo + Rust FFI |
-| **Build complexity** | **None** | None (separate service) | Rust toolchain in Go |
-| **Operational** | **Simple** (1 service) | Moderate (2 services) | None (in-process) |
-| **Acquisition risk** | None (independent) | **Datadog (2025)** | None (library) |
-| **Best for** | **Go fork (simplest)** | ES ecosystem fans | Future Rust rewrite |
+| Factor                 | Manticore              | Quickwit                       | Tantivy              |
+| ---------------------- | ---------------------- | ------------------------------ | -------------------- |
+| **Deployment**         | **Single binary**      | 2 services (Quickwit + Garage) | Embedded (FFI)       |
+| **RAM**                | **2-4 GB**             | Very low                       | 8-16 GB              |
+| **Index size**         | 50-80 GB               | **37-74 GB**                   | **37-74 GB**         |
+| **API**                | SQL + ES-compat        | **Full ES-compat**             | Library only         |
+| **Real-time indexing** | **Native**             | Batch (seconds)                | Manual commits       |
+| **Go integration**     | Official SDK           | **Any ES client**              | CGo + Rust FFI       |
+| **Build complexity**   | **None**               | None (separate service)        | Rust toolchain in Go |
+| **Operational**        | **Simple** (1 service) | Moderate (2 services)          | None (in-process)    |
+| **Acquisition risk**   | None (independent)     | **Datadog (2025)**             | None (library)       |
+| **Best for**           | **Go fork (simplest)** | ES ecosystem fans              | Future Rust rewrite  |
 
 #### Option D: DuckDB on Parquet Blobs (Embedded Analytics)
 
 If blobs are stored as Parquet format, DuckDB can query them directly — no import needed:
 
-| Metric | Value |
-|--------|-------|
-| Index size | 0 GB additional (queries Parquet directly) |
-| RAM | 2-8 GB (configurable) |
-| Query latency | 1-10s analytical, not interactive FTS |
-| Features | Full SQL aggregations, filters, GROUP BY — no facets/FTS |
-| Embedded | Yes (in-process via official Go driver) |
+| Metric        | Value                                                    |
+| ------------- | -------------------------------------------------------- |
+| Index size    | 0 GB additional (queries Parquet directly)               |
+| RAM           | 2-8 GB (configurable)                                    |
+| Query latency | 1-10s analytical, not interactive FTS                    |
+| Features      | Full SQL aggregations, filters, GROUP BY — no facets/FTS |
+| Embedded      | Yes (in-process via official Go driver)                  |
 
 Handles analytical queries well ("how many .mkv > 1GB?", "extension distribution", size histograms). Not suitable for interactive full-text search — use Manticore/Tantivy for that.
 
 ### Recommended Strategy: Hybrid Blob + Search Engine
 
 **Phase 1 — Hybrid Blob fork (2-3 weeks)**:
+
 - Fork bitmagnet, replace `torrent_files` (871M rows, 272 GB) with ZSTD-compressed blobs per torrent
 - Add `file_extensions TEXT[]` column + GIN index on `torrents` for facet queries
 - Full-text search: unchanged (tsvector on `torrent_contents` is pre-computed)
@@ -564,16 +580,19 @@ Handles analytical queries well ("how many .mkv > 1GB?", "extension distribution
 - **Result: 367 GB → ~115 GB database**
 
 **Phase 2 — Add Manticore Search (1-2 weeks)**:
+
 - Deploy Manticore with columnar storage for file-path FTS
 - Index file paths from blobs at crawl time
 - Enables full Elasticsearch-like search on individual file paths
 - **Result: +50-80 GB index, 2-4 GB RAM. Total: ~165-195 GB**
 
 **Phase 3 — Optional: ZFS compression (1-2 days)**:
+
 - Transparent 60% compression on both database and search index
 - **Result: ~66-78 GB total. 79-82% reduction from original 367 GB**
 
 **Optional — DuckDB analytics**:
+
 - Embedded, queries compressed Parquet blobs directly — no storage overhead
 - Covers analytical queries: extension distributions, size histograms, aggregations
 - 2-8 GB RAM, official Go driver. Add when analytical queries are needed.

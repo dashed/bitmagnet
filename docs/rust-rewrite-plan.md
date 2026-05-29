@@ -20,16 +20,16 @@ Optimize and rewrite bitmagnet in phases, starting with a **Hybrid Blob migratio
 
 ## Implementation Status
 
-| Phase | Status | Notes |
-|---|---|---|
-| Phase 0: Quick wins | 📋 Planned | Index drops are operational (run against the live DB), not code |
-| **Phase 1: Hybrid Blob migration** | ✅ **Implemented** (code merged, [PR #1](https://github.com/dashed/bitmagnet/pull/1)) | Built as a **zero-downtime live migration** (see [`live-migration-design.md`](./live-migration-design.md)) — dual-write + `AfterFind` hook + queue-based migration + live consistency verification + operational CLI. 42 unit tests + 4 E2E tests. **Destructive cutover (drop `torrent_files`, switch facet to JSONB containment) is deferred behind the `cleanup` safety gate and has not run.** |
-| **Phase 2: Rust infrastructure** | ✅ **Implemented** (branch `feat/rust-infrastructure`, [PR #2](https://github.com/dashed/bitmagnet/pull/2)) | `bitmagnet-rs/` Cargo workspace (5 crates: proto, common, model, db, search), `bitmagnet.v1` protobuf (tonic 0.14 / `tonic-prost`), gRPC server skeleton (all RPCs stubbed except HealthCheck), Tantivy 0.26 schema, multi-stage `Dockerfile.search` (built, 103 MB, runs non-root), `.github/workflows/rust.yml` CI. 38 tests pass incl. **Go↔Rust blob wire-compat fixtures**. Domain logic is Phase 3. |
-| **Phase 3: Tantivy search sidecar MVP** | ✅ **Implemented** (branch `feat/tantivy-search-sidecar`, stacked on PR #2) | `TokenizeFlat` ported with **go-unidecode tables verbatim** (4223-fixture Go parity); schema/index/indexer + all RPCs live; **run_search** (Go tsquery port: `&` `|` `.` `!` `*`, A/B/C/D field boosts via DisjunctionMaxQuery) + **run_facets** (all 14 facets, typed aggregations); **doc_id** composite key (= Go `InferID`) so multi-classification torrents coexist; backfill CLI (drives FROM torrent_contents = PG search parity). Read RPCs proven by a server-level integration test. Live-PG backfill + 48M-doc index run are operational (deferred). 4 proto caveats noted for Phase 4 below. |
-| **Phase 4: Shadow mode Go integration** | ✅ **Implemented** (branch `feat/shadow-mode-integration`, stacked on PR #3) | New Go packages `internal/search/{tantivy,shadow,router,searchfx}`: gRPC client + `BuildDocument` (matches Rust backfill, `DocID==InferID`); comparator (Jaccard@20/50, RBO p=0.9, top-1) + Prometheus metrics; `SearchRouter` implements `search.Search`, modes postgres/shadow/canary/tantivy; dual-write in `processor/persist.go` (fire-and-forget); fx `Decorate` swaps the router into gql/torznab; `fx.ValidateApp` test. **Disabled by default** (app unchanged when off). Filtered queries skip shadow comparison (free-text parity signal stays clean). Also fixed a Phase-3 `video_resolution` parity bug ("V1080p"→"1080p"). 27 Go pkgs + Rust workspace green, 0 new lint. |
-| Phases 5-9: Validation + Rust port | 📋 Planned | Unchanged below |
+| Phase                                   | Status                                                                                                      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 0: Quick wins                     | 📋 Planned                                                                                                  | Index drops are operational (run against the live DB), not code                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Phase 1: Hybrid Blob migration**      | ✅ **Implemented** (code merged, [PR #1](https://github.com/dashed/bitmagnet/pull/1))                       | Built as a **zero-downtime live migration** (see [`live-migration-design.md`](./live-migration-design.md)) — dual-write + `AfterFind` hook + queue-based migration + live consistency verification + operational CLI. 42 unit tests + 4 E2E tests. **Destructive cutover (drop `torrent_files`, switch facet to JSONB containment) is deferred behind the `cleanup` safety gate and has not run.**                                                                                                                                                                                                                                                                                      |
+| **Phase 2: Rust infrastructure**        | ✅ **Implemented** (branch `feat/rust-infrastructure`, [PR #2](https://github.com/dashed/bitmagnet/pull/2)) | `bitmagnet-rs/` Cargo workspace (5 crates: proto, common, model, db, search), `bitmagnet.v1` protobuf (tonic 0.14 / `tonic-prost`), gRPC server skeleton (all RPCs stubbed except HealthCheck), Tantivy 0.26 schema, multi-stage `Dockerfile.search` (built, 103 MB, runs non-root), `.github/workflows/rust.yml` CI. 38 tests pass incl. **Go↔Rust blob wire-compat fixtures**. Domain logic is Phase 3.                                                                                                                                                                                                                                                                              |
+| **Phase 3: Tantivy search sidecar MVP** | ✅ **Implemented** (branch `feat/tantivy-search-sidecar`, stacked on PR #2)                                 | `TokenizeFlat` ported with **go-unidecode tables verbatim** (4223-fixture Go parity); schema/index/indexer + all RPCs live; **run_search** (Go tsquery port: `&` `                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | ` `.` `!` `\*`, A/B/C/D field boosts via DisjunctionMaxQuery) + **run_facets** (all 14 facets, typed aggregations); **doc_id** composite key (= Go `InferID`) so multi-classification torrents coexist; backfill CLI (drives FROM torrent_contents = PG search parity). Read RPCs proven by a server-level integration test. Live-PG backfill + 48M-doc index run are operational (deferred). 4 proto caveats noted for Phase 4 below. |
+| **Phase 4: Shadow mode Go integration** | ✅ **Implemented** (branch `feat/shadow-mode-integration`, stacked on PR #3)                                | New Go packages `internal/search/{tantivy,shadow,router,searchfx}`: gRPC client + `BuildDocument` (matches Rust backfill, `DocID==InferID`); comparator (Jaccard@20/50, RBO p=0.9, top-1) + Prometheus metrics; `SearchRouter` implements `search.Search`, modes postgres/shadow/canary/tantivy; dual-write in `processor/persist.go` (fire-and-forget); fx `Decorate` swaps the router into gql/torznab; `fx.ValidateApp` test. **Disabled by default** (app unchanged when off). Filtered queries skip shadow comparison (free-text parity signal stays clean). Also fixed a Phase-3 `video_resolution` parity bug ("V1080p"→"1080p"). 27 Go pkgs + Rust workspace green, 0 new lint. |
+| Phases 5-9: Validation + Rust port      | 📋 Planned                                                                                                  | Unchanged below                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-> Phase 1 shipped the **live-migration variant** of the original plan rather than the "fork + stop writing rows" variant described in §Phase 1 below. The goal and disk numbers are unchanged; the *approach* keeps `torrent_files` populated (dual-write) until an explicit, verification-gated `cleanup` drops it — so rollback is "redeploy the old image" right up until cutover. See the [updated Phase 1 section](#phase-1-hybrid-blob-migration-implemented--zero-downtime-live-migration) for the as-built design.
+> Phase 1 shipped the **live-migration variant** of the original plan rather than the "fork + stop writing rows" variant described in §Phase 1 below. The goal and disk numbers are unchanged; the _approach_ keeps `torrent_files` populated (dual-write) until an explicit, verification-gated `cleanup` drops it — so rollback is "redeploy the old image" right up until cutover. See the [updated Phase 1 section](#phase-1-hybrid-blob-migration-implemented--zero-downtime-live-migration) for the as-built design.
 
 ---
 
@@ -39,15 +39,16 @@ Live production database measured 2026-05-28: **368 GB** (395,623,308,311 bytes)
 
 ### Current Database Breakdown
 
-| Table | Total | Data | Indexes | Rows | % of DB |
-|---|---|---|---|---|---|
-| torrent_files | **273 GB** | 119 GB | 155 GB | 873M | 74% |
-| torrent_contents | **61 GB** | 21 GB (+12 GB TOAST) | 28 GB | 48M | 17% |
-| torrents_torrent_sources | **19 GB** | 8 GB | 11 GB | 75M | 5% |
-| torrents | **14 GB** | 7 GB | 7 GB | 48M | 4% |
-| Other | **1 GB** | — | — | — | <1% |
+| Table                    | Total      | Data                 | Indexes | Rows | % of DB |
+| ------------------------ | ---------- | -------------------- | ------- | ---- | ------- |
+| torrent_files            | **273 GB** | 119 GB               | 155 GB  | 873M | 74%     |
+| torrent_contents         | **61 GB**  | 21 GB (+12 GB TOAST) | 28 GB   | 48M  | 17%     |
+| torrents_torrent_sources | **19 GB**  | 8 GB                 | 11 GB   | 75M  | 5%      |
+| torrents                 | **14 GB**  | 7 GB                 | 7 GB    | 48M  | 4%      |
+| Other                    | **1 GB**   | —                    | —       | —    | <1%     |
 
 Key findings:
+
 - **Only 16.8M of 48M torrents (35%) have file data** in `torrent_files` — critical for blob sizing
 - **31 unused indexes** (0 scans since last stats reset) consuming **29 GB** total
 - `torrent_files` has 2 unused indexes: `size_idx` (8.2 GB, 0 scans) and `extension_idx` (5.8 GB, 0 scans)
@@ -57,28 +58,28 @@ Key findings:
 
 ### Savings by Scenario (Python-verified)
 
-| Scenario | PG Size | Tantivy | Total | Savings | Effort |
-|---|---|---|---|---|---|
-| **Current** | 368 GB | — | **368 GB** | — | — |
-| Quick wins only | 339-354 GB | — | **339-354 GB** | 4-8% | Trivial |
-| Tantivy only | 329 GB | 39-78 GB | **368-407 GB** | ~0% | 10 weeks |
-| **Hybrid Blob only (PG)** | **~128 GB** | — | **~128 GB** | **66%** | **2-3 weeks** |
-| Hybrid Blob + Tantivy | ~93 GB | 39-78 GB | **132-171 GB** | 54-64% | 12+ weeks |
-| **Everything + ZFS** | **~37 GB** | **16-31 GB** | **53-68 GB** | **82-86%** | **13+ weeks** |
+| Scenario                  | PG Size     | Tantivy      | Total          | Savings    | Effort        |
+| ------------------------- | ----------- | ------------ | -------------- | ---------- | ------------- |
+| **Current**               | 368 GB      | —            | **368 GB**     | —          | —             |
+| Quick wins only           | 339-354 GB  | —            | **339-354 GB** | 4-8%       | Trivial       |
+| Tantivy only              | 329 GB      | 39-78 GB     | **368-407 GB** | ~0%        | 10 weeks      |
+| **Hybrid Blob only (PG)** | **~128 GB** | —            | **~128 GB**    | **66%**    | **2-3 weeks** |
+| Hybrid Blob + Tantivy     | ~93 GB      | 39-78 GB     | **132-171 GB** | 54-64%     | 12+ weeks     |
+| **Everything + ZFS**      | **~37 GB**  | **16-31 GB** | **53-68 GB**   | **82-86%** | **13+ weeks** |
 
 ### Hybrid Blob Disk Accounting (Python-verified)
 
-| Component | Current | After Blob Migration | Change | Verification |
-|---|---|---|---|---|
-| torrent_files (data + indexes) | **273 GB** | **0 GB** | -273 GB eliminated | — |
-| File blobs (ZSTD L3 msgpack) | 0 | **16.2 GB** | +16.2 GB | ✅ Measured: 1.0 KB avg blob, 16.8M torrents with files |
-| `file_extensions JSONB` + GIN | 0 | **5.6-9.4 GB** | +5.6-9.4 GB | ✅ Measured: 3.1 avg extensions/torrent (as-built: JSONB + `jsonb_path_ops` GIN) |
-| `torrent_file_summary` table | 0 | **10.4-14.1 GB** | +10.4-14.1 GB | ✅ Measured: 116 bytes avg row |
-| torrent_contents | 61 GB | 61 GB | unchanged | — |
-| torrents_torrent_sources | 19 GB | 19 GB | unchanged | — |
-| torrents (base table) | 14 GB | 14 GB | unchanged | — |
-| Other tables | 1 GB | 1 GB | unchanged | — |
-| **Database total** | **368 GB** | **~127-135 GB** | **-233 to -241 GB** | **66% reduction** |
+| Component                      | Current    | After Blob Migration | Change              | Verification                                                                     |
+| ------------------------------ | ---------- | -------------------- | ------------------- | -------------------------------------------------------------------------------- |
+| torrent_files (data + indexes) | **273 GB** | **0 GB**             | -273 GB eliminated  | —                                                                                |
+| File blobs (ZSTD L3 msgpack)   | 0          | **16.2 GB**          | +16.2 GB            | ✅ Measured: 1.0 KB avg blob, 16.8M torrents with files                          |
+| `file_extensions JSONB` + GIN  | 0          | **5.6-9.4 GB**       | +5.6-9.4 GB         | ✅ Measured: 3.1 avg extensions/torrent (as-built: JSONB + `jsonb_path_ops` GIN) |
+| `torrent_file_summary` table   | 0          | **10.4-14.1 GB**     | +10.4-14.1 GB       | ✅ Measured: 116 bytes avg row                                                   |
+| torrent_contents               | 61 GB      | 61 GB                | unchanged           | —                                                                                |
+| torrents_torrent_sources       | 19 GB      | 19 GB                | unchanged           | —                                                                                |
+| torrents (base table)          | 14 GB      | 14 GB                | unchanged           | —                                                                                |
+| Other tables                   | 1 GB       | 1 GB                 | unchanged           | —                                                                                |
+| **Database total**             | **368 GB** | **~127-135 GB**      | **-233 to -241 GB** | **66% reduction**                                                                |
 
 > **Key insight:** Only 16.8M of 48M torrents (35.1%) have file data in `torrent_files`. The remaining 31.1M torrents have no files — blob storage applies only to the 16.8M. This is why compressed blob size is ~16 GB, not the naively-calculated ~46 GB (if extrapolated across all 48M).
 
@@ -87,6 +88,7 @@ Key findings:
 ## Architecture Overview
 
 ### Current State (Go + PostgreSQL)
+
 ```
 DHT Crawler (Go) → Processor → PG INSERT ON CONFLICT
                         ↓
@@ -96,6 +98,7 @@ GraphQL/Torznab → query.GenericQuery → tsv @@ tsquery → Results + Facets
 ```
 
 ### Target State (Rust + PostgreSQL + Tantivy)
+
 ```
 DHT Crawler (Rust/tokio) → Processor → PG INSERT (SQLx)
                                ↓
@@ -107,6 +110,7 @@ GraphQL/Torznab (axum) → Tantivy Searcher → BM25 Results + Facets
 ```
 
 ### Transition State (Shadow Mode)
+
 ```
                   ┌─────────────────────────────────────┐
                   │         bitmagnet (Go)               │
@@ -126,17 +130,17 @@ GraphQL/Torznab (axum) → Tantivy Searcher → BM25 Results + Facets
 
 ## Why Not tantivy-go FFI?
 
-| Feature Needed | tantivy-go | Rust Sidecar |
-|---|---|---|
-| Text search with field boosting | ✅ | ✅ |
-| Numeric fields (seeders, size sorting) | ❌ | ✅ |
-| Date fields (published_at) | ❌ | ✅ |
-| Faceted search (14 facet types) | ❌ | ✅ |
-| Aggregations (facet counts) | ❌ | ✅ |
-| Range queries | ❌ | ✅ |
-| Latest Tantivy (0.26) | ❌ (0.22) | ✅ |
-| Build complexity | CGo + Rust FFI | Standard Rust binary |
-| Reusability for Rust port | Throwaway | Foundation |
+| Feature Needed                         | tantivy-go     | Rust Sidecar         |
+| -------------------------------------- | -------------- | -------------------- |
+| Text search with field boosting        | ✅             | ✅                   |
+| Numeric fields (seeders, size sorting) | ❌             | ✅                   |
+| Date fields (published_at)             | ❌             | ✅                   |
+| Faceted search (14 facet types)        | ❌             | ✅                   |
+| Aggregations (facet counts)            | ❌             | ✅                   |
+| Range queries                          | ❌             | ✅                   |
+| Latest Tantivy (0.26)                  | ❌ (0.22)      | ✅                   |
+| Build complexity                       | CGo + Rust FFI | Standard Rust binary |
+| Reusability for Rust port              | Throwaway      | Foundation           |
 
 ---
 
@@ -144,29 +148,30 @@ GraphQL/Torznab (axum) → Tantivy Searcher → BM25 Results + Facets
 
 ### Field Mapping (PG → Tantivy)
 
-| PG Source | tsvector Weight | Tantivy Field | Type | Flags | Query Boost |
-|---|---|---|---|---|---|
-| info_hash | A | `info_hash` | Bytes | STORED + INDEXED | — (exact match) |
-| torrent name | A | `torrent_name` | Text | STORED + INDEXED | 4.0 |
-| content title | A | `content_title` | Text | STORED + INDEXED | 4.0 |
-| original title | A | `original_title` | Text | INDEXED | 4.0 |
-| release year | B | `release_year` | U64 | FAST + INDEXED | 2.0 |
-| video resolution | C | `video_resolution` | Text | FAST + INDEXED | 1.5 |
-| video source/codec | C | `video_source`, `video_codec` | Text | FAST + INDEXED | 1.5 |
-| genres | D | `genres` | Text | INDEXED | 0.5 |
-| file paths | D | `file_paths` | Text | INDEXED | 0.5 |
-| content_type | — | `content_type` | Facet | — | — (filter only) |
-| seeders | — | `seeders` | U64 | FAST | — (sort only) |
-| leechers | — | `leechers` | U64 | FAST | — (sort only) |
-| size | — | `size` | U64 | FAST + INDEXED | — (sort/filter) |
-| files_count | — | `files_count` | U64 | FAST | — (sort only) |
-| published_at | — | `published_at` | Date | FAST + INDEXED | — (sort/filter) |
-| languages | — | `languages` | Text | FAST | — (facet) |
-| file_extensions | — | `file_extensions` | Text | FAST | — (facet) |
+| PG Source          | tsvector Weight | Tantivy Field                 | Type  | Flags            | Query Boost     |
+| ------------------ | --------------- | ----------------------------- | ----- | ---------------- | --------------- |
+| info_hash          | A               | `info_hash`                   | Bytes | STORED + INDEXED | — (exact match) |
+| torrent name       | A               | `torrent_name`                | Text  | STORED + INDEXED | 4.0             |
+| content title      | A               | `content_title`               | Text  | STORED + INDEXED | 4.0             |
+| original title     | A               | `original_title`              | Text  | INDEXED          | 4.0             |
+| release year       | B               | `release_year`                | U64   | FAST + INDEXED   | 2.0             |
+| video resolution   | C               | `video_resolution`            | Text  | FAST + INDEXED   | 1.5             |
+| video source/codec | C               | `video_source`, `video_codec` | Text  | FAST + INDEXED   | 1.5             |
+| genres             | D               | `genres`                      | Text  | INDEXED          | 0.5             |
+| file paths         | D               | `file_paths`                  | Text  | INDEXED          | 0.5             |
+| content_type       | —               | `content_type`                | Facet | —                | — (filter only) |
+| seeders            | —               | `seeders`                     | U64   | FAST             | — (sort only)   |
+| leechers           | —               | `leechers`                    | U64   | FAST             | — (sort only)   |
+| size               | —               | `size`                        | U64   | FAST + INDEXED   | — (sort/filter) |
+| files_count        | —               | `files_count`                 | U64   | FAST             | — (sort only)   |
+| published_at       | —               | `published_at`                | Date  | FAST + INDEXED   | — (sort/filter) |
+| languages          | —               | `languages`                   | Text  | FAST             | — (facet)       |
+| file_extensions    | —               | `file_extensions`             | Text  | FAST             | — (facet)       |
 
 ### Custom Tokenizer (Critical Path)
 
 Must replicate Go's `TokenizeFlat()` (`internal/database/fts/tokenizer.go`):
+
 1. Unicode transliteration via `deunicode` crate (Rust equivalent of go-unidecode)
 2. Lowercase normalization
 3. CJK: each character becomes a separate token
@@ -181,13 +186,13 @@ Must replicate Go's `TokenizeFlat()` (`internal/database/fts/tokenizer.go`):
 
 Immediate savings from database maintenance — no application changes required.
 
-| Task | Description | Savings | Risk |
-|---|---|---|---|
-| Drop `torrent_files_size_idx` | 8.2 GB, 0 scans since stats reset | 8.2 GB | Low — no queries use this index |
-| Drop `torrent_files_extension_idx` | 5.8 GB, 0 scans since stats reset | 5.8 GB | Low — facet uses EXISTS on `extension` column, not this index |
-| Audit remaining unused indexes | 31 indexes with 0 scans = 29 GB total | up to 15 GB more | Medium — some may be needed by query planner for faceted search |
-| `VACUUM ANALYZE` bloated tables | `torrents_torrent_sources` has 19.2% dead tuples (1.3 GB) | ~1.3 GB | None |
-| Tune autovacuum for large tables | Set `autovacuum_vacuum_scale_factor = 0.01` on `torrent_files` (871M rows × 0.2 = 174M dead rows before vacuum triggers) | Prevents future bloat | None |
+| Task                               | Description                                                                                                              | Savings               | Risk                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------- | --------------------------------------------------------------- |
+| Drop `torrent_files_size_idx`      | 8.2 GB, 0 scans since stats reset                                                                                        | 8.2 GB                | Low — no queries use this index                                 |
+| Drop `torrent_files_extension_idx` | 5.8 GB, 0 scans since stats reset                                                                                        | 5.8 GB                | Low — facet uses EXISTS on `extension` column, not this index   |
+| Audit remaining unused indexes     | 31 indexes with 0 scans = 29 GB total                                                                                    | up to 15 GB more      | Medium — some may be needed by query planner for faceted search |
+| `VACUUM ANALYZE` bloated tables    | `torrents_torrent_sources` has 19.2% dead tuples (1.3 GB)                                                                | ~1.3 GB               | None                                                            |
+| Tune autovacuum for large tables   | Set `autovacuum_vacuum_scale_factor = 0.01` on `torrent_files` (871M rows × 0.2 = 174M dead rows before vacuum triggers) | Prevents future bloat | None                                                            |
 
 **Conservative estimate: 14 GB immediate. Aggressive: up to 29 GB.**
 
@@ -206,22 +211,22 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 #### 1a. Schema Changes — ✅ done (`migrations/00021`, `00022`)
 
-| Change | As built | 
-|---|---|
-| `torrents.files_data BYTEA` | ZSTD-compressed MessagePack blob, one per torrent (~1.0 KB avg, stored in TOAST). |
+| Change                           | As built                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `torrents.files_data BYTEA`      | ZSTD-compressed MessagePack blob, one per torrent (~1.0 KB avg, stored in TOAST).                                                                                                                                                                                        |
 | `torrents.file_extensions JSONB` | Unique file extensions per torrent (`NOT NULL DEFAULT '[]'`). **JSONB**, not `TEXT[]` — matches the codebase `serializer:json` convention and avoids a `lib/pq` dependency. `jsonb_path_ops` GIN index (created `CONCURRENTLY` via `00022`, `-- +goose NO TRANSACTION`). |
-| `torrent_file_summary` table | Keyed by **`info_hash BYTEA`** PK (FK → `torrents`, `ON DELETE CASCADE`): `file_count, total_size, largest_file_size, extensions JSONB, has_video, has_subtitle, has_audio`. Covers filter/facet queries without decompressing blobs. |
+| `torrent_file_summary` table     | Keyed by **`info_hash BYTEA`** PK (FK → `torrents`, `ON DELETE CASCADE`): `file_count, total_size, largest_file_size, extensions JSONB, has_video, has_subtitle, has_audio`. Covers filter/facet queries without decompressing blobs.                                    |
 
 #### 1b. Application Changes — ✅ done
 
-| Area | File(s) | As built |
-|---|---|---|
-| Blob serializer | `internal/blobmigration/serializer.go` | `SerializeFiles`/`DeserializeFiles` (MessagePack → ZSTD L3, ~10% ratio), `ExtractUniqueExtensions`, `BuildFileSummary`. Package-level encoder/decoder. |
-| Model fields | `internal/model/torrents.gen.go` | `FilesData []byte` (`json:"-"`) and `FileExts []string` (`serializer:json`). Named `FileExts` to avoid collision with the existing `FileExtensions()` method. The `Files []TorrentFile` relation is **kept** (populated by `AfterFind`). |
-| Transparent read | `internal/model/torrents.go` | `AfterFind` deserializes `files_data` → `t.Files` via a `FilesDataDeserializer` function var (breaks the `model`↔`blobmigration` import cycle); falls back to preloaded rows on nil/error. |
-| Dual-write | `internal/dhtcrawler/persist.go` | `createTorrentModel()` sets `FilesData`/`FileExts`; the upsert adds `files_data`/`file_extensions` to `DoUpdates` **and still writes `torrent_files` rows**. |
-| Migration handler | `internal/blobmigration/queue/{handler,message}.go` | Self-chaining batch handler (cursor by `info_hash`), follows the `processor/batch` pattern. Per-batch 5% consistency sample; auto-pauses if error rate > 1%. Progress in `key_values`. |
-| CLI | `internal/app/cmd/blobmigrationcmd/command.go` | `blob-migration {start,status,pause,resume,verify,cleanup}`. |
+| Area              | File(s)                                             | As built                                                                                                                                                                                                                                 |
+| ----------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Blob serializer   | `internal/blobmigration/serializer.go`              | `SerializeFiles`/`DeserializeFiles` (MessagePack → ZSTD L3, ~10% ratio), `ExtractUniqueExtensions`, `BuildFileSummary`. Package-level encoder/decoder.                                                                                   |
+| Model fields      | `internal/model/torrents.gen.go`                    | `FilesData []byte` (`json:"-"`) and `FileExts []string` (`serializer:json`). Named `FileExts` to avoid collision with the existing `FileExtensions()` method. The `Files []TorrentFile` relation is **kept** (populated by `AfterFind`). |
+| Transparent read  | `internal/model/torrents.go`                        | `AfterFind` deserializes `files_data` → `t.Files` via a `FilesDataDeserializer` function var (breaks the `model`↔`blobmigration` import cycle); falls back to preloaded rows on nil/error.                                              |
+| Dual-write        | `internal/dhtcrawler/persist.go`                    | `createTorrentModel()` sets `FilesData`/`FileExts`; the upsert adds `files_data`/`file_extensions` to `DoUpdates` **and still writes `torrent_files` rows**.                                                                             |
+| Migration handler | `internal/blobmigration/queue/{handler,message}.go` | Self-chaining batch handler (cursor by `info_hash`), follows the `processor/batch` pattern. Per-batch 5% consistency sample; auto-pauses if error rate > 1%. Progress in `key_values`.                                                   |
+| CLI               | `internal/app/cmd/blobmigrationcmd/command.go`      | `blob-migration {start,status,pause,resume,verify,cleanup}`.                                                                                                                                                                             |
 
 #### 1c. Live consistency verification — ✅ done (`internal/blobmigration/consistency/`)
 
@@ -229,11 +234,11 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 #### 1d. Migration + cutover — ⏳ operational, **cutover deferred behind safety gate**
 
-| Step | Status | Notes |
-|---|---|---|
-| Run live migration | Operational | `blob-migration start` enqueues the self-chaining job; runs while the DHT crawler keeps ingesting. `status`/`pause`/`resume` for control. |
-| Verify | Operational | `blob-migration verify --full` (or `--sample-rate`) compares blobs vs. rows; records `verified_at`. |
-| **Cleanup (destructive)** | **Not yet run** | `blob-migration cleanup --confirm` drops `torrent_files` + `VACUUM`. Refuses unless **all** gates pass: status `completed`, zero unmigrated torrents, verification < 24h old, `--confirm`. |
+| Step                      | Status              | Notes                                                                                                                                                                                                                                              |
+| ------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Run live migration        | Operational         | `blob-migration start` enqueues the self-chaining job; runs while the DHT crawler keeps ingesting. `status`/`pause`/`resume` for control.                                                                                                          |
+| Verify                    | Operational         | `blob-migration verify --full` (or `--sample-rate`) compares blobs vs. rows; records `verified_at`.                                                                                                                                                |
+| **Cleanup (destructive)** | **Not yet run**     | `blob-migration cleanup --confirm` drops `torrent_files` + `VACUUM`. Refuses unless **all** gates pass: status `completed`, zero unmigrated torrents, verification < 24h old, `--confirm`.                                                         |
 | Facet → JSONB containment | Deferred to cutover | While `torrent_files` exists (dual-write), the file-type facet still uses the `EXISTS` subquery. The switch to `file_extensions` JSONB containment + the GraphQL resolver switch to blob-only reads happen at cutover, after the table is dropped. |
 
 **GO/NO-GO (cutover):** `verify --full` reports 100% blob↔row match, no unmigrated torrents remain, and search/browse/facets validated → run `cleanup --confirm`. Until then, the system runs safely in dual-write mode.
@@ -242,11 +247,11 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 **Status: ✅ implemented** on branch `feat/rust-infrastructure` (stacked on PR #1). As-built notes below.
 
-| Task | As built | Status |
-|---|---|---|
-| Rust workspace | `bitmagnet-rs/` Cargo workspace, 5 crates: `bitmagnet-proto`, `bitmagnet-common`, `bitmagnet-model`, `bitmagnet-db`, `bitmagnet-search`. (classifier/dht/api crates deferred to their phases.) | ✅ |
-| Protobuf schema | `proto/bitmagnet/{common,search}.proto`, package `bitmagnet.v1`. `SearchService` (IndexDocument, BatchIndex, DeleteDocument, Search, GetFacets, HealthCheck). **tonic 0.14** → codegen via `tonic-prost-build`; enums wire-locked to Go by unit tests. | ✅ |
-| CI/CD | `bitmagnet-rs/docker/Dockerfile.search` multi-stage (built, 103 MB, runs non-root); `.github/workflows/rust.yml` (fmt/clippy `-D warnings`/test/docker, path-filtered). | ✅ |
+| Task            | As built                                                                                                                                                                                                                                               | Status |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| Rust workspace  | `bitmagnet-rs/` Cargo workspace, 5 crates: `bitmagnet-proto`, `bitmagnet-common`, `bitmagnet-model`, `bitmagnet-db`, `bitmagnet-search`. (classifier/dht/api crates deferred to their phases.)                                                         | ✅     |
+| Protobuf schema | `proto/bitmagnet/{common,search}.proto`, package `bitmagnet.v1`. `SearchService` (IndexDocument, BatchIndex, DeleteDocument, Search, GetFacets, HealthCheck). **tonic 0.14** → codegen via `tonic-prost-build`; enums wire-locked to Go by unit tests. | ✅     |
+| CI/CD           | `bitmagnet-rs/docker/Dockerfile.search` multi-stage (built, 103 MB, runs non-root); `.github/workflows/rust.yml` (fmt/clippy `-D warnings`/test/docker, path-filtered).                                                                                | ✅     |
 
 > **As-built deltas from the original sketch:** (1) the model crate proved Go↔Rust blob wire-compat with fixtures generated from the real Go `blobmigration.SerializeFiles` — note Rust must use `rmp_serde::to_vec_named` (msgpack MAP keyed `i/p/e/s`) to match `vmihailenco/msgpack`; (2) `bitmagnet-search` implements the Tantivy 0.26 schema now (the rest of search is Phase 3 stubs); (3) `published_at` is `int64` Unix seconds in the proto; (4) CI is a standalone Rust workflow — folding it into the repo's Nix flake + Taskfile is future work. The `rust-toolchain.toml` pins `channel = "stable"`; pin to an explicit version if fully reproducible Docker builds are required.
 
@@ -254,17 +259,17 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 **Status: ✅ implemented** on branch `feat/tantivy-search-sidecar` (stacked on PR #2). As-built notes below.
 
-| Task | As built | Status |
-|---|---|---|
-| Custom tokenizer | `TokenizeFlat` ported exactly — **go-unidecode tables transcoded verbatim** (the `deunicode` crate diverges), plus Go's `IsLetter\|IsDigit` ranges + single-rune `ToLower`; no dedupe; CJK (>U+1FFF) one token each. 4223 Go-generated fixtures, byte-for-byte parity. Registered as the index analyzer (bare, no `LowerCaser` — would break CJK transliteration). | ✅ |
-| Index schema + lifecycle | Weighted text fields `text_a..d` (A=4.0/B=2.0/C=1.5/D=0.5) + keyword facet/fast fields + numerics + `doc_id`; `open_or_create`/reader/writer; tokenizer registered via `analyzer()`. | ✅ |
-| Write RPCs + indexer | `IndexDocument`/`BatchIndex`(stream)/`DeleteDocument`/`HealthCheck`(real doc_count). **doc_id** = `hex(info_hash):ct:cs:cid` (= Go `InferID`/PG generated id) — upsert deletes by doc_id so a torrent's multiple classifications coexist; `DeleteDocument` deletes by info_hash (PG cascade). | ✅ |
-| Query translation | `run_search`: faithful Go `AppQueryToTsquery` port (byte-for-byte vs `tsquery_test.go`); operators `&`(AND)/`\|`/`.`(→`<->`)/`!`/`*`(→`:*`) with PG precedence; each lexeme → `DisjunctionMaxQuery(0.3)` of `BoostQuery` over `text_a..d`; phrases→`PhraseQuery`, prefix→`PhrasePrefixQuery`; filters/pagination/sort; `SearchHit.id = doc_id`. | ✅ |
-| Faceted search + aggregations | `run_facets`: all 14 via typed `tantivy::aggregation`; `files_count` range buckets; `file_type` folds `file_extensions`; `tmdb_id` = `content_id` where `content_source=="tmdb"`; `FacetType::ALL` order. | ✅ |
-| Backfill CLI | `src/bin/backfill.rs` + `transform.rs`: `bitmagnet-db::stream_torrents_for_index` drives **FROM `torrent_contents`** (one doc per tc = PG `tsv @@ tsquery` parity), keyset by `tc.id`; deserialize blob (Go-compatible) → proto `TorrentDocument` → Tantivy; clap flags, resume on `tc.id`. (48M-doc live run is operational, deferred.) | ✅ |
-| Read-path integration test | `tests/read_path.rs` drives `Search`+`GetFacets` through the server (free-text/sort/filter, facet counts, multi-classification doc_id). | ✅ |
+| Task                          | As built                                                                                                                                                                                                                                                                                                                                                           | Status |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| Custom tokenizer              | `TokenizeFlat` ported exactly — **go-unidecode tables transcoded verbatim** (the `deunicode` crate diverges), plus Go's `IsLetter\|IsDigit` ranges + single-rune `ToLower`; no dedupe; CJK (>U+1FFF) one token each. 4223 Go-generated fixtures, byte-for-byte parity. Registered as the index analyzer (bare, no `LowerCaser` — would break CJK transliteration). | ✅     |
+| Index schema + lifecycle      | Weighted text fields `text_a..d` (A=4.0/B=2.0/C=1.5/D=0.5) + keyword facet/fast fields + numerics + `doc_id`; `open_or_create`/reader/writer; tokenizer registered via `analyzer()`.                                                                                                                                                                               | ✅     |
+| Write RPCs + indexer          | `IndexDocument`/`BatchIndex`(stream)/`DeleteDocument`/`HealthCheck`(real doc_count). **doc_id** = `hex(info_hash):ct:cs:cid` (= Go `InferID`/PG generated id) — upsert deletes by doc_id so a torrent's multiple classifications coexist; `DeleteDocument` deletes by info_hash (PG cascade).                                                                      | ✅     |
+| Query translation             | `run_search`: faithful Go `AppQueryToTsquery` port (byte-for-byte vs `tsquery_test.go`); operators `&`(AND)/`\|`/`.`(→`<->`)/`!`/`*`(→`:*`) with PG precedence; each lexeme → `DisjunctionMaxQuery(0.3)` of `BoostQuery` over `text_a..d`; phrases→`PhraseQuery`, prefix→`PhrasePrefixQuery`; filters/pagination/sort; `SearchHit.id = doc_id`.                    | ✅     |
+| Faceted search + aggregations | `run_facets`: all 14 via typed `tantivy::aggregation`; `files_count` range buckets; `file_type` folds `file_extensions`; `tmdb_id` = `content_id` where `content_source=="tmdb"`; `FacetType::ALL` order.                                                                                                                                                          | ✅     |
+| Backfill CLI                  | `src/bin/backfill.rs` + `transform.rs`: `bitmagnet-db::stream_torrents_for_index` drives **FROM `torrent_contents`** (one doc per tc = PG `tsv @@ tsquery` parity), keyset by `tc.id`; deserialize blob (Go-compatible) → proto `TorrentDocument` → Tantivy; clap flags, resume on `tc.id`. (48M-doc live run is operational, deferred.)                           | ✅     |
+| Read-path integration test    | `tests/read_path.rs` drives `Search`+`GetFacets` through the server (free-text/sort/filter, facet counts, multi-classification doc_id).                                                                                                                                                                                                                            | ✅     |
 
-> **Known limitations for Phase 4 (read-agent–flagged, all degrade sensibly):** (1) the proto `SearchFilters` is flat, so Go's per-facet OR-logic (exclude a facet's own filter when aggregating it) isn't reproduced — all facets aggregate over the one filtered set; (2) no dedicated multi-valued `file_types` field, so the `file_type` facet **overcounts** a torrent with 2+ same-type extensions (folds `file_extensions`); (3) no null/Unknown facet bucket (Go has one for missing content_type/release_year); (4) multi-key sort honours only the first `SortBy` (single-key `TopDocs`; field-sorted hits carry score 0.0); (5) `SearchHit` carries the `doc_id` *components* (info_hash + content_type/source/id) so the composite is client-derivable, but there's no explicit `doc_id` field on the proto — add one to `SearchHit` for an explicit stable hit id. These matter for shadow-mode ranking/facet parity and are the first tuning items in Phase 4.
+> **Known limitations for Phase 4 (read-agent–flagged, all degrade sensibly):** (1) the proto `SearchFilters` is flat, so Go's per-facet OR-logic (exclude a facet's own filter when aggregating it) isn't reproduced — all facets aggregate over the one filtered set; (2) no dedicated multi-valued `file_types` field, so the `file_type` facet **overcounts** a torrent with 2+ same-type extensions (folds `file_extensions`); (3) no null/Unknown facet bucket (Go has one for missing content*type/release_year); (4) multi-key sort honours only the first `SortBy` (single-key `TopDocs`; field-sorted hits carry score 0.0); (5) `SearchHit` carries the `doc_id` \_components* (info_hash + content_type/source/id) so the composite is client-derivable, but there's no explicit `doc_id` field on the proto — add one to `SearchHit` for an explicit stable hit id. These matter for shadow-mode ranking/facet parity and are the first tuning items in Phase 4.
 
 > **Original estimates (for reference):** tokenizer 3-5d · schema 2d · gRPC server 3d · query translation 3d · facets 3d · aggregations 2d · index mgmt 2d · backfill 2d.
 
@@ -272,76 +277,76 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 **Status: ✅ implemented** on branch `feat/shadow-mode-integration` (stacked on PR #3). As-built below.
 
-| Task | As built | Status |
-|---|---|---|
-| gRPC client | `internal/search/tantivy/`: client over generated bindings (`pb/`, protoc-gen-go v1.35.1 + go-grpc; regen `task gen-search-proto`); unix+tcp; `BuildDocument` mirrors the Rust backfill transform (`DocID==TorrentContent.InferID`). | ✅ |
-| Comparator + metrics | `internal/search/shadow/`: Jaccard@20/50, RBO_EXT p=0.9, top-1, latency — keyed by `InferID`; Prometheus collectors (`group:"prometheus_collectors"`) + structured logging. | ✅ |
-| SearchRouter | `internal/search/router/`: implements `search.Search`; modes postgres/shadow/canary/tantivy. Shadow serves PG + async-compares Tantivy (fire-and-forget, never affects served result/latency, honors `sample_rate`). Derives `pb.SearchRequest` from opaque `query.Option` via a recording `OptionBuilder`. Canary/tantivy *serving* scaffolded (full hydrated serving = Phase 6). | ✅ |
-| Dual-write | `processor/persist.go`: after the tx commits, async `IndexDocument` per torrent_content + `DeleteDocument` per removed info_hash; no-op when disabled; never fails crawling. | ✅ |
-| Config + fx wiring | `internal/search/searchfx/` configfx `search` section (**disabled by default → postgres mode**); `appfx` `fx.Decorate` (root scope) swaps the router into gql/torznab/processor; doc-count reporter (HealthCheck→`SetTantivyDocCount`) + client lifecycle; `internal/app/app_test.go` `fx.ValidateApp`. | ✅ |
+| Task                 | As built                                                                                                                                                                                                                                                                                                                                                                           | Status |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| gRPC client          | `internal/search/tantivy/`: client over generated bindings (`pb/`, protoc-gen-go v1.35.1 + go-grpc; regen `task gen-search-proto`); unix+tcp; `BuildDocument` mirrors the Rust backfill transform (`DocID==TorrentContent.InferID`).                                                                                                                                               | ✅     |
+| Comparator + metrics | `internal/search/shadow/`: Jaccard@20/50, RBO_EXT p=0.9, top-1, latency — keyed by `InferID`; Prometheus collectors (`group:"prometheus_collectors"`) + structured logging.                                                                                                                                                                                                        | ✅     |
+| SearchRouter         | `internal/search/router/`: implements `search.Search`; modes postgres/shadow/canary/tantivy. Shadow serves PG + async-compares Tantivy (fire-and-forget, never affects served result/latency, honors `sample_rate`). Derives `pb.SearchRequest` from opaque `query.Option` via a recording `OptionBuilder`. Canary/tantivy _serving_ scaffolded (full hydrated serving = Phase 6). | ✅     |
+| Dual-write           | `processor/persist.go`: after the tx commits, async `IndexDocument` per torrent_content + `DeleteDocument` per removed info_hash; no-op when disabled; never fails crawling.                                                                                                                                                                                                       | ✅     |
+| Config + fx wiring   | `internal/search/searchfx/` configfx `search` section (**disabled by default → postgres mode**); `appfx` `fx.Decorate` (root scope) swaps the router into gql/torznab/processor; doc-count reporter (HealthCheck→`SetTantivyDocCount`) + client lifecycle; `internal/app/app_test.go` `fx.ValidateApp`.                                                                            | ✅     |
 
 > **Resolved a Phase-3 parity bug here:** `video_resolution` was indexed as the raw enum `"V1080p"`, but Go's tsvector + GraphQL facet use the Label `"1080p"`. Fixed in both `transform.rs` (V-strip, like `video_3d`) and Go `BuildDocument` (`.Label()`), so live + backfilled docs agree and search/facet/filter align on `"1080p"`. `doc_id` unaffected.
 
-> **Deferred to Phase 5 (read-agent caveats + new):** shadow comparison currently SKIPS filtered queries (so jaccard/RBO reflect only free-text parity) — bridging `query.Where` filters → `pb.SearchFilters` needs call-site cooperation and is the top Phase-5 item. Plus the 5 Phase-3 proto caveats (per-facet OR-logic, `file_types` overcount, null bucket, single-key sort, explicit `doc_id` on `SearchHit`). Canary/tantivy *serving* (hydrating hits from PG) completes in Phase 6 cutover. Per-content deletes go by info_hash only (backfill reconciles).
+> **Deferred to Phase 5 (read-agent caveats + new):** shadow comparison currently SKIPS filtered queries (so jaccard/RBO reflect only free-text parity) — bridging `query.Where` filters → `pb.SearchFilters` needs call-site cooperation and is the top Phase-5 item. Plus the 5 Phase-3 proto caveats (per-facet OR-logic, `file_types` overcount, null bucket, single-key sort, explicit `doc_id` on `SearchHit`). Canary/tantivy _serving_ (hydrating hits from PG) completes in Phase 6 cutover. Per-content deletes go by info_hash only (backfill reconciles).
 
 > **Original estimates (for reference):** gRPC client 1d · dual-write 2d · SearchRouter 3d · comparator 2d · metrics 1d · config 1d · fx wiring 1d.
 
 ### Phase 5: Shadow Mode Validation (Weeks 11-13)
 
-| Task | Description | Estimate |
-|---|---|---|
-| Production backfill | Index 48M torrents from PG | 1-2 days |
-| Shadow mode run | 2-3 weeks collecting comparison metrics | 2-3 weeks |
-| Tokenizer tuning | Fix divergences found during shadow mode | 1-3 days |
-| Quality gate | Jaccard > 0.7 @ top-20 for 95% of queries | — |
+| Task                | Description                               | Estimate  |
+| ------------------- | ----------------------------------------- | --------- |
+| Production backfill | Index 48M torrents from PG                | 1-2 days  |
+| Shadow mode run     | 2-3 weeks collecting comparison metrics   | 2-3 weeks |
+| Tokenizer tuning    | Fix divergences found during shadow mode  | 1-3 days  |
+| Quality gate        | Jaccard > 0.7 @ top-20 for 95% of queries | —         |
 
 ### Phase 6: Tantivy Cutover (Weeks 14-15)
 
-| Task | Description | Estimate |
-|---|---|---|
-| Canary rollout | 5% → 50% → 100% over 2 weeks | 2 weeks |
-| Remove PG tsvector writes | Stop computing tsvector in Go | 1 day |
-| Drop GIN indexes | Drop `torrent_contents` tsv GIN index (14 GB) + content tsv GIN (31 MB) | 1 day |
+| Task                      | Description                                                             | Estimate |
+| ------------------------- | ----------------------------------------------------------------------- | -------- |
+| Canary rollout            | 5% → 50% → 100% over 2 weeks                                            | 2 weeks  |
+| Remove PG tsvector writes | Stop computing tsvector in Go                                           | 1 day    |
+| Drop GIN indexes          | Drop `torrent_contents` tsv GIN index (14 GB) + content tsv GIN (31 MB) | 1 day    |
 
 **GO/NO-GO: Week 13** — Is Tantivy stable at 100%? If yes, proceed to Rust port.
 
 ### Phase 7: Classifier Rust Port (Weeks 16-21)
 
-| Task | Description | Estimate |
-|---|---|---|
-| YAML parser | Port workflow YAML parsing (serde_yaml) | 3 days |
-| Expression engine | cel-rust or Rhai replacing CEL | 5-7 days |
-| Classifier actions | Content type detection, date parsing, video attrs | 5-7 days |
-| TMDB integration | reqwest HTTP client with rate limiting | 3 days |
-| Golden file testing | 10K samples, assert Rust output matches Go | 3 days |
-| Differential testing | Dual-execute in production, log divergence | 2 days |
-| Cutover | Rust consumes queue_jobs directly via SQLx | 2 days |
+| Task                 | Description                                       | Estimate |
+| -------------------- | ------------------------------------------------- | -------- |
+| YAML parser          | Port workflow YAML parsing (serde_yaml)           | 3 days   |
+| Expression engine    | cel-rust or Rhai replacing CEL                    | 5-7 days |
+| Classifier actions   | Content type detection, date parsing, video attrs | 5-7 days |
+| TMDB integration     | reqwest HTTP client with rate limiting            | 3 days   |
+| Golden file testing  | 10K samples, assert Rust output matches Go        | 3 days   |
+| Differential testing | Dual-execute in production, log divergence        | 2 days   |
+| Cutover              | Rust consumes queue_jobs directly via SQLx        | 2 days   |
 
 **GO/NO-GO: Week 19** — Rust classifier matches Go output with < 0.1% divergence?
 
 ### Phase 8: DHT Crawler Rust Port (Weeks 22-27)
 
-| Task | Description | Estimate |
-|---|---|---|
-| DHT protocol | BEP-5/9/33/51 on tokio UDP | 5-7 days |
-| K-table | BTreeMap-based Kademlia routing | 3-5 days |
-| Bloom filter | bitvec-based dedup filter | 2 days |
-| MetaInfo requester | TCP metadata fetch (BEP 9) | 3-5 days |
-| Batch persist | tokio channels replacing Go channels | 3-5 days |
+| Task                | Description                                   | Estimate  |
+| ------------------- | --------------------------------------------- | --------- |
+| DHT protocol        | BEP-5/9/33/51 on tokio UDP                    | 5-7 days  |
+| K-table             | BTreeMap-based Kademlia routing               | 3-5 days  |
+| Bloom filter        | bitvec-based dedup filter                     | 2 days    |
+| MetaInfo requester  | TCP metadata fetch (BEP 9)                    | 3-5 days  |
+| Batch persist       | tokio channels replacing Go channels          | 3-5 days  |
 | Parallel comparison | Both crawlers running, compare discovery rate | 1-2 weeks |
-| Cutover | Disable Go crawler, Rust handles all DHT | 2 days |
+| Cutover             | Disable Go crawler, Rust handles all DHT      | 2 days    |
 
 **GO/NO-GO: Week 27** — Rust pipeline stable? Can stop here (valid end state).
 
 ### Phase 9: API Server Rust Port (Weeks 28-33, Optional)
 
-| Task | Description | Estimate |
-|---|---|---|
-| GraphQL schema | async-graphql matching gqlgen schema | 5-7 days |
-| Torznab API | axum XML handler | 2-3 days |
-| Query builder | Port 827-line query.go (hardest single task) | 7-10 days |
-| API conformance | Captured response fixture testing | 3-5 days |
-| Cutover | Full Rust stack | 2 days |
+| Task            | Description                                  | Estimate  |
+| --------------- | -------------------------------------------- | --------- |
+| GraphQL schema  | async-graphql matching gqlgen schema         | 5-7 days  |
+| Torznab API     | axum XML handler                             | 2-3 days  |
+| Query builder   | Port 827-line query.go (hardest single task) | 7-10 days |
+| API conformance | Captured response fixture testing            | 3-5 days  |
+| Cutover         | Full Rust stack                              | 2 days    |
 
 ---
 
@@ -378,30 +383,30 @@ bitmagnet-rs/
 
 ## Risk Matrix
 
-| Risk | Phase | Likelihood | Impact | Mitigation |
-|---|---|---|---|---|
-| Blob migration data loss | Phase 1 | Low | **Critical** | ✅ Mitigated: dual-write keeps `torrent_files` intact during migration; `cleanup` is gated on `verify --full` (100% blob↔row match) + `--confirm`. Rollback = redeploy old image until cutover. |
-| File type facet divergence after blob migration | Phase 1 | Medium | **High** | ✅ Deferred safely: while `torrent_files` exists (dual-write) the facet `EXISTS` subquery is unchanged. The switch to `file_extensions` JSONB containment happens only at cutover; validate facet parity before `cleanup`. |
-| Insufficient disk for `VACUUM` after cleanup | Phase 1 | Low | Medium | `cleanup` runs `VACUUM` after `DROP TABLE torrent_files`; the dropped table frees 273 GB. Schedule during a low-traffic window. |
-| tsvector rebuild produces different lexemes from blob | Phase 1 | Low | **High** | ✅ Mitigated: `AfterFind` populates `t.Files` from the blob, so `fileSearchStrings()` reads identical data. Covered by the live consistency checker (field-by-field) + E2E equivalence test (`FileExtensions()` blob-vs-rows). |
-| Tokenizer mismatch → search divergence | Phase 3 | Medium | **High** | Custom Tantivy tokenizer replicating TokenizeFlat(); exhaustive testing with real torrent names (CJK, Cyrillic) |
-| CEL → Rhai/cel-rust incompatibility | Phase 7 | Medium | **High** | Evaluate both engines in week 16; golden file testing on 10K+ samples |
-| Tantivy index > 74 GB | Phase 3 | Medium | Medium | Monitor during backfill; reduce STORED fields if needed |
-| Memory pressure (PG + Tantivy + Go + Rust) | Phase 4+ | Medium | Medium | Tantivy uses mmap (OS-managed); deploy on 64GB+ RAM |
-| Rust learning curve | Phase 2+ | Medium | Medium | Search sidecar (greenfield) builds expertise before porting |
-| PG schema drift during dual-ownership | Phase 4+ | Low | **High** | Single migration tool; schema validation in CI |
+| Risk                                                  | Phase    | Likelihood | Impact       | Mitigation                                                                                                                                                                                                                     |
+| ----------------------------------------------------- | -------- | ---------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Blob migration data loss                              | Phase 1  | Low        | **Critical** | ✅ Mitigated: dual-write keeps `torrent_files` intact during migration; `cleanup` is gated on `verify --full` (100% blob↔row match) + `--confirm`. Rollback = redeploy old image until cutover.                               |
+| File type facet divergence after blob migration       | Phase 1  | Medium     | **High**     | ✅ Deferred safely: while `torrent_files` exists (dual-write) the facet `EXISTS` subquery is unchanged. The switch to `file_extensions` JSONB containment happens only at cutover; validate facet parity before `cleanup`.     |
+| Insufficient disk for `VACUUM` after cleanup          | Phase 1  | Low        | Medium       | `cleanup` runs `VACUUM` after `DROP TABLE torrent_files`; the dropped table frees 273 GB. Schedule during a low-traffic window.                                                                                                |
+| tsvector rebuild produces different lexemes from blob | Phase 1  | Low        | **High**     | ✅ Mitigated: `AfterFind` populates `t.Files` from the blob, so `fileSearchStrings()` reads identical data. Covered by the live consistency checker (field-by-field) + E2E equivalence test (`FileExtensions()` blob-vs-rows). |
+| Tokenizer mismatch → search divergence                | Phase 3  | Medium     | **High**     | Custom Tantivy tokenizer replicating TokenizeFlat(); exhaustive testing with real torrent names (CJK, Cyrillic)                                                                                                                |
+| CEL → Rhai/cel-rust incompatibility                   | Phase 7  | Medium     | **High**     | Evaluate both engines in week 16; golden file testing on 10K+ samples                                                                                                                                                          |
+| Tantivy index > 74 GB                                 | Phase 3  | Medium     | Medium       | Monitor during backfill; reduce STORED fields if needed                                                                                                                                                                        |
+| Memory pressure (PG + Tantivy + Go + Rust)            | Phase 4+ | Medium     | Medium       | Tantivy uses mmap (OS-managed); deploy on 64GB+ RAM                                                                                                                                                                            |
+| Rust learning curve                                   | Phase 2+ | Medium     | Medium       | Search sidecar (greenfield) builds expertise before porting                                                                                                                                                                    |
+| PG schema drift during dual-ownership                 | Phase 4+ | Low        | **High**     | Single migration tool; schema validation in CI                                                                                                                                                                                 |
 
 ---
 
 ## Go/No-Go Decision Points
 
-| Week | Phase | Checkpoint | Criteria | If No-Go |
-|---|---|---|---|---|
-| 3 | Phase 1 | Hybrid Blob migration | All search/browse functionality verified; file type facet returns same results; tsvector rebuild produces identical lexemes | Keep `torrent_files` table; investigate divergence |
-| 7 | Phase 3 | Tantivy Search MVP | Backfill completes, index size within estimate | Tune schema, reduce fields |
-| 13 | Phase 6 | Tantivy cutover | Jaccard > 0.7 @ top-20 for 95%, no latency regression | Extend shadow mode, tune tokenizer |
-| 19 | Phase 7 | Classifier port | Rust classifier < 0.1% divergence from Go | Keep Go classifier, investigate edge cases |
-| 27 | Phase 8 | DHT port | Rust crawler discovery rate matches Go ± 5% | Keep Go crawler (valid end state) |
+| Week | Phase   | Checkpoint            | Criteria                                                                                                                    | If No-Go                                           |
+| ---- | ------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 3    | Phase 1 | Hybrid Blob migration | All search/browse functionality verified; file type facet returns same results; tsvector rebuild produces identical lexemes | Keep `torrent_files` table; investigate divergence |
+| 7    | Phase 3 | Tantivy Search MVP    | Backfill completes, index size within estimate                                                                              | Tune schema, reduce fields                         |
+| 13   | Phase 6 | Tantivy cutover       | Jaccard > 0.7 @ top-20 for 95%, no latency regression                                                                       | Extend shadow mode, tune tokenizer                 |
+| 19   | Phase 7 | Classifier port       | Rust classifier < 0.1% divergence from Go                                                                                   | Keep Go classifier, investigate edge cases         |
+| 27   | Phase 8 | DHT port              | Rust crawler discovery rate matches Go ± 5%                                                                                 | Keep Go crawler (valid end state)                  |
 
 ---
 
@@ -411,42 +416,42 @@ bitmagnet-rs/
 
 **Done now (dual-write era):**
 
-| Component | File(s) | What was done |
-|---|---|---|
-| Blob serializer | `internal/blobmigration/serializer.go` | `SerializeFiles`/`DeserializeFiles` (msgpack+ZSTD), `ExtractUniqueExtensions`, `BuildFileSummary` |
-| Migration handler + CLI | `internal/blobmigration/queue/`, `internal/app/cmd/blobmigrationcmd/` | Self-chaining batch migration; `blob-migration {start,status,pause,resume,verify,cleanup}` |
-| Consistency system | `internal/blobmigration/consistency/` | `CompareFiles`/live checker/metrics/healthcheck (auto-heal on mismatch) |
-| Torrent GORM model | `internal/model/torrents.gen.go` | Added `FilesData []byte`, `FileExts []string` (`serializer:json`); `Files` relation **kept** |
-| Transparent read | `internal/model/torrents.go` | `AfterFind` deserializes blob → `t.Files` via `FilesDataDeserializer` var |
-| DHT dual-write | `internal/dhtcrawler/persist.go` | `createTorrentModel()` sets blob + exts; upsert adds them to `DoUpdates`; **still writes `torrent_files` rows** |
-| Schema | `migrations/00021`, `00022` | `files_data`, `file_extensions JSONB`, `torrent_file_summary`; GIN `CONCURRENTLY` |
-| fx wiring | `internal/app/appfx/module.go`, `internal/blobmigration/blobmigrationfx/` | Register config, queue handler, CLI command, consistency worker + collectors |
+| Component               | File(s)                                                                   | What was done                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Blob serializer         | `internal/blobmigration/serializer.go`                                    | `SerializeFiles`/`DeserializeFiles` (msgpack+ZSTD), `ExtractUniqueExtensions`, `BuildFileSummary`               |
+| Migration handler + CLI | `internal/blobmigration/queue/`, `internal/app/cmd/blobmigrationcmd/`     | Self-chaining batch migration; `blob-migration {start,status,pause,resume,verify,cleanup}`                      |
+| Consistency system      | `internal/blobmigration/consistency/`                                     | `CompareFiles`/live checker/metrics/healthcheck (auto-heal on mismatch)                                         |
+| Torrent GORM model      | `internal/model/torrents.gen.go`                                          | Added `FilesData []byte`, `FileExts []string` (`serializer:json`); `Files` relation **kept**                    |
+| Transparent read        | `internal/model/torrents.go`                                              | `AfterFind` deserializes blob → `t.Files` via `FilesDataDeserializer` var                                       |
+| DHT dual-write          | `internal/dhtcrawler/persist.go`                                          | `createTorrentModel()` sets blob + exts; upsert adds them to `DoUpdates`; **still writes `torrent_files` rows** |
+| Schema                  | `migrations/00021`, `00022`                                               | `files_data`, `file_extensions JSONB`, `torrent_file_summary`; GIN `CONCURRENTLY`                               |
+| fx wiring               | `internal/app/appfx/module.go`, `internal/blobmigration/blobmigrationfx/` | Register config, queue handler, CLI command, consistency worker + collectors                                    |
 
 **Deferred to cutover (after `cleanup` drops `torrent_files`):**
 
-| Component | File | Line(s) | Change at cutover |
-|---|---|---|---|
-| GraphQL file resolver | `internal/gql/gqlmodel/torrent_files.go` | 25 | `TorrentQuery.Files()` — switch from `torrent_files` SQL to blob decompression |
-| File type facet | `internal/database/search/facet_torrent_file_type.go` | 12, 41 | Switch from `torrent_files` `EXISTS` to `file_extensions` JSONB containment |
-| File extension criteria | `internal/database/search/criteria_torrent_file_type.go` | 8 | `TorrentFileTypeCriteria()` — rewrite to JSONB-GIN containment |
-| `TorrentFile` model removal | `internal/model/torrent_files*.go` | — | Remove model/scopes once `torrent_files` is dropped |
-| Processor persist | `internal/processor/persist.go` | 59-110 | Unchanged (never wrote `torrent_files`) |
+| Component                   | File                                                     | Line(s) | Change at cutover                                                              |
+| --------------------------- | -------------------------------------------------------- | ------- | ------------------------------------------------------------------------------ |
+| GraphQL file resolver       | `internal/gql/gqlmodel/torrent_files.go`                 | 25      | `TorrentQuery.Files()` — switch from `torrent_files` SQL to blob decompression |
+| File type facet             | `internal/database/search/facet_torrent_file_type.go`    | 12, 41  | Switch from `torrent_files` `EXISTS` to `file_extensions` JSONB containment    |
+| File extension criteria     | `internal/database/search/criteria_torrent_file_type.go` | 8       | `TorrentFileTypeCriteria()` — rewrite to JSONB-GIN containment                 |
+| `TorrentFile` model removal | `internal/model/torrent_files*.go`                       | —       | Remove model/scopes once `torrent_files` is dropped                            |
+| Processor persist           | `internal/processor/persist.go`                          | 59-110  | Unchanged (never wrote `torrent_files`)                                        |
 
 ### Phases 2-9: Rust Port (files to integrate with)
 
-| Component | File | Line(s) | Purpose |
-|---|---|---|---|
-| tsvector build | `internal/model/torrent_contents.go` | 66-106 | UpdateTsv() — weights A/B/C/D |
-| Content tsvector | `internal/model/content.go` | 83-108 | Content.UpdateTsv() |
-| Tokenizer | `internal/database/fts/tokenizer.go` | — | TokenizeFlat() — must replicate in Rust |
-| tsquery builder | `internal/database/fts/tsquery.go` | 9-24 | AppQueryToTsquery() |
-| DB persist | `internal/processor/persist.go` | 59-110 | Hook point for dual-write |
-| Search execution | `internal/database/query/query.go` | 617-619, 646-647 | ts_rank_cd and tsv @@ tsquery |
-| Search interface | `internal/database/search/search.go` | 9-15 | Central search interface |
-| 14 facet types | `internal/database/search/facet_*.go` | — | All facet implementations |
-| DHT crawler | `internal/dhtcrawler/crawler.go` | 61 | Start() — 15 concurrent pipelines |
-| Classifier | `internal/classifier/classifier.core.yml` | — | CEL/YAML workflow definitions |
-| DI root | `internal/app/appfx/module.go` | 38-76 | Uber fx module composition |
+| Component        | File                                      | Line(s)          | Purpose                                 |
+| ---------------- | ----------------------------------------- | ---------------- | --------------------------------------- |
+| tsvector build   | `internal/model/torrent_contents.go`      | 66-106           | UpdateTsv() — weights A/B/C/D           |
+| Content tsvector | `internal/model/content.go`               | 83-108           | Content.UpdateTsv()                     |
+| Tokenizer        | `internal/database/fts/tokenizer.go`      | —                | TokenizeFlat() — must replicate in Rust |
+| tsquery builder  | `internal/database/fts/tsquery.go`        | 9-24             | AppQueryToTsquery()                     |
+| DB persist       | `internal/processor/persist.go`           | 59-110           | Hook point for dual-write               |
+| Search execution | `internal/database/query/query.go`        | 617-619, 646-647 | ts_rank_cd and tsv @@ tsquery           |
+| Search interface | `internal/database/search/search.go`      | 9-15             | Central search interface                |
+| 14 facet types   | `internal/database/search/facet_*.go`     | —                | All facet implementations               |
+| DHT crawler      | `internal/dhtcrawler/crawler.go`          | 61               | Start() — 15 concurrent pipelines       |
+| Classifier       | `internal/classifier/classifier.core.yml` | —                | CEL/YAML workflow definitions           |
+| DI root          | `internal/app/appfx/module.go`            | 38-76            | Uber fx module composition              |
 
 ---
 
@@ -454,7 +459,7 @@ bitmagnet-rs/
 
 ```yaml
 search:
-  engine: postgres  # postgres | shadow | canary | tantivy
+  engine: postgres # postgres | shadow | canary | tantivy
   tantivy:
     enabled: false
     address: "unix:///var/run/bitmagnet/tantivy.sock"
@@ -475,11 +480,13 @@ search:
 ## Shadow Mode Metrics
 
 **Per-query (structured log):**
+
 - Query string, PG latency, Tantivy latency
 - Result counts, Jaccard similarity @ top-20/50
 - Rank-Biased Overlap (RBO p=0.9), top-1 match
 
 **Prometheus:**
+
 - `bitmagnet_search_shadow_jaccard_histogram`
 - `bitmagnet_search_shadow_rbo_histogram`
 - `bitmagnet_search_shadow_latency_ratio`
@@ -488,6 +495,7 @@ search:
 - `bitmagnet_search_tantivy_index_size_bytes`
 
 **Phase transition thresholds:**
+
 - Shadow → Canary: Jaccard > 0.7 @ top-20 for 95% of queries, RBO > 0.8
 - Canary → Full: No p99 latency regression, error rate < 0.1%
 

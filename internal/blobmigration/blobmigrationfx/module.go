@@ -26,12 +26,12 @@ type consistencyParams struct {
 
 type consistencyResult struct {
 	fx.Out
-	Worker          worker.Worker        `group:"workers"`
-	HealthCheckOpt  health.CheckerOption `group:"health_check_options"`
-	Collector1      prometheus.Collector `group:"prometheus_collectors"`
-	Collector2      prometheus.Collector `group:"prometheus_collectors"`
-	Collector3      prometheus.Collector `group:"prometheus_collectors"`
-	Collector4      prometheus.Collector `group:"prometheus_collectors"`
+	Worker         worker.Worker        `group:"workers"`
+	HealthCheckOpt health.CheckerOption `group:"health_check_options"`
+	Collector1     prometheus.Collector `group:"prometheus_collectors"`
+	Collector2     prometheus.Collector `group:"prometheus_collectors"`
+	Collector3     prometheus.Collector `group:"prometheus_collectors"`
+	Collector4     prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func newConsistency(p consistencyParams) consistencyResult {

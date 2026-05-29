@@ -3,10 +3,10 @@ package consistency
 import "github.com/prometheus/client_golang/prometheus"
 
 type Metrics struct {
-	ChecksTotal   prometheus.Counter
-	ErrorsTotal   prometheus.Counter
-	LastCheckAt   prometheus.Gauge
-	LastErrorAt   prometheus.Gauge
+	ChecksTotal prometheus.Counter
+	ErrorsTotal prometheus.Counter
+	LastCheckAt prometheus.Gauge
+	LastErrorAt prometheus.Gauge
 }
 
 func NewMetrics() *Metrics {

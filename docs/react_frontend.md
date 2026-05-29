@@ -12,58 +12,58 @@ A modern React-based frontend for BitMagnet, built from scratch with a focus on 
 
 ### Core
 
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| React | 18.x | UI framework |
-| TypeScript | 5.x | Type safety |
-| Vite | Latest | Build tool, dev server |
-| pnpm | Latest | Package manager |
+| Technology | Version | Purpose                |
+| ---------- | ------- | ---------------------- |
+| React      | 18.x    | UI framework           |
+| TypeScript | 5.x     | Type safety            |
+| Vite       | Latest  | Build tool, dev server |
+| pnpm       | Latest  | Package manager        |
 
 ### UI Framework
 
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| Mantine | 8.x (latest ~8.3.12) | Component library |
-| Tabler Icons | Latest | Icon set (Mantine default) |
-| Mantine Transitions | Built-in | Animations |
-| Mantine Notifications | Built-in | Toast notifications |
+| Technology            | Version              | Purpose                    |
+| --------------------- | -------------------- | -------------------------- |
+| Mantine               | 8.x (latest ~8.3.12) | Component library          |
+| Tabler Icons          | Latest               | Icon set (Mantine default) |
+| Mantine Transitions   | Built-in             | Animations                 |
+| Mantine Notifications | Built-in             | Toast notifications        |
 
 ### Data & State
 
-| Technology | Purpose |
-|------------|---------|
-| TanStack Query | Server state management, caching |
-| graphql-request | GraphQL client |
-| graphql-codegen | TypeScript type generation from schema |
-| React Context | Simple global state (theme, preferences) |
-| fuse.js | Client-side fuzzy search |
+| Technology      | Purpose                                  |
+| --------------- | ---------------------------------------- |
+| TanStack Query  | Server state management, caching         |
+| graphql-request | GraphQL client                           |
+| graphql-codegen | TypeScript type generation from schema   |
+| React Context   | Simple global state (theme, preferences) |
+| fuse.js         | Client-side fuzzy search                 |
 
 ### Routing & Forms
 
-| Technology | Purpose |
-|------------|---------|
-| TanStack Router | Type-safe routing |
-| TanStack Form | Form handling and validation |
-| TanStack Table | Headless table with Mantine styling |
+| Technology      | Purpose                             |
+| --------------- | ----------------------------------- |
+| TanStack Router | Type-safe routing                   |
+| TanStack Form   | Form handling and validation        |
+| TanStack Table  | Headless table with Mantine styling |
 
 ### Utilities
 
-| Technology | Purpose |
-|------------|---------|
-| date-fns | Date/time manipulation |
-| react-i18next | Internationalization |
-| cmdk | Command palette |
-| Recharts | Dashboard charts |
+| Technology    | Purpose                |
+| ------------- | ---------------------- |
+| date-fns      | Date/time manipulation |
+| react-i18next | Internationalization   |
+| cmdk          | Command palette        |
+| Recharts      | Dashboard charts       |
 
 ### Development
 
-| Technology | Purpose |
-|------------|---------|
-| Vitest | Unit testing |
-| Testing Library | Component testing |
-| ESLint (react-app config) | Linting |
-| Prettier | Formatting |
-| Husky | Pre-commit hooks |
+| Technology                | Purpose           |
+| ------------------------- | ----------------- |
+| Vitest                    | Unit testing      |
+| Testing Library           | Component testing |
+| ESLint (react-app config) | Linting           |
+| Prettier                  | Formatting        |
+| Husky                     | Pre-commit hooks  |
 
 ## Project Structure
 
@@ -89,20 +89,21 @@ webui-react/
 
 ## URL Structure
 
-| Route | Purpose |
-|-------|---------|
-| `/` | Redirect to `/search` |
-| `/search` | Main torrent search with filters |
-| `/search?q=...&filters=...` | Shareable search with URL state |
-| `/dashboard` | System overview, health, metrics |
-| `/dashboard/queues` | Queue monitoring and management |
-| `/settings` | User preferences |
+| Route                       | Purpose                          |
+| --------------------------- | -------------------------------- |
+| `/`                         | Redirect to `/search`            |
+| `/search`                   | Main torrent search with filters |
+| `/search?q=...&filters=...` | Shareable search with URL state  |
+| `/dashboard`                | System overview, health, metrics |
+| `/dashboard/queues`         | Queue monitoring and management  |
+| `/settings`                 | User preferences                 |
 
 ## Features
 
 ### Core Features (Parity with Angular)
 
 1. **Torrent Search**
+
    - Full-text search (server-side via GraphQL)
    - Faceted filtering: content type, source, tags, file type, language, genre, resolution, video source
    - **Torrent size filter**: Range slider + preset buttons (<100MB, 100MB-1GB, 1GB-10GB, 10GB+)
@@ -112,6 +113,7 @@ webui-react/
    - URL-encoded filters for shareable searches
 
 2. **Torrent Details**
+
    - Slide-over panel (keeps search visible)
    - Metadata display with poster images (direct TMDB URLs)
    - File listing (paginated for large torrents)
@@ -121,6 +123,7 @@ webui-react/
    - Copy magnet link + toast notification
 
 3. **Dashboard**
+
    - Health status with persistent header indicator + alerts
    - Queue metrics and job listing
    - Torrent metrics with Recharts visualizations
@@ -134,36 +137,42 @@ webui-react/
 ### Enhanced Features (Beyond Angular)
 
 1. **Keyboard Navigation**
+
    - Vim-style shortcuts: j/k (up/down), g (go to), / (search focus)
    - Help modal on `?` keypress
 
 2. **Command Palette (Cmd+K)**
+
    - Quick navigation to pages
    - Recent searches
    - Quick actions (theme toggle, etc.)
    - Torrent quick search with fuzzy matching
 
 3. **Saved Searches**
+
    - Save filter combinations to localStorage
    - Generate shareable URLs
    - Quick access from command palette
 
 4. **Better Mobile Experience**
+
    - Responsive hybrid layout: sidebar on desktop, bottom nav on mobile
    - Touch-optimized interactions
    - Proper mobile breakpoints
 
 5. **Bulk Operations**
+
    - Checkbox column + floating action bar
    - Shift+click range selection
    - Ctrl/Cmd+click multi-select (file manager style)
    - Batch tag, delete, reprocess
 
 6. **Real-time Updates (via SSE)**
+
    - New torrents added notifications
    - Queue job status changes
    - Health status change alerts
-   - *Requires backend SSE implementation*
+   - _Requires backend SSE implementation_
 
 7. **Fuzzy Search**
    - fuse.js for client-side fuzzy matching
@@ -256,6 +265,7 @@ This spec requires the following backend additions:
 **Purpose**: Real-time event streaming
 
 **Events**:
+
 - `torrent:added` - New torrent indexed
 - `queue:job:completed` - Background job finished
 - `queue:job:failed` - Background job failed
@@ -270,6 +280,7 @@ This spec requires the following backend additions:
 **Storage**: PostgreSQL (existing database)
 
 **Endpoints**:
+
 - `GET /api/settings` - Retrieve user settings
 - `PUT /api/settings` - Update user settings
 
@@ -376,11 +387,11 @@ analyze      # Bundle size analysis
 
 ## Risks & Mitigations
 
-| Risk | Mitigation |
-|------|------------|
-| Backend API changes | Generate types from schema; version pin if needed |
-| Design consistency | Define theme system early; use design principles skill |
-| Bundle size growth | Manual analysis during development; tree-shaking |
+| Risk                | Mitigation                                             |
+| ------------------- | ------------------------------------------------------ |
+| Backend API changes | Generate types from schema; version pin if needed      |
+| Design consistency  | Define theme system early; use design principles skill |
+| Bundle size growth  | Manual analysis during development; tree-shaking       |
 
 ## Acceptance Criteria
 
@@ -409,5 +420,5 @@ analyze      # Bundle size analysis
 
 ---
 
-*Interview completed: 40+ questions asked*
-*Spec refined: 2026-01-15*
+_Interview completed: 40+ questions asked_
+_Spec refined: 2026-01-15_
