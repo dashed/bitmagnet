@@ -19,19 +19,19 @@ entry, so any divergence from production tokenization fails the build.
 
 ## Provenance
 
-| | |
-|---|---|
-| Generated on | 2026-05-28 |
-| Go toolchain | `go1.23.6` |
-| `unicode.Version` | `15.0.0` |
-| `go-unidecode` | `v0.2.0` (`github.com/mozillazg/go-unidecode`) |
-| Fixture count | 4223 |
+|                   |                                                |
+| ----------------- | ---------------------------------------------- |
+| Generated on      | 2026-05-28                                     |
+| Go toolchain      | `go1.23.6`                                     |
+| `unicode.Version` | `15.0.0`                                       |
+| `go-unidecode`    | `v0.2.0` (`github.com/mozillazg/go-unidecode`) |
+| Fixture count     | 4223                                           |
 
 The same generator also emitted [`src/tokenizer/tables.rs`](../../src/tokenizer/tables.rs) —
 the embedded word-char ranges, `ToLower` map, and verbatim go-unidecode
 transliteration tables. Because those tables are read directly from the Go
 `unicode` package and `go-unidecode/table.Tables`, transliteration/classification
-parity is guaranteed *by construction*; these fixtures verify the surrounding
+parity is guaranteed _by construction_; these fixtures verify the surrounding
 Rust algorithm (lexing, word boundaries, the non-breaking-language rule, offset
 tracking) end-to-end.
 
