@@ -5,12 +5,14 @@
 //! skeleton and the module layout; the search/index logic lands in Phase 3.
 //!
 //! Modules:
-//! - [`schema`] — Tantivy field definitions (implemented).
-//! - [`server`] — the [`SearchServer`] gRPC service (`HealthCheck` only so far).
-//! - [`index`] — index open/create lifecycle (Phase 3 stub).
-//! - [`query`] — `tsquery`-to-Tantivy translation (Phase 3 stub).
-//! - [`facets`] — the 14 search facets (enum + Phase 3 stub).
-//! - [`tokenizer`] — the `TokenizeFlat` tokenizer (Phase 3 stub).
+//! - [`schema`] — Tantivy field definitions + resolved [`schema::Fields`].
+//! - [`server`] — the [`SearchServer`] gRPC service (write RPCs + `HealthCheck`
+//!   implemented; `Search`/`GetFacets` delegate to the read path).
+//! - [`index`] — index open/create lifecycle, reader/writer handles.
+//! - [`indexer`] — proto `TorrentDocument` → Tantivy document + upsert/delete.
+//! - [`query`] — `tsquery`-to-Tantivy translation + `run_search` (read path).
+//! - [`facets`] — the 14 search facets + `run_facets` (read path).
+//! - [`tokenizer`] — the `TokenizeFlat` tokenizer (Task #1).
 
 // `SearchServer` (in `server`) and `build_schema` (in `schema`) intentionally
 // echo their module name; the clearer call sites are worth one allow.
@@ -18,6 +20,7 @@
 
 pub mod facets;
 pub mod index;
+pub mod indexer;
 pub mod query;
 pub mod schema;
 pub mod server;
@@ -26,4 +29,5 @@ pub mod tokenizer;
 /// The generated `bitmagnet.v1` protobuf + gRPC bindings this sidecar serves.
 pub use bitmagnet_proto::v1 as proto;
 
+pub use schema::Fields;
 pub use server::SearchServer;

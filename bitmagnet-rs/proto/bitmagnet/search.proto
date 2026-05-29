@@ -46,6 +46,21 @@ message TorrentDocument {
   repeated string languages = 17;
   // Distinct file extensions (FAST — facet).
   repeated string file_extensions = 18;
+  // Stereoscopic 3D layout, e.g. "3D". Weight C, boost 1.5. Facet.
+  string video_3d = 19;
+  // Additional video modifier, e.g. "REMUX"/"PROPER". Weight C, boost 1.5. Facet.
+  string video_modifier = 20;
+  // Scene / p2p release group. Weight C, boost 1.5. Facet.
+  string release_group = 21;
+  // Audio track languages (FAST — facet).
+  repeated string audio_languages = 22;
+  // Metadata source of the classified content, e.g. "tmdb"/"imdb". Facet /
+  // filter; the tmdb_id facet aggregates content_id where content_source ==
+  // "tmdb" (bitmagnet keys content by (type, source, id), tmdb being one source).
+  string content_source = 23;
+  // Content identifier within content_source. Weight D, boost 0.5 — searchable
+  // like Go's weight-D external ids — plus facet / filter.
+  string content_id = 24;
 }
 
 // ---------------------------------------------------------------------------

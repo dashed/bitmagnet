@@ -1,5 +1,37 @@
 //! The 14 search facets exposed by bitmagnet, mirroring the Go `Facet`
-//! implementations.
+//! implementations, and the `GetFacets` RPC entry point the server delegates to.
+
+use tantivy::{Index, IndexReader};
+
+use crate::proto::{GetFacetsRequest, GetFacetsResponse};
+use crate::schema::Fields;
+
+/// Run faceted aggregation for `request.facet_fields` over the documents
+/// matching `request.query` + `request.filters`, returning one
+/// [`crate::proto::Facet`] per requested field. This is the entry point
+/// [`crate::server::SearchServer`] delegates the `GetFacets` RPC to.
+///
+/// Aggregate over the FAST keyword/numeric fields declared in [`crate::schema`]
+/// using Tantivy's built-in term/range aggregations (`tantivy::aggregation`,
+/// available without any cargo feature in 0.26).
+///
+/// Note: 5 of the 14 [`FacetType`]s (`Video3d`, `VideoModifier`,
+/// `ReleaseGroup`, `TmdbId`, `AudioLanguage`) have no backing field on the
+/// proto `TorrentDocument` yet and cannot be aggregated until it is extended.
+///
+/// # Errors
+/// Returns an error if aggregation fails.
+///
+/// # Panics
+/// Currently always panics — the read path (Task #3) fills this in.
+pub fn run_facets(
+    _index: &Index,
+    _reader: &IndexReader,
+    _fields: &Fields,
+    _request: GetFacetsRequest,
+) -> anyhow::Result<GetFacetsResponse> {
+    unimplemented!("read path (Task #3): run_facets")
+}
 
 /// A search facet: a field whose distinct values are aggregated into counts
 /// alongside a result set.
