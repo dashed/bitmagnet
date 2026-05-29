@@ -24,9 +24,10 @@
 //!   (sorted) non-empty extensions the blob already records per file.
 //! * `content_type` maps the canonical Postgres string back to the proto enum
 //!   int via [`ContentType`].
-//! * `video_3d` is stored as `V3D` / `V3DSBS` / `V3DOU`; we send Go's `Label()`
-//!   (the leading `V` stripped) so the common case tokenizes to the same `"3D"`
-//!   Go's weight-C tsvector uses, while the facet value stays meaningful.
+//! * `video_resolution` (`V1080p`…) and `video_3d` (`V3D` / `V3DSBS` / `V3DOU`)
+//!   are stored with a leading `V`; we send Go's `Label()` (that `V` stripped,
+//!   e.g. `"1080p"` / `"3D"`) so the indexed text, facet and filter values all
+//!   match Go's weight-C tsvector + GraphQL facets, which use the same label.
 //! * `audio_languages` (proto field 22) has **no** Postgres source — bitmagnet
 //!   only stores `languages` — so it is deliberately left empty here.
 
@@ -72,7 +73,11 @@ pub fn build_document(row: &TorrentForIndex, files: &[BlobFile]) -> TorrentDocum
         content_title: opt_string(&row.content_title),
         original_title: opt_string(&row.original_title),
         release_year: row.release_year.map_or(0, to_u32),
-        video_resolution: opt_string(&row.video_resolution),
+        video_resolution: row
+            .video_resolution
+            .as_deref()
+            .map(strip_v_prefix)
+            .unwrap_or_default(),
         video_source: opt_string(&row.video_source),
         video_codec: opt_string(&row.video_codec),
         genres: row.genres.clone(),
@@ -90,7 +95,7 @@ pub fn build_document(row: &TorrentForIndex, files: &[BlobFile]) -> TorrentDocum
         video_3d: row
             .video_3d
             .as_deref()
-            .map(video_3d_label)
+            .map(strip_v_prefix)
             .unwrap_or_default(),
         video_modifier: opt_string(&row.video_modifier),
         release_group: opt_string(&row.release_group),
@@ -126,15 +131,17 @@ fn content_type_to_proto(value: Option<&str>) -> i32 {
         .map_or(0, ContentType::to_proto_value)
 }
 
-/// Go's `Video3D.Label()`: the stored enum drops its leading `V`
-/// (`V3D` → `3D`, `V3DSBS` → `3DSBS`, `V3DOU` → `3DOU`).
-fn video_3d_label(raw: &str) -> String {
+/// Mirrors Go's `.Label()` for the `V`-prefixed video enums — `VideoResolution`
+/// (`V1080p` → `1080p`) and `Video3D` (`V3D` → `3D`) — i.e. `String()[1:]`, the
+/// leading `V` dropped. `VideoSource` / `VideoCodec` / `VideoModifier` are not
+/// `V`-prefixed (`Label() == String()`), so those still pass through raw.
+fn strip_v_prefix(raw: &str) -> String {
     raw.strip_prefix('V').unwrap_or(raw).to_owned()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_document, video_3d_label};
+    use super::{build_document, strip_v_prefix};
     use crate::indexer::document_to_tantivy;
     use crate::proto::ContentType;
     use crate::schema::{build_schema, Fields};
@@ -167,7 +174,7 @@ mod tests {
             content_title: Some("The Matrix".to_owned()),
             original_title: Some("The Matrix".to_owned()),
             release_year: Some(1999),
-            video_resolution: Some("1080p".to_owned()),
+            video_resolution: Some("V1080p".to_owned()),
             video_source: Some("BluRay".to_owned()),
             video_codec: Some("x265".to_owned()),
             video_3d: Some("V3D".to_owned()),
@@ -268,14 +275,17 @@ mod tests {
     }
 
     #[test]
-    fn video_3d_is_sent_as_gos_label() {
-        assert_eq!(video_3d_label("V3D"), "3D");
-        assert_eq!(video_3d_label("V3DSBS"), "3DSBS");
-        assert_eq!(video_3d_label("V3DOU"), "3DOU");
+    fn video_v_prefixed_fields_use_gos_label() {
+        // VideoResolution + Video3D both drop the leading V (Go's Label()).
+        assert_eq!(strip_v_prefix("V1080p"), "1080p");
+        assert_eq!(strip_v_prefix("V3D"), "3D");
+        assert_eq!(strip_v_prefix("V3DSBS"), "3DSBS");
+        assert_eq!(strip_v_prefix("V3DOU"), "3DOU");
         // Already-label / unexpected input is passed through unchanged.
-        assert_eq!(video_3d_label("3D"), "3D");
+        assert_eq!(strip_v_prefix("3D"), "3D");
 
         let doc = build_document(&classified_row(), &classified_files());
+        assert_eq!(doc.video_resolution, "1080p");
         assert_eq!(doc.video_3d, "3D");
     }
 

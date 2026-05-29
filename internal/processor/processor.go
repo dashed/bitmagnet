@@ -14,6 +14,8 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
+	"go.uber.org/zap"
 	"gorm.io/gen/field"
 	"gorm.io/gorm/clause"
 )
@@ -28,6 +30,10 @@ type processor struct {
 	runner          classifier.Runner
 	dao             *dao.Query
 	blockingManager blocking.Manager
+	// tantivy is the search sidecar client for the dual-write; nil when the
+	// "search" feature is disabled, in which case the dual-write is a no-op.
+	tantivy *tantivy.Client
+	logger  *zap.SugaredLogger
 }
 
 type MissingHashesError struct {

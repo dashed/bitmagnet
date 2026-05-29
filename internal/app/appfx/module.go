@@ -27,6 +27,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/dhtfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainfofx"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/queuefx"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/searchfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/telemetry/telemetryfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb/tmdbfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/torznab/torznabfx"
@@ -56,6 +57,7 @@ func New() fx.Option {
 		metricsfx.New(),
 		processorfx.New(),
 		queuefx.New(),
+		searchfx.New(),
 		telemetryfx.New(),
 		tmdbfx.New(),
 		torznabfx.New(),
@@ -76,5 +78,9 @@ func New() fx.Option {
 		),
 		fx.Provide(webui.New),
 		fx.Decorate(migrations.NewDecorator),
+		// Wrap the Postgres search.Search in the SearchRouter at root scope so the
+		// decoration reaches every consumer (GraphQL, Torznab, processor). No-op
+		// passthrough unless the "search" section is enabled. See searchfx.
+		fx.Decorate(searchfx.Decorator),
 	)
 }
