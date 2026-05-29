@@ -48,6 +48,7 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 			Got:       fmt.Sprintf("%d", len(blobFiles)),
 		})
 		result.Match = false
+
 		return result
 	}
 
@@ -71,6 +72,7 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 				Got:       fmt.Sprintf("%d", b.Index),
 			})
 		}
+
 		if b.Path != r.Path {
 			result.Mismatches = append(result.Mismatches, FieldMismatch{
 				FileIndex: i,
@@ -79,6 +81,7 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 				Got:       b.Path,
 			})
 		}
+
 		if b.Size != r.Size {
 			result.Mismatches = append(result.Mismatches, FieldMismatch{
 				FileIndex: i,
@@ -90,6 +93,7 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	}
 
 	result.Match = len(result.Mismatches) == 0
+
 	return result
 }
 
@@ -100,6 +104,7 @@ type blobRow struct {
 
 func CheckTorrent(ctx context.Context, q *dao.Query, infoHash protocol.ID) (CheckResult, error) {
 	var row blobRow
+
 	err := q.Torrent.UnderlyingDB().WithContext(ctx).
 		Table("torrents").
 		Select("info_hash, files_data").
@@ -133,6 +138,7 @@ func CheckTorrent(ctx context.Context, q *dao.Query, infoHash protocol.ID) (Chec
 
 	result := CompareFiles(blobFiles, rowFiles)
 	result.InfoHash = infoHash
+
 	return result, nil
 }
 
@@ -140,11 +146,13 @@ func CheckBatch(ctx context.Context, q *dao.Query, infoHashes []protocol.ID) (Su
 	var summary Summary
 	for _, h := range infoHashes {
 		summary.TotalChecked++
+
 		result, err := CheckTorrent(ctx, q, h)
 		if err != nil {
 			summary.Errors++
 			continue
 		}
+
 		if result.Match {
 			summary.Matches++
 		} else {
@@ -152,11 +160,13 @@ func CheckBatch(ctx context.Context, q *dao.Query, infoHashes []protocol.ID) (Su
 			summary.MismatchDetails = append(summary.MismatchDetails, result)
 		}
 	}
+
 	return summary, nil
 }
 
 func CheckRandom(ctx context.Context, q *dao.Query, sampleSize int) (Summary, error) {
 	var hashes []protocol.ID
+
 	err := q.Torrent.UnderlyingDB().WithContext(ctx).
 		Table("torrents").
 		Select("t.info_hash").

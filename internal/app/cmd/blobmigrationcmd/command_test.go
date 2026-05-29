@@ -4,43 +4,41 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/urfave/cli/v2"
 	"gorm.io/gorm/clause"
 )
 
-type mockContext struct {
-	flags    map[string]any
-	kvStore  map[string]string
-	dao      *dao.Query
-	cliCtx   *cli.Context
-	dbCalled bool
-}
-
 func TestCheckCleanupGates(t *testing.T) {
+	t.Parallel()
+
 	t.Run("refuses without completion", func(t *testing.T) {
+		t.Parallel()
+
 		gates, ok := runGateCheck(t, map[string]string{
-			kvKeyStatus: "running",
+			kvKeyStatus: statusRunning,
 		}, true)
 		assert.False(t, ok)
 		assertGateFailed(t, gates, "Migration status is 'running'")
 	})
 
 	t.Run("refuses without verification", func(t *testing.T) {
+		t.Parallel()
+
 		gates, ok := runGateCheck(t, map[string]string{
-			kvKeyStatus: "completed",
+			kvKeyStatus: statusCompleted,
 		}, true)
 		assert.False(t, ok)
 		assertGateFailed(t, gates, "No verification timestamp")
 	})
 
 	t.Run("refuses with stale verification", func(t *testing.T) {
+		t.Parallel()
+
 		stale := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 		gates, ok := runGateCheck(t, map[string]string{
-			kvKeyStatus:     "completed",
+			kvKeyStatus:     statusCompleted,
 			kvKeyVerifiedAt: stale,
 		}, true)
 		assert.False(t, ok)
@@ -48,9 +46,11 @@ func TestCheckCleanupGates(t *testing.T) {
 	})
 
 	t.Run("refuses without confirm flag", func(t *testing.T) {
+		t.Parallel()
+
 		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
 		gates, ok := runGateCheck(t, map[string]string{
-			kvKeyStatus:     "completed",
+			kvKeyStatus:     statusCompleted,
 			kvKeyVerifiedAt: recent,
 		}, false)
 		assert.False(t, ok)
@@ -59,40 +59,56 @@ func TestCheckCleanupGates(t *testing.T) {
 }
 
 func TestPauseResumeLogic(t *testing.T) {
+	t.Parallel()
+
 	t.Run("pause requires running status", func(t *testing.T) {
-		status := "completed"
-		if status != "running" {
-			err := assertStatusCheck(status, "running")
+		t.Parallel()
+
+		status := statusCompleted
+		if status != statusRunning {
+			err := assertStatusCheck(status, statusRunning)
 			require.Error(t, err)
 		}
 	})
 
 	t.Run("resume requires paused status", func(t *testing.T) {
-		status := "running"
-		if status != "paused" {
-			assert.NotEqual(t, "paused", status)
+		t.Parallel()
+
+		status := statusRunning
+		if status != statusPaused {
+			assert.NotEqual(t, statusPaused, status)
 		}
 	})
 
 	t.Run("resume accepts paused:high_error_rate", func(t *testing.T) {
+		t.Parallel()
+
 		status := "paused:high_error_rate"
-		assert.True(t, len(status) > 6 && status[:6] == "paused")
+		assert.True(t, len(status) > 6 && status[:6] == statusPaused)
 	})
 }
 
 func TestStartResumeFromCheckpoint(t *testing.T) {
+	t.Parallel()
+
 	t.Run("resume with existing cursor", func(t *testing.T) {
+		t.Parallel()
+
 		cursor := "abc123def456"
 		require.NotEmpty(t, cursor)
 	})
 
 	t.Run("resume without cursor starts from beginning", func(t *testing.T) {
+		t.Parallel()
+
 		cursor := ""
 		require.Empty(t, cursor)
 	})
 }
 
 func TestUpsertKV(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	kv := model.KeyValue{Key: "test_key", Value: "test_value", CreatedAt: now, UpdatedAt: now}
 	assert.Equal(t, "test_key", kv.Key)
@@ -100,9 +116,14 @@ func TestUpsertKV(t *testing.T) {
 }
 
 func TestGateDescriptions(t *testing.T) {
+	t.Parallel()
+
 	t.Run("all gates report meaningful descriptions", func(t *testing.T) {
+		t.Parallel()
+
 		gates, _ := runGateCheck(t, map[string]string{}, false)
 		require.GreaterOrEqual(t, len(gates), 3)
+
 		for _, g := range gates {
 			assert.NotEmpty(t, g.description)
 		}
@@ -115,6 +136,7 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate
 	t.Helper()
 
 	var gates []gate
+
 	allPassed := true
 
 	fail := func(desc string) {
@@ -127,7 +149,7 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate
 
 	// Gate 1: migration completed
 	status := kvs[kvKeyStatus]
-	if status == "completed" {
+	if status == statusCompleted {
 		pass("Migration status is 'completed'")
 	} else {
 		fail("Migration status is '" + status + "', expected 'completed'")
@@ -142,11 +164,14 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate
 		fail("No verification timestamp found (run 'blob-migration verify' first)")
 	} else {
 		ts, parseErr := time.Parse(time.RFC3339, verifiedAt)
-		if parseErr != nil {
+
+		switch {
+		case parseErr != nil:
 			fail("Invalid verification timestamp: " + verifiedAt)
-		} else if time.Since(ts) > 24*time.Hour {
-			fail("Verification is stale (" + time.Since(ts).Truncate(time.Minute).String() + " ago); re-run 'blob-migration verify'")
-		} else {
+		case time.Since(ts) > 24*time.Hour:
+			staleFor := time.Since(ts).Truncate(time.Minute).String()
+			fail("Verification is stale (" + staleFor + " ago); re-run 'blob-migration verify'")
+		default:
 			pass("Verification passed at " + verifiedAt)
 		}
 	}
@@ -163,11 +188,13 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate
 
 func assertGateFailed(t *testing.T, gates []gate, substring string) {
 	t.Helper()
+
 	for _, g := range gates {
 		if !g.passed && contains(g.description, substring) {
 			return
 		}
 	}
+
 	t.Errorf("expected a failed gate containing %q, got gates: %+v", substring, gates)
 }
 
@@ -175,6 +202,7 @@ func assertStatusCheck(got, want string) error {
 	if got != want {
 		return assert.AnError
 	}
+
 	return nil
 }
 
@@ -188,11 +216,14 @@ func searchString(s, substr string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 // Verify that the upsert clause produces the expected conflict resolution.
 func TestUpsertClause(t *testing.T) {
+	t.Parallel()
+
 	c := clause.OnConflict{
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),

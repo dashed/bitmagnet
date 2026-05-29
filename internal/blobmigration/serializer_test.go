@@ -12,6 +12,8 @@ import (
 )
 
 func TestSerializeDeserializeRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{
 			Index:     0,
@@ -50,6 +52,8 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 }
 
 func TestSerializeDeserializeEmpty(t *testing.T) {
+	t.Parallel()
+
 	data, err := SerializeFiles([]model.TorrentFile{})
 	require.NoError(t, err)
 	require.NotEmpty(t, data)
@@ -60,6 +64,8 @@ func TestSerializeDeserializeEmpty(t *testing.T) {
 }
 
 func TestSerializeDeserializeSingleFile(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{
 			Index:     0,
@@ -80,6 +86,8 @@ func TestSerializeDeserializeSingleFile(t *testing.T) {
 }
 
 func TestSerializeDeserializeLargeFileList(t *testing.T) {
+	t.Parallel()
+
 	files := make([]model.TorrentFile, 1500)
 	for i := range files {
 		files[i] = model.TorrentFile{
@@ -105,10 +113,12 @@ func TestSerializeDeserializeLargeFileList(t *testing.T) {
 }
 
 func TestSerializeDeserializeSpecialCharacters(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{
 			Index:     0,
-			Path:      "日本語/映画.mkv",
+			Path:      "日本語/映画.mkv", //nolint:gosmopolitan // intentional non-ASCII test path
 			Extension: model.NewNullString("mkv"),
 			Size:      1000,
 		},
@@ -120,7 +130,7 @@ func TestSerializeDeserializeSpecialCharacters(t *testing.T) {
 		},
 		{
 			Index:     2,
-			Path:      "中文/电影 (2024).mp4",
+			Path:      "中文/电影 (2024).mp4", //nolint:gosmopolitan // intentional non-ASCII test path
 			Extension: model.NewNullString("mp4"),
 			Size:      3000,
 		},
@@ -145,6 +155,8 @@ func TestSerializeDeserializeSpecialCharacters(t *testing.T) {
 }
 
 func TestExtractUniqueExtensions(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{Path: "a.mkv"},
 		{Path: "b.mkv"},
@@ -160,6 +172,8 @@ func TestExtractUniqueExtensions(t *testing.T) {
 }
 
 func TestExtractUniqueExtensionsEmpty(t *testing.T) {
+	t.Parallel()
+
 	exts := ExtractUniqueExtensions(nil)
 	assert.Nil(t, exts)
 
@@ -168,6 +182,8 @@ func TestExtractUniqueExtensionsEmpty(t *testing.T) {
 }
 
 func TestExtractUniqueExtensionsNoExtensions(t *testing.T) {
+	t.Parallel()
+
 	files := []model.TorrentFile{
 		{Path: "no_ext_file"},
 		{Path: "another_file"},
@@ -177,7 +193,10 @@ func TestExtractUniqueExtensionsNoExtensions(t *testing.T) {
 }
 
 func TestBuildFileSummary(t *testing.T) {
+	t.Parallel()
+
 	var infoHash protocol.ID
+
 	copy(infoHash[:], []byte("12345678901234567890"))
 
 	files := []model.TorrentFile{
@@ -200,7 +219,10 @@ func TestBuildFileSummary(t *testing.T) {
 }
 
 func TestBuildFileSummaryNoMedia(t *testing.T) {
+	t.Parallel()
+
 	var infoHash protocol.ID
+
 	files := []model.TorrentFile{
 		{Index: 0, Path: "data/file.csv", Size: 1000},
 		{Index: 1, Path: "data/readme.txt", Size: 500},
@@ -215,6 +237,8 @@ func TestBuildFileSummaryNoMedia(t *testing.T) {
 }
 
 func TestBuildFileSummaryEmpty(t *testing.T) {
+	t.Parallel()
+
 	var infoHash protocol.ID
 	summary := BuildFileSummary(infoHash, nil)
 
@@ -227,6 +251,8 @@ func TestBuildFileSummaryEmpty(t *testing.T) {
 }
 
 func TestCompressionRatio(t *testing.T) {
+	t.Parallel()
+
 	files := make([]model.TorrentFile, 500)
 	for i := range files {
 		files[i] = model.TorrentFile{
@@ -249,6 +275,7 @@ func TestCompressionRatio(t *testing.T) {
 			Size:      f.Size,
 		}
 	}
+
 	raw, err := msgpack.Marshal(compact)
 	require.NoError(t, err)
 

@@ -118,12 +118,14 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 		if err != nil {
 			return fmt.Errorf("creating next job: %w", err)
 		}
+
 		return d.QueueJob.WithContext(ctx).Create(&nextJob)
 	}
 }
 
 func queryDistinctInfoHashes(ctx context.Context, d *dao.Query, cursor string, limit int) ([]protocol.ID, error) {
 	var hashes []protocol.ID
+
 	q := d.TorrentFile.UnderlyingDB().WithContext(ctx).
 		Table("torrent_files").
 		Select("DISTINCT info_hash").
@@ -134,10 +136,16 @@ func queryDistinctInfoHashes(ctx context.Context, d *dao.Query, cursor string, l
 	}
 
 	err := q.Limit(limit).Pluck("info_hash", &hashes).Error
+
 	return hashes, err
 }
 
-func processBatch(ctx context.Context, d *dao.Query, infoHashes []protocol.ID, logger *zap.SugaredLogger) (migrated int, verifyErrors int, err error) {
+func processBatch(
+	ctx context.Context,
+	d *dao.Query,
+	infoHashes []protocol.ID,
+	logger *zap.SugaredLogger,
+) (migrated int, verifyErrors int, err error) {
 	for _, infoHash := range infoHashes {
 		files, findErr := d.TorrentFile.WithContext(ctx).
 			Where(d.TorrentFile.InfoHash.Eq(infoHash)).
@@ -178,9 +186,11 @@ func processBatch(ctx context.Context, d *dao.Query, infoHashes []protocol.ID, l
 			result, checkErr := consistency.CheckTorrent(ctx, d, infoHash)
 			if checkErr != nil {
 				logger.Warnw("consistency check error", "infoHash", infoHash, "error", checkErr)
+
 				verifyErrors++
 			} else if !result.Match {
 				logger.Warnw("consistency mismatch", "infoHash", infoHash, "mismatches", result.Mismatches)
+
 				verifyErrors++
 			}
 		}
@@ -204,10 +214,22 @@ func upsertFileSummary(ctx context.Context, d *dao.Query, summary model.TorrentF
 	now := time.Now()
 	summary.CreatedAt = now
 	summary.UpdatedAt = now
+
 	return d.Torrent.UnderlyingDB().WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "info_hash"}},
-			DoUpdates: clause.AssignmentColumns([]string{"file_count", "total_size", "largest_file_size", "extensions", "has_video", "has_subtitle", "has_audio", "updated_at"}),
+			Columns: []clause.Column{{Name: "info_hash"}},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{
+					"file_count",
+					"total_size",
+					"largest_file_size",
+					"extensions",
+					"has_video",
+					"has_subtitle",
+					"has_audio",
+					"updated_at",
+				},
+			),
 		}).
 		Create(&summary).Error
 }
@@ -218,6 +240,7 @@ func setProgress(ctx context.Context, d *dao.Query, cursor string, batchMigrated
 
 	upsertKV := func(key, value string) error {
 		kv := model.KeyValue{Key: key, Value: value, CreatedAt: now, UpdatedAt: now}
+
 		return db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
@@ -237,7 +260,9 @@ func setProgress(ctx context.Context, d *dao.Query, cursor string, batchMigrated
 	if batchMigrated > 0 {
 		return db.Exec(
 			"INSERT INTO key_values (key, value, created_at, updated_at) VALUES (?, ?, ?, ?) "+
-				"ON CONFLICT (key) DO UPDATE SET value = (COALESCE(key_values.value, '0')::int + EXCLUDED.value::int)::text, updated_at = EXCLUDED.updated_at",
+				"ON CONFLICT (key) DO UPDATE SET "+
+				"value = (COALESCE(key_values.value, '0')::int + EXCLUDED.value::int)::text, "+
+				"updated_at = EXCLUDED.updated_at",
 			kvKeyMigrated, fmt.Sprintf("%d", batchMigrated), now, now,
 		).Error
 	}
@@ -247,6 +272,7 @@ func setProgress(ctx context.Context, d *dao.Query, cursor string, batchMigrated
 
 func checkPaused(ctx context.Context, d *dao.Query) (bool, error) {
 	var kv model.KeyValue
+
 	err := d.Torrent.UnderlyingDB().WithContext(ctx).
 		Table("key_values").
 		Where("key = ?", kvKeyStatus).
@@ -254,10 +280,15 @@ func checkPaused(ctx context.Context, d *dao.Query) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	return strings.HasPrefix(kv.Value, "paused"), nil
 }
 
 func marshalJSON(v any) string {
-	b, _ := json.Marshal(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+
 	return string(b)
 }

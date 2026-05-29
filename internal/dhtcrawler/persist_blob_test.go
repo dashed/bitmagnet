@@ -11,7 +11,10 @@ import (
 )
 
 func TestCreateTorrentModelWithBlob(t *testing.T) {
+	t.Parallel()
+
 	var hash protocol.ID
+
 	copy(hash[:], []byte("01234567890123456789"))
 
 	info := metainfo.Info{
@@ -41,7 +44,10 @@ func TestCreateTorrentModelWithBlob(t *testing.T) {
 }
 
 func TestCreateTorrentModelSingleFile(t *testing.T) {
+	t.Parallel()
+
 	var hash protocol.ID
+
 	copy(hash[:], []byte("01234567890123456789"))
 
 	info := metainfo.Info{
@@ -58,7 +64,10 @@ func TestCreateTorrentModelSingleFile(t *testing.T) {
 }
 
 func TestCreateTorrentModelNoFiles(t *testing.T) {
+	t.Parallel()
+
 	var hash protocol.ID
+
 	copy(hash[:], []byte("01234567890123456789"))
 
 	info := metainfo.Info{
@@ -74,7 +83,10 @@ func TestCreateTorrentModelNoFiles(t *testing.T) {
 }
 
 func TestCreateTorrentModelOverThreshold(t *testing.T) {
+	t.Parallel()
+
 	var hash protocol.ID
+
 	copy(hash[:], []byte("01234567890123456789"))
 
 	files := make([]metainfo.FileInfo, 50)
