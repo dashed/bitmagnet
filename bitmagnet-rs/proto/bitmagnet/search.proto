@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package bitmagnet.v1;
+
+import "bitmagnet/common.proto";
+
+// TorrentDocument is the unit indexed by the Tantivy sidecar. Fields mirror the
+// "Field Mapping (PG -> Tantivy)" table in docs/rust-rewrite-plan.md; the
+// comments record the tsvector weight / query boost each field carries so the
+// search crate can build the Tantivy schema from this contract.
+message TorrentDocument {
+  // 20-byte BitTorrent v1 info hash. Exact-match key (STORED + INDEXED).
+  bytes info_hash = 1;
+  // Torrent display name. tsvector weight A, boost 4.0.
+  string torrent_name = 2;
+  // Classified content title. Weight A, boost 4.0.
+  string content_title = 3;
+  // Original-language title. Weight A, boost 4.0.
+  string original_title = 4;
+  // Release year. Weight B, boost 2.0 (Tantivy U64, FAST + INDEXED).
+  uint32 release_year = 5;
+  // Video resolution, e.g. "1080p". Weight C, boost 1.5.
+  string video_resolution = 6;
+  // Video source, e.g. "BluRay". Weight C, boost 1.5.
+  string video_source = 7;
+  // Video codec, e.g. "x265". Weight C, boost 1.5.
+  string video_codec = 8;
+  // Content genres. Weight D, boost 0.5.
+  repeated string genres = 9;
+  // File paths within the torrent. Weight D, boost 0.5.
+  repeated string file_paths = 10;
+  // Content type. Facet / filter only.
+  ContentType content_type = 11;
+  // Swarm seeders (Tantivy U64, FAST — sort only).
+  uint32 seeders = 12;
+  // Swarm leechers (FAST — sort only).
+  uint32 leechers = 13;
+  // Number of files in the torrent (FAST — sort only).
+  uint32 files_count = 14;
+  // Total torrent size in bytes (FAST + INDEXED — sort / filter).
+  uint64 size = 15;
+  // Publication time, Unix timestamp in seconds. Maps to a Tantivy Date field
+  // (FAST + INDEXED — sort / filter).
+  int64 published_at = 16;
+  // Detected languages (FAST — facet).
+  repeated string languages = 17;
+  // Distinct file extensions (FAST — facet).
+  repeated string file_extensions = 18;
+}
+
+// ---------------------------------------------------------------------------
+// Shared request building blocks
+// ---------------------------------------------------------------------------
+
+// Structured filters applied on top of (or instead of) the free-text query.
+// Shared by Search and GetFacets so facet counts reflect the active filters.
+message SearchFilters {
+  repeated ContentType content_types = 1;
+  repeated string languages = 2;
+  repeated string file_extensions = 3;
+  repeated string video_resolutions = 4;
+  optional uint32 release_year_min = 5;
+  optional uint32 release_year_max = 6;
+  optional uint64 size_min = 7;
+  optional uint64 size_max = 8;
+  optional uint32 seeders_min = 9;
+}
+
+message Pagination {
+  uint32 limit = 1;
+  uint32 offset = 2;
+}
+
+// One sort key; multiple may be combined for tie-breaking. `field` names a FAST
+// field, e.g. "seeders", "size", "published_at".
+message SortBy {
+  string field = 1;
+  bool descending = 2;
+}
+
+// ---------------------------------------------------------------------------
+// RPC messages
+// ---------------------------------------------------------------------------
+
+message IndexDocumentRequest {
+  TorrentDocument document = 1;
+}
+
+message IndexDocumentResponse {
+  bool ok = 1;
+}
+
+// Returned once a client-streaming BatchIndex completes.
+message BatchIndexResponse {
+  uint64 indexed_count = 1;
+  uint64 error_count = 2;
+}
+
+message DeleteDocumentRequest {
+  bytes info_hash = 1;
+}
+
+message DeleteDocumentResponse {
+  bool ok = 1;
+}
+
+message SearchRequest {
+  string query = 1;
+  SearchFilters filters = 2;
+  Pagination pagination = 3;
+  repeated SortBy sort = 4;
+}
+
+message SearchHit {
+  TorrentDocument document = 1;
+  float score = 2;
+}
+
+message SearchResponse {
+  repeated SearchHit hits = 1;
+  // Total number of matches, ignoring pagination.
+  uint64 total_hits = 2;
+}
+
+message GetFacetsRequest {
+  string query = 1;
+  SearchFilters filters = 2;
+  // Facet fields to aggregate, e.g. "content_type", "languages",
+  // "file_extensions", "video_resolution".
+  repeated string facet_fields = 3;
+}
+
+message FacetBucket {
+  string value = 1;
+  uint64 count = 2;
+}
+
+message Facet {
+  string field = 1;
+  repeated FacetBucket buckets = 2;
+}
+
+message GetFacetsResponse {
+  repeated Facet facets = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    SERVING_STATUS_UNKNOWN = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+  // Documents currently in the index (for readiness / lag monitoring).
+  uint64 doc_count = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service SearchService {
+  // Index (upsert) a single document.
+  rpc IndexDocument(IndexDocumentRequest) returns (IndexDocumentResponse);
+
+  // Stream many documents for bulk indexing / backfill.
+  rpc BatchIndex(stream IndexDocumentRequest) returns (BatchIndexResponse);
+
+  // Delete a document by info hash.
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+
+  // Full-text + filtered search returning ranked hits.
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Faceted aggregation counts for the given query / filters.
+  rpc GetFacets(GetFacetsRequest) returns (GetFacetsResponse);
+
+  // Liveness / readiness probe.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}

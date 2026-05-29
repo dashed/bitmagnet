@@ -1,0 +1,87 @@
+name: Rust
+
+# Rust workspace lives under bitmagnet-rs/ in this polyglot monorepo, so this
+# pipeline is scoped to that subtree and to its own workflow file.
+#
+# Future work: the Go pipeline (.github/workflows/checks.yml) runs inside
+# `nix develop` + `task`. Once the Rust toolchain is added to the repo's Nix
+# flake and Taskfile, these jobs should converge on the same `nix develop`
+# invocation instead of dtolnay/rust-toolchain + arduino/setup-protoc.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "bitmagnet-rs/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "bitmagnet-rs/**"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: bitmagnet-rs
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bitmagnet-rs
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bitmagnet-rs
+      - run: cargo test --workspace
+
+  docker:
+    name: docker build (search sidecar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: bitmagnet-rs
+          file: bitmagnet-rs/docker/Dockerfile.search
+          push: false
+          tags: bitmagnet-search:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

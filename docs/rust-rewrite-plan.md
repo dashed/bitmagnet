@@ -24,7 +24,8 @@ Optimize and rewrite bitmagnet in phases, starting with a **Hybrid Blob migratio
 |---|---|---|
 | Phase 0: Quick wins | 📋 Planned | Index drops are operational (run against the live DB), not code |
 | **Phase 1: Hybrid Blob migration** | ✅ **Implemented** (code merged, [PR #1](https://github.com/dashed/bitmagnet/pull/1)) | Built as a **zero-downtime live migration** (see [`live-migration-design.md`](./live-migration-design.md)) — dual-write + `AfterFind` hook + queue-based migration + live consistency verification + operational CLI. 42 unit tests + 4 E2E tests. **Destructive cutover (drop `torrent_files`, switch facet to JSONB containment) is deferred behind the `cleanup` safety gate and has not run.** |
-| Phases 2-9: Tantivy + Rust port | 📋 Planned | Unchanged below |
+| **Phase 2: Rust infrastructure** | ✅ **Implemented** (branch `feat/rust-infrastructure`, stacked on PR #1) | `bitmagnet-rs/` Cargo workspace (5 crates: proto, common, model, db, search), `bitmagnet.v1` protobuf (tonic 0.14 / `tonic-prost`), gRPC server skeleton (all RPCs stubbed except HealthCheck), Tantivy 0.26 schema, multi-stage `Dockerfile.search` (built, 103 MB, runs non-root), `.github/workflows/rust.yml` CI. 38 tests pass incl. **Go↔Rust blob wire-compat fixtures**. Domain logic is Phase 3. |
+| Phases 3-9: Tantivy + Rust port | 📋 Planned | Unchanged below |
 
 > Phase 1 shipped the **live-migration variant** of the original plan rather than the "fork + stop writing rows" variant described in §Phase 1 below. The goal and disk numbers are unchanged; the *approach* keeps `torrent_files` populated (dual-write) until an explicit, verification-gated `cleanup` drops it — so rollback is "redeploy the old image" right up until cutover. See the [updated Phase 1 section](#phase-1-hybrid-blob-migration-implemented--zero-downtime-live-migration) for the as-built design.
 
@@ -237,11 +238,15 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 ### Phase 2: Rust Infrastructure (Weeks 3-4, can overlap with Phase 1)
 
-| Task | Description | Estimate |
+**Status: ✅ implemented** on branch `feat/rust-infrastructure` (stacked on PR #1). As-built notes below.
+
+| Task | As built | Status |
 |---|---|---|
-| Rust workspace | Cargo workspace with crates: proto, model, search, common | 1 day |
-| Protobuf schema | search.proto (IndexDoc, Search, Facets RPCs) | 1 day |
-| CI/CD | Docker multi-stage build, cargo test/clippy/fmt in CI | 1 day |
+| Rust workspace | `bitmagnet-rs/` Cargo workspace, 5 crates: `bitmagnet-proto`, `bitmagnet-common`, `bitmagnet-model`, `bitmagnet-db`, `bitmagnet-search`. (classifier/dht/api crates deferred to their phases.) | ✅ |
+| Protobuf schema | `proto/bitmagnet/{common,search}.proto`, package `bitmagnet.v1`. `SearchService` (IndexDocument, BatchIndex, DeleteDocument, Search, GetFacets, HealthCheck). **tonic 0.14** → codegen via `tonic-prost-build`; enums wire-locked to Go by unit tests. | ✅ |
+| CI/CD | `bitmagnet-rs/docker/Dockerfile.search` multi-stage (built, 103 MB, runs non-root); `.github/workflows/rust.yml` (fmt/clippy `-D warnings`/test/docker, path-filtered). | ✅ |
+
+> **As-built deltas from the original sketch:** (1) the model crate proved Go↔Rust blob wire-compat with fixtures generated from the real Go `blobmigration.SerializeFiles` — note Rust must use `rmp_serde::to_vec_named` (msgpack MAP keyed `i/p/e/s`) to match `vmihailenco/msgpack`; (2) `bitmagnet-search` implements the Tantivy 0.26 schema now (the rest of search is Phase 3 stubs); (3) `published_at` is `int64` Unix seconds in the proto; (4) CI is a standalone Rust workflow — folding it into the repo's Nix flake + Taskfile is future work. The `rust-toolchain.toml` pins `channel = "stable"`; pin to an explicit version if fully reproducible Docker builds are required.
 
 ### Phase 3: Tantivy Search Sidecar MVP (Weeks 4-7)
 

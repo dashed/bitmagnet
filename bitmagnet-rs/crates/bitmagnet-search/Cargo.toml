@@ -1,0 +1,27 @@
+[package]
+name = "bitmagnet-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tantivy search index + gRPC sidecar for bitmagnet (Phase 1 skeleton)."
+
+[dependencies]
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+bitmagnet-common = { path = "../bitmagnet-common" }
+tokio.workspace = true
+tracing.workspace = true
+tonic.workspace = true
+tantivy.workspace = true
+# `env` (read defaults from environment) is additive on top of the workspace's
+# `derive` feature; it backs the `#[arg(env = "...")]` attributes in main.rs.
+clap = { workspace = true, features = ["env"] }
+anyhow.workspace = true
+# `tonic`'s server transport already pulls in `tokio-stream` with the `net`
+# feature; we depend on it directly to expose the Unix-domain-socket listener
+# (and the ephemeral TCP listener used by the in-process smoke test).
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bitmagnet-proto",
+    "crates/bitmagnet-common",
+    "crates/bitmagnet-model",
+    "crates/bitmagnet-db",
+    "crates/bitmagnet-search",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["bitmagnet contributors"]
+repository = "https://github.com/bitmagnet-io/bitmagnet"
+
+# Centrally pinned dependency versions. A member crate opts in with, e.g.,
+# `tonic.workspace = true` and may *add* features locally (features are
+# additive). Versions verified against crates.io on 2026-05-28 with the
+# toolchain rustc/cargo 1.95.0.
+[workspace.dependencies]
+# gRPC / protobuf. tonic 0.14 split the prost-specific codec + codegen out of
+# `tonic` / `tonic-build` into the `tonic-prost` (runtime) and
+# `tonic-prost-build` (build script) crates.
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+
+# Observability.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling.
+thiserror = "2"
+anyhow = "1"
+
+# Serialization + file-blob format (MessagePack -> ZSTD, mirrors the Go
+# `internal/blobmigration` serializer).
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+zstd = "0.13"
+
+# Database. NOTE: sqlx 0.7+ split the combined `runtime-tokio-rustls` feature
+# into separate `runtime-*` and `tls-*` features.
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "macros",
+] }
+
+# Search engine. 0.26 is the upstream target that motivated the sidecar (the
+# tantivy-go FFI bindings are pinned to 0.22).
+tantivy = "0.26"
+
+# CLI.
+clap = { version = "4", features = ["derive"] }
+
+# Lints inherited by every member via `[lints] workspace = true`. Kept at
+# `warn` (not `deny`) so local builds stay green; CI can promote to `-D
+# warnings`.
+[workspace.lints.rust]
+rust_2018_idioms = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
