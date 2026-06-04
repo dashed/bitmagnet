@@ -101,6 +101,23 @@ func unclassifiedTC() model.TorrentContent {
 	}
 }
 
+// singleFileTC mirrors a single-file torrent: FilesStatus == single with no
+// per-file rows, so its file extension is derived from the torrent name (the
+// weight-A field), matching model.Torrent.FileExtensions()'s Single arm.
+func singleFileTC() model.TorrentContent {
+	return model.TorrentContent{
+		InfoHash:    infoHash(0x02),
+		PublishedAt: time.Unix(1_600_000_000, 0),
+		Size:        2_000_000_000,
+		Torrent: model.Torrent{
+			InfoHash:    infoHash(0x02),
+			Name:        "Some.Movie.2024.mkv",
+			FilesStatus: model.FilesStatusSingle,
+			CreatedAt:   time.Unix(1_550_000_000, 0),
+		},
+	}
+}
+
 func TestBuildDocumentClassified(t *testing.T) {
 	t.Parallel()
 
@@ -184,6 +201,54 @@ func TestBuildDocumentUnclassified(t *testing.T) {
 	assert.Empty(t, doc.GetFileExtensions())
 	// No blob and no column -> files_count falls back to 0.
 	assert.Zero(t, doc.GetFilesCount())
+}
+
+// TestBuildDocumentSingleFileExtension covers a single-file torrent: it has no
+// per-file rows, so its file extension is derived from the torrent name and
+// indexed under file_extensions (filterable / facetable). file_paths stays
+// empty — the name is the weight-A field in Postgres and is NOT synthesized into
+// the weight-D file_paths tier, so ranking does not diverge from PG.
+func TestBuildDocumentSingleFileExtension(t *testing.T) {
+	t.Parallel()
+
+	doc := BuildDocument(singleFileTC())
+
+	assert.Equal(t, []string{"mkv"}, doc.GetFileExtensions(),
+		"single-file extension is derived from the torrent name")
+	assert.Empty(t, doc.GetFilePaths(),
+		"the torrent name must NOT be synthesized into file_paths")
+}
+
+// TestBuildDocumentSingleFileNoExtension covers a single-file torrent whose name
+// has no dotted extension: file_extensions is empty (no false extension).
+func TestBuildDocumentSingleFileNoExtension(t *testing.T) {
+	t.Parallel()
+
+	tc := singleFileTC()
+	tc.Torrent.Name = "Some Movie 2024"
+
+	doc := BuildDocument(tc)
+
+	assert.Empty(t, doc.GetFileExtensions(),
+		"a name with no dotted extension yields no file_extensions")
+	assert.Empty(t, doc.GetFilePaths())
+}
+
+// TestBuildDocumentMultiFileExtensionsUnchanged is a no-regression guard: a
+// multi-file torrent still sources file_extensions from the stored per-file
+// Extension values (byte-parity with the Rust blob backfill), NOT the name.
+func TestBuildDocumentMultiFileExtensionsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	doc := BuildDocument(classifiedTC())
+
+	assert.Equal(t, []string{"mkv", "srt"}, doc.GetFileExtensions(),
+		"multi-file extensions come from the stored per-file Extension, unchanged")
+	assert.Equal(t, []string{
+		"The.Matrix.1999.1080p.mkv",
+		"The.Matrix.1999.1080p.srt",
+		"readme",
+	}, doc.GetFilePaths(), "file_paths are unchanged for multi-file torrents")
 }
 
 // TestDocIDEqualsInferID locks the cross-system invariant: the DocID derived
