@@ -16,6 +16,7 @@ func makeInfoHash(b byte) protocol.ID {
 	for i := range id {
 		id[i] = b
 	}
+
 	return id
 }
 
@@ -28,6 +29,8 @@ func sampleFiles() []model.TorrentFile {
 }
 
 func TestProcessBatch_BlobCreation(t *testing.T) {
+	t.Parallel()
+
 	files := sampleFiles()
 
 	blob, err := blobmigration.SerializeFiles(files)
@@ -57,6 +60,8 @@ func TestProcessBatch_BlobCreation(t *testing.T) {
 }
 
 func TestSelfChaining_NewJobCreated(t *testing.T) {
+	t.Parallel()
+
 	cursor := makeInfoHash(0xBB).String()
 	batchSize := 500
 
@@ -70,12 +75,15 @@ func TestSelfChaining_NewJobCreated(t *testing.T) {
 	assert.Equal(t, model.QueueJobStatusPending, job.Status)
 
 	var params MessageParams
+
 	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
 	assert.Equal(t, cursor, params.InfoHashGreaterThan)
 	assert.Equal(t, 500, params.BatchSize)
 }
 
 func TestSelfChaining_DifferentFingerprints(t *testing.T) {
+	t.Parallel()
+
 	job1, err := NewQueueJob(MessageParams{
 		InfoHashGreaterThan: makeInfoHash(0x01).String(),
 		BatchSize:           100,
@@ -93,6 +101,8 @@ func TestSelfChaining_DifferentFingerprints(t *testing.T) {
 }
 
 func TestCompletion_NoSelfChain(t *testing.T) {
+	t.Parallel()
+
 	// When fewer results than batchSize are returned, the handler should NOT
 	// self-chain. We verify by checking that the message params for a "completed"
 	// state require no next job — the logic in handler.go checks
@@ -103,6 +113,8 @@ func TestCompletion_NoSelfChain(t *testing.T) {
 }
 
 func TestProgressTracking_MessageFormat(t *testing.T) {
+	t.Parallel()
+
 	job, err := NewQueueJob(MessageParams{
 		InfoHashGreaterThan: "",
 		BatchSize:           1000,
@@ -110,21 +122,27 @@ func TestProgressTracking_MessageFormat(t *testing.T) {
 	require.NoError(t, err)
 
 	var params MessageParams
+
 	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
-	assert.Equal(t, "", params.InfoHashGreaterThan)
+	assert.Empty(t, params.InfoHashGreaterThan)
 	assert.Equal(t, 1000, params.BatchSize)
 }
 
 func TestDefaultBatchSize(t *testing.T) {
+	t.Parallel()
+
 	job, err := NewQueueJob(MessageParams{})
 	require.NoError(t, err)
 
 	var params MessageParams
+
 	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
 	assert.Equal(t, 1000, params.BatchSize)
 }
 
 func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name      string
 		total     int
@@ -140,6 +158,8 @@ func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			errorRate := float64(tt.errors) / float64(tt.total)
 			shouldContinue := errorRate <= maxErrorRate
 			assert.Equal(t, tt.shouldRun, shouldContinue,
@@ -149,6 +169,8 @@ func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
 }
 
 func TestMarshalJSON(t *testing.T) {
+	t.Parallel()
+
 	result := marshalJSON([]string{"mkv", "srt"})
 	assert.Equal(t, `["mkv","srt"]`, result)
 

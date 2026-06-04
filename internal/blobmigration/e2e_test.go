@@ -573,8 +573,19 @@ func migrateOneTorrent(t *testing.T, ctx context.Context, db *gorm.DB, q *dao.Qu
 	summary.UpdatedAt = now
 	err = db.WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "info_hash"}},
-			DoUpdates: clause.AssignmentColumns([]string{"file_count", "total_size", "largest_file_size", "extensions", "has_video", "has_subtitle", "has_audio", "updated_at"}),
+			Columns: []clause.Column{{Name: "info_hash"}},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{
+					"file_count",
+					"total_size",
+					"largest_file_size",
+					"extensions",
+					"has_video",
+					"has_subtitle",
+					"has_audio",
+					"updated_at",
+				},
+			),
 		}).
 		Create(&summary).Error
 	require.NoError(t, err)
