@@ -47,6 +47,7 @@ require (
 	golang.org/x/sys v0.30.0
 	golang.org/x/text v0.22.0
 	golang.org/x/time v0.10.0
+	google.golang.org/grpc v1.67.1
 	google.golang.org/protobuf v1.36.5
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.7
@@ -60,6 +61,7 @@ require (
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/google/pprof v0.0.0-20241210010833-40e02aabc2ad // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 )
 

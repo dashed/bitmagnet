@@ -14,9 +14,19 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"go.uber.org/zap"
 	"gorm.io/gen/field"
 	"gorm.io/gorm/clause"
 )
+
+// SearchIndexer is the slice of the Tantivy sidecar client the dual-write needs
+// (*tantivy.Client satisfies it). A nil SearchIndexer means the search feature
+// is disabled and the dual-write is a no-op.
+type SearchIndexer interface {
+	IndexDocument(ctx context.Context, doc *pb.TorrentDocument) (*pb.IndexDocumentResponse, error)
+	DeleteDocument(ctx context.Context, infoHash []byte) (*pb.DeleteDocumentResponse, error)
+}
 
 type Processor interface {
 	Process(ctx context.Context, params MessageParams) error
@@ -28,6 +38,10 @@ type processor struct {
 	runner          classifier.Runner
 	dao             *dao.Query
 	blockingManager blocking.Manager
+	// searchIndexer dual-writes to the Tantivy sidecar; nil when the "search"
+	// feature is disabled, in which case the dual-write is a no-op.
+	searchIndexer SearchIndexer
+	logger        *zap.SugaredLogger
 }
 
 type MissingHashesError struct {
