@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	infohashv2 "github.com/anacrolix/torrent/types/infohash-v2"
 	"github.com/bitmagnet-io/bitmagnet/internal/lexer"
 	"github.com/facette/natsort"
 	"gorm.io/gorm"
@@ -89,8 +90,30 @@ func (t Torrent) PublishedAt() time.Time {
 	return publishedAt
 }
 
+// MagnetURI builds the magnet link for the torrent. It emits a v1 urn:btih
+// exact-topic for v1 and hybrid torrents and a v2 urn:btmh (multihash) exact-topic
+// for v2 and hybrid torrents (BEP 52 / BEP 9). A pure-v2 torrent therefore yields a
+// valid btmh magnet rather than a bogus btih built from its truncated SHA-256
+// primary key.
 func (t Torrent) MagnetURI() string {
-	return "magnet:?xt=urn:btih:" + t.InfoHash.String() +
+	xts := make([]string, 0, 2)
+
+	switch {
+	case t.InfoHashV1 != nil:
+		// v1-only or hybrid: the v1 SHA-1 is the btih topic.
+		xts = append(xts, "xt=urn:btih:"+t.InfoHashV1.String())
+	case t.InfoHashV2 == nil:
+		// Legacy / non-v2-aware rows (e.g. the importer path): the 20-byte primary
+		// key is the v1 SHA-1.
+		xts = append(xts, "xt=urn:btih:"+t.InfoHash.String())
+	}
+
+	if t.InfoHashV2 != nil {
+		// v2 or hybrid: the full SHA-256 as a multihash topic.
+		xts = append(xts, "xt=urn:btmh:"+infohashv2.ToMultihash(infohashv2.T(*t.InfoHashV2)).HexString())
+	}
+
+	return "magnet:?" + strings.Join(xts, "&") +
 		"&dn=" + url.QueryEscape(t.Name) +
 		"&xl=" + strconv.FormatUint(uint64(t.Size), 10)
 }
