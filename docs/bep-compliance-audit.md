@@ -38,6 +38,14 @@ correct). The notable gaps fall into three buckets:
 None of these break the current v1/IPv4 crawl; they bound _coverage_, _yield_, and
 _robustness_. The v2 gap is the most strategically important as v2/hybrid torrents grow.
 
+> **Implementation status (updated 2026-06-05):** Two gaps are now implemented on the
+> `dashed/bitmagnet` fork — **G9** ✅ (single-file extension in the Tantivy doc, PR #5)
+> and **G2** ✅ (DHT response source-address verification + `crypto/rand` transaction
+> IDs, PR #6), both verified (golangci-lint v2.1.6 clean, `go test -race`, Rust
+> fmt/clippy/test green). The remaining gaps (G1, G3–G8, G10) are open. The findings
+> below are preserved as the original pre-implementation audit; the "Recommended fix"
+> text for G9/G2 describes what was actually implemented.
+
 ---
 
 ## 2. Methodology & applicability framing
@@ -204,6 +212,9 @@ anacrolix exposes `ExtendedFileAttrs.Attr` (`p` = padding, plus symlink/sha1), b
 
 > These are **recommendations**; no code has been changed. Severity reflects impact on a
 > trackerless non-downloading crawler/indexer (coverage, yield, robustness, correctness).
+>
+> **Status (2026-06-05):** ✅ **G9** (PR #5) and ✅ **G2** (PR #6) are implemented and
+> verified; G1, G3–G8, and G10 remain open. The rows below are the original findings.
 
 | #   | Gap                                                                                                         | BEP         | Severity          | Nature of fix                                                                                                                                                                                                                                                                                                 |
 | --- | ----------------------------------------------------------------------------------------------------------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
