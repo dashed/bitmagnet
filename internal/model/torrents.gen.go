@@ -25,6 +25,9 @@ type Torrent struct {
 	FilesCount  NullUint                `gorm:"column:files_count" json:"filesCount"`
 	FilesData   []byte                  `gorm:"column:files_data" json:"-"`
 	FileExts    []string                `gorm:"column:file_extensions;not null;default:[];serializer:json" json:"fileExtensions"`
+	InfoHashV1  *protocol.ID            `gorm:"column:info_hash_v1" json:"infoHashV1"`
+	InfoHashV2  *protocol.InfoHashV2    `gorm:"column:info_hash_v2" json:"infoHashV2"`
+	MetaVersion NullUint16              `gorm:"column:meta_version" json:"metaVersion"`
 	Hint        TorrentHint             `gorm:"foreignKey:InfoHash" json:"hint"`
 	Contents    []TorrentContent        `gorm:"foreignKey:InfoHash" json:"contents"`
 	Sources     []TorrentsTorrentSource `gorm:"foreignKey:InfoHash" json:"sources"`

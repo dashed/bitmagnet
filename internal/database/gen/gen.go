@@ -180,6 +180,9 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		),
 		infoHashType,
 		infoHashReadOnly,
+		gen.FieldType("info_hash_v1", "*protocol.ID"),
+		gen.FieldType("info_hash_v2", "*protocol.InfoHashV2"),
+		gen.FieldType("meta_version", "NullUint16"),
 		gen.FieldType("files_status", "FilesStatus"),
 		gen.FieldGORMTag("files_status", func(tag field.GormTag) field.GormTag {
 			tag.Remove("default")

@@ -6,6 +6,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	pmetainfo "github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +28,7 @@ func TestCreateTorrentModelWithBlob(t *testing.T) {
 		},
 	}
 
-	torrent, err := createTorrentModel(hash, info, false, 1000)
+	torrent, err := createTorrentModel(hash, pmetainfo.ParsedInfo{Info: info, MetaVersion: 1}, false, 1000)
 	require.NoError(t, err)
 
 	assert.NotNil(t, torrent.FilesData)
@@ -56,7 +57,7 @@ func TestCreateTorrentModelSingleFile(t *testing.T) {
 		Length:      1_500_000_000,
 	}
 
-	torrent, err := createTorrentModel(hash, info, false, 1000)
+	torrent, err := createTorrentModel(hash, pmetainfo.ParsedInfo{Info: info, MetaVersion: 1}, false, 1000)
 	require.NoError(t, err)
 
 	assert.Nil(t, torrent.FilesData)
@@ -75,7 +76,7 @@ func TestCreateTorrentModelNoFiles(t *testing.T) {
 		PieceLength: 256 * 1024,
 	}
 
-	torrent, err := createTorrentModel(hash, info, false, 1000)
+	torrent, err := createTorrentModel(hash, pmetainfo.ParsedInfo{Info: info, MetaVersion: 1}, false, 1000)
 	require.NoError(t, err)
 
 	assert.Nil(t, torrent.FilesData)
@@ -103,7 +104,7 @@ func TestCreateTorrentModelOverThreshold(t *testing.T) {
 		Files:       files,
 	}
 
-	torrent, err := createTorrentModel(hash, info, false, 10)
+	torrent, err := createTorrentModel(hash, pmetainfo.ParsedInfo{Info: info, MetaVersion: 1}, false, 10)
 	require.NoError(t, err)
 
 	assert.NotNil(t, torrent.FilesData)

@@ -87,7 +87,7 @@ type nodeHasPeersForHash struct {
 
 type infoHashWithMetaInfo struct {
 	nodeHasPeersForHash
-	metaInfo metainfo.Info
+	metaInfo metainfo.ParsedInfo
 }
 
 type infoHashWithPeers struct {

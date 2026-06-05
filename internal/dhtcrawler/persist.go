@@ -152,10 +152,11 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 func createTorrentModel(
 	hash protocol.ID,
-	info metainfo.Info,
+	parsed metainfo.ParsedInfo,
 	savePieces bool,
 	saveFilesThreshold uint,
 ) (model.Torrent, error) {
+	info := parsed.Info
 	name := info.BestName()
 
 	private := false
@@ -165,26 +166,44 @@ func createTorrentModel(
 
 	var filesCount model.NullUint
 
+	var files []model.TorrentFile
+
+	// Classify single vs multi. For v1, info.IsDir() == (len(info.Files) != 0), so
+	// v1 behaviour is unchanged. For v2 (BEP 52) the file tree root is always a
+	// directory keyed by the file name, so IsDir() is true even for a single
+	// top-level file; treat "exactly one top-level file" as single so v2 / hybrid
+	// single-file torrents match v1 single-file behaviour (no file rows; the
+	// extension is indexed from the name in the Tantivy document builder).
 	filesStatus := model.FilesStatusSingle
-	if len(info.Files) > 0 {
-		filesStatus = model.FilesStatusMulti
-		filesCount = model.NewNullUint(uint(len(info.Files)))
-	}
 
-	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(info.Files)))
+	if info.IsDir() {
+		// UpvertedFiles yields the file list for both v1 (info.Files) and v2
+		// (file tree) torrents.
+		upvertedFiles := info.UpvertedFiles()
 
-	for i, file := range info.Files {
-		if i >= int(saveFilesThreshold) {
-			filesStatus = model.FilesStatusOverThreshold
-			break
+		isV2Single := info.HasV2() &&
+			len(upvertedFiles) == 1 &&
+			len(upvertedFiles[0].Path) <= 1
+
+		if !isV2Single {
+			filesStatus = model.FilesStatusMulti
+			filesCount = model.NewNullUint(uint(len(upvertedFiles)))
+			files = make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(upvertedFiles)))
+
+			for i, file := range upvertedFiles {
+				if i >= int(saveFilesThreshold) {
+					filesStatus = model.FilesStatusOverThreshold
+					break
+				}
+
+				files = append(files, model.TorrentFile{
+					InfoHash: hash,
+					Index:    uint(i),
+					Path:     file.DisplayPath(&info),
+					Size:     uint(file.Length),
+				})
+			}
 		}
-
-		files = append(files, model.TorrentFile{
-			InfoHash: hash,
-			Index:    uint(i),
-			Path:     file.DisplayPath(&info),
-			Size:     uint(file.Length),
-		})
 	}
 
 	var filesData []byte
@@ -209,6 +228,9 @@ func createTorrentModel(
 
 	return model.Torrent{
 		InfoHash:    hash,
+		InfoHashV1:  parsed.InfoHashV1,
+		InfoHashV2:  parsed.InfoHashV2,
+		MetaVersion: model.NewNullUint16(uint16(parsed.MetaVersion)),
 		Name:        name,
 		Size:        uint(info.TotalLength()),
 		Private:     private,

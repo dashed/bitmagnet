@@ -38,13 +38,15 @@ correct). The notable gaps fall into three buckets:
 None of these break the current v1/IPv4 crawl; they bound _coverage_, _yield_, and
 _robustness_. The v2 gap is the most strategically important as v2/hybrid torrents grow.
 
-> **Implementation status (updated 2026-06-05):** Two gaps are now implemented on the
-> `dashed/bitmagnet` fork — **G9** ✅ (single-file extension in the Tantivy doc, PR #5)
-> and **G2** ✅ (DHT response source-address verification + `crypto/rand` transaction
-> IDs, PR #6), both verified (golangci-lint v2.1.6 clean, `go test -race`, Rust
-> fmt/clippy/test green). The remaining gaps (G1, G3–G8, G10) are open. The findings
-> below are preserved as the original pre-implementation audit; the "Recommended fix"
-> text for G9/G2 describes what was actually implemented.
+> **Implementation status (updated 2026-06-05):** Implemented on the `dashed/bitmagnet`
+> fork — **G9** ✅ (single-file extension in the Tantivy doc, PR #5), **G2** ✅ (DHT
+> response source-address verification + `crypto/rand` transaction IDs, PR #6), and the
+> **G1 foundation (G1a)** ✅ (BitTorrent v2 / hybrid torrents are now ingested instead of
+> dropped/degraded — see the G1 note below). All verified (golangci-lint v2.1.6 clean,
+> `go test ./...` + `-race`, v2/hybrid integration tests against Postgres, generated code
+> regenerated). The remaining v2 slices (G1b–G1e) and gaps G3–G8, G10 are open. The
+> findings below are preserved as the original pre-implementation audit; the "Recommended
+> fix" text for completed gaps describes what was actually implemented.
 
 ---
 
@@ -164,6 +166,29 @@ Legend: ✅ Compliant · 🟡 Partial · ❌ Non-compliant · ⚪ N/A · 🔵 De
 - The dependency is _not_ the blocker: `anacrolix/torrent v1.58.0` fully supports v2 (`metainfo.Info.MetaVersion`/`FileTree`/`ExtendedFileAttrs`, `types/infohash-v2`, `magnet-v2`). bitmagnet uses none of it.
 - **Severity: High** — a growing share of the swarm is invisible (pure-v2) or partially indexed (hybrid). A real fix is a migration (dual/32-byte infohash columns, `btmh` magnets, `UpvertedFiles`, advertise bit 7, SHA-256 verification, piece layers), not a one-line change.
 
+> **Status — G1a foundation implemented (2026-06-05).** The foundation slice is done on
+> branch `feat/bittorrent-v2-foundation`: pure-v2 and hybrid torrents are now **ingested
+> and representable** instead of silently dropped/degraded. Specifically — (1) `parse.go`
+> verifies the received info dict under **both** SHA-1 and (truncated) SHA-256 and returns
+> a `ParsedInfo{MetaVersion, InfoHashV1, InfoHashV2}` descriptor (fixes #1 above);
+> (2) `createTorrentModel` now classifies by `info.IsDir()` and enumerates files via
+> `info.UpvertedFiles()`, so v2 `FileTree` torrents get correct file rows (fixes #3);
+> (3) a new `protocol.InfoHashV2 [32]byte` type + migration `00023` add
+> `info_hash_v1` / `info_hash_v2` (plain index) / `meta_version` columns recording the full
+> v2 identity. (The `info_hash_v2` index is deliberately **non-unique**: a hybrid is
+> announced under both its v1 and truncated-v2 hashes, so it can be ingested as two rows
+> with the same full v2 hash; a UNIQUE index would abort the batched persist upsert. Exact
+> v2 dedup is G1b.) **Design decision (synthesis):** the canonical `info_hash` **primary key stays
+> 20 bytes** — the v1 SHA-1 for v1/hybrid and the BEP-52 **truncated** SHA-256 for pure-v2
+> (the value the DHT crawl already keys on) — so no `protocol.ID`/FK/GraphQL/Rust-reader
+> churn was needed. The full 32-byte hash lives in `info_hash_v2`. Deferred to follow-on
+> stacked branches: **G1b** `btmh` magnets + DHT truncated-hash lookups (fixes #4 + the
+> hybrid-vs-v2 dedup gap), **G1c** advertise handshake bit 7 (fixes #2), **G1d** Rust
+> parity (read `info_hash_v2`/`meta_version`), **G1e** GraphQL/API surface. v2 **piece
+> layers** live outside the info dict (in the `.torrent` `piece layers` key) and are not
+> recoverable on the ut_metadata crawl path, so they remain out of scope. Full design +
+> decision record: `docs/dev/g1a-v2-foundation-spec.md`.
+
 ---
 
 ## 5. High-relevance BEPs — detailed findings
@@ -213,21 +238,23 @@ anacrolix exposes `ExtendedFileAttrs.Attr` (`p` = padding, plus symlink/sha1), b
 > These are **recommendations**; no code has been changed. Severity reflects impact on a
 > trackerless non-downloading crawler/indexer (coverage, yield, robustness, correctness).
 >
-> **Status (2026-06-05):** ✅ **G9** (PR #5) and ✅ **G2** (PR #6) are implemented and
-> verified; G1, G3–G8, and G10 remain open. The rows below are the original findings.
+> **Status (2026-06-05):** ✅ **G9** (PR #5), ✅ **G2** (PR #6), and the ✅ **G1
+> foundation (G1a)** (`feat/bittorrent-v2-foundation`) are implemented and verified; the
+> follow-on v2 slices **G1b–G1e** and gaps G3–G8, G10 remain open. The rows below are the
+> original findings.
 
-| #   | Gap                                                                                                         | BEP         | Severity          | Nature of fix                                                                                                                                                                                                                                                                                                 |
-| --- | ----------------------------------------------------------------------------------------------------------- | ----------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G1  | **BitTorrent v2 / hybrid support** — pure-v2 dropped, hybrid degraded                                       | 52 (+47)    | **High**          | Schema migration: 32-byte/dual infohash, `btmh` magnets, `UpvertedFiles`, advertise ext bit 7, SHA-256 verification, piece layers. Large, multi-PR.                                                                                                                                                           |
-| G2  | **DHT response source-address verification** + non-predictable transaction IDs                              | 5           | Medium (security) | Store the queried addr per in-flight TID and drop source-mismatched responses (`netip.Addr.Unmap()`-normalized on both sides — avoids false-rejecting 4-in-6 bootstrap replies); replace monotonic TIDs with `crypto/rand` + collision-retry; add a drop counter. Confined to `internal/protocol/dht/server`. |
-| G3  | **Padding-file (BEP 47) awareness** — exclude `attr:p` files from listings/counts                           | 47          | Medium            | Read `ExtendedFileAttrs.Attr`; skip padding files in `createTorrentModel` + banning.                                                                                                                                                                                                                          |
-| G4  | **IPv6 / dual-stack DHT** — activate existing want/nodes6 scaffolding + v6 socket; allow IPv6 metadata dial | 32, 45, (9) | Medium            | Bind v6 socket, send/honor `want`, return `Nodes6`; relax `tcp4`-only dial in `requester.go`.                                                                                                                                                                                                                 |
-| G5  | **BEP 42-compliant node ID** (CRC32C-from-IP) + echo `ip` in responses                                      | 42          | Medium            | Derive node ID from observed external IP; learn external IP (e.g. via responses) and set `Msg.IP`.                                                                                                                                                                                                            |
-| G6  | **Honor incoming `ro` flag** — don't add read-only nodes to routing/discovery                               | 43          | Low               | Check `args.ReadOnly` in `responderNodeDiscovery`.                                                                                                                                                                                                                                                            |
-| G7  | **Rotate DHT token secret** on the BEP 5 schedule (~5 min / 10 min window)                                  | 5           | Low               | Periodic secret rotation with a short grace window.                                                                                                                                                                                                                                                           |
-| G8  | **Evaluate PEX (ut_pex) and MSE (BEP 13)** for peer-discovery / fetch-success uplift                        | 11, 13      | Low               | Investigation/spike before committing.                                                                                                                                                                                                                                                                        |
-| G9  | **Single-file torrents: index the name-derived extension in the Tantivy search doc**                        | 3           | Low               | Synthesize `file_extensions=[name-derived ext]` for `FilesStatusSingle` in Go `BuildDocument` + Rust `transform.rs` (byte-parity); plumb `files_status` into the indexing SQL. NOT `persist.go`/`UpvertedFiles()` (would break `FilesStatusSingle` semantics).                                                |
-| G10 | **Non-UTF-8 name handling** — transliterate/sanitize instead of dropping the torrent                        | 3           | Low/Med           | Revisit `banning/utf8.go` reject; lossy-decode + keep raw, rather than discard legacy/non-Latin torrents.                                                                                                                                                                                                     |
+| #   | Gap                                                                                                         | BEP         | Severity          | Nature of fix                                                                                                                                                                                                                                                                                                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------------- | ----------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1  | **BitTorrent v2 / hybrid support** — pure-v2 dropped, hybrid degraded                                       | 52 (+47)    | **High**          | Large, multi-PR. **G1a foundation ✅ done** (`feat/bittorrent-v2-foundation`): dual-hash columns + 20-byte canonical PK (truncated SHA-256 for pure-v2), SHA-256 verification, `UpvertedFiles` — v2/hybrid now ingested. **Open:** G1b `btmh` magnets + DHT truncated-hash lookups, G1c advertise ext bit 7, G1d Rust parity, G1e GraphQL surface. (Piece layers N/A on the crawl path.) |
+| G2  | **DHT response source-address verification** + non-predictable transaction IDs                              | 5           | Medium (security) | Store the queried addr per in-flight TID and drop source-mismatched responses (`netip.Addr.Unmap()`-normalized on both sides — avoids false-rejecting 4-in-6 bootstrap replies); replace monotonic TIDs with `crypto/rand` + collision-retry; add a drop counter. Confined to `internal/protocol/dht/server`.                                                                            |
+| G3  | **Padding-file (BEP 47) awareness** — exclude `attr:p` files from listings/counts                           | 47          | Medium            | Read `ExtendedFileAttrs.Attr`; skip padding files in `createTorrentModel` + banning.                                                                                                                                                                                                                                                                                                     |
+| G4  | **IPv6 / dual-stack DHT** — activate existing want/nodes6 scaffolding + v6 socket; allow IPv6 metadata dial | 32, 45, (9) | Medium            | Bind v6 socket, send/honor `want`, return `Nodes6`; relax `tcp4`-only dial in `requester.go`.                                                                                                                                                                                                                                                                                            |
+| G5  | **BEP 42-compliant node ID** (CRC32C-from-IP) + echo `ip` in responses                                      | 42          | Medium            | Derive node ID from observed external IP; learn external IP (e.g. via responses) and set `Msg.IP`.                                                                                                                                                                                                                                                                                       |
+| G6  | **Honor incoming `ro` flag** — don't add read-only nodes to routing/discovery                               | 43          | Low               | Check `args.ReadOnly` in `responderNodeDiscovery`.                                                                                                                                                                                                                                                                                                                                       |
+| G7  | **Rotate DHT token secret** on the BEP 5 schedule (~5 min / 10 min window)                                  | 5           | Low               | Periodic secret rotation with a short grace window.                                                                                                                                                                                                                                                                                                                                      |
+| G8  | **Evaluate PEX (ut_pex) and MSE (BEP 13)** for peer-discovery / fetch-success uplift                        | 11, 13      | Low               | Investigation/spike before committing.                                                                                                                                                                                                                                                                                                                                                   |
+| G9  | **Single-file torrents: index the name-derived extension in the Tantivy search doc**                        | 3           | Low               | Synthesize `file_extensions=[name-derived ext]` for `FilesStatusSingle` in Go `BuildDocument` + Rust `transform.rs` (byte-parity); plumb `files_status` into the indexing SQL. NOT `persist.go`/`UpvertedFiles()` (would break `FilesStatusSingle` semantics).                                                                                                                           |
+| G10 | **Non-UTF-8 name handling** — transliterate/sanitize instead of dropping the torrent                        | 3           | Low/Med           | Revisit `banning/utf8.go` reject; lossy-decode + keep raw, rather than discard legacy/non-Latin torrents.                                                                                                                                                                                                                                                                                |
 
 These map 1:1 to the follow-up tasks created in the team task list.
 
