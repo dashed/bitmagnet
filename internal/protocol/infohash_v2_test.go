@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -165,4 +166,58 @@ func TestInfoHashV2IsZero(t *testing.T) {
 	assert.True(t, zero.IsZero())
 
 	assert.False(t, sampleV2().IsZero())
+}
+
+func TestInfoHashV2MarshalGQL(t *testing.T) {
+	t.Parallel()
+
+	h := sampleV2()
+
+	var buf bytes.Buffer
+
+	h.MarshalGQL(&buf)
+
+	// gqlgen scalars marshal as a JSON string literal (quoted 64-hex).
+	assert.Equal(t, `"`+h.String()+`"`, buf.String())
+	assert.Len(t, h.String(), 64)
+}
+
+func TestInfoHashV2UnmarshalGQL(t *testing.T) {
+	t.Parallel()
+
+	h := sampleV2()
+
+	t.Run("round-trip from hex string", func(t *testing.T) {
+		t.Parallel()
+
+		var got InfoHashV2
+
+		require.NoError(t, got.UnmarshalGQL(h.String()))
+		assert.Equal(t, h, got)
+	})
+
+	t.Run("accepts 0x prefix", func(t *testing.T) {
+		t.Parallel()
+
+		var got InfoHashV2
+
+		require.NoError(t, got.UnmarshalGQL("0x"+h.String()))
+		assert.Equal(t, h, got)
+	})
+
+	t.Run("rejects non-string input", func(t *testing.T) {
+		t.Parallel()
+
+		var got InfoHashV2
+
+		assert.Error(t, got.UnmarshalGQL(1234))
+	})
+
+	t.Run("rejects malformed hex", func(t *testing.T) {
+		t.Parallel()
+
+		var got InfoHashV2
+
+		assert.Error(t, got.UnmarshalGQL("not-a-valid-hash"))
+	})
 }
