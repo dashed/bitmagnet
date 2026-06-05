@@ -106,6 +106,10 @@ pub struct TorrentForIndex {
     pub info_hash: InfoHash,
     /// Torrent display name (`torrents.name`).
     pub torrent_name: String,
+    /// Files-status enum value as text (e.g. `"single"`, `"multi"`); cast to
+    /// `text` in SQL so it decodes into a `String` regardless of the column's
+    /// PostgreSQL enum type. Drives the single-file `file_extensions` fallback.
+    pub files_status: String,
     /// Classification key; all `None` for an unclassified torrent_content.
     pub content_type: Option<String>,
     pub content_source: Option<String>,
@@ -165,6 +169,7 @@ SELECT \
 tc.id AS id, \
 tc.info_hash AS info_hash, \
 t.name AS torrent_name, \
+t.files_status::text AS files_status, \
 tc.content_type AS content_type, \
 tc.content_source AS content_source, \
 tc.content_id AS content_id, \
@@ -233,6 +238,7 @@ pub async fn stream_torrents_for_index(
             id: row.try_get("id")?,
             info_hash,
             torrent_name: row.try_get("torrent_name")?,
+            files_status: row.try_get("files_status")?,
             content_type: row.try_get("content_type")?,
             content_source: row.try_get("content_source")?,
             content_id: row.try_get("content_id")?,
@@ -329,6 +335,7 @@ mod tests {
             id: "0123456789abcdef0123456789abcdef01234567:movie:tmdb:1".to_owned(),
             info_hash: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
             torrent_name: "t".to_owned(),
+            files_status: "multi".to_owned(),
             content_type: Some("movie".to_owned()),
             content_source: Some("tmdb".to_owned()),
             content_id: Some("1".to_owned()),
@@ -358,6 +365,7 @@ mod tests {
         // Drives from torrent_contents (one row = one search doc), joins
         // torrents + content, keysets on the composite PK tc.id.
         assert!(STREAM_FOR_INDEX_SQL.contains("FROM torrent_contents tc"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("t.files_status::text AS files_status"));
         assert!(STREAM_FOR_INDEX_SQL.contains("JOIN torrents t ON t.info_hash = tc.info_hash"));
         assert!(STREAM_FOR_INDEX_SQL.contains("LEFT JOIN content c"));
         assert!(STREAM_FOR_INDEX_SQL.contains("tc.id > $1"));

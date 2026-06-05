@@ -68,7 +68,7 @@ func BuildDocument(tc model.TorrentContent) *pb.TorrentDocument {
 		// --- Weight D relevance / facets ----------------------------------
 		Genres:         genres(tc.Content),
 		FilePaths:      filePaths(tc.Torrent.Files),
-		FileExtensions: fileExtensions(tc.Torrent.Files),
+		FileExtensions: fileExtensionsForDoc(tc.Torrent),
 		Languages:      languages(tc.Languages),
 		// No Postgres source for audio languages (see transform.rs): never set.
 		AudioLanguages: nil,
@@ -253,6 +253,26 @@ func fileExtensions(files []model.TorrentFile) []string {
 	sort.Strings(out)
 
 	return out
+}
+
+// fileExtensionsForDoc selects the file_extensions source per FilesStatus,
+// mirroring model.Torrent.FileExtensions(). A single-file torrent has no
+// per-file rows, so its extension is derived from the torrent name (the
+// weight-A field in Postgres); that single name-derived extension is indexed so
+// the document is filterable / facetable by extension, matching what the
+// Postgres-side model.Torrent.FileExtensions() yields for the same row. The
+// multi-file arm is unchanged: it reads the stored per-file Extension via
+// fileExtensions, preserving byte-parity with the Rust blob backfill path.
+func fileExtensionsForDoc(t model.Torrent) []string {
+	if t.SingleFile() {
+		if ext := model.FileExtensionFromPath(t.Name); ext.Valid {
+			return []string{ext.String}
+		}
+
+		return nil
+	}
+
+	return fileExtensions(t.Files)
 }
 
 // languages returns the content languages as alpha-2 codes in the same order

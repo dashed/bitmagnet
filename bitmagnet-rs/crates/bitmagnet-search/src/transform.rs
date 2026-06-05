@@ -34,7 +34,7 @@
 use std::collections::BTreeSet;
 
 use bitmagnet_db::TorrentForIndex;
-use bitmagnet_model::{BlobFile, ContentType};
+use bitmagnet_model::{file_extension_from_path, BlobFile, ContentType, FilesStatus};
 
 use crate::proto::TorrentDocument;
 
@@ -66,6 +66,26 @@ pub fn build_document(row: &TorrentForIndex, files: &[BlobFile]) -> TorrentDocum
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    // Single-file fallback (Go↔Rust parity): a single-file torrent stores no
+    // per-file blob, so the blob yields no extensions. Postgres derives the
+    // `extension` facet column from the torrent name for single-file torrents
+    // only, so mirror exactly that — synthesize the name-derived extension when
+    // the blob produced none and `files_status == "single"`. `file_paths` stays
+    // blob-only (no synthetic path), and NoInfo is excluded so Tantivy never
+    // becomes a superset of PG.
+    let file_extensions: Vec<String> = if file_extensions.is_empty()
+        && row
+            .files_status
+            .parse::<FilesStatus>()
+            .map(|s| s == FilesStatus::Single)
+            .unwrap_or(false)
+    {
+        file_extension_from_path(&row.torrent_name)
+            .into_iter()
+            .collect()
+    } else {
+        file_extensions
+    };
 
     TorrentDocument {
         info_hash: row.info_hash.as_slice().to_vec(),
@@ -168,6 +188,7 @@ mod tests {
             id: format!("{}:movie:tmdb:603", "ab".repeat(20)),
             info_hash: info_hash(0xAB),
             torrent_name: "The Matrix 1999 1080p BluRay x265-GROUP".to_owned(),
+            files_status: "multi".to_owned(),
             content_type: Some("movie".to_owned()),
             content_source: Some("tmdb".to_owned()),
             content_id: Some("603".to_owned()),
@@ -198,6 +219,7 @@ mod tests {
             id: format!("{}:?:?:?", "01".repeat(20)),
             info_hash: info_hash(0x01),
             torrent_name: "ubuntu-24.04-desktop-amd64.iso".to_owned(),
+            files_status: "no_info".to_owned(),
             content_type: None,
             content_source: None,
             content_id: None,
@@ -317,6 +339,40 @@ mod tests {
         assert!(doc.file_extensions.is_empty());
         // No blob and no column → files_count falls back to 0.
         assert_eq!(doc.files_count, 0);
+    }
+
+    #[test]
+    fn single_file_synthesizes_extension_from_name() {
+        // A single-file torrent stores no per-file blob, so the blob yields no
+        // extensions. PG derives the `extension` facet from the torrent name for
+        // single-file torrents only; the backfill must mirror that — synthesize
+        // the name-derived extension while leaving `file_paths` blob-only (empty).
+        let mut row = unclassified_row();
+        row.files_status = "single".to_owned();
+        row.torrent_name = "Ubuntu.2024.iso".to_owned();
+
+        let doc = build_document(&row, &[]);
+
+        assert_eq!(doc.file_extensions, vec!["iso"]);
+        assert!(doc.file_paths.is_empty());
+    }
+
+    #[test]
+    fn single_file_extension_round_trips_through_the_indexer() {
+        // End-to-end: a synthesized single-file extension must survive
+        // `document_to_tantivy` so it is retrievable/filterable like a blob ext.
+        let fields = Fields::from_schema(&build_schema()).unwrap();
+        let mut row = unclassified_row();
+        row.files_status = "single".to_owned();
+        row.torrent_name = "Ubuntu.2024.iso".to_owned();
+
+        let td = document_to_tantivy(&fields, &build_document(&row, &[]));
+
+        let exts: Vec<_> = td
+            .get_all(fields.file_extensions)
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(exts, vec!["iso"]);
     }
 
     #[test]
