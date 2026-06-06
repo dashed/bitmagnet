@@ -272,3 +272,9 @@ bitmagnet blob-migration start    # Enqueue migration jobs
 bitmagnet blob-migration status   # Show progress (migrated/total, %, ETA)
 bitmagnet blob-migration cleanup  # Drop torrent_files after verification
 ```
+
+---
+
+## Coexistence beyond Phase 1 (keep-everything mode)
+
+The dual-write pattern here generalizes: later phases add **more** parallel sinks without removing the legacy one, so the system can run *all* phases with **no table drop** (full reversibility) until each cutover is explicitly approved. Persist fans out to up to four sinks — `torrent_files` rows · `files_data` blob + `file_extensions` (same tx) · Tantivy `IndexDocument` (Phase 4, **post-commit fire-and-forget**, no-op when `SEARCH_ENABLED=false`) · `info_hash_v1/v2` + `meta_version` (BEP-52 v2, same tx). All additive; none on the served read path. The only destructive steps are the explicit, CLI-gated cutovers — see **“Coexistence / Keep-Everything Mode”** and the **`00023` live-safe rewrite** in [`rust-rewrite-plan.md`](./rust-rewrite-plan.md).
