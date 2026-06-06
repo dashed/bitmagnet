@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 )
 
@@ -109,4 +110,29 @@ func (h *InfoHashV2) UnmarshalJSON(data []byte) error {
 	*h = parsed
 
 	return nil
+}
+
+// UnmarshalGQL implements the gqlgen Unmarshaler interface for the Hash32 scalar.
+func (h *InfoHashV2) UnmarshalGQL(input interface{}) error {
+	switch input := input.(type) {
+	case string:
+		parsed, err := ParseInfoHashV2(input)
+		if err != nil {
+			return err
+		}
+
+		*h = parsed
+
+		return nil
+	default:
+		return errors.New("invalid hash type")
+	}
+}
+
+// MarshalGQL implements the gqlgen Marshaler interface for the Hash32 scalar. It
+// uses a value receiver so that both InfoHashV2 and *InfoHashV2 satisfy
+// graphql.Marshaler (the generated nullable-pointer marshaller returns the value
+// directly, with nil rendered as null).
+func (h InfoHashV2) MarshalGQL(w io.Writer) {
+	_, _ = w.Write([]byte(`"` + h.String() + `"`))
 }

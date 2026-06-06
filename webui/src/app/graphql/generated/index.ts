@@ -21,6 +21,7 @@ export type Scalars = {
   DateTime: { input: string; output: string; }
   Duration: { input: string; output: string; }
   Hash20: { input: string; output: string; }
+  Hash32: { input: string; output: string; }
   Void: { input: void; output: void; }
   Year: { input: number; output: number; }
 };
@@ -469,8 +470,10 @@ export type Torrent = {
   filesStatus: FilesStatus;
   hasFilesInfo: Scalars['Boolean']['output'];
   infoHash: Scalars['Hash20']['output'];
+  infoHashV2?: Maybe<Scalars['Hash32']['output']>;
   leechers?: Maybe<Scalars['Int']['output']>;
   magnetUri: Scalars['String']['output'];
+  metaVersion?: Maybe<Scalars['Int']['output']>;
   name: Scalars['String']['output'];
   seeders?: Maybe<Scalars['Int']['output']>;
   singleFile?: Maybe<Scalars['Boolean']['output']>;

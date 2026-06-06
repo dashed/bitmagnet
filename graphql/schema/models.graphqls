@@ -1,5 +1,7 @@
 type Torrent {
   infoHash: Hash20!
+  infoHashV2: Hash32
+  metaVersion: Int
   name: String!
   size: Int!
   hasFilesInfo: Boolean!
