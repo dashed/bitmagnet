@@ -86,7 +86,9 @@ func (p Params) startCmd() *cli.Command {
 
 			status, _ := getKV(ctx, d, kvKeyStatus)
 			if status == statusRunning {
-				return fmt.Errorf("migration is already running; use 'status' to check progress or 'pause' to stop")
+				return fmt.Errorf(
+					"migration is already running; use 'status' to check progress or 'pause' to stop",
+				)
 			}
 
 			resume := ctx.Bool("resume")
@@ -145,9 +147,14 @@ func (p Params) startCmd() *cli.Command {
 				verb = "resumed"
 			}
 
-			_, _ = fmt.Fprintf(ctx.App.Writer,
+			_, _ = fmt.Fprintf(
+				ctx.App.Writer,
 				"Migration %s with %d parallel range workers (chunk-size %d). Total torrents with files: %s\n",
-				verb, seeded, chunkSize, total)
+				verb,
+				seeded,
+				chunkSize,
+				total,
+			)
 
 			return nil
 		},
@@ -297,8 +304,12 @@ func (p Params) resumeCmd() *cli.Command {
 				return fmt.Errorf("seeding range jobs: %w", err)
 			}
 
-			_, _ = fmt.Fprintf(ctx.App.Writer,
-				"Migration resumed: %d range workers re-seeded from checkpoints (chunk-size %d).\n", seeded, chunkSize)
+			_, _ = fmt.Fprintf(
+				ctx.App.Writer,
+				"Migration resumed: %d range workers re-seeded from checkpoints (chunk-size %d).\n",
+				seeded,
+				chunkSize,
+			)
 
 			return nil
 		},
@@ -330,7 +341,7 @@ func computeRanges(k int) []queue.MessageParams {
 
 	ranges := make([]queue.MessageParams, 0, k)
 
-	for i := 0; i < k; i++ {
+	for i := range k {
 		var lower, upper string
 
 		if i > 0 {

@@ -234,6 +234,7 @@ func readChunkFiles(
 	if err != nil {
 		return nil, err
 	}
+
 	defer func() { _ = rows.Close() }()
 
 	var (
@@ -318,7 +319,10 @@ func flushChunk(
 
 		uArgs := make([]any, 0, len(preps)*3)
 
-		ub.WriteString("UPDATE torrents AS t SET files_data = v.fd, file_extensions = v.fe, updated_at = now() FROM (VALUES ")
+		ub.WriteString(
+			"UPDATE torrents AS t SET files_data = v.fd, file_extensions = v.fe, updated_at = now() " +
+				"FROM (VALUES ",
+		)
 
 		for i, p := range preps {
 			if i > 0 {
@@ -345,7 +349,8 @@ func flushChunk(
 		iArgs := make([]any, 0, len(preps)*10)
 
 		ib.WriteString("INSERT INTO torrent_file_summary " +
-			"(info_hash, file_count, total_size, largest_file_size, extensions, has_video, has_subtitle, has_audio, created_at, updated_at) VALUES ")
+			"(info_hash, file_count, total_size, largest_file_size, extensions, " +
+			"has_video, has_subtitle, has_audio, created_at, updated_at) VALUES ")
 
 		for i, p := range preps {
 			if i > 0 {
@@ -355,8 +360,19 @@ func flushChunk(
 			ib.WriteString("(decode(?,'hex'),?,?,?,?::jsonb,?,?,?,?,?)")
 
 			s := p.summary
-			iArgs = append(iArgs, p.infoHash.String(), s.FileCount, s.TotalSize, s.LargestFileSize, p.extsJSON,
-				s.HasVideo, s.HasSubtitle, s.HasAudio, now, now)
+			iArgs = append(
+				iArgs,
+				p.infoHash.String(),
+				s.FileCount,
+				s.TotalSize,
+				s.LargestFileSize,
+				p.extsJSON,
+				s.HasVideo,
+				s.HasSubtitle,
+				s.HasAudio,
+				now,
+				now,
+			)
 		}
 
 		ib.WriteString(" ON CONFLICT (info_hash) DO UPDATE SET " +

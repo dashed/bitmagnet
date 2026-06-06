@@ -174,11 +174,13 @@ func TestExtractUniqueExtensions(t *testing.T) {
 func TestExtractUniqueExtensionsEmpty(t *testing.T) {
 	t.Parallel()
 
+	// Non-nil empty slice (not nil): torrents.file_extensions / torrent_file_summary.extensions
+	// are JSONB NOT NULL, and a nil slice serializes to SQL NULL.
 	exts := ExtractUniqueExtensions(nil)
-	assert.Nil(t, exts)
+	assert.Equal(t, []string{}, exts)
 
 	exts = ExtractUniqueExtensions([]model.TorrentFile{})
-	assert.Nil(t, exts)
+	assert.Equal(t, []string{}, exts)
 }
 
 func TestExtractUniqueExtensionsNoExtensions(t *testing.T) {
@@ -189,7 +191,7 @@ func TestExtractUniqueExtensionsNoExtensions(t *testing.T) {
 		{Path: "another_file"},
 	}
 	exts := ExtractUniqueExtensions(files)
-	assert.Nil(t, exts)
+	assert.Equal(t, []string{}, exts)
 }
 
 func TestBuildFileSummary(t *testing.T) {
