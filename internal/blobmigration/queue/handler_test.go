@@ -127,30 +127,27 @@ func TestDefaultChunkSize(t *testing.T) {
 	assert.Equal(t, 1, params.NumRanges)
 }
 
-func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
+// Pause is now triggered only when EVERY sampled consistency check in a chunk fails (systematic
+// corruption), not a rate threshold; a lone transient mismatch is logged but does not pause.
+func TestConsistencyPause_OnlyWhenAllSampledFail(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		total     int
-		errors    int
-		shouldRun bool
+		name         string
+		verifyErrors int
+		shouldPause  bool
 	}{
-		{"no errors", 100, 0, true},
-		{"below threshold", 100, 1, true},
-		{"at threshold", 100, 2, false},
-		{"above threshold", 100, 5, false},
-		{"single error in small batch", 10, 1, false},
+		{"no errors", 0, false},
+		{"one of two failed", 1, false},
+		{"all sampled failed", consistencyChecksPerChunk, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			errorRate := float64(tt.errors) / float64(tt.total)
-			shouldContinue := errorRate <= maxErrorRate
-			assert.Equal(t, tt.shouldRun, shouldContinue,
-				"errorRate=%.4f, threshold=%.4f", errorRate, maxErrorRate)
+			pause := consistencyChecksPerChunk > 0 && tt.verifyErrors >= consistencyChecksPerChunk
+			assert.Equal(t, tt.shouldPause, pause)
 		})
 	}
 }

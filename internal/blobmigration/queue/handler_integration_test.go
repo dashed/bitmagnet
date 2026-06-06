@@ -189,6 +189,19 @@ func kvVal(t *testing.T, db *gorm.DB, key string) string {
 	return v
 }
 
+// migratedTotal sums the per-range migrated counters (blob_migration:migrated:<id>).
+func migratedTotal(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+
+	var n int64
+
+	require.NoError(t, db.Table("key_values").
+		Where("key LIKE ?", kvKeyMigratedPrefix+"%").
+		Select("COALESCE(SUM(value::bigint), 0)").Scan(&n).Error)
+
+	return n
+}
+
 func filesData(t *testing.T, db *gorm.DB, h protocol.ID) []byte {
 	t.Helper()
 
@@ -241,7 +254,7 @@ func TestBackfillFull_AllMigratedAndParity(t *testing.T) {
 	assert.Equal(t, int64(len(seeds)), summaryCount, "every torrent should have exactly one summary")
 
 	// Honest counter (no re-delivery overcount in a clean run).
-	assert.Equal(t, fmt.Sprintf("%d", len(seeds)), kvVal(t, db, kvKeyMigrated), "migrated_count must equal distinct torrents")
+	assert.Equal(t, int64(len(seeds)), migratedTotal(t, db), "migrated count must equal distinct torrents")
 
 	for _, s := range seeds {
 		fd := filesData(t, db, s.h)
@@ -310,12 +323,11 @@ func TestBackfillIdempotentRedelivery(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, fn(ctx, job))
-	migratedAfterFirst := kvVal(t, db, kvKeyMigrated)
-	assert.Equal(t, "5", migratedAfterFirst)
+	assert.Equal(t, int64(5), migratedTotal(t, db))
 
-	// Re-execute the SAME job (redelivery). NOT EXISTS => 0 work => counter unchanged, no error.
+	// Re-execute the SAME job (redelivery). files_data IS NULL => 0 work => counter unchanged, no error.
 	require.NoError(t, fn(ctx, job))
-	assert.Equal(t, "5", kvVal(t, db, kvKeyMigrated), "re-delivery must not double-count")
+	assert.Equal(t, int64(5), migratedTotal(t, db), "re-delivery must not double-count")
 
 	var summaryCount int64
 	require.NoError(t, db.Table("torrent_file_summary").Count(&summaryCount).Error)
@@ -383,7 +395,7 @@ func TestBackfillResume(t *testing.T) {
 	var total int64
 	require.NoError(t, db.Table("torrent_file_summary").Count(&total).Error)
 	assert.Equal(t, int64(n), total, "resume migrates the rest with no gaps/dupes")
-	assert.Equal(t, fmt.Sprintf("%d", n), kvVal(t, db, kvKeyMigrated))
+	assert.Equal(t, int64(n), migratedTotal(t, db))
 }
 
 func make20(n int, format string) []string {

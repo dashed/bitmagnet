@@ -21,13 +21,14 @@ import (
 
 const (
 	kvKeyStatus     = "blob_migration:status"
-	kvKeyMigrated   = "blob_migration:migrated_count"
 	kvKeyTotal      = "blob_migration:total_count"
 	kvKeyStartedAt  = "blob_migration:started_at"
 	kvKeyVerifiedAt = "blob_migration:verified_at"
-	// Per-range checkpoint + done-flag key prefixes (suffixed with the range id).
-	kvKeyCursorPrefix = "blob_migration:cursor:"
-	kvKeyRangePrefix  = "blob_migration:range:"
+	// Per-range checkpoint, done-flag, and migrated-counter key prefixes (suffixed with the range id).
+	// migrated is per-range (summed for status) to avoid single-row contention at high concurrency.
+	kvKeyCursorPrefix   = "blob_migration:cursor:"
+	kvKeyRangePrefix    = "blob_migration:range:"
+	kvKeyMigratedPrefix = "blob_migration:migrated:"
 
 	statusRunning   = "running"
 	statusPaused    = "paused"
@@ -109,8 +110,8 @@ func (p Params) startCmd() *cli.Command {
 				}
 
 				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
-					Exec("DELETE FROM key_values WHERE key LIKE ? OR key LIKE ?",
-						kvKeyCursorPrefix+"%", kvKeyRangePrefix+"%").Error; err != nil {
+					Exec("DELETE FROM key_values WHERE key LIKE ? OR key LIKE ? OR key LIKE ?",
+						kvKeyCursorPrefix+"%", kvKeyRangePrefix+"%", kvKeyMigratedPrefix+"%").Error; err != nil {
 					return fmt.Errorf("clearing range state: %w", err)
 				}
 
@@ -126,7 +127,6 @@ func (p Params) startCmd() *cli.Command {
 					kvKeyStatus:    statusRunning,
 					kvKeyTotal:     strconv.FormatInt(totalCount, 10),
 					kvKeyStartedAt: now.Format(time.RFC3339),
-					kvKeyMigrated:  "0",
 				} {
 					if err := upsertKV(ctx, d, k, v, now); err != nil {
 						return err
@@ -194,7 +194,23 @@ func (p Params) statusCmd() *cli.Command {
 			tw.AppendHeader(table.Row{"Property", "Value"})
 			tw.AppendRow(table.Row{"Status", status})
 
-			migrated, _ := strconv.ParseInt(m[kvKeyMigrated], 10, 64)
+			// Sum the per-range migrated counters + count active/done ranges.
+			var migrated int64
+
+			rangesDone, rangesActive := 0, 0
+
+			for k, v := range m {
+				switch {
+				case strings.HasPrefix(k, kvKeyMigratedPrefix):
+					n, _ := strconv.ParseInt(v, 10, 64)
+					migrated += n
+
+					rangesActive++
+				case strings.HasPrefix(k, kvKeyRangePrefix) && v == "done":
+					rangesDone++
+				}
+			}
+
 			total, _ := strconv.ParseInt(m[kvKeyTotal], 10, 64)
 			tw.AppendRow(table.Row{"Migrated", migrated})
 			tw.AppendRow(table.Row{"Total", total})
@@ -204,16 +220,10 @@ func (p Params) statusCmd() *cli.Command {
 				tw.AppendRow(table.Row{"Progress", fmt.Sprintf("%.1f%%", pct)})
 			}
 
-			rangesDone := 0
-			for k, v := range m {
-				if strings.HasPrefix(k, kvKeyRangePrefix) && v == "done" {
-					rangesDone++
-				}
-			}
-
-			if rangesDone > 0 {
-				tw.AppendRow(table.Row{"Ranges done", rangesDone})
-			}
+			tw.AppendRow(table.Row{
+				"Ranges",
+				fmt.Sprintf("%d done / %d total", rangesDone, rangesActive+rangesDone),
+			})
 
 			if startedAt := m[kvKeyStartedAt]; startedAt != "" {
 				t, parseErr := time.Parse(time.RFC3339, startedAt)

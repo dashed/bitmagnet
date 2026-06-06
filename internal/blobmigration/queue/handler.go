@@ -23,22 +23,30 @@ import (
 )
 
 const (
-	kvKeyStatus   = "blob_migration:status"
-	kvKeyMigrated = "blob_migration:migrated_count"
-	// Per-range checkpoint + done-flag keys: "<prefix><rangeID>".
-	kvKeyCursorPrefix = "blob_migration:cursor:"
-	kvKeyRangePrefix  = "blob_migration:range:"
+	kvKeyStatus = "blob_migration:status"
+	// Per-range checkpoint, done-flag, and migrated-counter keys: "<prefix><rangeID>". The migrated
+	// counter is per-range (each range is written by exactly one worker at a time) to avoid the
+	// single-row lock contention a global counter caused at high concurrency; status sums them.
+	kvKeyCursorPrefix   = "blob_migration:cursor:"
+	kvKeyRangePrefix    = "blob_migration:range:"
+	kvKeyMigratedPrefix = "blob_migration:migrated:"
 
 	statusRunning   = "running"
 	statusCompleted = "completed"
 
-	// DefaultChunkSize is the number of torrents (distinct info_hashes) processed per chunk.
+	// DefaultChunkSize is the number of torrents (distinct info_hashes) processed per chunk. Bounded
+	// by the pgx 65535-param cap (summary INSERT = 10 params/row -> <=6553); keep headroom.
 	DefaultChunkSize = 2000
 	// DefaultConcurrency is the default number of parallel info_hash-range workers.
 	DefaultConcurrency = 8
+	// maxChunkRows caps the torrent_files rows buffered per chunk so a giant-torrent region (up to
+	// 500k files/torrent) can't blow up memory at K-way concurrency. A chunk stops at a torrent
+	// boundary once this is exceeded (but always processes at least one torrent).
+	maxChunkRows = 200000
+	// dispatchCheckInterval is the blob handler's queue poll interval (see CheckInterval rationale).
+	dispatchCheckInterval = 25 * time.Millisecond
 
-	consistencySampleRate = 0.05
-	maxErrorRate          = 0.01
+	consistencyChecksPerChunk = 2
 )
 
 type Params struct {
@@ -66,6 +74,10 @@ func New(p Params) Result {
 				return handler.Handler{}, err
 			}
 
+			p.Logger.Infow("blob-migration handler initialised",
+				"concurrency", concurrency, "checkInterval", dispatchCheckInterval.String(),
+				"defaultChunkSize", DefaultChunkSize)
+
 			return handler.New(
 				MessageName,
 				newHandleFunc(d, p.Logger),
@@ -73,6 +85,10 @@ func New(p Params) Result {
 				// Parallel range-workers: K jobs are seeded by `start`, each owning a disjoint
 				// info_hash range; Concurrency(K) lets the queue server run them simultaneously.
 				handler.Concurrency(concurrency),
+				// The default 30s check interval makes the dispatcher effectively serial (it only
+				// re-checks right after a job completes); a low value lets it ramp the pool to
+				// Concurrency and hold it. Blob handler only.
+				handler.CheckInterval(dispatchCheckInterval),
 			), nil
 		}),
 	}
@@ -106,6 +122,8 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 			return fmt.Errorf("parsing upper bound: %w", err)
 		}
 
+		chunkStart := time.Now()
+
 		// Phase 1: the next chunk's distinct info_hashes (keyset, raw-bytea bounds, skipping already-
 		// migrated torrents). Empty => this range is positionally complete.
 		hashes, err := chunkHashes(ctx, d, lower, hasLower, upper, hasUpper, chunkSize)
@@ -117,12 +135,20 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 			return finishRange(ctx, d, msg, logger)
 		}
 
-		// Phase 2: read every file for those torrents in ONE bounded, ordered scan; group in Go.
+		// Phase 2: read every file for those torrents in ONE bounded, ordered scan (capped at
+		// maxChunkRows so a giant-torrent region can't blow up memory at K-way concurrency); group in Go.
 		maxHash := hashes[len(hashes)-1]
 
-		torrents, err := readChunkFiles(ctx, d, lower, hasLower, maxHash)
+		torrents, effectiveMax, err := readChunkFiles(ctx, d, lower, hasLower, maxHash)
 		if err != nil {
 			return fmt.Errorf("reading chunk files: %w", err)
+		}
+
+		// Advance to the last fully-read torrent; if this window had no files at all (all filesless),
+		// skip past them to the chunkHashes max so the range still progresses (no re-selection loop).
+		cursor := maxHash
+		if len(torrents) > 0 {
+			cursor = effectiveMax
 		}
 
 		migrated, verifyErrors, err := flushChunk(ctx, d, torrents, logger)
@@ -130,18 +156,25 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 			return err
 		}
 
-		if err := setRangeProgress(ctx, d, msg.RangeID, maxHash.String(), migrated); err != nil {
+		if err := setRangeProgress(ctx, d, msg.RangeID, cursor.String(), migrated); err != nil {
 			return err
 		}
 
-		if verifyErrors > 0 {
-			errorRate := float64(verifyErrors) / float64(len(torrents))
-			if errorRate > maxErrorRate {
-				logger.Warnw("blob migration paused due to high error rate",
-					"errorRate", errorRate, "errors", verifyErrors, "checked", len(torrents))
+		logger.Infow("blob chunk done",
+			"range", msg.RangeID,
+			"migrated", migrated,
+			"torrents", len(torrents),
+			"cursor", cursor.String()[:12],
+			"ms", time.Since(chunkStart).Milliseconds(),
+		)
 
-				return upsertKV(ctx, d, kvKeyStatus, "paused:high_error_rate")
-			}
+		// Pause only if EVERY sampled torrent in the chunk failed its consistency check (a systematic
+		// corruption signal); a lone transient mismatch is just logged in flushChunk.
+		if consistencyChecksPerChunk > 0 && verifyErrors >= consistencyChecksPerChunk {
+			logger.Warnw("blob migration paused: all sampled consistency checks failed",
+				"errors", verifyErrors, "checked", consistencyChecksPerChunk, "range", msg.RangeID)
+
+			return upsertKV(ctx, d, kvKeyStatus, "paused:high_error_rate")
 		}
 
 		// Respect a user pause before self-chaining.
@@ -151,7 +184,7 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 		}
 
 		nextJob, err := NewQueueJob(MessageParams{
-			InfoHashGreaterThan: maxHash.String(),
+			InfoHashGreaterThan: cursor.String(),
 			InfoHashLessOrEqual: msg.InfoHashLessOrEqual,
 			RangeID:             msg.RangeID,
 			NumRanges:           msg.NumRanges,
@@ -220,15 +253,16 @@ func chunkHashes(
 	return hashes, err
 }
 
-// readChunkFiles reads every torrent_files row for info_hash in (lower, maxHash] in one ordered scan
-// and groups them by info_hash (preserving index order). maxHash is the chunk's largest hash, so all
-// torrents are read completely.
+// readChunkFiles reads torrent_files rows for info_hash in (lower, maxHash] in one ordered scan and
+// groups them by info_hash (preserving index order). It stops at a torrent boundary once maxChunkRows
+// rows are buffered (but always returns at least one torrent, even a giant one), bounding memory at
+// K-way concurrency. effectiveMax is the largest fully-read info_hash (the cursor to advance to).
 func readChunkFiles(
 	ctx context.Context,
 	d *dao.Query,
 	lower protocol.ID, hasLower bool,
 	maxHash protocol.ID,
-) ([]chunkTorrent, error) {
+) (out []chunkTorrent, effectiveMax protocol.ID, err error) {
 	q := d.TorrentFile.UnderlyingDB().WithContext(ctx).
 		Table("torrent_files tf").
 		Select(`tf.info_hash, tf."index", tf.path, tf.size, tf.extension`).
@@ -242,33 +276,48 @@ func readChunkFiles(
 
 	rows, err := q.Rows()
 	if err != nil {
-		return nil, err
+		return nil, protocol.ID{}, err
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	var (
-		out     []chunkTorrent
-		cur     *chunkTorrent
-		curHash protocol.ID
+		cur      *chunkTorrent
+		curHash  protocol.ID
+		rowCount int
 	)
 
 	for rows.Next() {
 		var f model.TorrentFile
 		if scanErr := d.TorrentFile.UnderlyingDB().ScanRows(rows, &f); scanErr != nil {
-			return nil, scanErr
+			return nil, protocol.ID{}, scanErr
 		}
 
 		if cur == nil || f.InfoHash != curHash {
+			// At a torrent boundary: stop once we've buffered enough rows, but keep at least one
+			// torrent (a single giant torrent that alone exceeds the cap is still processed whole).
+			if len(out) > 0 && rowCount >= maxChunkRows {
+				break
+			}
+
 			out = append(out, chunkTorrent{infoHash: f.InfoHash})
 			cur = &out[len(out)-1]
 			curHash = f.InfoHash
 		}
 
 		cur.files = append(cur.files, f)
+		rowCount++
 	}
 
-	return out, rows.Err()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, protocol.ID{}, rowsErr
+	}
+
+	if len(out) > 0 {
+		effectiveMax = out[len(out)-1].infoHash
+	}
+
+	return out, effectiveMax, nil
 }
 
 // flushChunk serializes each torrent's blob/summary and writes the whole chunk in ONE transaction
@@ -399,11 +448,11 @@ func flushChunk(
 
 	migrated = len(preps)
 
-	// 5% consistency sample (idempotent, read-only) — same safety valve as before.
-	for _, p := range preps {
-		if rand.Float64() >= consistencySampleRate {
-			continue
-		}
+	// Consistency sample: a few random torrents per chunk (was a synchronous re-read of 5% of EVERY
+	// torrent, i.e. ~100 extra round-trips/chunk — far too heavy at K-way concurrency). Across the
+	// whole run this is still thousands of checks, enough to catch systematic corruption.
+	for range consistencyChecksPerChunk {
+		p := preps[rand.IntN(len(preps))]
 
 		result, checkErr := consistency.CheckTorrent(ctx, d, p.infoHash)
 		if checkErr != nil {
@@ -420,7 +469,9 @@ func flushChunk(
 	return migrated, verifyErrors, nil
 }
 
-// setRangeProgress checkpoints this range's cursor + adds to the global (concurrency-safe) counter.
+// setRangeProgress checkpoints this range's cursor + increments its PER-RANGE migrated counter. A
+// per-range counter (written by exactly one worker at a time) avoids the single-row lock contention
+// a global counter caused at high concurrency; status sums all blob_migration:migrated:<id> keys.
 func setRangeProgress(ctx context.Context, d *dao.Query, rangeID int, cursorHex string, migrated int) error {
 	if err := upsertKV(ctx, d, rangeCursorKey(rangeID), cursorHex); err != nil {
 		return err
@@ -432,7 +483,7 @@ func setRangeProgress(ctx context.Context, d *dao.Query, rangeID int, cursorHex 
 				"ON CONFLICT (key) DO UPDATE SET "+
 				"value = (COALESCE(key_values.value, '0')::int + EXCLUDED.value::int)::text, "+
 				"updated_at = EXCLUDED.updated_at",
-			kvKeyMigrated, strconv.Itoa(migrated), time.Now(), time.Now(),
+			rangeMigratedKey(rangeID), strconv.Itoa(migrated), time.Now(), time.Now(),
 		).Error
 	}
 
@@ -468,8 +519,9 @@ func finishRange(ctx context.Context, d *dao.Query, msg *MessageParams, logger *
 	return nil
 }
 
-func rangeCursorKey(rangeID int) string { return kvKeyCursorPrefix + strconv.Itoa(rangeID) }
-func rangeDoneKey(rangeID int) string   { return kvKeyRangePrefix + strconv.Itoa(rangeID) }
+func rangeCursorKey(rangeID int) string   { return kvKeyCursorPrefix + strconv.Itoa(rangeID) }
+func rangeDoneKey(rangeID int) string     { return kvKeyRangePrefix + strconv.Itoa(rangeID) }
+func rangeMigratedKey(rangeID int) string { return kvKeyMigratedPrefix + strconv.Itoa(rangeID) }
 
 func upsertKV(ctx context.Context, d *dao.Query, key, value string) error {
 	now := time.Now()
