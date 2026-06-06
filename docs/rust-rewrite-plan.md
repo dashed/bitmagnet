@@ -312,6 +312,20 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 
 **GO/NO-GO: Week 13** — Is Tantivy stable at 100%? If yes, proceed to Rust port.
 
+### Phase 3.5 (optional, additive): File-Grained Search Index (P2)
+
+A **second Tantivy index, one doc per file**, on the **same sidecar** restores true per-file search ("find all .mkv > 1 GB" with exact ext+size pairing) — impossible on the torrent-grained index (Tantivy 0.26 has no nested docs). Additive and reversible; no PG schema change. Independent of the phase numbering — it can land any time after the sidecar exists.
+
+- **Where:** a 2nd index directory `/index/files/` alongside `/index/torrents/` on the existing 200 Gi PVC.
+- **Source of truth:** the **16 GB `files_data` blob** (not the 873 M `torrent_files` rows) — `backfill_files` decodes one blob per torrent → N file docs.
+- **Identity:** `doc_id = hex(info_hash):file_index`; **delete-by-`info_hash`** (upsert = term-delete + re-add N).
+- **Denormalization (immutable only):** copy down `content_type` + `published_at`; **never `seeders`/`leechers`** (scrape-mutable → would force constant file-doc rewrites). Staleness is thus eliminated by construction.
+- **Not stored:** `path`/`size` hydrated from the blob at serve time → index stays **+8–15 GB** (v1 ≈ 8–12 GB; path FTS is the only expensive axis, deferred to v1.1).
+- **Write path:** +1 fire-and-forget `BatchIndexFiles` per torrent_content in `persist.go` (no-op when disabled; guarded on fileset/content-type change).
+- **Validation:** pre-cutover, `torrent_files` gives an **exact** parity ground truth — gate set-equality before D1.
+
+Full spec: `docs/dev/file-grained-search-spec.md`; option analysis: `docs/dev/perfile-search-with-blob-design.md` (P2).
+
 ### Phase 7: Classifier Rust Port (Weeks 16-21)
 
 | Task                 | Description                                       | Estimate |
@@ -518,22 +532,22 @@ search:
 
 ## Coexistence / Keep-Everything Mode (no drops)
 
-The phased plan above is written as "migrate → **cutover (drop)** → reclaim." But every phase is *also* deployable in **keep-everything mode**: run dual-write + Tantivy + BEP-52 v2 while dropping **no** table, trading the disk reclaim for full reversibility. This is the recommended posture for a reversibility-first operator until each cutover is explicitly approved.
+The phased plan above is written as "migrate → **cutover (drop)** → reclaim." But every phase is _also_ deployable in **keep-everything mode**: run dual-write + Tantivy + BEP-52 v2 while dropping **no** table, trading the disk reclaim for full reversibility. This is the recommended posture for a reversibility-first operator until each cutover is explicitly approved.
 
-**Why it works:** every **new forward-path** migration (`00021`, `00022`, and the rewritten `00023` below) is **additive — zero Up-section `DROP`**. (Historical `00002`–`00020` carry Up-section drops, but they were applied long ago; baseline `main` ships ≤`00020`.) P2/P3/P4 add **no migrations at all** (`00021`+`00022` only); Tantivy's index is **out-of-Postgres**, so adopting it never touches the PG schema. The `SearchRouter` defaults to `engine=postgres`, so Tantivy runs *alongside* PG FTS (shadow/canary) until you flip it.
+**Why it works:** every **new forward-path** migration (`00021`, `00022`, and the rewritten `00023` below) is **additive — zero Up-section `DROP`**. (Historical `00002`–`00020` carry Up-section drops, but they were applied long ago; baseline `main` ships ≤`00020`.) P2/P3/P4 add **no migrations at all** (`00021`+`00022` only); Tantivy's index is **out-of-Postgres**, so adopting it never touches the PG schema. The `SearchRouter` defaults to `engine=postgres`, so Tantivy runs _alongside_ PG FTS (shadow/canary) until you flip it.
 
 **Deferred-drops registry — the complete set of destructive steps (none run in keep-everything mode):**
 
-| # | Trigger | Frees | Gate |
-|---|---|---|---|
-| D0a/b | `DROP INDEX torrent_files_{size,extension}_idx` (0 scans) | 8.2 + 5.8 GB | manual |
-| **D1** | `blob-migration cleanup --confirm` → **`DROP TABLE torrent_files`** + facet→JSONB + blob-only reads | **276 GB** (DB ~397→~121 GB; `DROP TABLE` frees to OS immediately) | `verify --full` 100% + 0 unmigrated + verify <24 h + `--confirm` + backup. **First irreversible step.** |
-| D2 | Phase-6 Tantivy cutover → `DROP INDEX torrent_contents` tsv GIN | 14 GB | Tantivy @100% canary, Jaccard >0.7@top-20/95%, no latency regression |
-| — | 🚨 **keep** `content.tsv` GIN (31 MB, **650K scans, actively used**) — Tantivy replaces `torrent_contents` FTS, not this | — | — |
+| #      | Trigger                                                                                                                  | Frees                                                              | Gate                                                                                                    |
+| ------ | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| D0a/b  | `DROP INDEX torrent_files_{size,extension}_idx` (0 scans)                                                                | 8.2 + 5.8 GB                                                       | manual                                                                                                  |
+| **D1** | `blob-migration cleanup --confirm` → **`DROP TABLE torrent_files`** + facet→JSONB + blob-only reads                      | **276 GB** (DB ~397→~121 GB; `DROP TABLE` frees to OS immediately) | `verify --full` 100% + 0 unmigrated + verify <24 h + `--confirm` + backup. **First irreversible step.** |
+| D2     | Phase-6 Tantivy cutover → `DROP INDEX torrent_contents` tsv GIN                                                          | 14 GB                                                              | Tantivy @100% canary, Jaccard >0.7@top-20/95%, no latency regression                                    |
+| —      | 🚨 **keep** `content.tsv` GIN (31 MB, **650K scans, actively used**) — Tantivy replaces `torrent_contents` FTS, not this | —                                                                  | —                                                                                                       |
 
 **Disk (order matters):** keep-everything **grows** the DB (every copy is additive) and Tantivy adds **+40–78 GB** → ~440–475 GB with no cutover; cutover D1 first → then Tantivy → ~160–200 GB. The headline win is the **276 GB `torrent_files` drop (D1)**; Tantivy alone is ~disk-neutral (it offsets the 14 GB GIN it lets you drop). With ~1.1 TB free, carrying both copies indefinitely is fine.
 
-**Write amplification:** persist fans out to up to four sinks — `torrent_files` rows · `files_data` blob+`file_extensions` (same tx) · Tantivy `IndexDocument` (post-commit, **fire-and-forget**, no-op when `SEARCH_ENABLED=false`) · `info_hash_v1/v2`+`meta_version` columns. All additive; none on the served read path.
+**Write amplification:** persist fans out to up to four sinks — `torrent_files` rows · `files_data` blob+`file_extensions` (same tx) · Tantivy `IndexDocument` (post-commit, **fire-and-forget**, no-op when `SEARCH_ENABLED=false`) · `info_hash_v1/v2`+`meta_version` columns. All additive; none on the served read path. _(Optional 5th sink with the file-grained index (Phase 3.5): a `BatchIndexFiles` per torrent_content — post-commit, fire-and-forget, no-op when disabled, **once per ingest/re-classification — NOT per scrape**, because only immutable fields are denormalized.)_
 
 **Rollback:** "redeploy the old image" works right up until the **first** drop (old goose sees ≤`00020` → no-op; GORM ignores unknown columns/tables). After D1 the system is forward-only. 🚫 never `goose down` (its Down drops `files_data` etc.).
 
@@ -545,4 +559,4 @@ The phased plan above is written as "migrate → **cutover (drop)** → reclaim.
 2. **New `00024_v2_infohash_indexes.sql` (`-- +goose NO TRANSACTION`, mirrors `00022`):**
    `CREATE INDEX CONCURRENTLY IF NOT EXISTS torrents_info_hash_v2_idx ON torrents (info_hash_v2) WHERE info_hash_v2 IS NOT NULL` — **partial**, since the only filter is the dedup lookup `info_hash_v2 IN (…)` (`internal/dhtcrawler/persist.go:351`), which never matches NULL → the planner uses it and the index holds only hybrid/v2 rows. **Defer the `info_hash_v1` index** — no query filters that column on the v2 branches.
 3. **Operational `v2-backfill` CLI** (clone `blobmigrationcmd`'s KV-cursor/status/pause-resume skeleton; **a simple single-keyset loop, NOT the parallel range-worker infra** — the per-row work is a server-side set UPDATE, so workers/zstd are pure overhead): keyset on the PK, per page `UPDATE torrents SET info_hash_v1=info_hash, meta_version=1 WHERE info_hash > $cur AND info_hash <= $last AND meta_version IS NULL` (the `meta_version IS NULL` guard ⇒ idempotent/resumable), batch ~5–20k, sleep between, **runs after startup — never gates `/status`** (~4,800 batches).
-4. **No transitional guards needed — read paths are already NULL-tolerant**, so the backfill is for *completeness*, not correctness: `MagnetURI` (`internal/model/torrents.go:99-119`) falls back to the PK `info_hash` when `info_hash_v1`/`v2` are NULL; the dedup `IN (…)` skips NULL rows; GraphQL `infoHashV2`/`metaVersion` are nullable. New crawler rows are **born complete** (`persist.go:243-245` ← `protocol/metainfo/parse.go:54-66`); only pre-existing (and importer-path) rows stay NULL until the backfill, all covered by the PK fallback.
+4. **No transitional guards needed — read paths are already NULL-tolerant**, so the backfill is for _completeness_, not correctness: `MagnetURI` (`internal/model/torrents.go:99-119`) falls back to the PK `info_hash` when `info_hash_v1`/`v2` are NULL; the dedup `IN (…)` skips NULL rows; GraphQL `infoHashV2`/`metaVersion` are nullable. New crawler rows are **born complete** (`persist.go:243-245` ← `protocol/metainfo/parse.go:54-66`); only pre-existing (and importer-path) rows stay NULL until the backfill, all covered by the PK fallback.

@@ -224,12 +224,13 @@ The earlier "40-50 GB" estimate was incorrect — it didn't fully account for `t
 
 With optional additions:
 
-| Addition                    | Extra Disk | Extra RAM | Purpose                              |
-| --------------------------- | ---------- | --------- | ------------------------------------ |
-| PG summary table            | +12-15 GB  | shared    | Extension/size filters, facet counts |
-| Manticore Search (columnar) | +50-80 GB  | 2-4 GB    | Full FTS on file paths               |
-| Tantivy (embedded)          | +37-74 GB  | 8-16 GB   | Full FTS, no external service        |
-| DuckDB analytics            | +0 GB      | 2-8 GB    | Analytical queries on Parquet blobs  |
+| Addition                        | Extra Disk | Extra RAM | Purpose                                           |
+| ------------------------------- | ---------- | --------- | ------------------------------------------------- |
+| PG summary table                | +12-15 GB  | shared    | Extension/size filters, facet counts              |
+| Manticore Search (columnar)     | +50-80 GB  | 2-4 GB    | Full FTS on file paths                            |
+| Tantivy (embedded)              | +37-74 GB  | 8-16 GB   | Full FTS, no external service                     |
+| DuckDB analytics                | +0 GB      | 2-8 GB    | Analytical queries on Parquet blobs               |
+| File-grained Tantivy (per-file) | +8-15 GB   | +2-4 GB   | True per-file search (ext+size pairing, path FTS) |
 
 ### Projected Total with Search Engine
 
@@ -242,6 +243,10 @@ With optional additions:
 | **Blob + Manticore + ZFS**  | ~46 GB  | 20-32 GB     | **~66-78 GB**   | +2-4 GB   |
 
 Note: ZFS compression applies to both the database and any on-disk search index (Manticore columnar compresses further under ZFS).
+
+### Per-File Search Capability — chosen path
+
+The hybrid-blob migration trades fleet-wide per-file SQL for blob compactness. To **restore true per-file search** ("the .mkv _itself_ > 1 GB" — a conjunction the summary table and the torrent-grained Tantivy index cannot express, since Tantivy 0.26 has no nested docs), the chosen path is **P2: a second, file-grained Tantivy index (1 doc/file) on the existing sidecar** (+8–15 GB, +2–4 GB RAM) — _not_ a slim PG `torrent_file` table (which would re-bloat 68–92 GB, the exact cost the blob migration removed). It is backfilled from the 16 GB blob (not the 873 M rows) and denormalizes only immutable torrent fields. See [`dev/perfile-search-with-blob-design.md`](./dev/perfile-search-with-blob-design.md) (option matrix) and [`dev/file-grained-search-spec.md`](./dev/file-grained-search-spec.md) (implementation spec).
 
 ### Approach Details
 

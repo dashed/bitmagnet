@@ -189,6 +189,13 @@ Legend: ✅ Compliant · 🟡 Partial · ❌ Non-compliant · ⚪ N/A · 🔵 De
 > recoverable on the ut_metadata crawl path, so they remain out of scope. Full design +
 > decision record: `docs/dev/g1a-v2-foundation-spec.md`.
 
+> **G1d ↔ file-grained search convergence.** The proposed **file-grained Tantivy index**
+> (one doc per _file_; `docs/dev/file-grained-search-spec.md`) is the natural home for BEP-52
+> **per-file identity** — v2 makes files first-class with per-file merkle roots, which map
+> directly onto one-doc-per-file granularity. When G1d (Rust reads `info_hash_v2`/`meta_version`)
+> lands, the file index can carry per-file v2 attributes without further schema churn (the file
+> index is a disposable, rebuildable cache — a schema bump just triggers a re-backfill).
+
 ---
 
 ## 5. High-relevance BEPs — detailed findings
