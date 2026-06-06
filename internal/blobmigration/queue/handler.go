@@ -216,6 +216,7 @@ func upsertFileSummary(ctx context.Context, d *dao.Query, summary model.TorrentF
 	summary.UpdatedAt = now
 
 	return d.Torrent.UnderlyingDB().WithContext(ctx).
+		Table("torrent_file_summary").
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "info_hash"}},
 			DoUpdates: clause.AssignmentColumns(
@@ -241,7 +242,7 @@ func setProgress(ctx context.Context, d *dao.Query, cursor string, batchMigrated
 	upsertKV := func(key, value string) error {
 		kv := model.KeyValue{Key: key, Value: value, CreatedAt: now, UpdatedAt: now}
 
-		return db.Clauses(clause.OnConflict{
+		return db.Table("key_values").Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 		}).Create(&kv).Error

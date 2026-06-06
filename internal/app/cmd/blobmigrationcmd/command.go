@@ -516,6 +516,7 @@ func upsertKV(ctx *cli.Context, d *dao.Query, key, value string, now time.Time) 
 	kv := model.KeyValue{Key: key, Value: value, CreatedAt: now, UpdatedAt: now}
 
 	return d.Torrent.UnderlyingDB().WithContext(ctx.Context).
+		Table("key_values").
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
