@@ -296,16 +296,35 @@ The file index + the blob together restore — and exceed — `torrent_files`' q
 
 File-level results are already **exact** (count, offset/limit, sort). The gap is only the optional **collapse-to-torrent** view (D6), where `total_hits` counts files, not torrents.
 
-**Resolution (two tiers):**
+**Resolution (three tiers):**
 
 - **Exact count for a bounded match set:** retrieve the matching `info_hash`es and dedup into a set (exact distinct-torrent count), or run a `terms` aggregation on the `info_hash` fast field. Feasible whenever the filtered match set is not enormous — which the typical `ext + size` query is. Surface this as the exact path; fall back to the HLL/cardinality estimate (`totalCountIsEstimate=true`) only above a configured match-set cap, and `log()` when the cap trips.
-- **Deep, stable pagination of _distinct torrents_:** genuinely hard — Tantivy 0.26 has **no native collapse/group-by**. App-side dedup windows work for shallow pages but not deep ones. This stays a documented limitation unless we adopt a Tantivy version with collapsing or maintain a torrent-grained companion (rejected — that is the slim-table re-bloat trap). In practice avoided by defaulting to **file-level** results (`collapse=false`).
+- **Exact count _and_ deep stable pagination for one-sided size thresholds — a small per-(torrent, extension) aggregate (recommended option).** Maintain a slim table/index keyed `(info_hash, extension)` carrying `max_size` (and optionally `min_size`, `file_count`) for that extension within the torrent: `max_size ≥ T ⟺ the torrent has an <ext> file ≥ T`. This pairs extension with a size aggregate **at torrent granularity**, so a plain SQL `WHERE extension='mkv' AND max_size > 1e9` gives an **exact distinct-torrent result with trivial, stable deep pagination and arbitrary joins** — the thing Tantivy 0.26 cannot collapse. Cost: ~3.1 distinct extensions/torrent × 16.86 M = **~52 M rows (~3–5 GB)**, vs the 873 M-row slim per-file table (68–92 GB). **Limitation:** aggregates answer **one-sided** thresholds exactly (`> T` via `max_size`, `< T` via `min_size`) but **not two-sided ranges** (e.g. "an mkv in [1, 2] GB" — a torrent with a 0.5 GB and a 5 GB mkv has `max>2` yet may have none in range); two-sided ranges and per-file results still need the file index (file-level, exact) or a blob refine. Build it from the same blob pass as the file-index backfill (a cheap GROUP BY per torrent); it can live in PG (queryable alongside `torrent_file_summary`) or as denormalized fields on the file index — PG recommended for the join-friendliness.
+- **General deep pagination of _distinct torrents_ (two-sided / path-FTS predicates):** still the hard floor — Tantivy 0.26 has **no native collapse/group-by**, and the aggregate above only covers one-sided size thresholds. App-side dedup windows work shallow, not deep. Mitigated by defaulting to **file-level** results (`collapse=false`); fully closing it would need a Tantivy version with collapsing (rejected: the 873 M-row slim table re-bloat trap).
 
 ### 13.3 Arbitrary SQL analytics / joins — DuckDB-on-blobs (complementary tool)
 
 `torrent_files` being a SQL table allowed ad-hoc analytics (histograms, percentiles, GROUP BY, joins). A search index is the wrong tool for that. The right one is **P1 from the design doc — DuckDB over the blobs**: decode `files_data` → `(info_hash, index, path, extension, size)` (reuse `deserialize_files`) on demand, or via a small periodic Parquet export, and run full SQL. ≈0 persistent storage (or a small Parquet side file). This is **not** part of the file-index build — it is the analytics companion, listed in the rollout (§11.7) and in [`perfile-search-with-blob-design.md`](./perfile-search-with-blob-design.md) (P1).
 
-**Net:** #13.1 and #13.3 are fully closed (a cheap hydration fix already owed by the blob migration; an already-planned companion tool). #13.2 is closed for the common bounded case; only deep distinct-torrent pagination has a hard floor in Tantivy 0.26.
+### 13.4 Parity vs disk — the tradeoff curve
+
+"Best parity" is a choice on a curve, not a single answer. The truest parity is simply **not dropping `torrent_files`** (it _is_ the table); everything below trades faithfulness for the ~273 GB reclaim. Recorded so the decision is explicit:
+
+| Option                                                 | Parity completeness                                                       | Latency | Extra disk                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------- | ------- | -------------------------- |
+| Keep `torrent_files` (defer cutover — today's posture) | 100% (the table itself)                                                   | —       | +273 GB (i.e. no reclaim)  |
+| Slim PG `torrent_file` table (one store)               | ~100% incl. deep distinct-torrent paging + arbitrary joins                | <50 ms  | +68–92 GB ❌ re-bloat trap |
+| **File-grained Tantivy index (this spec)**             | per-file search/filter/facet + path FTS; torrent-collapse paging caveated | <50 ms  | **+8–15 GB**               |
+| **+ per-(torrent,ext) aggregate (§13.2)**              | adds exact distinct-torrent counts + deep paging for one-sided thresholds | <50 ms  | +3–5 GB                    |
+| DuckDB-on-blobs (§13.3)                                | **exact per-file _and_ arbitrary SQL/analytics**                          | 1–10 s  | **+0 GB**                  |
+
+Key reads from the curve:
+
+- **The most space-efficient exact-parity option is DuckDB-on-blobs (+0 GB)** — it even exceeds the index (arbitrary joins/aggregations). The index's _sole_ advantage is interactive latency (<50 ms) + path FTS. If per-keystroke speed isn't required, exact parity already exists at zero extra disk.
+- The recommended **space-conscious interactive composition** is **blob (browse/hydrate) + file-grained index (interactive per-file search) + the small per-(torrent,ext) aggregate (exact torrent-level counts/paging) + DuckDB-on-blobs (analytics)** — ~11–20 GB total to cover, interactively, what the 273 GB table did. The cost is **more moving parts (3–4 stores) vs one SQL table**, not lost capability.
+- The slim per-file PG table is the only single-store full-parity-with-low-latency option, and it is rejected purely on the +68–92 GB re-bloat — the exact cost the blob migration removed.
+
+**Net:** #13.1 and #13.3 are fully closed (a cheap hydration fix already owed by the blob migration; an already-planned 0 GB companion tool). #13.2 is closed for bounded match sets, and — with the optional ~3–5 GB per-(torrent,ext) aggregate — **also for exact counts + deep pagination on one-sided size thresholds** (the common case); only two-sided-range / path-FTS deep distinct-torrent pagination retains a hard floor in Tantivy 0.26. Full literal parity in a single store remains the (rejected-on-size) slim PG table or simply keeping `torrent_files`.
 
 ---
 
