@@ -432,20 +432,23 @@ func (p Params) verifyCmd() *cli.Command {
 				return err
 			}
 
-			var sampleSize int
+			parallelism := int(p.Config.Parallelism)
+			if parallelism < 1 {
+				parallelism = queue.DefaultConcurrency
+			}
+
+			chunkSize := int(p.Config.ChunkSize)
+			if chunkSize < 1 {
+				chunkSize = queue.DefaultChunkSize
+			}
+
+			// sampleSize 0 = full. Parallel streaming (no ORDER BY RANDOM / join / per-torrent reads).
+			sampleSize := 0
 			if ctx.Bool("full") {
-				var count int64
-				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
-					Table("torrents").
-					Where("files_data IS NOT NULL").
-					Count(&count).Error; err != nil {
-					return fmt.Errorf("counting migrated torrents: %w", err)
-				}
-				sampleSize = int(count)
 				_, _ = fmt.Fprintf(
 					ctx.App.Writer,
-					"Running full verification on %d torrents...\n",
-					sampleSize,
+					"Running full parallel verification (%d workers, chunk %d)...\n",
+					parallelism, chunkSize,
 				)
 			} else {
 				var count int64
@@ -455,15 +458,20 @@ func (p Params) verifyCmd() *cli.Command {
 					Count(&count).Error; err != nil {
 					return fmt.Errorf("counting migrated torrents: %w", err)
 				}
+
 				sampleSize = int(float64(count) * ctx.Float64("sample-rate"))
 				if sampleSize < 1 {
 					sampleSize = 1
 				}
-				_, _ = fmt.Fprintf(ctx.App.Writer, "Sampling %d of %d migrated torrents (%.0f%%)...\n",
-					sampleSize, count, ctx.Float64("sample-rate")*100)
+
+				_, _ = fmt.Fprintf(
+					ctx.App.Writer,
+					"Sampling %d of %d migrated torrents (%.0f%%, %d workers)...\n",
+					sampleSize, count, ctx.Float64("sample-rate")*100, parallelism,
+				)
 			}
 
-			summary, err := consistency.CheckRandom(ctx.Context, d, sampleSize)
+			summary, err := consistency.CheckAll(ctx.Context, d, parallelism, chunkSize, sampleSize)
 			if err != nil {
 				return fmt.Errorf("verification failed: %w", err)
 			}
