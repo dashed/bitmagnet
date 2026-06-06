@@ -189,7 +189,7 @@ type TorrentFileSearchItem {
 }
 ```
 
-**Resolver flow:** map input → `SearchFiles` → hits carry only `(info_hash, file_index, score)`; collect distinct info_hashes; **one** PG round-trip hydrates the `Torrent`s (whose `AfterFind` already decoded the blob); resolve `matchedFiles` from `torrent.Files[file_index]` (the D8 hydrate-from-blob step); **single-file** items re-synthesize the `{name, ext, size}` triple (no blob to read). `collapse=false`: one item/hit, `totalCount = total_hits` exact. `collapse=true`: group by info_hash in-page, `totalCount` = approximate distinct-torrent cardinality, `totalCountIsEstimate=true`, with a documented page-straddle caveat. **No PG fallback** when disabled → typed "file search not enabled" error.
+**Resolver flow:** map input → `SearchFiles` → hits carry only `(info_hash, file_index, score)`; collect distinct info_hashes; **one** PG round-trip hydrates the `Torrent`s (whose `AfterFind` already decoded the blob); resolve `matchedFiles` from `torrent.Files[file_index]` (the D8 hydrate-from-blob step); **single-file** items re-synthesize the `{name, ext, size}` triple (no blob to read). Per-file `createdAt`/`updatedAt` are **hydrated from the parent torrent's timestamps** (see §13.1 — the blob carries no per-file timestamps, and they are crawl-time-uniform anyway). `collapse=false`: one item/hit, `totalCount = total_hits` exact. `collapse=true`: group by info_hash in-page, `totalCount` = approximate distinct-torrent cardinality, `totalCountIsEstimate=true`, with a documented page-straddle caveat (see §13.2 for the exact-bounded-count option). **No PG fallback** when disabled → typed "file search not enabled" error.
 
 ---
 
@@ -265,7 +265,8 @@ type TorrentFileSearchItem {
 4. **Go v1**: `BuildFileDocuments` + `FileClient` + guarded dual-write + `filesearch.Service` + GraphQL `fileSearch` + searchfx gate.
 5. **Backfill Job** + pre-cutover **set-equality parity gate**.
 6. **v1.1** (opt-in): add tokenized `path` + path-FTS query, after smoke-sizing.
-7. **Cross-ref G1d**: file index carries per-file v2 merkle identity when G1d lands.
+7. **Analytics (complementary, not this index):** DuckDB-on-blobs for ad-hoc per-file SQL — see §13.3. ≈0 persistent storage; not part of the index build.
+8. **Cross-ref G1d**: file index carries per-file v2 merkle identity when G1d lands.
 
 Each step is additive, reversible, and disabled by default (`SEARCH_FILE_INDEX_ENABLED=false`).
 
@@ -279,7 +280,36 @@ Each step is additive, reversible, and disabled by default (`SEARCH_FILE_INDEX_E
 
 ---
 
-## 13. Source references
+## 13. Parity with `torrent_files` — closing the three caveats
+
+The file index + the blob together restore — and exceed — `torrent_files`' query surface (per-file `ext+size` filter, path FTS, per-file facets via the index; per-torrent file listing + metadata hydration via the blob). Three residual gaps vs. the old table, and how each is closed:
+
+### 13.1 Per-file `created_at` / `updated_at` — hydrate from the parent torrent (cheap)
+
+`torrent_files` carried per-file `created_at`/`updated_at` (`internal/model/torrent_files.gen.go`); the blob stores only `{index, path, extension, size}` (`blob.rs:31-46`), so neither the blob nor the file index has them. But those rows are **insert-once and never updated** (`INSERT … ON CONFLICT DO NOTHING`, per the crawl persist path), so per-file timestamps are **crawl-time-uniform across a torrent's files** — i.e. effectively torrent-level already.
+
+**Resolution:** hydrate `TorrentFile.createdAt`/`updatedAt` (both non-null in the GraphQL `TorrentFile` type) from the **parent torrent's** `created_at`/`updated_at` at serve time. Zero storage, semantically equivalent. Storing real per-file timestamps in the blob is rejected (≈14 GB for two timestamps × 873 M files, for no behavioural gain).
+
+> **Note — this is a pre-existing blob-migration gap, not introduced here.** The blob-based file browser already loses per-file timestamps post-cutover (the blob never stored them); the GraphQL `TorrentFile.createdAt/updatedAt` fields would read zero. The fix belongs in the blob/file-browser hydration regardless of the file index — fold it into the blob-migration read path and the file-search resolver alike.
+
+### 13.2 Exact distinct-_torrent_ counts — exact for bounded sets; deep paging is the hard floor
+
+File-level results are already **exact** (count, offset/limit, sort). The gap is only the optional **collapse-to-torrent** view (D6), where `total_hits` counts files, not torrents.
+
+**Resolution (two tiers):**
+
+- **Exact count for a bounded match set:** retrieve the matching `info_hash`es and dedup into a set (exact distinct-torrent count), or run a `terms` aggregation on the `info_hash` fast field. Feasible whenever the filtered match set is not enormous — which the typical `ext + size` query is. Surface this as the exact path; fall back to the HLL/cardinality estimate (`totalCountIsEstimate=true`) only above a configured match-set cap, and `log()` when the cap trips.
+- **Deep, stable pagination of _distinct torrents_:** genuinely hard — Tantivy 0.26 has **no native collapse/group-by**. App-side dedup windows work for shallow pages but not deep ones. This stays a documented limitation unless we adopt a Tantivy version with collapsing or maintain a torrent-grained companion (rejected — that is the slim-table re-bloat trap). In practice avoided by defaulting to **file-level** results (`collapse=false`).
+
+### 13.3 Arbitrary SQL analytics / joins — DuckDB-on-blobs (complementary tool)
+
+`torrent_files` being a SQL table allowed ad-hoc analytics (histograms, percentiles, GROUP BY, joins). A search index is the wrong tool for that. The right one is **P1 from the design doc — DuckDB over the blobs**: decode `files_data` → `(info_hash, index, path, extension, size)` (reuse `deserialize_files`) on demand, or via a small periodic Parquet export, and run full SQL. ≈0 persistent storage (or a small Parquet side file). This is **not** part of the file-index build — it is the analytics companion, listed in the rollout (§11.7) and in [`perfile-search-with-blob-design.md`](./perfile-search-with-blob-design.md) (P1).
+
+**Net:** #13.1 and #13.3 are fully closed (a cheap hydration fix already owed by the blob migration; an already-planned companion tool). #13.2 is closed for the common bounded case; only deep distinct-torrent pagination has a hard floor in Tantivy 0.26.
+
+---
+
+## 14. Source references
 
 - **No-nested-docs proof / single-writer / schema-match / fast-field range:** `tantivy/src/query/boolean_query/boolean_query.rs:421-447`, `tantivy/src/index/index.rs:218-231,539-558,613`, `tantivy/src/indexer/index_writer.rs:672-680`, `tantivy/src/query/range_query/range_query.rs:102-117`, `tantivy/columnar/src/lib.rs:82`.
 - **Existing sidecar surfaces:** `bitmagnet-rs/crates/bitmagnet-search/src/{schema.rs,index.rs,indexer.rs,server.rs,transform.rs,bin/backfill.rs}`, `proto/bitmagnet/search.proto`.
