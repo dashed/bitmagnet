@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/consistency"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -53,17 +54,40 @@ func setupIntegrationDB(t *testing.T) *gorm.DB {
 	require.NoError(t, goose.UpContext(context.Background(), sqlDB, "."))
 
 	t.Cleanup(reset)
+
 	return db
+}
+
+// hashFromBytes builds an info_hash from leading bytes (zero-padded). Lets tests place torrents at
+// chosen points in the keyspace (incl. the <0x30 / >0x66 zone the old hex-string cursor mis-bound).
+func hashFromBytes(b ...byte) protocol.ID {
+	var id protocol.ID
+	copy(id[:], b)
+
+	return id
 }
 
 func seedTorrentWithFiles(t *testing.T, db *gorm.DB, infoHash protocol.ID, numFiles int) {
 	t.Helper()
+
+	paths := make([]string, numFiles)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("videos/file_%03d.mkv", i)
+	}
+
+	seedTorrentPaths(t, db, infoHash, paths)
+}
+
+// seedTorrentPaths inserts a torrent + its torrent_files rows with the given paths.
+func seedTorrentPaths(t *testing.T, db *gorm.DB, infoHash protocol.ID, paths []string) {
+	t.Helper()
+
 	now := time.Now()
 
 	torrent := model.Torrent{
 		InfoHash:    infoHash,
-		Name:        fmt.Sprintf("regression-%x", infoHash[:4]),
-		Size:        uint(numFiles * 1000),
+		Name:        fmt.Sprintf("t-%x", infoHash[:4]),
+		Size:        uint(len(paths) * 1000),
 		FilesStatus: model.FilesStatusMulti,
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -72,177 +96,301 @@ func seedTorrentWithFiles(t *testing.T, db *gorm.DB, infoHash protocol.ID, numFi
 		Omit("Extension", "FilesCount", "Hint", "Contents", "Sources", "Files", "Pieces", "Tags", "FilesData", "FileExts").
 		Create(&torrent).Error)
 
-	files := make([]model.TorrentFile, numFiles)
-	for i := range files {
+	if len(paths) == 0 {
+		return
+	}
+
+	files := make([]model.TorrentFile, len(paths))
+	for i, p := range paths {
 		files[i] = model.TorrentFile{
 			InfoHash:  infoHash,
 			Index:     uint(i),
-			Path:      fmt.Sprintf("videos/file_%03d.mkv", i),
+			Path:      p,
 			Size:      uint(1000 * (i + 1)),
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
 	}
+
 	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error)
 }
 
-// TestHandlerBatchWritesCorrectTables drives the REAL worker batch handler (newHandleFunc ->
-// processBatch -> updateTorrent + upsertFileSummary + setProgress) against a real Postgres schema.
-//
-// REGRESSION: before the table-binding fix, upsertFileSummary/setProgress wrote through the
-// torrents-bound session (d.Torrent.UnderlyingDB().Create(&nonTorrent)) and the batch failed with
-// `column ... of relation "torrents" does not exist`. The pre-existing e2e test missed this because
-// it reimplemented the writes with a clean *gorm.DB instead of calling the production functions.
-func TestHandlerBatchWritesCorrectTables(t *testing.T) {
-	db := setupIntegrationDB(t)
+// testRanges mirrors command.computeRanges: k disjoint, gap-free (lower, upper] info_hash ranges.
+func testRanges(k, chunkSize int) []MessageParams {
+	step := 256 / k
+
+	out := make([]MessageParams, 0, k)
+
+	for i := 0; i < k; i++ {
+		var lower, upper string
+
+		if i > 0 {
+			lower = hashFromBytes(byte(i * step)).String()
+		}
+
+		if i < k-1 {
+			upper = hashFromBytes(byte((i + 1) * step)).String()
+		}
+
+		out = append(out, MessageParams{
+			InfoHashGreaterThan: lower,
+			InfoHashLessOrEqual: upper,
+			RangeID:             i,
+			NumRanges:           k,
+			ChunkSize:           chunkSize,
+		})
+	}
+
+	return out
+}
+
+// driveBackfill seeds k range jobs and drives them to completion in-process (standing in for the
+// queue server): repeatedly run every pending blob_migration job through the real handler, then
+// dequeue it, until none remain.
+func driveBackfill(t *testing.T, db *gorm.DB, k, chunkSize int) {
+	t.Helper()
+
 	ctx := context.Background()
 	d := dao.Use(db)
-
-	const n = 5
-	hashes := make([]protocol.ID, n)
-	for i := 0; i < n; i++ {
-		hashes[i] = makeInfoHash(byte(0x21 + i))
-		seedTorrentWithFiles(t, db, hashes[i], 3+i)
-	}
-
-	// Run one batch through the actual production handler. batchSize 1000 > n -> single final batch.
 	fn := newHandleFunc(d, zap.NewNop().Sugar())
-	job, err := NewQueueJob(MessageParams{BatchSize: 1000})
-	require.NoError(t, err)
-	require.NoError(t, fn(ctx, job),
-		"real batch handler must write key_values/torrent_file_summary to their OWN tables (table-binding regression)")
 
-	// files_data set on every torrent (updateTorrent -> torrents, already correct).
-	// NB: scan the bytea into a struct field, not a bare []byte (GORM reads []uint8 as a row slice).
-	for _, h := range hashes {
-		var row struct{ FilesData []byte }
-		require.NoError(t, db.Table("torrents").Select("files_data").Where("info_hash = ?", h).Scan(&row).Error)
-		assert.NotNil(t, row.FilesData, "files_data should be set for %x", h[:4])
+	for _, r := range testRanges(k, chunkSize) {
+		job, err := NewQueueJob(r)
+		require.NoError(t, err)
+		require.NoError(t, db.Create(&job).Error)
 	}
 
-	// torrent_file_summary populated 1:1 — the upsertFileSummary table-binding regression.
+	for iter := 0; ; iter++ {
+		require.Less(t, iter, 100000, "drive loop did not terminate")
+
+		var jobs []model.QueueJob
+		require.NoError(t, db.Where("queue = ? AND status = ?", MessageName, model.QueueJobStatusPending).
+			Find(&jobs).Error)
+
+		if len(jobs) == 0 {
+			break
+		}
+
+		for _, job := range jobs {
+			require.NoError(t, fn(ctx, job))
+			require.NoError(t, db.Exec("DELETE FROM queue_jobs WHERE id = ?", job.ID).Error)
+		}
+	}
+}
+
+func kvVal(t *testing.T, db *gorm.DB, key string) string {
+	t.Helper()
+
+	var v string
+
+	err := db.Table("key_values").Select("value").Where("key = ?", key).Scan(&v).Error
+	require.NoError(t, err)
+
+	return v
+}
+
+func filesData(t *testing.T, db *gorm.DB, h protocol.ID) []byte {
+	t.Helper()
+
+	var row struct{ FilesData []byte }
+
+	require.NoError(t, db.Table("torrents").Select("files_data").Where("info_hash = ?", h[:]).Scan(&row).Error)
+
+	return row.FilesData
+}
+
+// TestBackfillFull_AllMigratedAndParity drives the full parallel-range streaming backfill over a
+// varied set of torrents (different file counts, extension-less, CJK paths, and first-bytes spanning
+// the whole keyspace), with a small chunk size to force many chunks + range boundaries. It asserts
+// complete coverage, blob<->row parity, correct extensions, an HONEST migrated counter, and the
+// completion barrier.
+func TestBackfillFull_AllMigratedAndParity(t *testing.T) {
+	db := setupIntegrationDB(t)
+
+	type seed struct {
+		h     protocol.ID
+		paths []string
+	}
+
+	seeds := []seed{
+		{hashFromBytes(0x00, 0x01), []string{"a/movie.mkv", "a/subs.srt", "a/info.nfo"}}, // first byte < 0x30
+		{hashFromBytes(0x00, 0x02), []string{"README", "LICENSE"}},                       // extension-less -> '[]'
+		{hashFromBytes(0x10), []string{"x.mp4", "y.mp4", "z.txt", "w.jpg"}},
+		{hashFromBytes(0x33, 0x07), []string{"日本語/映画.mkv", "中文/电影.mp4"}}, // CJK
+		{hashFromBytes(0x66, 0x09), make20(40, "data/blob_%03d.bin")},    // many files
+		{hashFromBytes(0x80), []string{"only.flac"}},
+		{hashFromBytes(0xC0, 0x05), []string{"vid.mkv", "vid.idx", "vid.sub"}},
+		{hashFromBytes(0xFF, 0xFE), []string{"last.mkv", "last.nfo"}}, // first byte > 0x66
+	}
+	for _, s := range seeds {
+		seedTorrentPaths(t, db, s.h, s.paths)
+	}
+
+	// Mark a fresh migration started (the command normally does this).
+	require.NoError(t, db.Exec("INSERT INTO key_values (key,value,created_at,updated_at) VALUES (?,?,?,?)",
+		kvKeyStatus, statusRunning, time.Now(), time.Now()).Error)
+
+	driveBackfill(t, db, 4 /*ranges*/, 3 /*chunk*/)
+
+	// Completion barrier flipped status.
+	assert.Equal(t, statusCompleted, kvVal(t, db, kvKeyStatus))
+
+	// Every torrent migrated exactly once.
 	var summaryCount int64
 	require.NoError(t, db.Table("torrent_file_summary").Count(&summaryCount).Error)
-	assert.Equal(t, int64(n), summaryCount, "upsertFileSummary must write to torrent_file_summary, not torrents")
+	assert.Equal(t, int64(len(seeds)), summaryCount, "every torrent should have exactly one summary")
 
-	// key_values progress written — the setProgress/upsertKV table-binding regression.
-	var status string
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyStatus).Scan(&status).Error)
-	assert.Equal(t, "completed", status, "final batch (n<batchSize) should mark completed")
-	var migrated string
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyMigrated).Scan(&migrated).Error)
-	assert.Equal(t, fmt.Sprintf("%d", n), migrated)
+	// Honest counter (no re-delivery overcount in a clean run).
+	assert.Equal(t, fmt.Sprintf("%d", len(seeds)), kvVal(t, db, kvKeyMigrated), "migrated_count must equal distinct torrents")
 
-	// Guard: the KV/summary writes must not have leaked stray rows into torrents.
-	var torrentCount int64
-	require.NoError(t, db.Table("torrents").Count(&torrentCount).Error)
-	assert.Equal(t, int64(n), torrentCount, "no stray rows inserted into torrents")
+	for _, s := range seeds {
+		fd := filesData(t, db, s.h)
+		require.NotNil(t, fd, "files_data set for %x", s.h[:4])
+
+		blobFiles, err := blobmigration.DeserializeFiles(fd)
+		require.NoError(t, err)
+
+		var rows []model.TorrentFile
+		require.NoError(t, db.Table("torrent_files").Where("info_hash = ?", s.h[:]).Order(`"index"`).Find(&rows).Error)
+
+		res := consistency.CompareFiles(blobFiles, rows)
+		assert.True(t, res.Match, "blob<->row parity for %x: %+v", s.h[:4], res.Mismatches)
+	}
+
+	// Extension-less torrent gets '[]' (not NULL) in both columns.
+	noExt := hashFromBytes(0x00, 0x02)
+
+	var fe, ext string
+	require.NoError(t, db.Table("torrents").Select("file_extensions").Where("info_hash = ?", noExt[:]).Scan(&fe).Error)
+	require.NoError(t, db.Table("torrent_file_summary").Select("extensions").Where("info_hash = ?", noExt[:]).Scan(&ext).Error)
+	assert.Equal(t, "[]", fe)
+	assert.Equal(t, "[]", ext)
 }
 
-// TestSetProgressAndSummaryTargetTables is a focused unit-level regression on the two worker write
-// helpers, asserting each lands in its own table (independent of the full batch path).
-func TestSetProgressAndSummaryTargetTables(t *testing.T) {
+// TestBackfillByteaCursorCoverage is the regression for the hex-vs-bytea cursor bug: torrents whose
+// info_hash leading byte is OUTSIDE the ASCII-hex range (0x30-0x66) must still be covered. With the
+// old string-bound cursor they were skipped/misordered.
+func TestBackfillByteaCursorCoverage(t *testing.T) {
+	db := setupIntegrationDB(t)
+
+	firstBytes := []byte{0x00, 0x05, 0x2f, 0x30, 0x67, 0x90, 0xab, 0xfe, 0xff}
+	for i, fb := range firstBytes {
+		seedTorrentWithFiles(t, db, hashFromBytes(fb, byte(i)), 2)
+	}
+
+	require.NoError(t, db.Exec("INSERT INTO key_values (key,value,created_at,updated_at) VALUES (?,?,?,?)",
+		kvKeyStatus, statusRunning, time.Now(), time.Now()).Error)
+
+	driveBackfill(t, db, 4, 2)
+
+	var summaryCount int64
+	require.NoError(t, db.Table("torrent_file_summary").Count(&summaryCount).Error)
+	assert.Equal(t, int64(len(firstBytes)), summaryCount,
+		"all torrents across the keyspace (incl. <0x30 and >0x66 leading bytes) must be covered")
+}
+
+// TestBackfillIdempotentRedelivery proves a re-executed chunk (the queue's at-least-once delivery)
+// neither errors nor double-counts: the NOT EXISTS scan skips already-migrated torrents.
+func TestBackfillIdempotentRedelivery(t *testing.T) {
 	db := setupIntegrationDB(t)
 	ctx := context.Background()
 	d := dao.Use(db)
 
-	hash := makeInfoHash(0x71)
-	seedTorrentWithFiles(t, db, hash, 4)
-
-	// upsertFileSummary -> torrent_file_summary (NOT torrents). Build a complete summary via the
-	// production helper so all NOT NULL columns (e.g. extensions) are populated.
-	files := []model.TorrentFile{
-		{InfoHash: hash, Index: 0, Path: "a/movie.mkv", Extension: model.NewNullString("mkv"), Size: 4000},
-		{InfoHash: hash, Index: 1, Path: "a/subs.srt", Extension: model.NewNullString("srt"), Size: 50},
+	for i := 0; i < 5; i++ {
+		seedTorrentWithFiles(t, db, hashFromBytes(0x40, byte(i)), 3)
 	}
-	summary := blobmigration.BuildFileSummary(hash, files)
-	require.NoError(t, upsertFileSummary(ctx, d, summary))
-	var sc int64
-	require.NoError(t, db.Table("torrent_file_summary").Where("info_hash = ?", hash).Count(&sc).Error)
-	assert.Equal(t, int64(1), sc)
 
-	// setProgress -> key_values status + cursor + migrated_count (NOT torrents).
-	require.NoError(t, setProgress(ctx, d, hash.String(), 7, "running"))
-	var status, cursor, migrated string
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyStatus).Scan(&status).Error)
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyCursor).Scan(&cursor).Error)
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyMigrated).Scan(&migrated).Error)
-	assert.Equal(t, "running", status)
-	assert.Equal(t, hash.String(), cursor)
-	assert.Equal(t, "7", migrated)
-
-	// setProgress is additive on migrated_count (raw SQL increment).
-	require.NoError(t, setProgress(ctx, d, hash.String(), 3, "running"))
-	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyMigrated).Scan(&migrated).Error)
-	assert.Equal(t, "10", migrated)
-}
-
-// TestBackfillExtensionlessTorrent reproduces the real-prod stall: a multi-file torrent whose files
-// have NO extractable extension. ExtractUniqueExtensions returned a nil slice -> the json serializer
-// wrote SQL NULL -> `null value in column "extensions" of relation "torrent_file_summary"` (and the
-// same for torrents.file_extensions), both JSONB NOT NULL. Pre-fix the batch fails; post-fix the
-// empty set serializes to '[]'.
-func TestBackfillExtensionlessTorrent(t *testing.T) {
-	db := setupIntegrationDB(t)
-	ctx := context.Background()
-	d := dao.Use(db)
-
-	hash := makeInfoHash(0x91)
-	now := time.Now()
-	torrent := model.Torrent{
-		InfoHash: hash, Name: "extensionless", Size: 3000,
-		FilesStatus: model.FilesStatusMulti, CreatedAt: now, UpdatedAt: now,
-	}
-	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).
-		Omit("Extension", "FilesCount", "Hint", "Contents", "Sources", "Files", "Pieces", "Tags", "FilesData", "FileExts").
-		Create(&torrent).Error)
-	files := []model.TorrentFile{
-		{InfoHash: hash, Index: 0, Path: "README", Size: 1000, CreatedAt: now, UpdatedAt: now},
-		{InfoHash: hash, Index: 1, Path: "bin/payload", Size: 2000, CreatedAt: now, UpdatedAt: now},
-	}
-	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error)
+	require.NoError(t, db.Exec("INSERT INTO key_values (key,value,created_at,updated_at) VALUES (?,?,?,?)",
+		kvKeyStatus, statusRunning, time.Now(), time.Now()).Error)
 
 	fn := newHandleFunc(d, zap.NewNop().Sugar())
-	job, err := NewQueueJob(MessageParams{BatchSize: 1000})
+
+	// A single-range job covering everything, chunk big enough for all 5.
+	job, err := NewQueueJob(MessageParams{RangeID: 0, NumRanges: 1, ChunkSize: 100})
 	require.NoError(t, err)
-	require.NoError(t, fn(ctx, job), "batch must handle extension-less torrents (extensions -> '[]', not NULL)")
 
-	var ext string
-	require.NoError(t, db.Table("torrent_file_summary").Select("extensions").Where("info_hash = ?", hash).Scan(&ext).Error)
-	assert.Equal(t, "[]", ext, "extensionless torrent should get summary extensions '[]'")
+	require.NoError(t, fn(ctx, job))
+	migratedAfterFirst := kvVal(t, db, kvKeyMigrated)
+	assert.Equal(t, "5", migratedAfterFirst)
 
-	var fe string
-	require.NoError(t, db.Table("torrents").Select("file_extensions").Where("info_hash = ?", hash).Scan(&fe).Error)
-	assert.Equal(t, "[]", fe, "extensionless torrent should get file_extensions '[]'")
+	// Re-execute the SAME job (redelivery). NOT EXISTS => 0 work => counter unchanged, no error.
+	require.NoError(t, fn(ctx, job))
+	assert.Equal(t, "5", kvVal(t, db, kvKeyMigrated), "re-delivery must not double-count")
+
+	var summaryCount int64
+	require.NoError(t, db.Table("torrent_file_summary").Count(&summaryCount).Error)
+	assert.Equal(t, int64(5), summaryCount)
 }
 
-// TestSelfChainEnqueueIdempotentOnRetry reproduces the real-prod chain halt: the queue de-dups on
-// `fingerprint` and delivers at-least-once, so a re-executed batch re-enqueues its already-committed
-// next-job. Pre-fix that hit queue_jobs_fingerprint_idx (duplicate key) -> job fails -> chain halts.
-// Post-fix the enqueue is OnConflict DoNothing -> the retry is a clean no-op.
-func TestSelfChainEnqueueIdempotentOnRetry(t *testing.T) {
+// TestBackfillResume checkpoints per range and resumes from the checkpoint without redoing or
+// skipping work.
+func TestBackfillResume(t *testing.T) {
 	db := setupIntegrationDB(t)
 	ctx := context.Background()
 	d := dao.Use(db)
 
-	const n = 5
+	const n = 12
 	for i := 0; i < n; i++ {
-		seedTorrentWithFiles(t, db, makeInfoHash(byte(0xA1+i)), 3)
+		seedTorrentWithFiles(t, db, hashFromBytes(0x70, byte(i)), 2)
 	}
 
+	require.NoError(t, db.Exec("INSERT INTO key_values (key,value,created_at,updated_at) VALUES (?,?,?,?)",
+		kvKeyStatus, statusRunning, time.Now(), time.Now()).Error)
+
 	fn := newHandleFunc(d, zap.NewNop().Sugar())
-	// batchSize 2 < n -> not the last batch -> the handler enqueues a next-job.
-	job, err := NewQueueJob(MessageParams{BatchSize: 2})
+
+	// Process exactly one chunk of 4 (single range), then "pause" by NOT self-chaining further.
+	job, err := NewQueueJob(MessageParams{RangeID: 0, NumRanges: 1, ChunkSize: 4})
 	require.NoError(t, err)
+	require.NoError(t, fn(ctx, job))
 
-	require.NoError(t, fn(ctx, job), "first batch run should succeed + enqueue a next-job")
-	var pending int64
-	require.NoError(t, db.Table("queue_jobs").Where("queue = ? AND status = ?", "blob_migration", "pending").Count(&pending).Error)
-	require.Equal(t, int64(1), pending, "first run enqueues exactly one next-job")
+	var afterOne int64
+	require.NoError(t, db.Table("torrent_file_summary").Count(&afterOne).Error)
+	require.Equal(t, int64(4), afterOne, "first chunk migrates 4")
 
-	// Re-execute the SAME job (simulating the queue's at-least-once retry).
-	require.NoError(t, fn(ctx, job), "re-executing a batch must not error on the already-enqueued next-job")
-	var pendingAfter int64
-	require.NoError(t, db.Table("queue_jobs").Where("queue = ? AND status = ?", "blob_migration", "pending").Count(&pendingAfter).Error)
-	assert.Equal(t, int64(1), pendingAfter, "retry must not create a duplicate next-job")
+	cursor := kvVal(t, db, rangeCursorKey(0))
+	require.NotEmpty(t, cursor, "per-range cursor checkpointed")
+
+	// Simulate a pause/crash: the chain is stopped (clear any self-chained pending jobs).
+	require.NoError(t, db.Exec("DELETE FROM queue_jobs WHERE queue = ?", MessageName).Error)
+
+	// Resume: re-seed a job from the persisted checkpoint cursor, then drive to completion.
+	resumeJob, err := NewQueueJob(MessageParams{
+		InfoHashGreaterThan: cursor,
+		RangeID:             0,
+		NumRanges:           1,
+		ChunkSize:           4,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&resumeJob).Error)
+
+	for iter := 0; ; iter++ {
+		require.Less(t, iter, 10000)
+
+		var jobs []model.QueueJob
+		require.NoError(t, db.Where("queue = ? AND status = ?", MessageName, model.QueueJobStatusPending).Find(&jobs).Error)
+
+		if len(jobs) == 0 {
+			break
+		}
+
+		for _, j := range jobs {
+			require.NoError(t, fn(ctx, j))
+			require.NoError(t, db.Exec("DELETE FROM queue_jobs WHERE id = ?", j.ID).Error)
+		}
+	}
+
+	var total int64
+	require.NoError(t, db.Table("torrent_file_summary").Count(&total).Error)
+	assert.Equal(t, int64(n), total, "resume migrates the rest with no gaps/dupes")
+	assert.Equal(t, fmt.Sprintf("%d", n), kvVal(t, db, kvKeyMigrated))
+}
+
+func make20(n int, format string) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf(format, i)
+	}
+
+	return out
 }

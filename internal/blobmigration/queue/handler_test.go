@@ -63,11 +63,13 @@ func TestSelfChaining_NewJobCreated(t *testing.T) {
 	t.Parallel()
 
 	cursor := makeInfoHash(0xBB).String()
-	batchSize := 500
 
 	job, err := NewQueueJob(MessageParams{
 		InfoHashGreaterThan: cursor,
-		BatchSize:           batchSize,
+		InfoHashLessOrEqual: makeInfoHash(0xCC).String(),
+		RangeID:             3,
+		NumRanges:           8,
+		ChunkSize:           500,
 	})
 	require.NoError(t, err)
 
@@ -78,57 +80,41 @@ func TestSelfChaining_NewJobCreated(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
 	assert.Equal(t, cursor, params.InfoHashGreaterThan)
-	assert.Equal(t, 500, params.BatchSize)
+	assert.Equal(t, makeInfoHash(0xCC).String(), params.InfoHashLessOrEqual)
+	assert.Equal(t, 3, params.RangeID)
+	assert.Equal(t, 8, params.NumRanges)
+	assert.Equal(t, 500, params.ChunkSize)
 }
 
 func TestSelfChaining_DifferentFingerprints(t *testing.T) {
 	t.Parallel()
 
-	job1, err := NewQueueJob(MessageParams{
-		InfoHashGreaterThan: makeInfoHash(0x01).String(),
-		BatchSize:           100,
-	})
+	job1, err := NewQueueJob(MessageParams{InfoHashGreaterThan: makeInfoHash(0x01).String(), ChunkSize: 100})
 	require.NoError(t, err)
 
-	job2, err := NewQueueJob(MessageParams{
-		InfoHashGreaterThan: makeInfoHash(0x02).String(),
-		BatchSize:           100,
-	})
+	job2, err := NewQueueJob(MessageParams{InfoHashGreaterThan: makeInfoHash(0x02).String(), ChunkSize: 100})
 	require.NoError(t, err)
 
 	assert.NotEqual(t, job1.Fingerprint, job2.Fingerprint,
 		"jobs with different cursors must have different fingerprints")
 }
 
-func TestCompletion_NoSelfChain(t *testing.T) {
+// Different ranges (same cursor) must also have distinct fingerprints so K parallel range jobs
+// coexist in the queue.
+func TestSelfChaining_DifferentRangesDistinctFingerprints(t *testing.T) {
 	t.Parallel()
 
-	// When fewer results than batchSize are returned, the handler should NOT
-	// self-chain. We verify by checking that the message params for a "completed"
-	// state require no next job — the logic in handler.go checks
-	// len(infoHashes) < batchSize to decide.
-	batchSize := 1000
-	returnedCount := 500
-	assert.Less(t, returnedCount, batchSize, "completion detected when returned < batchSize")
-}
-
-func TestProgressTracking_MessageFormat(t *testing.T) {
-	t.Parallel()
-
-	job, err := NewQueueJob(MessageParams{
-		InfoHashGreaterThan: "",
-		BatchSize:           1000,
-	})
+	job0, err := NewQueueJob(MessageParams{RangeID: 0, NumRanges: 8, ChunkSize: 100})
 	require.NoError(t, err)
 
-	var params MessageParams
+	job1, err := NewQueueJob(MessageParams{RangeID: 1, NumRanges: 8, ChunkSize: 100})
+	require.NoError(t, err)
 
-	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
-	assert.Empty(t, params.InfoHashGreaterThan)
-	assert.Equal(t, 1000, params.BatchSize)
+	assert.NotEqual(t, job0.Fingerprint, job1.Fingerprint,
+		"jobs for different ranges must have different fingerprints")
 }
 
-func TestDefaultBatchSize(t *testing.T) {
+func TestDefaultChunkSize(t *testing.T) {
 	t.Parallel()
 
 	job, err := NewQueueJob(MessageParams{})
@@ -137,7 +123,8 @@ func TestDefaultBatchSize(t *testing.T) {
 	var params MessageParams
 
 	require.NoError(t, json.Unmarshal([]byte(job.Payload), &params))
-	assert.Equal(t, 1000, params.BatchSize)
+	assert.Equal(t, DefaultChunkSize, params.ChunkSize)
+	assert.Equal(t, 1, params.NumRanges)
 }
 
 func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
@@ -166,14 +153,4 @@ func TestConsistencyCheckPause_ErrorRateThreshold(t *testing.T) {
 				"errorRate=%.4f, threshold=%.4f", errorRate, maxErrorRate)
 		})
 	}
-}
-
-func TestMarshalJSON(t *testing.T) {
-	t.Parallel()
-
-	result := marshalJSON([]string{"mkv", "srt"})
-	assert.Equal(t, `["mkv","srt"]`, result)
-
-	result = marshalJSON([]string{})
-	assert.Equal(t, `[]`, result)
 }
