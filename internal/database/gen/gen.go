@@ -193,6 +193,14 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		}),
 		gen.FieldType("size", "uint"),
 		gen.FieldIgnore("tsv"),
+		gen.FieldRename("file_extensions", "FileExts"),
+		gen.FieldType("file_extensions", "[]string"),
+		gen.FieldGORMTag("file_extensions", func(tag field.GormTag) field.GormTag {
+			tag.Set("serializer", "json")
+			return tag
+		}),
+		gen.FieldJSONTag("file_extensions", "fileExtensions"),
+		gen.FieldJSONTag("files_data", "-"),
 		createdAtReadOnly,
 	)
 	metadataSources := g.GenerateModel(

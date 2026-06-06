@@ -4,11 +4,13 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli/args"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli/hooks"
+	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/blobmigrationcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/classifiercmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/configcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/processcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/reprocesscmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/workercmd"
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/blobmigrationfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking/blockingfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classifierfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
@@ -38,6 +40,7 @@ import (
 func New() fx.Option {
 	return fx.Module(
 		"app",
+		blobmigrationfx.New(),
 		blockingfx.New(),
 		classifierfx.New(),
 		configfx.New(),
@@ -64,6 +67,7 @@ func New() fx.Option {
 			cli.New,
 			hooks.New,
 			// cli commands:
+			blobmigrationcmd.New,
 			classifiercmd.New,
 			configcmd.New,
 			reprocesscmd.New,
