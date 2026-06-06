@@ -119,7 +119,12 @@ func newHandleFunc(d *dao.Query, logger *zap.SugaredLogger) handler.Func {
 			return fmt.Errorf("creating next job: %w", err)
 		}
 
-		return d.QueueJob.WithContext(ctx).Create(&nextJob)
+		// Idempotent enqueue: the queue de-dups on `fingerprint`, and the queue server delivers
+		// at-least-once. If this job is re-executed (its next-job was already committed before the
+		// job was marked done), a plain Create hits queue_jobs_fingerprint_idx -> the job errors ->
+		// retries -> re-processes the batch -> the chain thrashes/halts. DoNothing makes the
+		// re-enqueue a no-op (the next job is already queued), so the chain advances cleanly.
+		return d.QueueJob.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&nextJob)
 	}
 }
 

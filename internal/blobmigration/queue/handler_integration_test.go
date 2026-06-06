@@ -215,3 +215,34 @@ func TestBackfillExtensionlessTorrent(t *testing.T) {
 	require.NoError(t, db.Table("torrents").Select("file_extensions").Where("info_hash = ?", hash).Scan(&fe).Error)
 	assert.Equal(t, "[]", fe, "extensionless torrent should get file_extensions '[]'")
 }
+
+// TestSelfChainEnqueueIdempotentOnRetry reproduces the real-prod chain halt: the queue de-dups on
+// `fingerprint` and delivers at-least-once, so a re-executed batch re-enqueues its already-committed
+// next-job. Pre-fix that hit queue_jobs_fingerprint_idx (duplicate key) -> job fails -> chain halts.
+// Post-fix the enqueue is OnConflict DoNothing -> the retry is a clean no-op.
+func TestSelfChainEnqueueIdempotentOnRetry(t *testing.T) {
+	db := setupIntegrationDB(t)
+	ctx := context.Background()
+	d := dao.Use(db)
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		seedTorrentWithFiles(t, db, makeInfoHash(byte(0xA1+i)), 3)
+	}
+
+	fn := newHandleFunc(d, zap.NewNop().Sugar())
+	// batchSize 2 < n -> not the last batch -> the handler enqueues a next-job.
+	job, err := NewQueueJob(MessageParams{BatchSize: 2})
+	require.NoError(t, err)
+
+	require.NoError(t, fn(ctx, job), "first batch run should succeed + enqueue a next-job")
+	var pending int64
+	require.NoError(t, db.Table("queue_jobs").Where("queue = ? AND status = ?", "blob_migration", "pending").Count(&pending).Error)
+	require.Equal(t, int64(1), pending, "first run enqueues exactly one next-job")
+
+	// Re-execute the SAME job (simulating the queue's at-least-once retry).
+	require.NoError(t, fn(ctx, job), "re-executing a batch must not error on the already-enqueued next-job")
+	var pendingAfter int64
+	require.NoError(t, db.Table("queue_jobs").Where("queue = ? AND status = ?", "blob_migration", "pending").Count(&pendingAfter).Error)
+	assert.Equal(t, int64(1), pendingAfter, "retry must not create a duplicate next-job")
+}
