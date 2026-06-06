@@ -191,21 +191,31 @@ func chunkHashes(
 ) ([]protocol.ID, error) {
 	var hashes []protocol.ID
 
-	q := d.TorrentFile.UnderlyingDB().WithContext(ctx).
-		Table("torrent_files tf").
-		Select("DISTINCT tf.info_hash").
-		Where("NOT EXISTS (SELECT 1 FROM torrent_file_summary s WHERE s.info_hash = tf.info_hash)").
-		Order("tf.info_hash")
+	// Drive discovery from `torrents` (one row per info_hash, PK-ordered) filtered by the migrated
+	// flag `files_data IS NULL` — an index scan with the LIMIT pushed down, and the cursor sits at
+	// the migration frontier so the rows just ahead are all NULL (stays fast as ranges fill).
+	//
+	// The old `SELECT DISTINCT tf.info_hash FROM torrent_files ... NOT EXISTS(summary) ... LIMIT`
+	// forced a full ~46M-row Parallel Seq Scan + Hash Anti Join + Sort PER CHUNK (the LIMIT can't be
+	// pushed through DISTINCT+anti-join), which stalled the backfill at minutes-per-chunk.
+	//
+	// `files_data IS NULL` is also the idempotency guard: a re-delivered/forked chunk skips
+	// already-migrated torrents -> 0 work, honest counter (replaces the NOT EXISTS(summary) guard).
+	q := d.Torrent.UnderlyingDB().WithContext(ctx).
+		Table("torrents").
+		Select("info_hash").
+		Where("files_data IS NULL").
+		Order("info_hash")
 
 	if hasLower {
-		q = q.Where("tf.info_hash > ?", lower)
+		q = q.Where("info_hash > ?", lower)
 	}
 
 	if hasUpper {
-		q = q.Where("tf.info_hash <= ?", upper)
+		q = q.Where("info_hash <= ?", upper)
 	}
 
-	err := q.Limit(limit).Pluck("tf.info_hash", &hashes).Error
+	err := q.Limit(limit).Pluck("info_hash", &hashes).Error
 
 	return hashes, err
 }
