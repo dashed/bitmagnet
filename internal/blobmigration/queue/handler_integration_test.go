@@ -176,3 +176,42 @@ func TestSetProgressAndSummaryTargetTables(t *testing.T) {
 	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", kvKeyMigrated).Scan(&migrated).Error)
 	assert.Equal(t, "10", migrated)
 }
+
+// TestBackfillExtensionlessTorrent reproduces the real-prod stall: a multi-file torrent whose files
+// have NO extractable extension. ExtractUniqueExtensions returned a nil slice -> the json serializer
+// wrote SQL NULL -> `null value in column "extensions" of relation "torrent_file_summary"` (and the
+// same for torrents.file_extensions), both JSONB NOT NULL. Pre-fix the batch fails; post-fix the
+// empty set serializes to '[]'.
+func TestBackfillExtensionlessTorrent(t *testing.T) {
+	db := setupIntegrationDB(t)
+	ctx := context.Background()
+	d := dao.Use(db)
+
+	hash := makeInfoHash(0x91)
+	now := time.Now()
+	torrent := model.Torrent{
+		InfoHash: hash, Name: "extensionless", Size: 3000,
+		FilesStatus: model.FilesStatusMulti, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).
+		Omit("Extension", "FilesCount", "Hint", "Contents", "Sources", "Files", "Pieces", "Tags", "FilesData", "FileExts").
+		Create(&torrent).Error)
+	files := []model.TorrentFile{
+		{InfoHash: hash, Index: 0, Path: "README", Size: 1000, CreatedAt: now, UpdatedAt: now},
+		{InfoHash: hash, Index: 1, Path: "bin/payload", Size: 2000, CreatedAt: now, UpdatedAt: now},
+	}
+	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error)
+
+	fn := newHandleFunc(d, zap.NewNop().Sugar())
+	job, err := NewQueueJob(MessageParams{BatchSize: 1000})
+	require.NoError(t, err)
+	require.NoError(t, fn(ctx, job), "batch must handle extension-less torrents (extensions -> '[]', not NULL)")
+
+	var ext string
+	require.NoError(t, db.Table("torrent_file_summary").Select("extensions").Where("info_hash = ?", hash).Scan(&ext).Error)
+	assert.Equal(t, "[]", ext, "extensionless torrent should get summary extensions '[]'")
+
+	var fe string
+	require.NoError(t, db.Table("torrents").Select("file_extensions").Where("info_hash = ?", hash).Scan(&fe).Error)
+	assert.Equal(t, "[]", fe, "extensionless torrent should get file_extensions '[]'")
+}
