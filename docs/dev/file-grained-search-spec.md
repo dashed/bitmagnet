@@ -265,8 +265,9 @@ type TorrentFileSearchItem {
 4. **Go v1**: `BuildFileDocuments` + `FileClient` + guarded dual-write + `filesearch.Service` + GraphQL `fileSearch` + searchfx gate.
 5. **Backfill Job** + pre-cutover **set-equality parity gate**.
 6. **v1.1** (opt-in): add tokenized `path` + path-FTS query, after smoke-sizing.
-7. **Analytics (complementary, not this index):** DuckDB-on-blobs for ad-hoc per-file SQL — see §13.3. ≈0 persistent storage; not part of the index build.
-8. **Cross-ref G1d**: file index carries per-file v2 merkle identity when G1d lands.
+7. **Optional refinements (post-v1, from the design research):** (a) `DistinctTorrentCollector` for gated exact collapse deep-paging (§13.2); (b) a bucketed-size vector on the per-(torrent,ext) aggregate for two-sided distinct-torrent queries at bucket precision; (c) a ~0.3 GB composite-term field on the _existing_ torrent index as a cheap interim before this index ships. Rationale + rejected alternatives: [`perfile-search-innovative-design.md`](./perfile-search-innovative-design.md).
+8. **Analytics (complementary, not this index):** DuckDB-on-blobs for ad-hoc per-file SQL — see §13.3. ≈0 persistent storage; not part of the index build.
+9. **Cross-ref G1d**: file index carries per-file v2 merkle identity when G1d lands.
 
 Each step is additive, reversible, and disabled by default (`SEARCH_FILE_INDEX_ENABLED=false`).
 
@@ -292,7 +293,7 @@ The file index + the blob together restore — and exceed — `torrent_files`' q
 
 > **Note — this is a pre-existing blob-migration gap, not introduced here.** The blob-based file browser already loses per-file timestamps post-cutover (the blob never stored them); the GraphQL `TorrentFile.createdAt/updatedAt` fields would read zero. The fix belongs in the blob/file-browser hydration regardless of the file index — fold it into the blob-migration read path and the file-search resolver alike.
 
-### 13.2 Exact distinct-_torrent_ counts — exact for bounded sets; deep paging is the hard floor
+### 13.2 Exact distinct-_torrent_ counts — exact for bounded sets; deep paging via a gated custom collector
 
 File-level results are already **exact** (count, offset/limit, sort). The gap is only the optional **collapse-to-torrent** view (D6), where `total_hits` counts files, not torrents.
 
@@ -300,7 +301,7 @@ File-level results are already **exact** (count, offset/limit, sort). The gap is
 
 - **Exact count for a bounded match set:** retrieve the matching `info_hash`es and dedup into a set (exact distinct-torrent count), or run a `terms` aggregation on the `info_hash` fast field. Feasible whenever the filtered match set is not enormous — which the typical `ext + size` query is. Surface this as the exact path; fall back to the HLL/cardinality estimate (`totalCountIsEstimate=true`) only above a configured match-set cap, and `log()` when the cap trips.
 - **Exact count _and_ deep stable pagination for one-sided size thresholds — a small per-(torrent, extension) aggregate (recommended option).** Maintain a slim table/index keyed `(info_hash, extension)` carrying `max_size` (and optionally `min_size`, `file_count`) for that extension within the torrent: `max_size ≥ T ⟺ the torrent has an <ext> file ≥ T`. This pairs extension with a size aggregate **at torrent granularity**, so a plain SQL `WHERE extension='mkv' AND max_size > 1e9` gives an **exact distinct-torrent result with trivial, stable deep pagination and arbitrary joins** — the thing Tantivy 0.26 cannot collapse. Cost: ~3.1 distinct extensions/torrent × 16.86 M = **~52 M rows (~3–5 GB)**, vs the 873 M-row slim per-file table (68–92 GB). **Limitation:** aggregates answer **one-sided** thresholds exactly (`> T` via `max_size`, `< T` via `min_size`) but **not two-sided ranges** (e.g. "an mkv in [1, 2] GB" — a torrent with a 0.5 GB and a 5 GB mkv has `max>2` yet may have none in range); two-sided ranges and per-file results still need the file index (file-level, exact) or a blob refine. Build it from the same blob pass as the file-index backfill (a cheap GROUP BY per torrent); it can live in PG (queryable alongside `torrent_file_summary`) or as denormalized fields on the file index — PG recommended for the join-friendliness.
-- **General deep pagination of _distinct torrents_ (two-sided / path-FTS predicates):** still the hard floor — Tantivy 0.26 has **no native collapse/group-by**, and the aggregate above only covers one-sided size thresholds. App-side dedup windows work shallow, not deep. Mitigated by defaulting to **file-level** results (`collapse=false`); fully closing it would need a Tantivy version with collapsing (rejected: the 873 M-row slim table re-bloat trap).
+- **General deep pagination of _distinct torrents_ (two-sided / path-FTS predicates):** **not a hard engine limit** — a ~150-LOC custom Tantivy `Collector` (`DistinctTorrentCollector`) closes it _in-engine_, exact, for all predicates incl. two-sided ranges and path-FTS (two-phase: per-segment `info_hash`→max-size group map, merge on info_hash bytes, deterministic `(size desc, info_hash asc)` deep paging). The price is a query-time match-set scan (collapse forfeits TopDocs early-termination), so gate it behind a selectivity cap → over cap, fall back to the aggregate/HLL. Default v1 avoids it entirely by serving **file-level** results (`collapse=false`). Design + source citations: [`perfile-search-innovative-design.md`](./perfile-search-innovative-design.md) §2.1. (The 873 M-row slim PG table remains rejected — re-bloat trap.)
 
 ### 13.3 Arbitrary SQL analytics / joins — DuckDB-on-blobs (complementary tool)
 
@@ -324,7 +325,7 @@ Key reads from the curve:
 - The recommended **space-conscious interactive composition** is **blob (browse/hydrate) + file-grained index (interactive per-file search) + the small per-(torrent,ext) aggregate (exact torrent-level counts/paging) + DuckDB-on-blobs (analytics)** — ~11–20 GB total to cover, interactively, what the 273 GB table did. The cost is **more moving parts (3–4 stores) vs one SQL table**, not lost capability.
 - The slim per-file PG table is the only single-store full-parity-with-low-latency option, and it is rejected purely on the +68–92 GB re-bloat — the exact cost the blob migration removed.
 
-**Net:** #13.1 and #13.3 are fully closed (a cheap hydration fix already owed by the blob migration; an already-planned 0 GB companion tool). #13.2 is closed for bounded match sets, and — with the optional ~3–5 GB per-(torrent,ext) aggregate — **also for exact counts + deep pagination on one-sided size thresholds** (the common case); only two-sided-range / path-FTS deep distinct-torrent pagination retains a hard floor in Tantivy 0.26. Full literal parity in a single store remains the (rejected-on-size) slim PG table or simply keeping `torrent_files`.
+**Net:** #13.1 and #13.3 are fully closed (a cheap hydration fix already owed by the blob migration; an already-planned 0 GB companion tool). #13.2 is closed for bounded match sets, and — with the optional ~3–5 GB per-(torrent,ext) aggregate — **also for exact counts + deep pagination on one-sided size thresholds** (the common case); two-sided-range / path-FTS deep distinct-torrent pagination is closed too via the **gated custom collapse collector** (no longer a hard floor — see [`perfile-search-innovative-design.md`](./perfile-search-innovative-design.md)), at the price of a query-time match-set scan. Full literal parity in a single store remains the (rejected-on-size) slim PG table or simply keeping `torrent_files`.
 
 ---
 
