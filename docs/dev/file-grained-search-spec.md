@@ -137,7 +137,7 @@ Mirror `backfill.rs` (keyset loop, commit interval, `--after-*` resume, blob-err
 
 ### 5.1 `tantivy/document.go` — `BuildFileDocuments` + `FileDocID`
 
-Go twin of `backfill_files.rs` (byte-parity discipline like `BuildDocument`). `extension` comes from the **stored blob value**, not re-derived from path (parity with `fileExtensions()`). `FileDocID = hex(info_hash) + ":" + file_index`. Emits the **synthetic single-file doc** (D5). **[PARITY]** the `content_type` copy-down rule must match the Rust backfill (use the torrent's distinct content types; `UNKNOWN`/empty if unclassified).
+Go twin of `backfill_files.rs` (byte-parity discipline like `BuildDocument`). **`extension` is derived from the file path via `model.FileExtensionFromPath` — NOT the blob's stored `extension` value, which is empty for crawl-path torrents (G1; see [`perfile-search-complete-parity.md`](./perfile-search-complete-parity.md) §2). The path-derived regex is byte-identical to the dropped `torrent_files.extension` generated column, so this is exact parity, and matches `fileExtensions()`/`ExtractUniqueExtensions`.** `FileDocID = hex(info_hash) + ":" + file_index`. Emits the **synthetic single-file doc** (D5). **[PARITY]** the `content_type` copy-down rule must match the Rust backfill (use the torrent's distinct content types; `UNKNOWN`/empty if unclassified).
 
 ### 5.2 `tantivy/client.go` — `FileClient`
 
@@ -252,7 +252,7 @@ type TorrentFileSearchItem {
 ## 10. [PARITY] cross-boundary contracts (must match Go ↔ Rust)
 
 1. `doc_id` = `hex(info_hash):file_index` exactly.
-2. A `FileDocument` built by Go from a torrent's blob is field-identical to one `backfill_files.rs` builds from the same blob (extension from stored blob value; single-file synthesis D5; the content_type copy-down rule).
+2. A `FileDocument` built by Go from a torrent's blob is field-identical to one `backfill_files.rs` builds from the same blob (**extension derived from path via `FileExtensionFromPath`, never the blob's stored value — G1**; single-file synthesis D5; the content_type copy-down rule).
 3. Round-trip: `IndexFiles` a torrent then `SearchFiles(ext=X, size_min=N)` returns exactly the satisfying files. Add a cross-system parity test (mirror the existing torrent `DocID`/`BuildDocument` parity test).
 
 ---
@@ -260,16 +260,19 @@ type TorrentFileSearchItem {
 ## 11. Phased rollout
 
 1. **Spec** (this doc) — done.
-2. **Proto + regen** `pb` (both services).
-3. **Rust v1**: `file_schema` (no path) + `file_indexer` + `backfill_files` + `server` handlers + 2nd-index wiring in `main`.
-4. **Go v1**: `BuildFileDocuments` + `FileClient` + guarded dual-write + `filesearch.Service` + GraphQL `fileSearch` + searchfx gate.
-5. **Backfill Job** + pre-cutover **set-equality parity gate**.
-6. **v1.1** (opt-in): add tokenized `path` + path-FTS query, after smoke-sizing.
-7. **Optional refinements (post-v1, from the design research):** (a) `DistinctTorrentCollector` for gated exact collapse deep-paging (§13.2); (b) a bucketed-size vector on the per-(torrent,ext) aggregate for two-sided distinct-torrent queries at bucket precision; (c) a ~0.3 GB composite-term field on the _existing_ torrent index as a cheap interim before this index ships. Rationale + rejected alternatives: [`perfile-search-innovative-design.md`](./perfile-search-innovative-design.md).
-8. **Analytics (complementary, not this index):** DuckDB-on-blobs for ad-hoc per-file SQL — see §13.3. ≈0 persistent storage; not part of the index build.
-9. **Cross-ref G1d**: file index carries per-file v2 merkle identity when G1d lands.
+2. **G1 — extension-from-path correctness fix (PREREQUISITE, 0 GB):** derive `extension` via `FileExtensionFromPath` in the Go builder, Rust backfill, blob-read/hydration, and the aggregate key — never the empty blob `e`. Add an `extension` field to the consistency checker so the bug can't re-hide. See [`perfile-search-complete-parity.md`](./perfile-search-complete-parity.md) §2.
+3. **G2 — re-point `TorrentQuery.files` at the blob (PREREQUISITE, 0 GB):** reimplement the per-torrent file browser over `torrent.FilesData` (in-memory orderBy/pagination/totalCount/hasNextPage + PG NULL-ordering + multi-infoHash merge) so it survives `DROP TABLE torrent_files`. + timestamp (from `torrent.created_at`) and `ORDER BY index` re-sort hydration.
+4. **Proto + regen** `pb` (both services).
+5. **Rust v1**: `file_schema` (no path) + `file_indexer` + `backfill_files` + `server` handlers + 2nd-index wiring in `main`.
+6. **Go v1**: `BuildFileDocuments` + `FileClient` + guarded dual-write + `filesearch.Service` + GraphQL `fileSearch` + searchfx gate.
+7. **Per-(torrent,ext) aggregate `{max,min,count}` (v1, 3–5 GB):** exact one-sided distinct-torrent count + deep paging — the literal incumbent collapse capability (promoted from optional).
+8. **Backfill Job** (file index + aggregate, from the blob) + pre-cutover **set-equality parity gate** (test against **crawl-path** blobs, not just backfilled — G1 hides on backfilled data).
+9. **Analytics:** DuckDB-on-blobs for ad-hoc per-file SQL — see §13.3. ≈0 persistent storage.
+10. **v1.5 — complete distinct-torrent collapse:** (a) bucketed-size vector on the aggregate (~1 GB) for two-sided ranges; (b) `DistinctTorrentCollector` (0 GB, gated) for path-FTS / over-cap, exact-but-slow guard. Rationale: [`perfile-search-innovative-design.md`](./perfile-search-innovative-design.md), dispatch in [`perfile-search-complete-parity.md`](./perfile-search-complete-parity.md) §3.
+11. **v1.1** (opt-in, +8–18 GB): tokenized `path` + path-FTS, after smoke-sizing.
+12. **Optional/forward:** composite-term interim field on the existing torrent index (~0.3 GB); widen the file-index denorm set only on demand (E1); cross-ref **G1d** (per-file v2 merkle identity).
 
-Each step is additive, reversible, and disabled by default (`SEARCH_FILE_INDEX_ENABLED=false`).
+Each step is additive, reversible, and disabled by default (`SEARCH_FILE_INDEX_ENABLED=false`). Complete-parity verdict, exceptions, and the full component→capability map: [`perfile-search-complete-parity.md`](./perfile-search-complete-parity.md).
 
 ---
 
@@ -289,7 +292,7 @@ The file index + the blob together restore — and exceed — `torrent_files`' q
 
 `torrent_files` carried per-file `created_at`/`updated_at` (`internal/model/torrent_files.gen.go`); the blob stores only `{index, path, extension, size}` (`blob.rs:31-46`), so neither the blob nor the file index has them. But those rows are **insert-once and never updated** (`INSERT … ON CONFLICT DO NOTHING`, per the crawl persist path), so per-file timestamps are **crawl-time-uniform across a torrent's files** — i.e. effectively torrent-level already.
 
-**Resolution:** hydrate `TorrentFile.createdAt`/`updatedAt` (both non-null in the GraphQL `TorrentFile` type) from the **parent torrent's** `created_at`/`updated_at` at serve time. Zero storage, semantically equivalent. Storing real per-file timestamps in the blob is rejected (≈14 GB for two timestamps × 873 M files, for no behavioural gain).
+**Resolution:** hydrate `TorrentFile.createdAt`/`updatedAt` (both non-null in the GraphQL `TorrentFile` type) **both from the parent torrent's `created_at`** at serve time — _not_ `torrent.updated_at`, which upserts to the last crawl and would drift on every scrape (whereas `torrent_files` timestamps are effectively frozen at first crawl). Zero storage, semantically equivalent. Storing real per-file timestamps in the blob is rejected (≈14 GB raw / ~1–4 GB zstd for two timestamps × 873 M files, for a display-only, crawl-time-uniform field with no behavioural gain).
 
 > **Note — this is a pre-existing blob-migration gap, not introduced here.** The blob-based file browser already loses per-file timestamps post-cutover (the blob never stored them); the GraphQL `TorrentFile.createdAt/updatedAt` fields would read zero. The fix belongs in the blob/file-browser hydration regardless of the file index — fold it into the blob-migration read path and the file-search resolver alike.
 
