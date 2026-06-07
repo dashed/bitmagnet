@@ -302,6 +302,79 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 | Tokenizer tuning    | Fix divergences found during shadow mode  | 1-3 days  |
 | Quality gate        | Jaccard > 0.7 @ top-20 for 95% of queries | —         |
 
+### Phase 5.5: File-Grained Search — Complete Per-File Parity (Weeks ~13-14, gates Phase 6)
+
+**Status: 📋 Planned** (spec complete; **gates the Phase-6 cutover**). Full spec: [`docs/dev/file-grained-search-spec.md`](./dev/file-grained-search-spec.md); complete-parity analysis: [`docs/dev/perfile-search-complete-parity.md`](./dev/perfile-search-complete-parity.md); innovative-design research: [`docs/dev/perfile-search-innovative-design.md`](./dev/perfile-search-innovative-design.md).
+
+A **second, file-grained Tantivy index — one document per file** — served by the **same sidecar process** (its own directory `/index/files/` alongside `/index/torrents/`, its **own writer/reader/mutex**), restores **true per-file search** that the hybrid-blob migration removes once `torrent_files` is dropped. **This is a distinct index from the WIP torrent-grained Phase-3 sidecar index** (1 doc per torrent_content): same process and PVC, separate directory + separate writer (Tantivy enforces one writer per directory). It answers the per-file **conjunction** "find all `.mkv` files > 1 GB" — the exact `(extension, size)` pairing — which **neither** `torrent_file_summary` (uncorrelated `largest_file_size` + deduped `extensions` set) **nor** the torrent-grained Tantivy doc (one multivalued `file_extensions[]` + a single torrent-total `size`) can express. Tantivy 0.26 has **no nested documents** (proven: `tantivy/src/query/boolean_query/boolean_query.rs:421-447`), so the only structure that carries the pairing at file granularity is **one doc per file**.
+
+> **As-deployed context.** Phase 1 (hybrid blob) **is deployed**: blobs are written on the live crawl path and the backfill is verified (0 mismatches); the destructive cutover (D1, `DROP TABLE torrent_files`) is **deferred**. The Phase-3 torrent-grained search sidecar is **WIP and gated** (draft/uncommitted ansible, placeholder image, nothing serving) — neither search index is live today. This phase therefore describes **net-new** work that bolts a second, file-grained index onto that (future) sidecar; none of it is deployed.
+
+Defining choices: indexed **from the 16 GB `files_data` blob** (never the 873 M `torrent_files` rows → future-proof past the deferred `DROP TABLE`); `doc_id = hex(info_hash):file_index`; **per-torrent replace** (`delete_term(info_hash)` + add all N file docs in one commit); denormalize **immutable fields only** — `content_type[]` + `published_at`, **never `seeders`/`leechers`** (scrape-mutable → would force ~52 doc rewrites per torrent per scrape across 873 M docs; staleness eliminated by construction); store only `doc_id` — `path`/`size`/`extension` are hydrated from the blob at serve time, keeping the index ≈ 8–15 GB. **GraphQL only** (`torrentContent.fileSearch`); **direct serve, not shadow** (no exact PG baseline at serve time); Torznab stays torrent-grained. Gated by a new **`SEARCH_FILE_INDEX_ENABLED` (default `false`)**, independent of `SEARCH_ENABLED`. This is a **forward feature, not a live regression** — pre-cutover `torrent_files` still answers per-file SQL.
+
+#### Complete parity is a composition, not a single store
+
+`torrent_files` fused **five workloads** into one 273 GB table — per-file search · per-torrent listing/browse · distinct-torrent collapse · fleet analytics · arbitrary joins. No single low-disk store reproduces all five (the only one that does is the slim PG per-file table, rejected on **+68–92 GB re-bloat** — exactly what the migration removed). Parity is recovered by **decomposing** the workload across purpose-fit stores, each cheap because it carries only what it must:
+
+| Component                                              | Restores                                                                                             | Latency          | Marginal disk        |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- | ---------------- | -------------------- |
+| **Blob hydration** (`AfterFind`, already paid)         | list a torrent's files; ORDER BY path/size; per-torrent paginate + totalCount; display values        | in-mem           | 0                    |
+| **G1 — extension-from-path** (code)                    | per-file `extension` value + filter + sort, **correct for the live (crawl-path) corpus**             | <50 ms           | 0                    |
+| **G2 — file-browser-over-blob** (code)                 | `TorrentQuery.files` listing/sort/paginate after `DROP TABLE torrent_files`                          | <50 ms           | 0                    |
+| **Timestamp + index-sort hydration** (code)            | per-file `created_at`/`updated_at` ← `torrent.created_at`; `ORDER BY index`                          | <50 ms           | 0                    |
+| **File-grained Tantivy index v1**                      | per-file `(ext ∧ size)` filter + exact file-level count/sort/facet; single-file synthesis            | <50 ms           | 8–15 GB              |
+| **Per-(torrent,ext) aggregate** `{max,min,count}` (PG) | **exact** distinct-torrent count + keyset deep paging for one-sided thresholds (incumbent collapse)  | <50 ms           | 3–5 GB               |
+| **Bucket-size vector** on the aggregate (~16 log₂)     | two-sided distinct-torrent ranges (interior exact; ≤2 boundary buckets → bounded blob-refine)        | <50 ms           | ~1 GB                |
+| **`DistinctTorrentCollector`** (Rust, ~150 LOC, gated) | path-FTS / two-sided collapse, exact deep paging ≤ a selectivity cap; over cap → exact-but-slow scan | <50 ms under cap | 0                    |
+| **DuckDB-on-blobs**                                    | exact ad-hoc analytics / arbitrary SQL / joins                                                       | 1–10 s           | 0                    |
+| **File index v1.1** (opt-in)                           | per-file **path FTS** (**exceeds** the incumbent — the table had none)                               | <50 ms           | +8–18 GB (uncertain) |
+
+**Marginal cost of complete parity ≈ 12–21 GB** (file index 8–15 + aggregate 3–5 + bucket vector ~1; collector / DuckDB / blob / hydration = 0) vs the **273 GB** table eliminated — all under the existing **200 Gi HEL1 PVC** (the file index is a second directory on the same volume as the torrent index). (+v1.1 path FTS → ~20–39 GB, cost-gated on a smoke-sizing pass.) The price is **more moving parts (4 stores + 3 code-only paths) and a deliberate latency split**, not lost capability.
+
+**Verdict** (from [`perfile-search-complete-parity.md`](./dev/perfile-search-complete-parity.md)): complete _functional_ parity is **achievable as a composition after two prerequisite fixes (G1, G2)**, interactively (<50 ms) and exactly, except a handful of explicitly-documented exceptions (below). Unqualified single-store parity is unreachable below "keep `torrent_files`" or the rejected slim PG table — this is the parity-vs-disk curve, made explicit.
+
+#### v1 prerequisites (code-only, 0 GB) — these gate everything
+
+- **G1 — extension-from-path correctness fix.** This is a **live, accumulating data-at-rest defect — not a current browser bug.** `dhtcrawler/persist.go` builds `TorrentFile{…}` with no `Extension` (the dropped `torrent_files.extension` was a PG **generated** column), so **crawl-path blobs are written with an empty per-file `extension` (`e=""`) today**, and the affected fraction grows with every crawl. **Backfilled blobs are correct** (the blob-migration path reads the generated column), so the corpus is split live-vs-backfilled. **It does not affect today's UI:** the per-torrent file browser still reads `torrent_files` directly (G2 not done) and dual-write keeps that table populated, so `TorrentFile.extension` is correct **now**; the torrent-level file-type facet is path-derived (`ExtractUniqueExtensions`) and likewise unaffected. The defect **activates as a regression at two future points**: **(A)** when G2 re-points the browser at the blob — crawl-path rows then surface NULL `extension` (and wrong `ORDER BY extension`); and **(B)** when the file-grained index/aggregate trust the blob's `e` — the `extension` filter then **silently misses every crawl-path torrent** (and DuckDB `GROUP BY extension` is empty for them). It **hides from parity tests run on backfilled data**, and the consistency checker never compares `extension`, so a backfill-only parity gate silently passes (hence the cutover gate must use crawl-path blobs — see below). Fix (0 GB): derive `extension` via `model.FileExtensionFromPath(path)` at **every** build/read site (Go `BuildFileDocuments`, Rust `backfill_files`, blob-read/hydration, aggregate key) — never trust blob `e`; its regex is byte-identical to the old generated column, so this is exact parity. Add an `extension` field to the consistency checker so the class of bug can't re-hide.
+- **G2 — re-point `TorrentQuery.files` at the blob.** The per-torrent file browser still runs raw SQL `FROM torrent_files` (`gqlmodel/torrent_files.go` → `search.TorrentFiles`); the file-search spec adds a _different_ surface and does **not** reimplement it, so **post-`DROP TABLE torrent_files` the file browser errors.** Fix (0 GB): reimplement `TorrentQuery.files` over `torrent.FilesData` (`AfterFind` already hydrates `t.Files`) — in-memory `orderBy`/pagination/`totalCount`/`hasNextPage`, PG NULL-ordering for the `extension` sort, and the multi-`infoHash` merge. Depends on G1 + the timestamp/index-sort hydration.
+- **Per-(torrent,ext) aggregate** `{max,min,count}` (PG, 3–5 GB) — **promoted to v1**: it _is_ the literal incumbent distinct-torrent collapse capability (`WHERE extension='mkv' AND max_size > 1e9` → exact distinct-torrent result with trivial keyset deep paging + arbitrary joins). Built from the same blob pass as the file-index backfill.
+
+#### v1.5 / v1.1 (additive, gated, after v1)
+
+- **v1.5 — completes distinct-torrent collapse** (and exceeds the incumbent, which never exposed these in search): (a) **bucket-size vector** on the aggregate (~1 GB) for two-sided ranges; (b) **`DistinctTorrentCollector`** (Rust, ~150 LOC, gated by a selectivity cap) for path-FTS / two-sided / over-cap collapse — exact-but-slow above the cap. The "no deep distinct-torrent paging in Tantivy 0.26" floor is **downgraded** to "achievable via a gated custom collector."
+- **v1.1 — path FTS (opt-in, +8–18 GB uncertain):** tokenized `path` field for per-file path search, after a `backfill_limit` smoke-sizing pass confirms the text cost and demand. The expensive axis is **path FTS, not the denorm scalars.**
+
+#### Documented exceptions (the residue after G1 + G2)
+
+- **E1** — compound predicate crossing per-file `(ext,size)` AND a **non-denormalized** torrent attribute (resolution/tag/title~/seeders>): no exact _interactive_ single-store answer; exact via DuckDB-on-blobs at 1–10 s. The denorm list (`content_type` + `published_at`) is the boundary of interactive compound parity; widen on demand.
+- **E2** — per-file timestamps hydrate from `torrent.created_at` (stable), not independent (the blob never stored them; a pre-existing blob-migration gap, display-only, no timestamp sort/filter exists).
+- **E3** — distinct-torrent exactness has a selectivity cap (mirrors the incumbent, which also seq-scanned broad queries); over cap → exact-but-slow scan (default) or opt-in `totalCountIsEstimate=true`.
+- **E4** — browse is read-your-write (blob is a synchronous `torrents` column); file **search** lags ingest (post-commit fire-and-forget index write) — standard search posture.
+- **E5** (non-functional) — uniqueness enforced by builder correctness (per-torrent replace), not a DB constraint.
+- **E6** (parity-neutral) — `over_threshold` files (`save_files_threshold`) absent from blob/index/DuckDB — but `torrent_files` truncated them too; `files_count` holds the true total in both.
+
+#### Tasks
+
+| Task                             | Scope                                                                                                                                                                           | Disk     | Status      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------- |
+| G1 extension-from-path fix       | `FileExtensionFromPath` at every build/read/aggregate site (Go + Rust); add `extension` to the consistency checker                                                              | 0 GB     | 📋 (prereq) |
+| G2 file-browser-over-blob        | reimplement `TorrentQuery.files` over `torrent.FilesData` (in-mem orderBy/paginate/totalCount/hasNextPage + multi-infoHash)                                                     | 0 GB     | 📋 (prereq) |
+| Timestamp + index-sort hydration | per-file `created_at`/`updated_at` ← `torrent.created_at`; resolver re-sorts `.Index`                                                                                           | 0 GB     | 📋          |
+| Proto + regen                    | `FileSearchService` (`IndexFiles`/`BatchIndexFiles`/`DeleteFiles`/`SearchFiles`/`GetFileFacets`/`HealthCheck`) in `search.proto`; `task gen-search-proto`                       | 0 GB     | 📋          |
+| Rust file index v1               | `file_schema` (no path) + `file_indexer` + `bin/backfill_files` (source = blob) + `server` handlers + 2nd-index wiring in `main` (failure-isolated, own heap)                   | 8–15 GB  | 📋          |
+| Go surface v1                    | `BuildFileDocuments` + `FileClient` + **guarded** dual-write (change-gated, fire-and-forget; delete fans out to both services) + `filesearch.Service` + GraphQL + searchfx gate | 0 GB     | 📋          |
+| Per-(torrent,ext) aggregate      | `{max,min,count}` keyed `(info_hash, extension)` in PG (built from the blob pass) — exact one-sided distinct-torrent                                                            | 3–5 GB   | 📋          |
+| DuckDB-on-blobs                  | decode `files_data` → `(info_hash, index, path, extension, size)` on demand (or periodic Parquet) for ad-hoc SQL                                                                | 0 GB     | 📋          |
+| Backfill Job + parity gate       | separate Job (serving Deployment scaled-to-0); **set-equality parity vs CRAWL-PATH blobs** before D1 (see GO/NO-GO)                                                             | —        | 📋          |
+| v1.5 collapse                    | bucket-size vector (~1 GB) + `DistinctTorrentCollector` (gated)                                                                                                                 | ~1 GB    | 📋 (v1.5)   |
+| v1.1 path FTS                    | tokenized `path` field, after smoke-sizing                                                                                                                                      | +8–18 GB | 📋 (opt-in) |
+
+#### This phase gates Phase 6 — `torrent_files` must not be dropped until per-file parity holds
+
+`torrent_files` is the **exact per-file ground truth** the parity gate compares against, and it is also the table Phase-6/D1 drops. So per-file parity must be **proven before** `blob-migration cleanup --confirm` runs `DROP TABLE torrent_files` (deferred-drop **D1** in the Coexistence registry). The gate is a **set-equality** assertion of `(info_hash, file_index)` between a PG query (`WHERE extension=$e AND size>$s`, ∪ single-file synthesis) and `SearchFiles` (precision = recall = 1.0) — stronger than the torrent index's Jaccard/RBO. **It MUST run against CRAWL-PATH blobs, not backfilled ones** — G1 hides on backfilled data, so a backfill-only gate is a false pass. After D1, `torrent_files` is gone and only index-vs-blob self-consistency remains; there is no second chance to validate against the real table. This phase therefore **adds a precondition to D1**: per-file Tantivy set-equality (on crawl-path blobs) joins `verify --full` 100% blob↔row match as a cutover gate.
+
+**GO/NO-GO (per-file parity, before D1 / Phase-6 cutover):** G1 + G2 merged; file index backfilled from the blob with verified 100% blob coverage (no `files_data`-NULL `files_status=multi` rows; ~16.97 M torrents-with-files reconciled); set-equality `(info_hash, file_index)` parity = 1.0 **against crawl-path blobs**; `fileSearch` + per-torrent file browser validated end-to-end. **If NO-GO:** keep `torrent_files` (dual-write posture is unchanged and safe); the file index runs additively with `SEARCH_FILE_INDEX_ENABLED=false` until parity is proven.
+
 ### Phase 6: Tantivy Cutover (Weeks 14-15)
 
 | Task                      | Description                                                             | Estimate |
@@ -311,20 +384,6 @@ The highest-ROI change: replace 873M individual `torrent_files` rows (273 GB) wi
 | Drop GIN indexes          | Drop `torrent_contents` tsv GIN index (14 GB) + content tsv GIN (31 MB) | 1 day    |
 
 **GO/NO-GO: Week 13** — Is Tantivy stable at 100%? If yes, proceed to Rust port.
-
-### Phase 3.5 (optional, additive): File-Grained Search Index (P2)
-
-A **second Tantivy index, one doc per file**, on the **same sidecar** restores true per-file search ("find all .mkv > 1 GB" with exact ext+size pairing) — impossible on the torrent-grained index (Tantivy 0.26 has no nested docs). Additive and reversible; no PG schema change. Independent of the phase numbering — it can land any time after the sidecar exists.
-
-- **Where:** a 2nd index directory `/index/files/` alongside `/index/torrents/` on the existing 200 Gi PVC.
-- **Source of truth:** the **16 GB `files_data` blob** (not the 873 M `torrent_files` rows) — `backfill_files` decodes one blob per torrent → N file docs.
-- **Identity:** `doc_id = hex(info_hash):file_index`; **delete-by-`info_hash`** (upsert = term-delete + re-add N).
-- **Denormalization (immutable only):** copy down `content_type` + `published_at`; **never `seeders`/`leechers`** (scrape-mutable → would force constant file-doc rewrites). Staleness is thus eliminated by construction.
-- **Not stored:** `path`/`size` hydrated from the blob at serve time → index stays **+8–15 GB** (v1 ≈ 8–12 GB; path FTS is the only expensive axis, deferred to v1.1).
-- **Write path:** +1 fire-and-forget `BatchIndexFiles` per torrent_content in `persist.go` (no-op when disabled; guarded on fileset/content-type change).
-- **Validation:** pre-cutover, `torrent_files` gives an **exact** parity ground truth — gate set-equality before D1.
-
-Full spec: `docs/dev/file-grained-search-spec.md`; option analysis: `docs/dev/perfile-search-with-blob-design.md` (P2).
 
 ### Phase 7: Classifier Rust Port (Weeks 16-21)
 
@@ -547,7 +606,7 @@ The phased plan above is written as "migrate → **cutover (drop)** → reclaim.
 
 **Disk (order matters):** keep-everything **grows** the DB (every copy is additive) and Tantivy adds **+40–78 GB** → ~440–475 GB with no cutover; cutover D1 first → then Tantivy → ~160–200 GB. The headline win is the **276 GB `torrent_files` drop (D1)**; Tantivy alone is ~disk-neutral (it offsets the 14 GB GIN it lets you drop). With ~1.1 TB free, carrying both copies indefinitely is fine.
 
-**Write amplification:** persist fans out to up to four sinks — `torrent_files` rows · `files_data` blob+`file_extensions` (same tx) · Tantivy `IndexDocument` (post-commit, **fire-and-forget**, no-op when `SEARCH_ENABLED=false`) · `info_hash_v1/v2`+`meta_version` columns. All additive; none on the served read path. _(Optional 5th sink with the file-grained index (Phase 3.5): a `BatchIndexFiles` per torrent_content — post-commit, fire-and-forget, no-op when disabled, **once per ingest/re-classification — NOT per scrape**, because only immutable fields are denormalized.)_
+**Write amplification:** persist fans out to up to four sinks — `torrent_files` rows · `files_data` blob+`file_extensions` (same tx) · Tantivy `IndexDocument` (post-commit, **fire-and-forget**, no-op when `SEARCH_ENABLED=false`) · `info_hash_v1/v2`+`meta_version` columns. All additive; none on the served read path. _(Optional 5th sink with the file-grained index (Phase 5.5): a `BatchIndexFiles` per torrent_content — post-commit, fire-and-forget, no-op when disabled, **once per ingest/re-classification — NOT per scrape**, because only immutable fields are denormalized.)_
 
 **Rollback:** "redeploy the old image" works right up until the **first** drop (old goose sees ≤`00020` → no-op; GORM ignores unknown columns/tables). After D1 the system is forward-only. 🚫 never `goose down` (its Down drops `files_data` etc.).
 

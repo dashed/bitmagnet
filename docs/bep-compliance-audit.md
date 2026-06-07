@@ -195,6 +195,12 @@ Legend: ✅ Compliant · 🟡 Partial · ❌ Non-compliant · ⚪ N/A · 🔵 De
 > directly onto one-doc-per-file granularity. When G1d (Rust reads `info_hash_v2`/`meta_version`)
 > lands, the file index can carry per-file v2 attributes without further schema churn (the file
 > index is a disposable, rebuildable cache — a schema bump just triggers a re-backfill).
+>
+> ⚠️ **Name collision (disambiguation):** this audit's **G1d** (BEP-52 v2 Rust parity) is unrelated to
+> the file-grained-search work's **"G1"** (the empty-blob-`extension` correctness fix in
+> `docs/dev/perfile-search-complete-parity.md`). The latter is the same _path-derivation_ family as
+> this audit's **G9** (single-file extension), not a v2 concern. See the complete-parity analysis for
+> the full per-file parity composition and its two prerequisites (G1, G2).
 
 ---
 
