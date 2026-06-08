@@ -119,9 +119,12 @@ bitmagnet-rs/
 
 ## 4. Prove-then-retire harness (the gate)
 
-The DROP gate is **L2a (`agg_torrent_ext` vs `torrent_files` EXISTS)**. Two-pronged:
-1. **Offline parity** on the HEL1 restore (has the full `torrent_files` AND can regen agg from the blob): for every torrent assert `set(ext from torrent_files) == set(ext from agg_torrent_ext)`. Extend `internal/blobmigration/consistency/checker.go` (already JOINs `torrent_files`, `checker.go:173`) with an `extension`/agg check. (This is the same checker the G1 task touches.)
-2. **Live shadow** (Go, flag-gated): run both EXISTS variants + facet counts on real searches; require a **sustained zero-mismatch window** (days) before flipping `agg_torrent_ext` primary.
+The DROP gate is **L2a (`agg_torrent_ext` vs `torrent_files` EXISTS)** — proven by **all-Rust invariant composition** (no Go request-path shadow; detail in [`L2-P0-…-checker-spec.md`](./L2-P0-agg-torrent-ext-and-checker-spec.md) §7):
+1. **Job A — one-time, direct** (Rust `bitmagnet-parquet verify`): full `agg` vs `torrent_files` on the HEL1 restore/snapshot — proves the chain + G1 parity before flip.
+2. **Job B — continuous, durable** (Rust): `agg` vs the blob it was built from; survives the DROP.
+3. **existing blob ⟺ `torrent_files` consistency** closes the loop ⟹ `agg ⟺ torrent_files` in prod, transitively.
+
+The cap-induced divergence is **structurally zero** (the blob mirrors `torrent_files` at all 3 write sites — checker §8), so any mismatch is a bug; require a sustained zero-mismatch window before flipping primary.
 
 **L2b correctness gate** (no live parity, net-new): its `ext∧size` / collapse / range results validated against the equivalent `torrent_files` SQL on the offline restore — ARCH-C already produced these query pairs; fold them into a repeatable parity check.
 
@@ -160,11 +163,11 @@ Model on the existing `roles/bitmagnet-search` (Tantivy sidecar) — a new role 
 
 ## 7. Phasing + task breakdown
 
-- **L2-P0** — PG `agg_torrent_ext` migration + the offline parity checker (extend `consistency/checker.go`). *(maps to IMPL-A4 + the C6 guard IMPL-A5.)*
+- **L2-P0** — PG `agg_torrent_ext` migration + the **Rust** `verify` checker (Job A/B) + `bitmagnet-db` batch readers. *(L2-P0-1…5; detailed in the P0 spec.)*
 - **L2-P1** — `bitmagnet-parquet` crate: base export (sort+denorm+rollups+atomic swap) **+ the minute delta job (delta Parquet + delta rollups + agg delta-upsert, anti-join supersession) + compaction job** + the `torrents.updated_at` index. *(IMPL-B1/B2.)*
 - **L2-P2** — `file_search.proto` + `bitmagnet-filesearch` crate (DuckDB sidecar, safe SQL builder, reload) + Go gRPC client. *(IMPL-B3/B4.)*
 - **L2-P3** — homelab `bitmagnet-filesearch` role + CronJob + image (HEL1) + Go shadow wiring. *(IMPL-B5/B6.)*
-- **L2-P4** — live shadow-compare window → (on sustained parity) flip the content-search filter to `agg_torrent_ext`; GA the `fileSearch` cross-file API. **DROP still deferred.**
+- **L2-P4** — sustained zero-mismatch window (Job A + B) → flip the content-search filter to `agg_torrent_ext`; GA the `fileSearch` cross-file API. **DROP still deferred.**
 
 All future — **no code in this change**; this document is the spec.
 

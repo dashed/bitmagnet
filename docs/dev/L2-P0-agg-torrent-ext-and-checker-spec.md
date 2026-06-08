@@ -86,29 +86,50 @@ A one-time seed so the checker has data to validate (distinct from the minute de
 
 ---
 
-## 7. The checker(s) — TWO jobs, by data-lifetime (DECISION, user 2026-06-08)
+## 7. The checker — ALL RUST (DECISION, user 2026-06-08): a `verify` subcommand of `bitmagnet-parquet`
 
-"Checker" is really two verifications against different references with different lifetimes; they go in different languages:
+Two verifications by data-lifetime, **both Rust**, living as a `verify` subcommand of the planned `bitmagnet-parquet` crate (DRY — it streams blobs + builds agg). Workspace conventions (grounded): compare/diff = a **pure fn in the crate `lib.rs`** (unit-tested with the committed `.blob` fixtures → runs in CI, no DB); the **DB readers in `bitmagnet-db`** beside the existing streamers; the bin follows the `bitmagnet-search/src/bin/backfill.rs` `main()`(parse+`init_tracing`)→`run()` split with clap-derive, `anyhow .context()`, per-row warn-and-skip. CLI: `bitmagnet-parquet verify --source <agg-blob|agg-torrent-files> --mode <full|sample> --batch-size 1000 --postgres-dsn ""` (a `#[derive(ValueEnum)]` for `--source`, mirroring the bench crate's `Source` enum).
 
-### Job A — DROP-gate parity: `agg` vs `torrent_files` → **Go** (extend the `verify` checker)
-Proves "flipping the EXISTS changes no results." Inherently bound to `torrent_files` (a **retiring** table) → **throwaway** → extend the existing Go checker rather than build durable Rust for it.
-- New `CheckAggBatch`/`compareAgg` beside `CheckBatch`/`CompareFiles` (existing fns compare only index/path/size; extension is greenfield). **Batch** form (right for `--full` ≈ 17M):
-  - agg: `SELECT info_hash, extension, max_size FROM agg_torrent_ext WHERE info_hash = ANY($1)`.
-  - expected from `torrent_files` (G1 via its generated col): `SELECT info_hash, extension, max(size) FROM torrent_files WHERE info_hash = ANY($1) AND extension IS NOT NULL GROUP BY 1,2` (or in Go from `rowFiles` via `ExtractUniqueExtensions` + a max-size loop).
-  - compare per-torrent ext-**sets** + `max_size` and classify (see below).
-- **Separate mismatch channel** (new counter/result type), **NOT** `Summary.Mismatches` → `LiveChecker` must never NULL a blob over agg drift.
-- Wire into the `verify` subcommand behind **`--agg-parity`** (reuse `--full`/`--sample-rate`); 3-class table + non-zero exit only on a genuine mismatch.
-- Run on the **HEL1 restore** (full, uncapped `torrent_files`). Co-located with the **live Go shadow-compare** (L2-P0b / parent §4) — the online half of the gate — which is *irreducibly Go* (a WHERE-clause comparison inside the Go content-search), so the whole gate's logic stays in one place/language.
+### Job A — DROP-gate parity: `agg` vs `torrent_files` (one-time, direct, pre-flip)
+Proves the swap changes no results + establishes **G1 parity** directly. Bound to `torrent_files` (retiring) so it's throwaway in *lifetime* — but Rust per the calibration, and it reuses everything (`bitmagnet-db` readers + the pure compare fn). New **`bitmagnet-db` batch readers** (task #48; sqlx 0.9 binds `Vec<Vec<u8>>` to `bytea[]` — confirmed, no workaround; use an explicit `::bytea[]` cast):
+```rust
+// expected (source of truth)
+const BATCH_TORRENT_FILES_AGG_SQL: &str =
+  "SELECT info_hash, extension, max(size) AS max_size FROM torrent_files \
+   WHERE info_hash = ANY($1::bytea[]) AND extension IS NOT NULL GROUP BY info_hash, extension";
+pub async fn batch_torrent_files_ext_agg(pool, &[InfoHash]) -> Result<Vec<FileExtAgg>>;
+// actual (rollup under test)
+const BATCH_AGG_TORRENT_EXT_SQL: &str =
+  "SELECT info_hash, extension, max_size FROM agg_torrent_ext WHERE info_hash = ANY($1::bytea[])";
+pub async fn batch_agg_torrent_ext(pool, &[InfoHash]) -> Result<Vec<AggTorrentExtRow>>;
+```
+Keyset-page torrents (reuse the bench crate's raw-sqlx `torrent_files (info_hash,"index")` keyset), batch the hashes, compare per-torrent ext-**set** + `max_size`. Run on the **HEL1 restore** (full, uncapped `torrent_files`) / a prod snapshot. Non-zero exit only on a genuine mismatch.
 
-| class | meaning | gate (post-cap-finding §8) |
+### Job B — durable invariant: `agg` vs the **blob** (continuous)
+"Does agg correctly summarize the blob it was built from?" Needs **no `torrent_files`** → survives the DROP, runs forever. Recompute the expected agg from the decoded blob and compare to the stored `agg_torrent_ext`. The code that BUILDS agg self-verifies its output — DRY in `bitmagnet-parquet`.
+
+### The gate = invariant composition (NO Go request-path shadow)
+The earlier plan used a Go live shadow-compare in the request path. Going Rust enables a **strictly better** gate via composition:
+- **Job A** (one-time, direct, full) — `agg ⟺ torrent_files` proven directly pre-flip (incl. G1).
+- **Job B** (continuous, durable) — `agg ⟺ blob` maintained forever.
+- **existing blob ⟺ `torrent_files` consistency** (already running) — closes the loop ⟹ `agg ⟺ torrent_files` in prod, transitively.
+
+No double-running content searches in the hot path; invariants checked directly + continuously; all-Rust.
+
+### Correctness rules (both jobs — load-bearing)
+- 🚨 **Expected extension ALWAYS path-derived** via `file_extension_from_path(BlobFile.path)`, skipping empties — **NEVER** `BlobFile.extension` (the stored `e`, which is **empty for crawl-path torrents** = the G1 bug). This matches `torrent_files.extension` (the path-derived generated column) and the agg table (valid exts only, §4).
+- **Null/empty-ext symmetry**: the `torrent_files` reader filters `extension IS NOT NULL`; the blob side skips empty path-derived exts → **both sides = valid exts only**, or the checker false-positives on every no-ext torrent.
+- **Size types**: `BlobFile.size` is `u64`, `torrent_files.max(size)` and `agg.max_size` are `i64` — widen/compare carefully.
+- **Cap-subset is structurally zero (§8)** → any difference is a **bug** (G1/decode/build), not an accepted loss. Expect ~100% exact.
+
+| class | meaning | gate |
 |---|---|---|
-| **exact** | `agg == torrent_files` ext-set + max_size | pass — expected ~100% |
-| **subset/any mismatch** | any difference | **a BUG to fix** (cap divergence is structurally zero, §8) — must be 0 |
+| **exact** | ext-set + max_size match | pass — expected ~100% |
+| **any mismatch** | any difference | **a BUG to fix** — must be 0 |
 
-### Job B — durable invariant: `agg` vs the **blob** → **Rust** (in the `bitmagnet-parquet` builder)
-"Does agg correctly summarize the blob it was built from?" Needs **no `torrent_files`** → survives the DROP, runs forever as a health check. The code that BUILDS agg (the L2-P1 Rust builder, reusing `bitmagnet-db`/`bitmagnet-model`) **self-verifies** it against the decoded blob — DRY, durable, Rust (aligns with the rest of L2).
-
-> This split honors both principles: **Rust for the durable L2 components** (Job B, the agg builder) and **don't over-build throwaway tooling for a retiring table** (Job A reuses the existing Go checker). It's the correct decomposition by data lifetime, not a compromise.
+### Tests (workspace convention)
+- **Pure compare fn** → unit tests over in-memory `Vec<BlobFile>` / agg-row fixtures (+ the committed `.blob` fixtures for Go-wire parity) → runs in CI (no DB).
+- **DB readers** → `#[tokio::test] #[ignore = "requires a live PostgreSQL"]` integration (run on the HEL1 restore) + a cheap `*_sql_shape` `.contains()` guard, exactly like `bitmagnet-db`'s existing reader tests.
 
 ---
 
@@ -139,4 +160,4 @@ The earlier worry was that the blob (hence agg) is capped at `save_files_thresho
 **Decisions (all settled 2026-06-08):**
 1. **Schema** — ✅ **include `max_size`** now (§3): `(info_hash, extension, max_size)`, PK `(info_hash, extension)`. Future-proofs torrent-grain `ext∧size` collapse at one cheap column.
 2. **Cap question** — ✅ **settled from code (§8): structurally zero divergence** — blob mirrors `torrent_files` at all three write sites. The checker is build-correctness confirmation, not a cap-risk quantifier.
-3. **Checker language** — ✅ **two jobs by data-lifetime (§7):** Job A (agg-vs-`torrent_files` DROP-gate parity) = extend the **Go** `verify` checker (throwaway, reuses existing checker + CLI + G1 helpers, co-located with the irreducibly-Go live shadow-compare); Job B (agg-vs-blob durable self-check) = **Rust**, in the `bitmagnet-parquet` builder.
+3. **Checker language** — ✅ **all Rust** (user override, 2026-06-08; §7). Both Job A (agg-vs-`torrent_files`, one-time direct) and Job B (agg-vs-blob, continuous) are a `verify` subcommand of `bitmagnet-parquet`; readers in `bitmagnet-db`; compare fn pure + unit-tested. **No Go request-path shadow** — the gate is invariant composition (Job A direct + Job B continuous + existing blob⟺torrent_files), which is strictly better and all-Rust.
