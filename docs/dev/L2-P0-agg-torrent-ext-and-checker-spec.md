@@ -31,8 +31,9 @@ goose v3, single file, StatementBegin/End blocks, auto-applies on pod start (fx 
 -- +goose Up
 -- +goose StatementBegin
 CREATE TABLE IF NOT EXISTS agg_torrent_ext (
-    info_hash  BYTEA NOT NULL REFERENCES torrents(info_hash) ON DELETE CASCADE,
-    extension  TEXT  NOT NULL,                 -- only valid (non-null) extensions; see §4
+    info_hash  BYTEA  NOT NULL REFERENCES torrents(info_hash) ON DELETE CASCADE,
+    extension  TEXT   NOT NULL,                 -- only valid (non-null) extensions; see §4
+    max_size   BIGINT NOT NULL,                 -- max size of any file of this ext in this torrent
     PRIMARY KEY (info_hash, extension)
 );
 -- +goose StatementEnd
@@ -46,6 +47,7 @@ CREATE INDEX IF NOT EXISTS idx_agg_torrent_ext_extension
 DROP TABLE IF EXISTS agg_torrent_ext;
 -- +goose StatementEnd
 ```
+**DECISION (user, 2026-06-08): include `max_size` now.** It's not needed by the EXISTS filter or the facet (presence only), but it future-proofs the **torrent-grain `ext∧size` collapse** at one cheap column: "torrents having an `.mkv` > 1 GB" = `EXISTS(… extension='mkv' AND max_size > 1000000000)` — served by PG/agg without DuckDB. `file_count`/`total_size` remain trivially addable later if a count/sum surface ever needs them.
 
 - **PK `(info_hash, extension)`** directly serves the correlated EXISTS (`info_hash = torrents.info_hash AND extension IN (…)`) — the only strictly-required index.
 - **Secondary `(extension, info_hash)`** lets the planner drive the semi-join from a selective extension IN-list (mirrors `torrent_files`' standalone `(extension)` index, but covering). Optional; add if the planner prefers it.
@@ -78,37 +80,46 @@ gen.Exists(q.AggTorrentExt.Where(
 ## 6. Initial backfill / seed (Rust, from the blob, G1)
 
 A one-time seed so the checker has data to validate (distinct from the minute delta-upsert of L2-P1):
-- Reuse the `bitmagnet-db` blob streamer (`stream_torrents_with_files`, keyset on info_hash). Per torrent: decode `files_data` → for each file derive `file_extension_from_path` (G1, skip empties) → `DISTINCT` set → `INSERT INTO agg_torrent_ext (info_hash, extension) … ON CONFLICT DO NOTHING`.
+- Reuse the `bitmagnet-db` blob streamer (`stream_torrents_with_files`, keyset on info_hash). Per torrent: decode `files_data` → for each file derive `file_extension_from_path` (G1, skip empties) → **group by extension, taking `MAX(size)`** → `INSERT INTO agg_torrent_ext (info_hash, extension, max_size) … ON CONFLICT (info_hash, extension) DO UPDATE SET max_size = EXCLUDED.max_size`.
 - Multi-file torrents only (single-file ext stays on `torrents.extension`).
 - Idempotent; resumable by info_hash cursor. (Becomes a mode of the L2-P1 `bitmagnet-parquet` job.)
 
 ---
 
-## 7. The parity checker (the gate)
+## 7. The checker(s) — TWO jobs, by data-lifetime (DECISION, user 2026-06-08)
 
-Extend `internal/blobmigration/consistency/` — a **new** `CheckAggBatch` / `compareAgg` beside `CheckBatch`/`CompareFiles` (the existing functions compare only index/path/size; extension parity is greenfield). **Batch** form (right for `--full` ≈ 17M):
-- Fetch agg: `SELECT info_hash, extension FROM agg_torrent_ext WHERE info_hash = ANY($1)`.
-- **Expected (uncapped) from `torrent_files`** (G1-correct via its generated column): `SELECT info_hash, extension FROM torrent_files WHERE info_hash = ANY($1) AND extension IS NOT NULL GROUP BY 1,2` — or in Go from `rowFiles` via `ExtractUniqueExtensions`.
-- Compare the per-torrent extension **sets** and classify:
+"Checker" is really two verifications against different references with different lifetimes; they go in different languages:
 
-| class | meaning | gate |
-|---|---|---|
-| **exact** | `agg == torrent_files` ext-set | pass |
-| **cap-subset** | `agg ⊂ torrent_files` (blob capped at `save_files_threshold`, over-threshold torrents only) | **quantify** — count torrents + the missing extensions' rarity |
-| **genuine mismatch** | any other difference (incl. `agg ⊄ torrent_files`) | **must be 0** — a bug |
-
+### Job A — DROP-gate parity: `agg` vs `torrent_files` → **Go** (extend the `verify` checker)
+Proves "flipping the EXISTS changes no results." Inherently bound to `torrent_files` (a **retiring** table) → **throwaway** → extend the existing Go checker rather than build durable Rust for it.
+- New `CheckAggBatch`/`compareAgg` beside `CheckBatch`/`CompareFiles` (existing fns compare only index/path/size; extension is greenfield). **Batch** form (right for `--full` ≈ 17M):
+  - agg: `SELECT info_hash, extension, max_size FROM agg_torrent_ext WHERE info_hash = ANY($1)`.
+  - expected from `torrent_files` (G1 via its generated col): `SELECT info_hash, extension, max(size) FROM torrent_files WHERE info_hash = ANY($1) AND extension IS NOT NULL GROUP BY 1,2` (or in Go from `rowFiles` via `ExtractUniqueExtensions` + a max-size loop).
+  - compare per-torrent ext-**sets** + `max_size` and classify (see below).
 - **Separate mismatch channel** (new counter/result type), **NOT** `Summary.Mismatches` → `LiveChecker` must never NULL a blob over agg drift.
-- Wire into the `verify` subcommand behind a new **`--agg-parity`** flag (reuse `--full`/`--sample-rate`); print the 3-class table + non-zero exit only on class-3.
-- Run on the **HEL1 restore** (has full, uncapped `torrent_files`) = the offline half of the gate; the live Go shadow-compare (L2-P0b/§4 of the parent) is the online half.
+- Wire into the `verify` subcommand behind **`--agg-parity`** (reuse `--full`/`--sample-rate`); 3-class table + non-zero exit only on a genuine mismatch.
+- Run on the **HEL1 restore** (full, uncapped `torrent_files`). Co-located with the **live Go shadow-compare** (L2-P0b / parent §4) — the online half of the gate — which is *irreducibly Go* (a WHERE-clause comparison inside the Go content-search), so the whole gate's logic stays in one place/language.
+
+| class | meaning | gate (post-cap-finding §8) |
+|---|---|---|
+| **exact** | `agg == torrent_files` ext-set + max_size | pass — expected ~100% |
+| **subset/any mismatch** | any difference | **a BUG to fix** (cap divergence is structurally zero, §8) — must be 0 |
+
+### Job B — durable invariant: `agg` vs the **blob** → **Rust** (in the `bitmagnet-parquet` builder)
+"Does agg correctly summarize the blob it was built from?" Needs **no `torrent_files`** → survives the DROP, runs forever as a health check. The code that BUILDS agg (the L2-P1 Rust builder, reusing `bitmagnet-db`/`bitmagnet-model`) **self-verifies** it against the decoded blob — DRY, durable, Rust (aligns with the rest of L2).
+
+> This split honors both principles: **Rust for the durable L2 components** (Job B, the agg builder) and **don't over-build throwaway tooling for a retiring table** (Job A reuses the existing Go checker). It's the correct decomposition by data lifetime, not a compromise.
 
 ---
 
-## 8. The real content of the gate: cap-induced divergence
+## 8. Cap-induced divergence — SETTLED FROM CODE: structurally zero
 
-`agg_torrent_ext` is **blob-derived**; the blob is capped at `save_files_threshold` (~100 files). The current EXISTS is **uncapped** (`torrent_files`). So for **over-threshold torrents (~6% of the corpus** — p90=54 files, p99=743, max 88,561) the agg ext-set may be a **subset** → flipping the filter could lose a rare-extension match in a large torrent.
+The earlier worry was that the blob (hence agg) is capped at `save_files_threshold` while the EXISTS is uncapped `torrent_files`, losing rare-ext matches in big torrents. **Reading the three write sites settles it — the blob always mirrors `torrent_files`, so there is no divergence:**
+- **Crawler** (`internal/dhtcrawler/persist.go:203-251`): the blob `FilesData` (`SerializeFiles(files)`, :226) and the `torrent_files` rows (`Files: files`, :250) are built from the **same `files` slice**, capped together in the same loop (`if i >= saveFilesThreshold { break }`, :206). Both capped identically (or both full for legacy) → **identical sets**.
+- **Backfill** (`internal/blobmigration/queue/handler.go:150-167`): reads **all** `torrent_files` rows for the torrent (`Find()`, no limit) and serializes them **verbatim** → blob == `torrent_files` exactly (even for legacy 88,561-file torrents — the blob just gets big).
+- **Importer** (`internal/importer/importer.go:257-263`): writes **no files** (`FilesStatusNoInfo`); file rows + blob arrive later via the crawler. (The "importer bypasses the cap" note refers to the processor's `torrent_contents` tsvector — FIND-1 — not `torrent_files`/blob.)
 
-- **Open empirical question the checker answers:** is the divergence ≈0 (blobs backfilled from full `torrent_files` → uncapped) or material (forward crawls cap the blob below `torrent_files`)? Depends on the crawler/importer blob-capping behavior (confirm: does `save_files_threshold` cap the *blob* or only `torrent_files`?). The checker's **class-2 count on the real corpus is the answer.**
-- **If material → a product decision:** accept losing rare-ext matches in huge torrents, raise `save_files_threshold`, or keep `torrent_files` for over-threshold torrents. This *is* "prove before drop."
+⟹ **`agg(blob)` and `torrent_files` are the same file set by construction.** The cap-subset class is structurally empty; the checker (Job A) now serves as **build-correctness confirmation** (expect ~100% exact; any mismatch = a bug in the agg-build/G1/decode, not an accepted product loss). The DROP gate is materially de-risked.
 
 ### Other risks
 | risk | mitigation |
@@ -125,7 +136,7 @@ Extend `internal/blobmigration/consistency/` — a **new** `CheckAggBatch` / `co
 
 **Tasks (created):** #43 (this spec) · #44 (00024 DDL) · #45 (gen model + criteria seam) · #46 (Rust seed) · #47 (checker `--agg-parity`). Parent: #23 (agg/L2a), #41 (parity harness), #42 (flip).
 
-**Open decisions for the user:**
-1. **Schema:** minimal presence `(info_hash, extension)` for P0 *(recommended)*, or include `max_size` now to future-proof torrent-grain `ext∧size` collapse (one extra column, cheap)?
-2. **Confirm the cap question** — should we read the crawler to settle whether the blob is capped below `torrent_files` (forward divergence), or let the checker's class-2 measurement settle it empirically?
-3. **Checker language** — extend the **Go** checker (recommended: it's the existing `verify` tooling, runs in the migration cmd, and `torrent_files` is being retired so a Rust checker for it is throwaway), with the durable L2 pieces (agg maintenance, sidecar) in Rust as planned?
+**Decisions (all settled 2026-06-08):**
+1. **Schema** — ✅ **include `max_size`** now (§3): `(info_hash, extension, max_size)`, PK `(info_hash, extension)`. Future-proofs torrent-grain `ext∧size` collapse at one cheap column.
+2. **Cap question** — ✅ **settled from code (§8): structurally zero divergence** — blob mirrors `torrent_files` at all three write sites. The checker is build-correctness confirmation, not a cap-risk quantifier.
+3. **Checker language** — ✅ **two jobs by data-lifetime (§7):** Job A (agg-vs-`torrent_files` DROP-gate parity) = extend the **Go** `verify` checker (throwaway, reuses existing checker + CLI + G1 helpers, co-located with the irreducibly-Go live shadow-compare); Job B (agg-vs-blob durable self-check) = **Rust**, in the `bitmagnet-parquet` builder.
