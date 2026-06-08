@@ -91,7 +91,7 @@ A one-time seed so the checker has data to validate (distinct from the minute de
 Two verifications by data-lifetime, **both Rust**, living as a `verify` subcommand of the planned `bitmagnet-parquet` crate (DRY — it streams blobs + builds agg). Workspace conventions (grounded): compare/diff = a **pure fn in the crate `lib.rs`** (unit-tested with the committed `.blob` fixtures → runs in CI, no DB); the **DB readers in `bitmagnet-db`** beside the existing streamers; the bin follows the `bitmagnet-search/src/bin/backfill.rs` `main()`(parse+`init_tracing`)→`run()` split with clap-derive, `anyhow .context()`, per-row warn-and-skip. CLI: `bitmagnet-parquet verify --source <agg-blob|agg-torrent-files> --mode <full|sample> --batch-size 1000 --postgres-dsn ""` (a `#[derive(ValueEnum)]` for `--source`, mirroring the bench crate's `Source` enum).
 
 ### Job A — DROP-gate parity: `agg` vs `torrent_files` (one-time, direct, pre-flip)
-Proves the swap changes no results + establishes **G1 parity** directly. Bound to `torrent_files` (retiring) so it's throwaway in *lifetime* — but Rust per the calibration, and it reuses everything (`bitmagnet-db` readers + the pure compare fn). New **`bitmagnet-db` batch readers** (task #48; sqlx 0.9 binds `Vec<Vec<u8>>` to `bytea[]` — confirmed, no workaround; use an explicit `::bytea[]` cast):
+Proves the swap changes no results + establishes **G1 parity** directly. Bound to `torrent_files` (retiring) so it's throwaway in *lifetime* — but Rust per the calibration, and it reuses everything (`bitmagnet-db` readers + the pure compare fn). New **`bitmagnet-db` batch readers** (task #48). **sqlx 0.9 verified against canonical source (#49):** bind `Vec<Vec<u8>>` (built from `info_hash.as_bytes().to_vec()`); it encodes as `bytea[]` (OID 1001) because sqlx *sends* the bound type OID in the Parse message — so the **`::bytea[]` cast is OPTIONAL** (belt-and-suspenders, kept below for readability), not required. `.bind(keys)` owned or `.bind(&keys)` both work; **guard empty key slices** (skip the query). sqlx's own `type_checking.rs:72` lists `Vec<Vec<u8>>` as *the* canonical `bytea[]` representation.
 ```rust
 // expected (source of truth)
 const BATCH_TORRENT_FILES_AGG_SQL: &str =
@@ -121,6 +121,11 @@ No double-running content searches in the hot path; invariants checked directly 
 - **Null/empty-ext symmetry**: the `torrent_files` reader filters `extension IS NOT NULL`; the blob side skips empty path-derived exts → **both sides = valid exts only**, or the checker false-positives on every no-ext torrent.
 - **Size types**: `BlobFile.size` is `u64`, `torrent_files.max(size)` and `agg.max_size` are `i64` — widen/compare carefully.
 - **Cap-subset is structurally zero (§8)** → any difference is a **bug** (G1/decode/build), not an accepted loss. Expect ~100% exact.
+
+**sqlx 0.9 decode rules (verified against canonical source, #49):**
+- `try_get` keys off the **per-row value**, not column-nullability metadata (`row.rs:117-130`) → **read `extension` as `String`** (the `IS NOT NULL` filter guarantees non-NULL rows; `Option<String>` only as defense-in-depth). Read `info_hash` as `Vec<u8>` then `InfoHash::from_slice`. Read `max_size` as **`i64`** (exact `int8` OID match — do *not* read an `int4` column as `i64`, the compatible-guard errors).
+- The enabled `macros` feature is **inert** for the runtime `sqlx::query("…")` path — no `DATABASE_URL`/`.sqlx` cache, compiles DB-less. `query()` takes `impl SqlSafeStr`, so **const `&str` SQL is fine** (a runtime-templated string would need `.into_sql_str()`/`query_with`).
+- Decode errors surface as `Error::ColumnDecode` (type-mismatch *and* wrapped unexpected-null) / `Error::ColumnNotFound`; `Error` is `#[non_exhaustive]` → `?` + anyhow `.context()` is accurate.
 
 | class | meaning | gate |
 |---|---|---|
