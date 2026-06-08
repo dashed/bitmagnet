@@ -37,6 +37,8 @@ This split matters: **the live-parity obligation is almost entirely L2a** (small
 
 ### 2a. PG `agg_torrent_ext` (L2a) — the DROP-gate parity piece
 
+> **Detailed design: [`L2-P0-agg-torrent-ext-and-checker-spec.md`](./L2-P0-agg-torrent-ext-and-checker-spec.md).** Refinement from grounding: the file-type facet does **presence-`EXISTS`** (no `GROUP BY`/`COUNT(DISTINCT)`), so the gate needs only `(info_hash, extension)` — `file_count/total_size/max_size` below are **optional/deferred** (only for a future torrent-grain `ext∧size` collapse).
+
 **Schema** (PG migration in the Go repo's migration dir — shared schema):
 ```sql
 CREATE TABLE agg_torrent_ext (
