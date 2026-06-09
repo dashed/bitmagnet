@@ -6,7 +6,26 @@
 
 > **One-line answer:** This is the single capability the cheap replacement stack (DuckDB-on-Parquet + `file_extensions` JSONB + blob) deliberately cannot serve — but it is a **nice-to-have with no demonstrated demand**, its own headline target (`<50 ms per keystroke`) is **structurally unmet for the early keystrokes**, and it would **roughly triple the replacement footprint**. **Defer it behind a hard 5-part gate; it never gates the DROP.**
 
-Thread docs: [T1 requirements/UX](./pathsearch-T1-requirements-ux.md) · [T2 gap & alternatives](./pathsearch-T2-gap-and-alternatives.md) · [T3 index design](./pathsearch-T3-index-design.md) · [T4 deploy/ops](./pathsearch-T4-deploy-ops.md) · [T5 decision](./pathsearch-T5-decision.md). Upstream: [cjk-tokenizer-…-RESULTS](./cjk-tokenizer-and-incremental-merge-bench-RESULTS.md), [arch-c-parity-and-optimization-results](./arch-c-parity-and-optimization-results.md), [space-savings-vs-torrent-files](./space-savings-vs-torrent-files.md), [duckdb-parquet-parity-architecture](./duckdb-parquet-parity-architecture.md).
+Thread docs: [T1 requirements/UX](./pathsearch-T1-requirements-ux.md) · [T2 gap & alternatives](./pathsearch-T2-gap-and-alternatives.md) · [T3 index design](./pathsearch-T3-index-design.md) · [T4 deploy/ops](./pathsearch-T4-deploy-ops.md) · [T5 decision](./pathsearch-T5-decision.md) · **[PS-MB1 micro-bench RESULTS](./pathsearch-microbench-RESULTS.md)** · [spec](./pathsearch-microbench-spec.md). Upstream: [cjk-tokenizer-…-RESULTS](./cjk-tokenizer-and-incremental-merge-bench-RESULTS.md), [arch-c-parity-and-optimization-results](./arch-c-parity-and-optimization-results.md), [space-savings-vs-torrent-files](./space-savings-vs-torrent-files.md), [duckdb-parquet-parity-architecture](./duckdb-parquet-parity-architecture.md).
+
+---
+
+## 🟢 MEASURED UPDATE — PS-MB1 ran (2026-06-09): the cost case flips
+
+The investigation below (§1–§7) reached its decision on the **per-file** index (~90 GB, broad-prefix 100–320 ms). The gated micro-bench it recommended was then **executed on the full 879.5 M-row HEL1 restore** (team `bitmagnet-bench`, runner+analyst; arms A/B/C + recall + the full-corpus capstone A2). The headline numbers move materially — **per-torrent path-bag granularity transforms the economics**:
+
+| dimension | per-file (investigation assumption) | **per-torrent, MEASURED (PS-MB1 A2, 16,973,470 torrents)** |
+|---|---|---|
+| index size | ~90 GB | **13.54 GiB** production (`WithFreqs`; as-built 81.86 GiB is 83.5 % droppable positions) |
+| `ascii3` warm **p50** | 100–145 ms (breaks the gate) | **24.71 ms** — PASS (docs cap at ~17 M regardless of corpus growth) |
+| `cjk3` | sub-ms | **0.21 ms** |
+| broadest-substring **p95/p99** | 244–320 ms | **~55–65 ms** (`ascii3` p95 58.6 / p99 59.7) — over 50 ms only at the worst-case tail |
+| recall | 1.0 (ngram) | **1.0000** every group |
+| **space-savings impact** | drop+index ⇒ **87 % → 55 %** | drop+index ⇒ **87 % → ~84 %** |
+
+**What changes:** the L3 path-FTS index is **NOT a footprint-tripler** — at per-torrent granularity it is a **~13.5 GiB, median-interactive (~25 ms) add-on**. The `<50 ms` target is met at **p50** but the *broadest* synthetic substrings breach it at the **p95/p99 tail** (~55–65 ms; mitigated by min-chars≥3, real-query selectivity, debounce, top-k) — so it's "median-interactive," not "uniformly <50 ms." The one design unlock = index the path field **`WithFreqs` not `WithFreqsAndPositions`** (ngram positions are dead weight → drops 83.5 % of the index); this is a standing recommendation for any path-ngram field (incl. the existing Tantivy sidecar).
+
+**What does NOT change:** the **build-gate is unchanged** — L3 is still **NO-GO by default, purely additive, and never gates the `torrent_files` DROP** (PS-T5 G4). PS-MB1 only proves L3 is *buildable cheaply and fast enough* **if** a real product demand (G1) + an in-prod ILIKE wall (G2) ever fire. Absent that demand, defer. So §1–§7 below stand on the *decision* (defer); only their *cost framing* ("triples the footprint," "structurally unmet") is superseded by these measured per-torrent numbers. Full detail: [PS-MB1 RESULTS](./pathsearch-microbench-RESULTS.md).
 
 ---
 

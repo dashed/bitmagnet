@@ -40,3 +40,6 @@ testem.log
 # System files
 .DS_Store
 Thumbs.db
+
+# PS-MB1 bench raw logs (throwaway; internal HEL1 paths) — keep local, not in repo
+docs/dev/psmb-logs/
