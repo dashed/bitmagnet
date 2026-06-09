@@ -16,7 +16,7 @@ use tantivy::schema::{
     BytesOptions, Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,
     FAST, STORED, STRING, TEXT,
 };
-use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer};
 use tantivy::Index;
 
 /// How a numeric field (`size`, `published_at`) is configured.
@@ -245,6 +245,19 @@ pub enum PathTokenizer {
     /// (`ngram_tokenizer.rs:168`), so substring queries are a conjunction of
     /// the query's ngram terms, never a `PhraseQuery` (see `main.rs`).
     Ngram,
+    /// PS-T3 micro-bench arm C: per-WORD edge-ngram (prefix grams) for ASCII
+    /// words + full sliding char-ngram for CJK runs (routed per code point).
+    /// Tantivy's stock `NgramTokenizer{prefix_only:true}` anchors at offset 0 of
+    /// the WHOLE text, so on a path it would only match a query that prefixes the
+    /// entire path — useless for typeahead. This custom tokenizer splits on
+    /// non-alphanumerics first, then edge-grams each ASCII word and full-ngrams
+    /// each CJK run, so a query matches by word-prefix (ASCII) or substring (CJK).
+    /// Far fewer postings than full char-ngram for the ASCII majority; the open
+    /// question the micro-bench answers is whether that shrinks the broad-prefix
+    /// match-set enough to clear `<50 ms` warm. Query as a CONJUNCTION of grams
+    /// (same as `Ngram`). Recommended build width: `--ngram-min 2 --ngram-max 12`
+    /// (a wide max gives real prefix discrimination; cost grows ~linearly in max).
+    EdgeNgram,
     /// `lindera-tantivy` CJK morphological segmentation. OPTIONAL — only built
     /// when the `lindera` cargo feature is enabled; otherwise selecting it errors
     /// rather than silently degrading. Keeps a heavy/failed lindera build from
@@ -259,6 +272,7 @@ impl PathTokenizer {
         match self {
             PathTokenizer::Default => "default",
             PathTokenizer::Ngram => "ngram",
+            PathTokenizer::EdgeNgram => "edge_ngram",
             PathTokenizer::Lindera => "lindera",
         }
     }
@@ -289,6 +303,14 @@ pub fn register_path_tokenizer(
                 .filter(LowerCaser)
                 .build();
             index.tokenizers().register("ngram", analyzer);
+        }
+        PathTokenizer::EdgeNgram => {
+            // Per-word edge-ngram (ASCII) + per-CJK-run full ngram. Lowercasing
+            // happens inside the tokenizer (so no LowerCaser filter is needed),
+            // matching the in-process lowercased substring truth.
+            let (min, max) = ngram;
+            let analyzer = TextAnalyzer::builder(PerWordEdgeNgram::new(min, max)).build();
+            index.tokenizers().register("edge_ngram", analyzer);
         }
         PathTokenizer::Lindera => {
             #[cfg(feature = "lindera")]
@@ -350,4 +372,107 @@ pub fn build_recall_schema(tok: PathTokenizer) -> (Schema, RecallFields) {
     let ident = b.add_u64_field("ident", NumericOptions::default().set_fast());
     let schema = b.build();
     (schema, RecallFields { path, ident })
+}
+
+// ===========================================================================
+// PS-T3 micro-bench: per-word edge-ngram tokenizer (arm C)
+// ===========================================================================
+
+/// Custom tokenizer: split text on non-alphanumerics, then for each ASCII word
+/// emit its edge-grams (prefixes of length `min..=max`), and for each CJK / non-
+/// ASCII run emit full sliding char-ngrams (length `min..=max`). All output is
+/// lowercased. Tokens carry `position = 0` (like the ngram tokenizer): substring
+/// queries are evaluated as a CONJUNCTION of grams, never a phrase, so positions
+/// are dead weight. See the `PathTokenizer::EdgeNgram` doc for the rationale.
+#[derive(Clone, Debug)]
+pub struct PerWordEdgeNgram {
+    min: usize,
+    max: usize,
+}
+
+impl PerWordEdgeNgram {
+    pub fn new(min: usize, max: usize) -> Self {
+        // Guard against a zero/inverted window (would emit nothing / panic).
+        let min = min.max(1);
+        let max = max.max(min);
+        Self { min, max }
+    }
+
+    /// Build the token list for `text` (owned — the stream does not borrow it).
+    fn grams(&self, text: &str) -> Vec<Token> {
+        let mut tokens = Vec::new();
+        for word in text.split(|c: char| !c.is_alphanumeric()) {
+            if word.is_empty() {
+                continue;
+            }
+            let lc = word.to_lowercase();
+            let chars: Vec<char> = lc.chars().collect();
+            let n = chars.len();
+            let is_cjk = chars.iter().any(|c| !c.is_ascii());
+            if n < self.min {
+                // Word shorter than the smallest gram → index it whole so 1-char
+                // (and sub-`min`) words remain findable.
+                push(&mut tokens, lc.clone());
+                continue;
+            }
+            if is_cjk {
+                // Full sliding char-ngrams → CJK substring within the run.
+                for len in self.min..=self.max.min(n) {
+                    for start in 0..=(n - len) {
+                        push(&mut tokens, chars[start..start + len].iter().collect());
+                    }
+                }
+            } else {
+                // ASCII word → edge-grams (prefixes). A query that is a prefix of
+                // the word shares all its (shorter) prefix grams → matches.
+                for len in self.min..=self.max.min(n) {
+                    push(&mut tokens, chars[..len].iter().collect());
+                }
+            }
+        }
+        tokens
+    }
+}
+
+fn push(tokens: &mut Vec<Token>, text: String) {
+    tokens.push(Token {
+        offset_from: 0,
+        offset_to: 0,
+        position: 0,
+        text,
+        position_length: 1,
+    });
+}
+
+/// A token stream over a pre-computed `Vec<Token>` (owns its tokens).
+pub struct VecTokenStream {
+    tokens: Vec<Token>,
+    idx: usize,
+}
+
+impl TokenStream for VecTokenStream {
+    fn advance(&mut self) -> bool {
+        if self.idx < self.tokens.len() {
+            self.idx += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn token(&self) -> &Token {
+        &self.tokens[self.idx - 1]
+    }
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.tokens[self.idx - 1]
+    }
+}
+
+impl Tokenizer for PerWordEdgeNgram {
+    type TokenStream<'a> = VecTokenStream;
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> VecTokenStream {
+        VecTokenStream {
+            tokens: self.grams(text),
+            idx: 0,
+        }
+    }
 }

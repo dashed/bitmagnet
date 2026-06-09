@@ -31,7 +31,7 @@ use bitmagnet_model::file_extension_from_path;
 
 use schema::{
     build_file_schema, build_recall_schema, register_path_tokenizer, FileFields, PathTokenizer,
-    Variant,
+    RecallFields, Variant,
 };
 
 /// Writer heap — matches the shipped sidecar (`index.rs:15`) so merge/flush
@@ -103,6 +103,21 @@ enum Source {
     TorrentFiles,
 }
 
+/// PS-T3 micro-bench: document granularity for the `recall` path index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Granularity {
+    /// One Tantivy doc per file (~873 M @ full corpus) — the EXP-D/D2 baseline.
+    PerFile,
+    /// One "path-bag" doc per torrent (~17 M @ full corpus): all of a torrent's
+    /// file paths added as separate values of the one `path` field (each value
+    /// tokenized independently → no cross-file boundary grams). Identity + delete
+    /// key = info_hash only. Postings shrink with torrent-document-frequency; the
+    /// bench measures by how much (G5 size) and whether broad-prefix latency
+    /// clears `<50 ms` (G3). Consecutive `torrent_files` rows are grouped by
+    /// info_hash, relying on the keyset scan's `ORDER BY info_hash, index`.
+    PerTorrent,
+}
+
 #[derive(Parser, Debug)]
 struct BuildArgs {
     /// Schema variant (V1..V11), or "all" to build every variant in turn.
@@ -151,6 +166,10 @@ struct RecallArgs {
     /// Path tokenizer to build the path-only index with.
     #[arg(long, value_enum, default_value_t = PathTokenizer::Ngram)]
     tokenizer: PathTokenizer,
+    /// PS-T3 micro-bench: per-file (one doc/file) or per-torrent (one path-bag
+    /// doc/torrent). per-torrent counts `--limit-docs` in TORRENTS, not files.
+    #[arg(long, value_enum, default_value_t = Granularity::PerFile)]
+    granularity: Granularity,
     /// TSV file of `group<TAB>query` lines (a `#` header / `#`-prefixed lines are
     /// skipped). `group` is `cjk` or `ascii`; results are reported per group.
     #[arg(long)]
@@ -1017,7 +1036,10 @@ fn build_path_query(
         tokens.push(ts.token().text.clone());
     }
     match tok {
-        PathTokenizer::Ngram => {
+        // EdgeNgram shares the conjunction-of-grams query shape with Ngram: the
+        // query string is tokenized by the same analyzer, and all resulting grams
+        // must be present (positions ignored).
+        PathTokenizer::Ngram | PathTokenizer::EdgeNgram => {
             let mut seen: HashSet<String> = HashSet::new();
             let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
             for t in tokens {
@@ -1054,6 +1076,48 @@ fn build_path_query(
     }
 }
 
+/// Index one "unit" — one file (per-file) or one torrent's path-bag
+/// (per-torrent) — into the recall index. A unit matches a query if ANY of its
+/// paths contains it (so per-torrent truth is the OR over the fileset). Every
+/// path is added as a SEPARATE value of the `path` field, so each is tokenized
+/// independently and no boundary grams span two files.
+#[allow(clippy::too_many_arguments)]
+fn index_unit(
+    writer: &IndexWriter,
+    truth: &mut [TruthEntry],
+    specs: &[QuerySpec],
+    fields: &RecallFields,
+    skip_truth: bool,
+    truth_cap: usize,
+    ident: u64,
+    paths: &[String],
+) -> Result<()> {
+    if !skip_truth {
+        // Lowercase each path once (not once per query), then OR over the bag.
+        let paths_lc: Vec<String> = paths.iter().map(|p| p.to_lowercase()).collect();
+        for (k, spec) in specs.iter().enumerate() {
+            if paths_lc.iter().any(|p| p.contains(&spec.query_lc)) {
+                let e = &mut truth[k];
+                e.count += 1;
+                if !e.saturated {
+                    if truth_cap == 0 || e.set.len() < truth_cap {
+                        e.set.insert(ident);
+                    } else {
+                        e.saturated = true;
+                    }
+                }
+            }
+        }
+    }
+    let mut td = TantivyDocument::new();
+    for p in paths {
+        td.add_text(fields.path, p);
+    }
+    td.add_u64(fields.ident, ident);
+    writer.add_document(td).context("add_document")?;
+    Ok(())
+}
+
 async fn run_recall(args: RecallArgs) -> Result<()> {
     let specs = load_queries(&args.queries_file)?;
     if specs.is_empty() {
@@ -1062,8 +1126,8 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
     let n_cjk = specs.iter().filter(|s| s.group == "cjk").count();
     let n_ascii = specs.iter().filter(|s| s.group == "ascii").count();
     println!(
-        "recall: tokenizer={:?} source={:?} queries={} (cjk={} ascii={}) limit_docs={} truth_cap={}",
-        args.tokenizer, args.source, specs.len(), n_cjk, n_ascii, args.limit_docs, args.truth_cap
+        "recall: tokenizer={:?} granularity={:?} source={:?} queries={} (cjk={} ascii={}) limit_docs={} truth_cap={}",
+        args.tokenizer, args.granularity, args.source, specs.len(), n_cjk, n_ascii, args.limit_docs, args.truth_cap
     );
 
     // --- Build the path-only index --------------------------------------
@@ -1096,38 +1160,65 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
     let mut docs: u64 = 0;
     let mut since_commit: u64 = 0;
     let start = Instant::now();
-    while docs < args.limit_docs {
-        let Some((ih, idx, path, _size)) = stream.next_doc().await? else {
-            break; // real source exhausted before limit_docs
-        };
-        let id = ident_hash(&ih, idx);
-        // The O(160×N) exact-substring truth pass — skipped at full scale via
-        // --skip-truth (intractable + unnecessary; recall is locked at 50 M).
-        if !args.skip_truth {
-            let path_lc = path.to_lowercase();
-            for (k, spec) in specs.iter().enumerate() {
-                if path_lc.contains(&spec.query_lc) {
-                    let e = &mut truth[k];
-                    e.count += 1;
-                    if !e.saturated {
-                        if args.truth_cap == 0 || e.set.len() < args.truth_cap {
-                            e.set.insert(id);
-                        } else {
-                            e.saturated = true;
-                        }
-                    }
+    match args.granularity {
+        Granularity::PerFile => {
+            while docs < args.limit_docs {
+                let Some((ih, idx, path, _size)) = stream.next_doc().await? else {
+                    break; // real source exhausted before limit_docs
+                };
+                index_unit(
+                    &writer, &mut truth, &specs, &fields, args.skip_truth, args.truth_cap,
+                    ident_hash(&ih, idx), std::slice::from_ref(&path),
+                )?;
+                docs += 1;
+                since_commit += 1;
+                if since_commit >= args.commit_interval {
+                    writer.commit().context("commit")?;
+                    since_commit = 0;
                 }
             }
         }
-        let mut td = TantivyDocument::new();
-        td.add_text(fields.path, &path);
-        td.add_u64(fields.ident, id);
-        writer.add_document(td).context("add_document")?;
-        docs += 1;
-        since_commit += 1;
-        if since_commit >= args.commit_interval {
-            writer.commit().context("commit")?;
-            since_commit = 0;
+        Granularity::PerTorrent => {
+            // Group consecutive rows by info_hash (the keyset scan is ordered by
+            // info_hash) → one path-bag doc per torrent. The trailing torrent is
+            // flushed on stream-end / limit; if --limit-docs cuts mid-torrent the
+            // last torrent's fileset is truncated (negligible at bench scale).
+            let mut pend: Option<([u8; 20], Vec<String>)> = None;
+            loop {
+                if docs >= args.limit_docs {
+                    break;
+                }
+                match stream.next_doc().await? {
+                    Some((ih, _idx, path, _size)) => match &mut pend {
+                        Some((cur, paths)) if *cur == ih => paths.push(path),
+                        _ => {
+                            if let Some((cur, paths)) = pend.take() {
+                                index_unit(
+                                    &writer, &mut truth, &specs, &fields, args.skip_truth,
+                                    args.truth_cap, ident_hash(&cur, 0), &paths,
+                                )?;
+                                docs += 1;
+                                since_commit += 1;
+                                if since_commit >= args.commit_interval {
+                                    writer.commit().context("commit")?;
+                                    since_commit = 0;
+                                }
+                            }
+                            pend = Some((ih, vec![path]));
+                        }
+                    },
+                    None => {
+                        if let Some((cur, paths)) = pend.take() {
+                            index_unit(
+                                &writer, &mut truth, &specs, &fields, args.skip_truth,
+                                args.truth_cap, ident_hash(&cur, 0), &paths,
+                            )?;
+                            docs += 1;
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
     writer.commit().context("final commit")?;
