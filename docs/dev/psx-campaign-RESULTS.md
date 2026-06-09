@@ -1,6 +1,6 @@
 # PSX campaign — RESULTS (D1–D4 synthesis)
 
-**Date:** 2026-06-09 · **Status:** 🟡 SKELETON — design verdicts settled from the four specs; measured tables AWAITING runner logs in [`psx-logs/`](./psx-logs/). Analyst (`psx-analyst`) is **LOCAL-only** — never SSHes to HEL1; fills tables as `psx_*.log` land.
+**Date:** 2026-06-09 · **Status:** 🟡 SKELETON — design verdicts settled from the four specs (D3 RETIRE, D4 DEFER-RUM, D2(B) engine-irreducible→UX all closed; D1 encoder-reality locked: **Rust encode = indicative**, HEL1 has no Go); measured tables AWAITING runner logs in [`psx-logs/`](./psx-logs/) (empty as of this checkpoint). Analyst (`psx-analyst`) is **LOCAL-only** — never SSHes to HEL1; fills tables as `psx_*.log` land.
 **Env:** HEL1 throwaway bench (879.5 M-row **pre-blob-backfill** restore, `torrent_files` source; bench-pg NodePort DSN `…@127.0.0.1:30654/bitmagnet`; userspace rust/uv). **Production FSN1 untouched.** ONE serial run, ONE ssh connection (the runner owns it).
 **Specs:** [`psx-D1`](./psx-D1-blob-parquet-gap-spec.md) · [`psx-D2`](./psx-D2-l3-prod-confirmation-spec.md) · [`psx-D3`](./psx-D3-agg-extmaxsize-spec.md) · [`psx-D4`](./psx-D4-find2-ftswall-spec.md)
 **Baselines extended:** [`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md) (PS-MB1, the L3 GO) · [`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md) (ARCH-C DuckDB) · [`fba1-jsonb-dropgate-results.md`](./fba1-jsonb-dropgate-results.md) (FB-A1 JSONB) · [`cjk-tokenizer-and-incremental-merge-bench-RESULTS.md`](./cjk-tokenizer-and-incremental-merge-bench-RESULTS.md) (EXP-D/D2/E).
@@ -11,10 +11,10 @@
 
 | Thread | Question | Verdict | Status |
 |---|---|---|---|
-| **D1** blob→Parquet | Does the real **decode→ext→Parquet** pipeline over actual blob bytes match the `torrent_files`-sourced Parquet, and at what throughput? | _(awaiting run)_ — **expected: 0 blob errors, exact parity, 0.6–0.94 µs/file confirmed** | ⏳ MEASURE |
-| **D2** L3 prod-shape | Confirm `WithFreqs` **13.54 GiB** + recall **1.0** + the **REAL** prod-shape latency (TopDocs-by-seeders), and settle the broad p95 tail | _(awaiting A build/B5/B6)_ — **(B) source-proven ENGINE-IRREDUCIBLE → UX, settled now;** size/recall/latency to confirm | ⏳ MEASURE (B settled) |
+| **D1** blob→Parquet | Does the real **decode→ext→Parquet** pipeline over actual blob bytes match the `torrent_files`-sourced Parquet, and at what throughput? | _(awaiting run)_ — **expected: 0 blob errors, exact parity, 0.6–0.94 µs/file confirmed**; decode/parity/throughput prod-faithful, encode-timing **Rust-indicative** (no Go on HEL1) | ⏳ MEASURE |
+| **D2** L3 prod-shape | Confirm `WithFreqs` **13.54 GiB** + recall **1.0** + the **REAL** prod-shape latency (TopDocs-by-seeders), and settle the broad p95 tail | ✅ **DONE**. **(A)** 13.32 GiB (−1.6 %), recall **1.0000**, `.pos` empty, ascii3 p50 25.6 ms — **−83.7 % vs 82 GB, deployable**. **(B5)** realistic multi-word < 50 ms p95; bare broad gram tails (TopDocs 77–94 ms); Count is a floor; engine-irreducible→UX. **(B6)** `WithFreqs` latency-free (warm identical, cold ~4×) | ✅ (A)+(B5)+(B6) |
 | **D3** `agg ext∧max_size` | Is a PG `agg_torrent_ext` rollup worth its disk vs DuckDB? | 🟥 **RETIRE** — route ext∧max_size to DuckDB (5–132 ms, **+0 PG disk**); corrected agg sizing ≈ **10 GB**; **no run** | ✅ SETTLED (design-only) |
-| **D4** FIND-2 FTS wall | The broad-common-term `ORDER BY ts_rank_cd` wall — fix? | **DEFER RUM** (write-amp dealbreaker + 30–50 GB + semantics change); **code-only bounded-candidate ranking** is the lever; characterise-then-decide | ✅ REC SETTLED · ⏳ EXPLAIN optional |
+| **D4** FIND-2 FTS wall | The broad-common-term `ORDER BY ts_rank_cd` wall — fix? | ✅ **MEASURED**: wall = **49.4 s (x264) / 74.9 s (1080p)**, 41–59 s of it pure `ts_rank_cd` (GIN scan 469 ms). **DEFER RUM** (write-amp dealbreaker). Cheap cliff-fix = **§2.3a popularity sort (1.9–4.9 ms)**; §2.4 bounded-candidate keeps relevance but only 7× (6.9 s, not interactive) | ✅ MEASURED + REC SETTLED |
 
 > **Cross-cutting standing constraint (unchanged):** the `torrent_files` **DROP stays deferred** until every replacement layer is proven in prod. None of D1–D4 touches that sequencing. D1/D2 are bench-only; D3 is design-only; D4 is pre-existing + DROP-independent.
 
@@ -24,14 +24,16 @@
 
 **The gap:** every prior L2/DuckDB/file-index number was sourced from `torrent_files`, never from the production blob (the bench restore is the pre-backfill dump → `files_data`/`torrent_file_summary` EMPTY). D1 re-encodes `files_data` **on the bench** with the exact production encoder (`blobmigration.SerializeFiles`), then runs the real `decode→ext→Parquet` path and proves parity against the `torrent_files`-sourced Parquet — **no prod blob reads, ever**.
 
-**Why bench re-encode is faithful (code-verified):** prod format = `zstd_L3(msgpack_named_array[{i,p,e,s}])`; Go⇄Go, Rust⇄Rust, and cross-language byte-identical inner-msgpack round-trips are all proven (`serializer_test.go`, `blob.rs` tests, `blob_fixture.rs`). Bench-encoded blob is indistinguishable from prod for every downstream consumer. Backfill encodes **all** `torrent_files` rows (no cap) → decoded fileset === `torrent_files` for that hash → exact Stage-3 parity.
+**Why bench re-encode is faithful (code-verified):** prod format = `zstd_L3(msgpack_named_array[{i,p,e,s}])`; Go⇄Go, Rust⇄Rust, and cross-language byte-identical **inner-msgpack** round-trips are all proven (`serializer_test.go`, `blob.rs` tests, `blob_fixture.rs`). Bench-encoded blob is indistinguishable from prod for every downstream **decoder** (only the outer zstd frame differs between libzstd and klauspost — *mutually decodable*, immaterial to any reader). Backfill encodes **all** `torrent_files` rows (no cap) → decoded fileset === `torrent_files` for that hash → exact Stage-3 parity.
+
+> 🚨 **Encoder reality (overrides D1 spec §1.2):** HEL1 has **no Go toolchain** → the runner uses the **Rust encoder** (`serialize_files`), the spec's *fallback*. Consequence for labeling: **decode, parity, and Stage-2 end-to-end throughput remain production-faithful** (the inner msgpack the decoder consumes is byte-identical to prod). But the **encode µs/file is "Rust libzstd, indicative"** — the production importer encodes with klauspost zstd (`SpeedDefault`), a *different* zstd implementation. So D1.1's encode timing is an **indicative encode-cost order-of-magnitude, NOT a measurement of the Go importer's encode path.** Treat it as "blob encoding costs ~X µs/file on this box," not as "the persist.go hot path was profiled."
 
 ### D1 gates flagged to lead
 
 | Gate | Question | Result |
 |---|---|---|
 | **G0** | post-backfill dump exists? (zero-encode fast path) | ⏳ _(Stage-0 probe — known only the **pre-backfill** dump today → default = Stage-1 re-encode)_ |
-| **G1** | Go toolchain on HEL1? (else Rust-encode fallback, zstd-frame caveat) | ⏳ |
+| **G1** | Go toolchain on HEL1? (else Rust-encode fallback, zstd-frame caveat) | 🔴 **NO Go on HEL1 → Rust `serialize_files` used** (encode-timing = indicative; decode/parity/throughput unaffected) |
 | **G2** | ≥ ~50 GB free disk before Stage 1 | ⏳ |
 | **G3** | encode smoke (`--limit 100000`) throughput acceptable | ⏳ |
 | **G4** | lead GO + bench-up (pre RUN-6 teardown) | ⏳ |
@@ -42,12 +44,12 @@
 |---|---|---|---|
 | torrents encoded | ⏳ | ⏳ | |
 | files encoded | ⏳ | ⏳ | full ≈ 856.79 M |
-| **encode µs/file** (pure `SerializeFiles`) | ⏳ | ⏳ | the importer encode-path number |
+| **encode µs/file** (`serialize_files`) | ⏳ | ⏳ | 🏷️ **Rust libzstd — indicative**, NOT the Go importer path (see caveat above) |
 | write throughput (t/s) | ⏳ | ⏳ | PG-write-bound |
 | `files_data` bytes written | ⏳ | ⏳ | est. ~16 GB |
-| encoder used | ⏳ | ⏳ | Go primary / Rust fallback (flag zstd-frame caveat) |
+| encoder used | **Rust** `serialize_files` | **Rust** `serialize_files` | HEL1 has no Go → spec fallback; zstd-frame differs (klauspost in prod), inner msgpack byte-identical |
 
-**Context check:** compare encode µs/file vs the live `persist.go` hot path (~1–1.5 ms/torrent @ ≤100 files). _(fill from log)_
+**Context check (indicative only):** the live `persist.go` hot path is ~1–1.5 ms/torrent @ ≤100 files (klauspost). The bench Rust encode µs/file is an order-of-magnitude sanity check on encode cost, **not** a like-for-like profile of the production encoder. _(fill from log)_
 
 ### D1.2 — REAL blob → Parquet (Stage 2): end-to-end throughput
 
@@ -78,9 +80,9 @@
 2. **Parity** — `blob_rows == tf_rows` AND content-hash identical (slim + full incl. `path`); any delta attributable only to documented cap semantics → ⏳
 3. **Throughput** — end-to-end µs/file reported; PASS if at/near 0.6–0.94 µs/file (decode-only) → ⏳
 4. **Format fidelity** — bench blob is valid zstd (`28 b5 2f fd`) decoding to exact `{i,p,e,s}` → ⏳ (implied by #1+#2)
-5. **Encode path timed** — importer encode µs/file reported + contextualised → ⏳
+5. **Encode cost timed** — Rust `serialize_files` encode µs/file reported + contextualised (🏷️ **indicative**, not the Go importer path — HEL1 has no Go) → ⏳
 
-> **D1 verdict (provisional, pending logs):** _Expected_ to close the measurement gap — confirm the prod blob decodes cleanly at scale, the Parquet is byte-for-byte the `torrent_files`-sourced artifact all prior conclusions rest on, and the 0.6–0.94 µs/file figure holds end-to-end. **Anomaly flags to watch:** any blob errors > 0; any parity delta beyond cap semantics; throughput materially off 0.6–0.94 µs/file.
+> **D1 verdict (provisional, pending logs):** _Expected_ to close the measurement gap — confirm the prod-format blob decodes cleanly at scale, the Parquet is byte-for-byte the `torrent_files`-sourced artifact all prior conclusions rest on, and the 0.6–0.94 µs/file figure holds end-to-end. **Scope caveat:** decode + parity + Stage-2 throughput are **production-faithful** (inner msgpack byte-identical); the **encode µs/file is Rust-libzstd-indicative** (HEL1 has no Go), a sanity check on encode cost — not a profile of the Go importer's klauspost path. **Anomaly flags to watch:** any blob errors > 0; any parity delta beyond cap semantics; throughput materially off 0.6–0.94 µs/file.
 
 ---
 
@@ -88,17 +90,19 @@
 
 L3 (per-torrent ngram free-text path index) is a **GO** (user decision). PS-MB1 measured the GO on the *as-built* shape and *projected* the prod shape. D2 closes three residual gaps: **(A)** build the real `WithFreqs` artifact (size was computed by `.pos` subtraction, never built); **(B)** attack the broad-query p95 tail and decide reducible-vs-UX; **(C)** confirm per-torrent freshness/supersession.
 
-### D2(A) — `WithFreqs` production-shape build
+### D2(A) — `WithFreqs` production-shape build ✅ PASSED ALL GATES (2026-06-09)
 
-> **Source-settled before any run:** `WithFreqs` drops only the `.pos` segment files; `.idx` (postings) + `.term` (term dict) are **byte-identical** to the positions-on build (`IndexRecordOption::has_freq` true for both; only `has_positions` differs). So the build lands at PS-MB1's **13.54 GiB ± a sliver**, recall **1.0000** (conjunction never reads positions), same p50/p95/p99. **(A) is a confirmation** that removes the "computed-not-built" caveat and yields a deployable artifact.
+> **Source-settled, now BUILT & confirmed:** `WithFreqs` drops only the `.pos` segment files; `.idx` (postings) + `.term` (term dict) are byte-identical to the positions-on build. The full-corpus build (`idx_pt_ngram_full_nopos`, logs `psx_r3_withfreqs_build.log` + `psx_r3_recall.log`) **lands the prediction**: 13.32 GiB, recall 1.0000, identical latency, with `.pos` genuinely empty. **The "computed-not-built" caveat is removed; this is a deployable artifact.** Build wall **~62 min** (15:47:35Z→16:49:56Z), single-thread writer + 2 GB arena, force-merge 17 segs → **1 segment**.
 
-| Gate | Expectation | PASS rule | Result |
+| Gate | Expectation | Result (measured) | Verdict |
 |---|---|---|---|
-| **G5-A size** | TOTAL ≈ **13.54 GiB**, positions component == 0 | within ±3 % AND `.pos` == 0 | ⏳ |
-| build sanity | docs == **16,973,470**, 1 segment, ingest ≈ 60–100 min | docs within 0.1 %, segments == 1 | ⏳ |
-| postings invariant | `.idx` ≈ **827.8 B/doc**, term dict ≈ **15.7 B/doc** (A2 values, unchanged by dropping positions) | both within ±2 % of A2 | ⏳ |
-| recall (separate WITH-truth run) | ngram recall == **1.0000** every group | byte-identical to positions-on | ⏳ |
-| latency (prod shape, informational) | `ascii3` warm p50 ≈ 24.7 ms, `cjk3` ≈ 0.2 ms, `ascii3` p95 ≈ 58–60 ms | divergence > 15 % flags a build/measure problem | ⏳ |
+| **G5-A size** | TOTAL ≈ **13.54 GiB**, positions == 0 | **13.32 GiB** (14,298,884,502 B / 842.4 B-doc) = **−1.6 %**; **positions = 104 B ≈ 0.000 B/doc** (`.pos` is a 4 KB stub) | ✅ within ±3 % AND `.pos`≈0 |
+| build sanity | docs == 16,973,470, 1 seg, 60–100 min | docs = **16,973,470** (exact), **1 segment**, ingest 3595 s + merge → **~62 min** | ✅ |
+| postings invariant | `.idx` ≈ 827.8 B/doc, term dict ≈ 15.7 B/doc (A2) | `.idx` = **816.28 B/doc** (−1.4 %, within ±2 %); term dict = **13.13 B/doc** (−16 % vs A2 — ⚠️ FLAG but tiny [223 MB total] & latency-irrelevant; bounded ngram vocab, A2 ref likely a different N) | ✅ postings; ⚠️ term-dict benign |
+| recall (separate 150k-truth run) | ngram recall == 1.0000 every group | **recall = 1.0000 on EVERY group** (ascii2–5, cjk2–4); precision 1.0 except ascii4 **0.910** / ascii5 **0.980** (documented non-contiguous ≥4-char-gram false-positives — recall still perfect, the conjunction never misses) | ✅✅ |
+| latency (prod shape, informational) | `ascii3` p50 ≈ 24.7 ms, `cjk3` ≈ 0.2 ms | `ascii3` p50 **25.6 ms** / p95 41.0 / p99 60.6; `cjk3` **0.27 ms**; ascii2 3.35, ascii4 19.0/55.1, ascii5 28.2/63.7, cjk2 0.18 (matches R2 positions-on — postings byte-identical) | ✅ within 15 % |
+
+**Component breakdown (full corpus, B/doc):** postings 816.28 · term dicts 13.13 · FAST cols 8.00 · doc store 4.02 · field norms 1.00 · **positions 0.000** · TOTAL **842.4** → **13.32 GiB**. Postings = 97 % of the index; dropping positions removed the entire `.pos` segment (82 GB → 13.3 GiB = **−83.7 % vs the positions-on `idx_pt_ngram_full`**) at zero recall/latency cost.
 
 **Crate change (drafted, `cargo check` green):** a `--no-positions` flag on `recall` flipping the path field `WithFreqsAndPositions`→`WithFreqs` (3 edits: `schema.rs`, `RecallArgs`, `run_recall`; guard rejects `--no-positions` with `default`/`lindera` tokenizers — those use `PhraseQuery` which needs positions). `pathquery` needs no change.
 
@@ -114,29 +118,48 @@ Candidate p95 mitigations — verdict from tantivy 0.26.1 source (`(F)` citation
 | B2 | rarest-gram-first conjunction | **no-op** — `intersect_scorers` already `sort_by_key(cost())` (`intersection.rs:31`); intersection already rarest-driven | n/a |
 | B3 | stop-gram (drop commonest bigram) | likely no-op + lossy (commonest gram is the cheap non-driver; dropping a `Must` → false positives) | optional (not built) |
 | B4 | index-sort seeders + capped TopDocs | **double dead-end** — index-sort *removed* from tantivy (#2434, `CHANGELOG.md:98`); `order_by_fast_field` requires_scoring==false → full-scan, no early-term; Block-WAND only fires for BM25-score on unions | **not runnable** (engine lacks feature) |
-| B5 | **realistic multi-word selectivity** | the real reducer — multi-word → larger conjunction → tiny intersection | yes (TSV) → ⏳ |
-| B6 | `WithFreqs` vs `WithFreqsAndPositions` query delta | query reads only `.idx`; delta = page-cache pressure (82 GB vs 14 GB), not algorithmic | yes → ⏳ |
+| B5 | **realistic multi-word selectivity** | the real reducer — multi-word → larger conjunction → tiny intersection | ✅ **MEASURED** — hypothesis validated |
+| B6 | `WithFreqs` vs `WithFreqsAndPositions` query delta | query reads only `.idx`; delta = page-cache pressure (82 GB vs 14 GB), not algorithmic | ✅ **MEASURED** — warm identical, cold ~4× better for nopos |
 
-**B5 — realistic-query selectivity (load-bearing): what fraction of realistic queries breach 50 ms?**
+**B5 — realistic-query selectivity ✅ MEASURED 2026-06-09** (`psx_r2_b5_selectivity.log`, `idx_pt_ngram_full` WithFreqsAndPositions 16,973,470 docs/1 seg; **warm-only** — no root for `drop_caches`, "cold" col = first-exec on a likely-warm page cache). **Count collector, by query group:**
 
-| query | match-set | warm p50 | warm p95 | < 50 ms? |
-|---|---|---|---|---|
-| `1080p` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `x264` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `1080p bluray` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `x264 1080p` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `2160p x265 hdr` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `s01e01` | ⏳ | ⏳ | ⏳ | ⏳ |
-| `<CJK title fragment>` | ⏳ | ⏳ | ⏳ | ⏳ |
+| group | avg hits | warm p50 | warm p95 | warm p99 | < 50 ms p95? |
+|---|---|---|---|---|---|
+| **a1_broad** (bare single gram — synthetic worst case) | 1,066,065 | 29.0 ms | **63.4 ms** | 64.3 ms | ❌ (the tail) |
+| **a2_2word** | 17,790 | 10.7 ms | **21.9 ms** | 22.1 ms | ✅ |
+| **a3_dotted** (e.g. `x264.1080p`) | 105,603 | 18.3 ms | **47.8 ms** | 48.1 ms | ✅ |
+| **a4_long** (3+ tokens) | 29,239 | 2.1 ms | 51.3 ms* | 51.7 ms | ~ (*bimodal — most ~2 ms; one space-spanning query breaches) |
+| **cjk2word** | 31,497 | 0.6 ms | **1.7 ms** | 1.8 ms | ✅✅ |
 
-**B6 — positions on/off query delta:**
+⟹ **B5 hypothesis VALIDATED: realistic multi-word queries are < 50 ms p95** (2word 22 ms, dotted 48 ms, cjk 1.7 ms). **ONLY the bare single broad gram tails > 50 ms** (a1 63 ms; the `ascii3` sweep 59 ms) — the degenerate synthetic worst case, not real typeahead traffic.
 
-| | warm p50 | warm p95 | cold p95 | resident |
-|---|---|---|---|---|
-| `idx_pt_ngram_full` (WithFreqsAndPositions) | ⏳ | ⏳ | ⏳ | ~82 GB |
-| `idx_pt_ngram_full_nopos` (WithFreqs) | ⏳ | ⏳ | ⏳ | ~14 GB |
+**🔑 Count is a LOWER BOUND — production TopDocs page (`order_by_fast_field` ident DESC, the value-independent proxy for seeders) adds ~20–30 % on broad terms** (confirms the spec §0 reframing — the page collector full-scans the match-set with no early-term, §F):
 
-Hypothesis: warm ≈ equal (postings byte-identical); **cold p95 better for nopos** (14 GB resident vs 82 GB to fault in) → `WithFreqs` is a latency-neutral-or-better win on top of the 83 % size cut.
+| group | Count p50 / p95 | **TopDocs p50 / p95** | Δ |
+|---|---|---|---|
+| a1_broad (1.07 M hits) | 29.0 / 63.4 | **38.5 / 76.5** | +30 % p95 |
+| `ascii3` sweep (2.13 M hits) | 24.6 / 59.4 | **37.1 / 93.5** | +57 % p95 |
+| `ascii2` (4.42 M hits) | 2.9 / 7.5 | **20.9 / 52.3** | **7×** — Count of one posting list is cheap, TopDocs scans *all* hits to a top-K heap |
+| cjk2 (223 k hits) | 0.14 / 0.52 | **0.27 / 2.96** | interactive on both |
+
+⟹ **Production broad-gram p95 ≈ 77–94 ms** (TopDocs, the real page). **CJK interactive on both collectors.** This empirically seals the spec's claim that PS-MB1's Count p95 *understates* production — you can't even match the Count floor by adding the sort, let alone beat it (B4's source-proven dead-end).
+
+**B6 — positions on/off query delta ✅ MEASURED 2026-06-09** (`psx_r4_b6_positions_delta.log`; same binary + sweep, both indexes; warm-only — caches partly warm from R2/R3, so "cold" = first-exec, not true `drop_caches`). **Hypothesis confirmed exactly: dropping `.pos` is latency-neutral warm and better cold.**
+
+| group | pos-on warm p50 → nopos | pos-on warm p95 → nopos | pos-on TopDocs p95 → nopos |
+|---|---|---|---|
+| ascii3 | 24.71 → **24.32 ms** | 58.18 → **58.92 ms** | 92.39 → **93.33 ms** |
+| ascii5 | 26.65 → **26.37 ms** | 63.74 → **64.28 ms** | 75.74 → **76.95 ms** |
+| cjk2 | 0.14 → **0.14 ms** | 0.56 → **0.51 ms** | 8.04 → **7.88 ms** |
+
+⟹ **warm latency IDENTICAL within noise** (postings `.idx` byte-identical; the ngram conjunction never reads positions). **Cold/first-exec benefit** from less page-cache pressure (13 GB vs 82 GB resident): `ascii2` cold-p95 **31.39 ms (pos) → 8.31 ms (nopos) = ~4× better**; other groups equal here only because caches were already warm — a true-cold deploy faulting 82 GB vs 13 GB would widen the gap further.
+
+| index | warm p95 (`ascii3`) | cold-p95 (`ascii2`) | resident |
+|---|---|---|---|
+| `idx_pt_ngram_full` (WithFreqsAndPositions) | 58.18 ms | **31.39 ms** | 82 GB |
+| `idx_pt_ngram_full_nopos` (WithFreqs) | 58.92 ms | **8.31 ms** | **13.3 GiB** |
+
+⟹ **`WithFreqs` is a free win: 83.7 % smaller, recall 1.0000, identical warm latency, ~4× better cold.** ✅ confirmed (not just hypothesised).
 
 ### D2(C) — per-torrent freshness sanity
 
@@ -144,9 +167,9 @@ Per-torrent path-bag is **strictly cheaper** than the already-validated EXP-E pe
 
 ### D2 deliverable verdict
 
-> **(A)** Build the full-corpus `WithFreqs` per-torrent index → confirm **13.54 GiB / recall 1.0000 / prod-shape latency**. Yields a deployable artifact. _(pending logs)_
-> **(B) SETTLED:** broad-query p95 is **source-proven engine-irreducible** in tantivy 0.26.1 — every engine lever is already-done (B2), unsupported (B4), or can't shrink a full-match-set conjunction count (B1/B3). The only reducers are **query selectivity** (B5, measured) + **client UX** (debounce, client min-chars, loading state, result caps). The measured p95 is a **lower bound** on prod (TopDocs-by-seeders ≥ Count). **Verdict: irreducible at engine, solved at UX — ship with UX guards.** If even realistic multi-word queries tail > 50 ms → fall back to **search-on-submit** (~25 ms median, not promised per-keystroke).
-> **(C)** Per-torrent freshness inherits + beats the validated EXP-E numbers (1 doc/torrent supersession). **Anomaly flags:** recall < 1.0000; size > 13.54 GiB +3 %; prod-shape latency *far* above the Count lower bound (a tail materially worse than ~58–60 ms p95 on `ascii3` would flag a build/measure problem).
+> **(A) ✅ PASSED:** full-corpus `WithFreqs` per-torrent index BUILT — **13.32 GiB** (−1.6 % vs the 13.54 GiB prediction), **recall 1.0000** every group, `.pos` empty (104 B), **ascii3 p50 25.6 ms** (matches R2). **−83.7 % vs the positions-on 82 GB index at zero recall/latency cost.** The "computed-not-built" caveat is gone; this is a deployable artifact (kept on HEL1 for the B6 head-to-head). Lone benign FLAG: term-dict 13.13 B/doc vs A2's 15.7 (−16 %, 223 MB total, latency-irrelevant).
+> **(B) FULLY MEASURED (B5 + B6):** broad-query p95 is **source-proven engine-irreducible** in tantivy 0.26.1 — every engine lever is already-done (B2), unsupported (B4), or can't shrink a full-match-set conjunction count (B1/B3). **B5: the only real reducer is query selectivity** — realistic multi-word queries are **< 50 ms p95** (2word 22 ms, dotted 48 ms, cjk 1.7 ms, Count); only the **bare single broad gram** tails (a1 63 ms Count → **77 ms TopDocs**; `ascii3` 59 → **94 ms**). **TopDocs page is +20–57 % over Count** (7× on `ascii2`) → PS-MB1's Count p95 is a **floor**, real prod ≈ **77–94 ms** for the degenerate broad gram. **B6: `WithFreqs` is latency-free** — warm latency identical to positions-on (postings byte-identical), cold ~4× better (13 GB vs 82 GB resident). **Verdict: irreducible at engine, solved at UX — ship the `WithFreqs` artifact with UX guards** (client min 2–3 chars, ~150 ms debounce, loading state, "top N of many"). The > 50 ms cases are degenerate single-broad-gram typeahead frames, not real multi-word traffic; if even that must be per-keystroke, fall back to **search-on-submit** (~25–38 ms median).
+> **(C)** Per-torrent freshness inherits + beats the validated EXP-E numbers (1 doc/torrent supersession). **Anomaly flags — NONE fired:** recall = 1.0000 (✓ not < 1.0); size = 13.32 GiB (✓ < 13.54 +3 %); `ascii3` p50 25.6 ms / p95 41 ms (✓ on-target, not far above the Count floor). The lone non-blocking note is the −16 % term-dict B/doc vs A2 (tiny, latency-irrelevant).
 
 ---
 
@@ -182,40 +205,56 @@ Per-torrent path-bag is **strictly cheaper** than the already-validated EXP-E pe
 
 **DROP-independent:** touches only `torrent_contents` (+ joins to `torrents`/`content`), never `torrent_files`. Pre-existing, orthogonal to the migration.
 
-### D4 — EXPLAIN characterisation (read-only; optional bench run)
+### D4 — EXPLAIN characterisation ✅ MEASURED (read-only EXPLAIN ANALYZE; no RUM)
 
-The plan shape (planner reasoning, postgres-performance lens): a **Bitmap Index Scan** on the composite `gin(content_type, tsv)` (the ~14 GB index) → **Bitmap Heap Scan** (recheck) → feeds a **Sort / top-N heapsort** that must consume the *whole* ~4.28 M-row match-set computing `ts_rank_cd` per row before emitting `LIMIT 30`. The GIN is **not** the cost; the per-row rank + full sort is. GIN cannot return rows in rank order → no index-ordered early-out exists with the current index.
+**RAN 2026-06-09** on the bench restore (`torrent_contents` = **48,035,320** rows; serial `max_parallel_workers_per_gather=0` for the canonical single-core wall — the bench PG pod's tiny k8s-default `/dev/shm` makes parallel plans fail with *"could not resize shared memory segment"*, so the serial pass is authoritative). Logs: `psx_r1b_find2_serial.log` (walls), `psx_r1_find2.log` (btree contrasts + 2-term/phrase/CTE).
 
-| Probe | What it isolates | Result |
+The plan shape (confirmed verbatim in the EXPLAIN output): **Bitmap Index Scan** on `torrent_contents_content_type_tsv_idx` (the composite `gin(content_type, tsv)`) → **Bitmap Heap Scan** (recheck) → **Sort / top-N heapsort** that consumes the *whole* match-set computing `ts_rank_cd` per row before emitting `LIMIT 30`. The Bitmap **Index** Scan is **469 ms** (cheap); the wall is the per-row `ts_rank_cd` over millions of rows. GIN cannot return rows in rank order → no index-ordered early-out with the current index. ✅ **Hypothesis confirmed exactly.**
+
+**Term selectivity (P0):** x264 = **4,278,916** · 1080p = **6,016,135** · 720p = 4,592,065 · x264&1080p = **1,263,768** · rarbg = 1,217,088 · ettv = 109,602 · sparks = **35,132** · yify = 25,664.
+
+| Probe | What it isolates | Result (single-core, measured) |
 |---|---|---|
-| **P0** corpus + term selectivity | `count(*) WHERE tsv @@ 'x264'` ≈ 4.28 M; index sizes | ⏳ |
-| **P1** served wall (relevance, paginated `LIMIT 30`) | Execution Time + Sort node actual time | ⏳ (~49 s expected) |
-| **P2** + the app joins (torrents + content) | confirm joins are NOT dominant | ⏳ |
-| **P3a** GIN match only (`count(*)`, no rank/order) | GIN cost | ⏳ (~482 ms expected) |
-| **P3b** match + rank, NO order | rank-compute cost = Δ(b−a) | ⏳ |
-| **P3c** match + rank + order + LIMIT | sort cost = Δ(c−b) | ⏳ (= P1) |
-| **P4** same term, ORDER BY `published_at`/`seeders` (btree) | early-term vs bitmap+sort regime | ⏳ |
-| term matrix | broad (`x264`) / medium (`1080p`) / rare group / 2-term AND / phrase | ⏳ — locates the cliff |
+| **P0** corpus + term selectivity | rows / match counts | **48.04 M** rows; x264 **4.28 M** (8.9 %), 1080p **6.02 M**, sparks **35 k** |
+| **P1** served wall (relevance, `LIMIT 30`) | Execution Time | **x264 = 49.4 s** · 1080p = **74.9 s** · sparks(35 k) = **2.1 s** |
+| **P2** + the app joins (torrents+content) | joins NOT dominant | **32.1 s** (Seq Scan `torrents` 4.9 s is minor; rank+sort still dominate — *faster* than P1 only because the planner defers the rank projection to the sort input vs P1 computing it in the 48 s heap-scan projection) |
+| **P3a** GIN match only (`count(*)`) | GIN cost | **5.50 s** total; **Bitmap Index Scan = 469 ms** (the GIN posting scan is cheap; the 5 s is the heap-block count) |
+| **P3b** match + rank, NO order | rank-compute cost | **46.8 s** ⇒ rank-compute = **Δ 41.3 s = THE wall** |
+| **P3c** = P1 (rank+order+LIMIT) | sort-on-top cost | sort adds only **Δ 2.6 s** (49.4 − 46.8) |
+| **P4** same term, ORDER BY `published_at` / `seeders` (btree) | early-term regime | **published_at = 4.85 ms · seeders = 1.91 ms** — Index Scan Backward, early-term (~4 orders of magnitude faster) |
+| **P-2.4** bounded-candidate CTE (x264, `published_at DESC LIMIT 50000` → rank → top-30) | the §2.4 fix latency | **6.89 s** — beats 49 s (7×) but **NOT < 50 ms**; the window-gather itself scans **1.06 M rows / 5.7 s** (filtered btree) to fill 50 k x264 |
+| 2-term AND (`x264 & 1080p`, 1.26 M) | does the wall extend to multi-common-term AND? | **34.0 s — YES, still a wall** |
+| phrase (`the <-> matrix`, 5.5 k matched) | phrase rank cost | **5.95 s** (43 k index candidates → position recheck drops 37.7 k → rank; common leading term `the` makes it costly despite few final hits) |
+
+> **1080p decomposition (mirror of x264):** GIN count **6.59 s** (index scan 575 ms) → rank-no-order **65.5 s** ⇒ rank = Δ **58.9 s**; sort adds 9.4 s → served **74.9 s**. Same shape, larger match-set → larger wall.
 
 ### D4 — fix candidate matrix
 
-| Option | Keeps `ts_rank_cd` relevance? | New disk | Build/migration | Write-path cost | Broad-term latency | Risk |
+| Option | Keeps `ts_rank_cd` relevance? | New disk | Build/migration | Write-path cost | Broad-term latency (**measured**) | Risk |
 |---|---|---|---|---|---|---|
-| **Baseline (today)** | yes | 0 | — | current | ~49 s (the wall) | — |
-| **2.1 RUM `<=>`** | **no** (`ts_rank`, no cover-density) | **+30–50 GB** (~2–3× GIN) | slow single-thread build + `CREATE EXTENSION` | **high** (positional posting-list updates; FIND-1 risk) | tens of ms (the win) | **high** — write-amp + semantics + ext |
+| **Baseline (today)** | yes | 0 | — | current | **x264 49.4 s / 1080p 74.9 s** (the wall) | — |
+| **2.1 RUM `<=>`** | **no** (`ts_rank`, no cover-density) | **+30–50 GB** (~2–3× GIN) | slow single-thread build + `CREATE EXTENSION` | **high** (positional posting-list updates; FIND-1 risk) | tens of ms (the win — *not run*) | **high** — write-amp + semantics + ext |
 | 2.2 `ts_rank` swap | ~similar | 0 | code 1-liner | unchanged | ~tens of s (constant-factor only) | low — **not a fix** |
-| 2.3a published_at/seeders default | no (popularity) | 0 | code + UX | unchanged | fast for common terms (early-term) | medium (product default change) |
-| **2.4 bounded-candidate CTE (approx)** | yes (over a window) | 0 | code | unchanged | bounded (rank ~50k) | low-medium (approx recall) |
+| **2.3a published_at/seeders default** | no (popularity) | 0 | code + UX | unchanged | **seeders 1.91 ms · published_at 4.85 ms** (early-term — the genuine cheap cliff-fix) | medium (product default change) |
+| **2.4 bounded-candidate CTE (approx)** | yes (over a window) | 0 | code | unchanged | **6.89 s** (49 s→6.9 s, 7×; window-gather is 5.7 s — **not interactive for broad-sparse terms; degenerates for rare terms** that can't fill the window) | low-medium (approx recall + sparsity-sensitive) |
 
-_(latency cells filled from §P-probes if bench runs; otherwise hypotheses from code analysis + MEMORY)_
+_(latency cells **measured** 2026-06-09, serial single-core; see §P-probes)_
 
-### D4 verdict — **DEFER RUM; code-only bounded-candidate ranking is the lever**
+### D4 verdict — ✅ MEASURED: **DEFER RUM; the cheap cliff-fix is a popularity-sort fallback (§2.3a), with bounded-candidate (§2.4) as a relevance-preserving 7× mid-tier**
 
-> **DEFER RUM.** It is the textbook fix (index-ordered ranking, early-termination, tens-of-ms) and the only option that keeps interactive latency *and* relevance order — but its costs are real and stacked **against this exact project**: **+30–50 GB** on a footprint-minimising migration; a slow single-threaded build; a new shared-lib extension to bake into the PG image; a **ranking-semantics change** (`<=>` ≈ `ts_rank`, no cover-density vs `ts_rank_cd`); and — **the dealbreaker — write amplification on an upsert-heavy table that already shows super-linear tsv-update cost (FIND-1)**. RUM's positional posting lists are far heavier to update than GIN's. Pursue RUM **only** on a confirmed product requirement for sub-second relevance-ranked broad-term results, and even then gate on the write-amp probe.
+> **The wall is confirmed and decomposed:** broad-common-term `ORDER BY ts_rank_cd` = **49.4 s (x264) / 74.9 s (1080p)** single-core, of which **41–59 s is pure `ts_rank_cd` compute** over the 4–6 M-row match-set (Bitmap **Index** Scan is 469 ms; sort-on-top is 2.6 s). The wall **extends to 2-common-term AND** (`x264 & 1080p`, 1.26 M → **34 s**) and to common-leading phrases (`the <-> matrix` → **5.95 s**), but **rare terms are fine ranked** (sparks 35 k → 2.1 s). **DROP-independent** (touches only `torrent_contents`).
 >
-> **If broad-term latency is a real user complaint, ship the code-only lever (no extension, no disk, no write-path impact):** **§2.4 bounded-candidate ranking** — cap the candidate window via the existing `published_at`/`seeders` btree (early-terminates), `ts_rank_cd`-rank that bounded window, return top-N. Keeps relevance semantics *approximately* (cost = a low-rank-but-old true match could fall outside the window — arguably fine, since `ts_rank_cd` over millions of equally-weighted `simple` single-term matches is already near-arbitrary). Implemented by extending `shouldTryCteStrategy()`/the CTE branch to the relevance path. Companion fallback: **§2.3a** degrade broad single common terms to a popularity sort (the existing CTE already accelerates that shape). **Reject §2.2** (`ts_rank` swap) — constant-factor only, doesn't remove the cliff.
+> **DEFER RUM.** Still the textbook fix (index-ordered ranking, early-term, tens-of-ms) and the only option keeping interactive latency *and* relevance order — but its costs stack **against this exact project**: **+30–50 GB** on a footprint-minimising migration; slow single-threaded build; a shared-lib extension baked into the PG image; a **ranking-semantics change** (`<=>` ≈ `ts_rank`, no cover-density vs `ts_rank_cd`); and **the dealbreaker — write amplification on an upsert-heavy table that already shows super-linear tsv-update cost (FIND-1)**. Pursue RUM **only** on a confirmed product requirement for sub-second relevance-ranked *broad*-term results, gated on a write-amp probe.
 >
-> **Now vs defer:** characterise on bench now (cheap, read-only EXPLAIN ANALYZE); **defer any code/extension change** pending the numbers + product decisions: (a) is broad-term relevance latency actually user-visible? (most real queries are multi-term/selective, already < 25 ms per EXP-A) (b) is approximate relevance acceptable? **Nothing here blocks the migration; no production change is proposed.**
+> **🔑 What the numbers changed about the recommendation:** the §2.4 bounded-candidate CTE **does cut the wall 7× (49 s → 6.9 s) but is NOT interactive** — gathering 50 k candidates via the `published_at` btree itself scans **1.06 M rows / 5.7 s** for a term covering 8.9 % of the corpus, and **degenerates for rare terms** (a term with < 50 k matches forces a near-full index scan to fill the window). So §2.4 is a *relevance-preserving mid-tier*, not the cheap fix I projected pre-run. **The genuine cheap cliff-fix is §2.3a — a popularity (`seeders`/`published_at`) sort, measured at 1.9–4.9 ms** via the existing btree early-term path (the CTE strategy *already* accelerates this shape, `query.go:812-826`). Its only cost is semantic: popularity, not relevance.
+>
+> **Recommended ladder (all code-only, no extension/disk/write-path impact):**
+> 1. **Most queries need nothing** — real traffic is multi-term/selective and already **< 25 ms** (EXP-A); the wall is a *broad-common-term* tail, not the common case.
+> 2. **For the broad-term tail, default to §2.3a popularity sort** (1.9–4.9 ms) — accept popularity ordering for terms above a selectivity threshold (detectable cheaply: planner row-estimate or a fast `count` bound). This is the cliff-fix.
+> 3. **Offer §2.4 bounded-candidate `ts_rank_cd`** as an opt-in "sort by relevance" that returns in ~7 s for broad terms (with a window-size knob) — relevance-approximate, honest about latency. Apply it **only** to mid-selectivity terms (it degrades for both very-broad and very-rare).
+> 4. **Reject §2.2** (`ts_rank` swap) — constant-factor only, doesn't remove the cliff.
+>
+> **Now vs defer:** characterisation **done** (read-only EXPLAIN ANALYZE, no prod touch, no RUM built). **Defer any code/extension change** pending product decisions: (a) is broad-term relevance latency user-visible at all? (most real queries already < 25 ms) (b) is a popularity default acceptable for broad terms, or is approximate-relevance (§2.4) required? **Nothing here blocks the migration; no production change is proposed.**
 
 ---
 
@@ -226,10 +265,13 @@ Logs land in [`psx-logs/`](./psx-logs/) as the runner deposits them; this sectio
 | log file | thread | fills |
 |---|---|---|
 | `psx_d1_*` (encode smoke/full, blob→parquet, parity) | D1 | §D1.1–D1.3 |
-| `psx_l3_A_build.log` / `psx_l3_A_recall.log` / `psx_l3_A_pq.log` | D2(A) | §D2(A) |
-| `psx_l3_B5_*` / `psx_l3_B6_*` (minchars, realistic, pos on/off) | D2(B) | §D2(B) |
+| `psx_r3_withfreqs_build.log` ✅ (build + size + latency) / `psx_r3_recall.log` ✅ (recall/precision) | D2(A) | §D2(A) |
+| `psx_r2_b5_selectivity.log` ✅ (B5 realistic + Count-vs-TopDocs) | D2(B) | §D2(B) B5 + reframe |
+| `psx_r4_b6_positions_delta.log` ✅ (pos on/off head-to-head) | D2(B) | §D2(B) B6 |
 | `psx_l3_C_freshness.log` (optional) | D2(C) | §D2(C) |
 | _(D3: no run — design-only)_ | D3 | §D3 (settled) |
-| `psx_d4_explain_*.log` (optional EXPLAIN) | D4 | §D4 P-probes |
+| `psx_r1b_find2_serial.log` ✅ (single-core walls + P3 isolation) | D4 | §D4 P0–P3, P1 walls |
+| `psx_r1_find2.log` ✅ (P4 btree contrasts, 2-term AND, phrase, §2.4 CTE) | D4 | §D4 P4, P-2.4, term matrix |
+| `r1_find2_probes.sql` / `r1b_find2_serial.sql` (probe SQL) | D4 | source queries |
 
-_Last updated: 2026-06-09 (skeleton; awaiting logs)._
+_Last updated: 2026-06-09 (analyst — **D2 FULLY DONE** [(A) build + (B5) selectivity + (B6) pos-on/off], **D4**, **D3** all complete; D2(A) 13.32 GiB/−83.7 %/recall 1.0000, B6 `WithFreqs` warm-identical+cold-~4×. D4 wall 49.4/74.9 s = rank-compute, §2.3a cheap fix, DEFER RUM. D3 RETIRE. D1 Rust-encoder locked. **ONLY D1 (`psx_d1_*`, blob→Parquet gap) remains.**)._

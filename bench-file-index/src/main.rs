@@ -282,6 +282,15 @@ struct PathqueryArgs {
     /// Ngram max length (must match the build; only for --tokenizer ngram).
     #[arg(long, default_value_t = 3)]
     ngram_max: usize,
+    /// PS-D2-L3 (B): ALSO time the production-shape page collector
+    /// `TopDocs::with_limit(30).order_by_fast_field::<u64>("ident", Desc)` per
+    /// warm rep, alongside the cheap `Count`. The recall schema's only u64 fast
+    /// field is `ident`; `order_by_fast_field` cost is value-independent (full
+    /// match-set scan + top-K heap, no early-term — tantivy 0.26.1), so ident is
+    /// a faithful proxy for ordering by `seeders`. Emits a 2nd latency table =
+    /// the production lower bound vs Count. (No rebuild: works on any recall idx.)
+    #[arg(long, default_value_t = false)]
+    topdocs: bool,
 }
 
 /// One torrent normalized across sources.
@@ -1475,6 +1484,7 @@ fn run_pathquery(args: PathqueryArgs) -> Result<()> {
     struct GroupAcc {
         cold_ms: Vec<f64>,
         warm_ms: Vec<f64>,
+        warm_td_ms: Vec<f64>,
         hits_sum: u64,
         n: usize,
     }
@@ -1494,15 +1504,33 @@ fn run_pathquery(args: PathqueryArgs) -> Result<()> {
             let _ = searcher.search(&query, &Count).context("pathquery warm")?;
             warm.push(t.elapsed().as_secs_f64() * 1000.0);
         }
+        // Production-shape page collector (B): TopDocs ordered by a u64 fast
+        // field. Full match-set scan + top-K heap, no early-term (proxy for
+        // seeders ordering). Timed warm, alongside Count.
+        let mut warm_td: Vec<f64> = Vec::new();
+        if args.topdocs {
+            for _ in 0..args.warm_reps {
+                let t = Instant::now();
+                let _top: Vec<(Option<u64>, _)> = searcher
+                    .search(
+                        &query,
+                        &TopDocs::with_limit(30).order_by_fast_field::<u64>("ident", Order::Desc),
+                    )
+                    .context("pathquery topdocs")?;
+                warm_td.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
         let acc = groups.entry(spec.group.clone()).or_insert_with(|| GroupAcc {
             cold_ms: Vec::new(),
             warm_ms: Vec::new(),
+            warm_td_ms: Vec::new(),
             hits_sum: 0,
             n: 0,
         });
         acc.n += 1;
         acc.cold_ms.push(cold);
         acc.warm_ms.extend(warm);
+        acc.warm_td_ms.extend(warm_td);
         acc.hits_sum += hits;
     }
 
@@ -1530,6 +1558,28 @@ fn run_pathquery(args: PathqueryArgs) -> Result<()> {
             pct(&warm, 95.0),
             pct(&warm, 99.0),
         );
+    }
+    if args.topdocs {
+        println!(
+            "\n  per-group TopDocs(limit=30, order_by ident DESC) latency = production page lower bound:"
+        );
+        println!(
+            "  {:<6} {:>4} {:>12} {:>10} {:>10} {:>10}",
+            "group", "n", "avgHits", "td-p50", "td-p95", "td-p99"
+        );
+        for (g, a) in &groups {
+            let mut td = a.warm_td_ms.clone();
+            td.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            println!(
+                "  {:<6} {:>4} {:>12} {:>8.2}ms {:>8.2}ms {:>8.2}ms",
+                g,
+                a.n,
+                a.hits_sum / a.n.max(1) as u64,
+                pct(&td, 50.0),
+                pct(&td, 95.0),
+                pct(&td, 99.0),
+            );
+        }
     }
     Ok(())
 }

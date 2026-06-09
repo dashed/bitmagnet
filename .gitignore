@@ -43,3 +43,10 @@ Thumbs.db
 
 # PS-MB1 bench raw logs (throwaway; internal HEL1 paths) — keep local, not in repo
 docs/dev/psmb-logs/
+
+# Rust build artifacts in bench crates (throwaway; never commit target/)
+bench/*/target/
+bench-file-index/target/
+
+# PSX campaign raw logs + work scripts (throwaway; HEL1 paths/conn details)
+docs/dev/psx-logs/
