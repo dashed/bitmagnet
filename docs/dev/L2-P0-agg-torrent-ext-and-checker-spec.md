@@ -1,5 +1,7 @@
 # L2-P0 — `agg_torrent_ext` migration + parity checker: detailed spec
 
+> 🛑 **SUPERSEDED for the DROP gate (FB-A1, 2026-06-09 — MEASURED).** This table is **NOT built** for the gate. The benchmark ([`fba1-jsonb-dropgate-results.md`](./fba1-jsonb-dropgate-results.md)) confirmed the already-deployed **`torrents.file_extensions` JSONB** beats `agg_torrent_ext` on every axis (disk +119 MB vs +9.5 GB; real-time vs minute freshness; competitive latency; exact set-parity, 50–110× faster to evaluate). **The DROP gate is now: a flag-gated Go change swapping the multi-file `EXISTS torrent_files` for `file_extensions @> '["x"]'` (raw-SQL OR-chain), single-file branch unchanged, + a parity confirmation.** The `agg_torrent_ext` DDL / model / seed / readers / checker below are retained ONLY as a documented future option *if* an `ext ∧ max_size` torrent-grain query is ever committed (JSONB carries no size); if built then, use the hardened rollout (create w/o secondary index → COPY-seed → index after → ANALYZE; FK `NOT VALID`/`VALIDATE`; add `(extension, max_size, info_hash)` for the size predicate).
+
 **Date:** 2026-06-08
 **Status:** SPEC (design only — no code; "do not drop `torrent_files` until proven" in force).
 **Parent:** [`L2-duckdb-parquet-search-rust-spec.md`](./L2-duckdb-parquet-search-rust-spec.md) (this refines its §2a). L2-P0 is the smallest, foundational brick and **the DROP gate**.
