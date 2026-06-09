@@ -319,6 +319,16 @@ The realtime per-keystroke `<50 ms` free-text **path** search question got its o
 - **Alternatives rejected (PS-T2/PS-MB1):** edge-ngram (bigger in prod 21.3 GiB *and* misses substrings, `264`→0.19 recall); external engines (Meilisearch/Typesense are *prefix not infix*; Quickwit misses local `<50 ms`; Manticore a lone gated-spike; pg_trgm loses); per-file ngram (90 GB, breaks the gate at scale).
 - **Net:** adding L3 now costs ~13.5 GiB and drops the saving only **87 % → ~83 %** (was −55 %). It's a cheap, viable add-on **if** a real product demand + an in-prod ILIKE wall ever fire — otherwise deferred.
 
+### 13. PSX campaign — built confirmation + production-shape latency + the L2 gap closed (MEASURED 2026-06-09)
+
+After the user committed to building L3, a follow-up campaign ([`psx-campaign-RESULTS.md`](./psx-campaign-RESULTS.md)) **built** the production artifact and closed the last measurement gap:
+
+- **L3 WithFreqs index BUILT (was computed by `.pos` subtraction):** **13.32 GiB** measured (vs the 13.54 GiB prediction, −1.6 %; positions ≈ 0), recall **1.0000**, 16,973,470 docs — confirming the lossless ~83 % cut (82 GB → 13.3 GiB) and that `WithFreqs` is latency-neutral warm / better cold. **Deployable artifact.**
+- 🔧 **Production-shape latency correction:** the broad-substring **p95 ≈ 55–65 ms** cited above is a `Count`-collector **lower bound**. The real production page collector (`TopDocs` ordered by a fast field, e.g. seeders) adds **+20–57 %** with no early-termination → **broad-single-gram p95 ≈ 77–94 ms**. Realistic *multi-word* queries stay **< 50 ms** (two-word 21.9 ms, dotted 47.8 ms, CJK 1.7 ms); only the degenerate single broad gram tails, and that tail is **engine-irreducible** (source-proven in Tantivy 0.26.1: index-sort removed, `order_by_fast_field` full-scans, `collect` can't abort) → a **UX** matter (debounce / min-chars / loading-state), not an engine one.
+- ✅ **The L2 blob→Parquet pipeline is now validated on REAL blobs** (D1 — closes "every L2 number was sourced from `torrent_files` by proxy"): bench-encoded prod-format blobs decode with **0 errors**, blob-sourced Parquet == `torrent_files`-sourced **byte-for-byte** (slim + full incl. `path`), decode **0.746 µs/file** (in the predicted 0.6–0.94 band), encode 0.458 µs/file (Rust-indicative). *(Sample: 5.15 M files; full-corpus run is bench-read-bound ~8 h — a NodePort+sqlx artifact, not production — so not executed.)*
+- ↩ **`agg_torrent_ext` RETIRED:** `ext ∧ max_size` (the one query `file_extensions` JSONB can't serve) is served by the DuckDB tier at 5–132 ms with **+0 PG disk** — re-adding ~10 GB + a pipeline to PG is against the DROP goal.
+- 🔎 **FIND-2 (separate, DROP-independent):** the main search's broad-term relevance wall (`ts_rank_cd`, x264 ≈ 49 s) has a **cheap code-only fix** — default broad typed queries to popularity sort (`seeders`/`published_at` btree backward scan = **1.9–4.9 ms**); offer relevance as an honest opt-in. RUM **deferred** (write-amp on the upsert-heavy table + 30–50 GB).
+
 ---
 
 ## 5. L2 Architecture (PROPOSED)

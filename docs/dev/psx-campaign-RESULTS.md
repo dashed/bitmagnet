@@ -44,10 +44,10 @@
 
 | Metric | Smoke (100k) ✅ MEASURED | Full (16.97M) | Notes |
 |---|---|---|---|
-| torrents encoded | **100,000** | ⏳ not run | — |
-| files encoded | **5,150,589** (avg **51.5** files/torrent) | ⏳ | full ≈ 856.79 M |
-| **encode µs/file** (`serialize_files`) | **0.458 µs/file** | ⏳ | 🏷️ **Rust libzstd — indicative**, NOT the Go importer path (see caveat above) |
-| write throughput (t/s) | 536 t/s (READ-bound) | ⏳ | **~28k rows/s** = k8s **NodePort + sqlx async** read of `torrent_files` → full ≈ **8 h**. 🚨 **A bench artifact, NOT a production throughput signal** — prod reads blobs from *local* PG (fast). The full run would only re-measure this artifact + add a marginal "0-errors-across-all" guarantee. |
+| torrents encoded | **100,000** | — not run | — |
+| files encoded | **5,150,589** (avg **51.5** files/torrent) | — not run | full ≈ 856.79 M |
+| **encode µs/file** (`serialize_files`) | **0.458 µs/file** | — not run | 🏷️ **Rust libzstd — indicative**, NOT the Go importer path (see caveat above) |
+| write throughput (t/s) | 536 t/s (READ-bound) | — not run | **~28k rows/s** = k8s **NodePort + sqlx async** read of `torrent_files` → full ≈ **8 h**. 🚨 **A bench artifact, NOT a production throughput signal** — prod reads blobs from *local* PG (fast). The full run would only re-measure this artifact + add a marginal "0-errors-across-all" guarantee. |
 | `files_data` bytes written | **94.2 MB** (0.09 GiB) | ~16 GiB (extrapolated) | matches the ~16 GB estimate |
 | encoder used | **Rust** `serialize_files` | — | HEL1 has no Go → spec fallback; zstd-frame differs (klauspost in prod), inner msgpack byte-identical |
 
@@ -91,7 +91,13 @@ Compared on the **32,157-torrent / 1,836,665-file overlap** (blob_export's first
 4. **Format fidelity** — bench blob decodes to the exact `{i,p,e,s}` set (implied by #1+#2 — 0 errors + identical checksums) → ✅
 5. **Encode cost timed** — Rust `serialize_files` **0.458 µs/file** reported + contextualised (🏷️ **indicative**, not the Go importer path — HEL1 has no Go) → ✅
 
-> **D1 verdict ✅ — gap CLOSED (with one bounded caveat):** the production-format blob decodes **cleanly (0 errors)** and the resulting Parquet is **byte-for-byte identical** (slim + full incl. `path`) to the `torrent_files`-sourced artifact every prior L2/DuckDB/file-index conclusion rests on, at **0.746 µs/file** end-to-end — squarely in the predicted band. **Scope honesty:** (a) **encode µs/file is Rust-libzstd-indicative** (HEL1 has no Go), a sanity check, not the Go importer's klauspost path; (b) parity + 0-errors were proven on a **32,157-torrent / 1.84 M-file overlap sample**, not all 16.97 M — the full-corpus 0-errors run was gated by an ~8 h NodePort read (bench-DSN artifact). Per-file decode + parity are **corpus-independent** (each blob is decoded and checked independently), so the sample generalises; the only unproven-at-full-scale claim is "0 errors across *all* 16.97 M." **No anomaly fired:** 0 errors, exact parity (no delta at all, cap-semantics moot), throughput on-target.
+> **D1 verdict ✅ — gap CLOSED on FIDELITY + per-file cost (sample-scoped, stated as a limitation — not a silent truncation):** the production-format blob decodes **cleanly (0 errors)** and the resulting Parquet is **byte-for-byte identical** (slim + full incl. `path`) to the `torrent_files`-sourced artifact every prior L2/DuckDB/file-index conclusion rests on, at **0.746 µs/file** end-to-end — squarely in the predicted 0.6–0.94 band, now on **real blob bytes**.
+>
+> **Explicit scope limitation:** parity + 0-errors were proven on the blob_export∩encode **overlap = 32,157 torrents / 1,836,665 files**, **NOT all 16.97 M / 856 M files**. The full-corpus end-to-end run was **not executed** — the bench encode is **READ-bound at ~28k rows/s (k8s NodePort + sqlx async)** ≈ 8 h, **a bench-DSN artifact, not a production throughput signal** (prod reads blobs from local PG, fast); the full run would only re-measure that artifact and add a marginal "0-errors-across-*all*" guarantee. Because **per-file decode cost + parity are corpus-independent** (every blob is decoded and checksum-checked independently), the sample is **conclusive for the gap it closes**; the single claim left unproven-at-full-scale is "0 errors across *all* 16.97 M." *(A wider 5.15 M-file full-overlap `blob_export`+parity was launched on HEL1 → `bench-scratch/psx_r5_pqfull.log`; it finishes after the runner's shutdown and was not fetched locally — expected identical, same encoder/decoder, wider overlap. The confirmed 1.84 M-file EXACT-parity above is the deliverable.)*
+>
+> **Encode label (exact):** `serialize_files` = **0.458 µs/file** — *Rust libzstd, **indicative***; the Go importer uses **klauspost/compress (`SpeedDefault`)**. Inner msgpack is byte-identical Go⇄Rust (`blob_fixture.rs`); only the outer zstd frame differs (mutually decodable) → decode/parity/throughput stay production-faithful, only the encode *timing* is indicative.
+>
+> **Bench-only code note:** the `bitmagnet-db/stream.rs` `files_count::int8` cast used by `blob_export` is **uncommitted / bench-only** (the bench restore is INT4; not a verified prod fix). **No anomaly fired:** 0 errors, exact parity (no delta at all — encode was uncapped, cap-semantics moot), throughput on-target. **R6 freshness was SKIPPED** (reasoning-settled — per-torrent supersession is strictly cheaper than the validated EXP-E per-file 11 ms / ~2 ms; see §D2(C)).
 
 ---
 
@@ -123,7 +129,7 @@ Candidate p95 mitigations — verdict from tantivy 0.26.1 source (`(F)` citation
 
 | # | candidate | source verdict | runnable? |
 |---|---|---|---|
-| B1 | min-chars 4/5 | **already worse** (A2 ascii4/5 p95 55.8/64.4 — longer substrings keep huge match-sets; `ascii3` *is* the floor) | yes (TSV only) → ⏳ |
+| B1 | min-chars 4/5 | **already worse — CONFIRMED** by the R2/R4 sweep (ascii4 warm p95 55.2 / ascii5 64.3; longer substrings keep huge match-sets; `ascii3` *is* the floor) | ✅ (sweep data) |
 | B2 | rarest-gram-first conjunction | **no-op** — `intersect_scorers` already `sort_by_key(cost())` (`intersection.rs:31`); intersection already rarest-driven | n/a |
 | B3 | stop-gram (drop commonest bigram) | likely no-op + lossy (commonest gram is the cheap non-driver; dropping a `Must` → false positives) | optional (not built) |
 | B4 | index-sort seeders + capped TopDocs | **double dead-end** — index-sort *removed* from tantivy (#2434, `CHANGELOG.md:98`); `order_by_fast_field` requires_scoring==false → full-scan, no early-term; Block-WAND only fires for BM25-score on unions | **not runnable** (engine lacks feature) |
@@ -172,7 +178,7 @@ Candidate p95 mitigations — verdict from tantivy 0.26.1 source (`(F)` citation
 
 ### D2(C) — per-torrent freshness sanity
 
-Per-torrent path-bag is **strictly cheaper** than the already-validated EXP-E per-file numbers: supersession = `delete_term(info_hash)` + re-add **one** path-bag doc (vs ~52 file docs), torrent-granular = EXP-B's anti-join analog; LogMergePolicy caps at ~17 M docs (vs 879 M). EXP-E measured per-file supersession **11 ms**, fresh-lag ~2 ms flat → per-torrent ≤ that. **Reasoning-confirmed sanity; optional `freshness --granularity per-torrent` extension is LOW priority** (measure only on explicit go). Measured: ⏳ _(if run)_.
+Per-torrent path-bag is **strictly cheaper** than the already-validated EXP-E per-file numbers: supersession = `delete_term(info_hash)` + re-add **one** path-bag doc (vs ~52 file docs), torrent-granular = EXP-B's anti-join analog; LogMergePolicy caps at ~17 M docs (vs 879 M). EXP-E measured per-file supersession **11 ms**, fresh-lag ~2 ms flat → per-torrent ≤ that. **R6 freshness measurement was SKIPPED** (reasoning-settled per spec §C + EXP-E — per-torrent is strictly cheaper than the validated per-file numbers, so an explicit run adds no decision value). Verdict: per-torrent freshness inherits the EXP-E numbers as an upper bound; **ms-level supersession + ~2 ms fresh-lag, confirmed by inheritance.**
 
 ### D2 deliverable verdict
 
@@ -283,4 +289,4 @@ Logs land in [`psx-logs/`](./psx-logs/) as the runner deposits them; this sectio
 | `psx_r1_find2.log` ✅ (P4 btree contrasts, 2-term AND, phrase, §2.4 CTE) | D4 | §D4 P4, P-2.4, term matrix |
 | `r1_find2_probes.sql` / `r1b_find2_serial.sql` (probe SQL) | D4 | source queries |
 
-_Last updated: 2026-06-09 (analyst — **CAMPAIGN COMPLETE, all 4 threads synthesized.** D1 ✅ gap closed: 0 blob errors, EXACT parity (slim+full incl. path, checksums identical), 0.746 µs/file end-to-end; encode 0.458 µs/file Rust-indicative; parity on 32,157-torrent/1.84 M-file overlap (corpus-independent → generalises), full-16.97 M 0-errors gated by ~8 h bench read. D2 ✅ (A 13.32 GiB/−83.7 %/recall 1.0000; B5 multi-word <50 ms; B6 WithFreqs free). D3 ✅ RETIRE. D4 ✅ wall = rank-compute, §2.3a cheap fix, DEFER RUM. Ready for the lead's final commit; placeholders intact.)._
+_Last updated: 2026-06-09 (analyst — **FINAL PASS, campaign R0→R5 COMPLETE, all 4 threads synthesized.** D1 ✅ gap closed on fidelity+per-file cost: 0 blob errors, EXACT byte-for-byte parity (slim+full incl. path, checksums identical) on 32,157-torrent/1.84 M-file overlap, 0.746 µs/file decode; encode 0.458 µs/file Rust-indicative (klauspost in prod); full-16.97 M NOT run (~8 h NodePort+sqlx READ artifact, not a prod signal — stated as a limitation); `files_count::int8` cast bench-only; R6 freshness SKIPPED (reasoning-settled). D2 ✅ (A 13.32 GiB/−83.7 %/recall 1.0000; B5 multi-word <50 ms, prod broad-tail 77–94 ms; B6 WithFreqs free). D3 ✅ RETIRE. D4 ✅ wall = rank-compute, §2.3a cheap fix 2–5 ms, DEFER RUM. Whole-campaign bottom line in §0. Ready for the lead's final commit; `<BENCH_PW>`/`<HEL1_TAILSCALE_IP>`/`<PORT>` placeholders intact.)._
