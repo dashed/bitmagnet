@@ -51,11 +51,12 @@ The one capability the cheap tiers can't make *interactive* is **broad free-text
 
 | index option | size | source | notes |
 |---|---|---|---|
-| **ngram CJK-correct path index** | **~90 GB** (94 GB measured @879.5M) | EXP-D2 | CJK recall+precision 1.0; queries 0.07 ms–sub-second |
+| **per-torrent path-bag ngram, CJK-correct** ✅ recommended | **13.54 GiB** (measured @ full corpus, 16.97M torrents) | **PS-MB1** | `WithFreqs`; `ascii3` p50 24.71 ms (p95 tail ~55–65 ms), CJK sub-ms, recall 1.0 |
+| ~~per-file ngram CJK-correct path index~~ (superseded) | ~~~90 GB~~ (94 GB @879.5M) | EXP-D2 | footprint-tripler; per-file docs → latency breaks at scale; PS-MB1 replaced it |
 | (default-tokenizer path index, ASCII-only) | ~19–30 GB | EXP-D | **CJK recall 0.0037 — broken**, not viable for this 15%-CJK corpus |
 | (DuckDB-FTS / BM25, ASCII-only) | +35 GB | ARCH-C | also CJK-token-only |
 
-➡️ **The CJK-correct free-text index is ~+90 GB** — char-grams explode the postings list (100 B/doc). It's the single largest line item, larger than the entire DuckDB-on-Parquet tier.
+➡️ **PS-MB1 (2026-06-09) reframed this line item.** The per-FILE ngram was ~90 GB (the historical "swing factor"). The **per-torrent path-bag** form — one doc per torrent (~17 M docs vs 873 M), each file path a separate field value, `WithFreqs` (positions are 83.5 % dead weight for ngram) — measures **13.54 GiB**, ~6.7× smaller, still CJK-correct and median-interactive. So the free-text index is **no longer a footprint-tripler**; it's a modest add-on, gated on demand not cost.
 
 ---
 
@@ -66,7 +67,8 @@ The one capability the cheap tiers can't make *interactive* is **broad free-text
 | **A. Migration only** (blob, no search restored) | ~19 GB | — | **~19 GB** | **−93%** |
 | **B. + cheap search parity** (slim Parquet + agg) | ~19 + 4 GB | ~3.9 GB | **~27 GB** | **−90%** |
 | **C. + optimized search tier** (sorted+rollups + agg) | ~19 + 4 GB | ~12 GB | **~35 GB** | **−87%** |
-| **D. + CJK free-text index** (the EXP-D2 index) | ~19 + 4 GB | ~12 + **90 GB** | **~125 GB** | **−55%** |
+| **D. + free-text index** (**per-torrent**, PS-MB1) | ~19 + 4 GB | ~12 + **13.5 GiB** | **~48 GB** | **−83%** |
+| ~~D′. + free-text index (per-FILE, superseded)~~ | ~~~19 + 4~~ | ~~~12 + 90~~ | ~~~125 GB~~ | ~~−55%~~ |
 
 *(PG-only view is even cleaner: the search tiers live on the sidecar, so PostgreSQL itself goes 397 GB → ~121 GB regardless, and per-file search leaves PG entirely.)*
 
@@ -76,9 +78,9 @@ The one capability the cheap tiers can't make *interactive* is **broad free-text
 
 - **The migration is a ~93% space win** (276 GB → ~19 GB).
 - **Keeping complete per-file search parity barely dents it — still ~87%** (scenario C, ~35 GB total).
-- **The CJK free-text index is the swing factor: it nearly triples the replacement footprint and halves the savings** (93% → 55%). The +90 GB index is, on its own, ~3× the entire rest of the replacement stack.
+- **The free-text index is no longer the swing factor** (PS-MB1): the per-FILE form *was* (−55%, ~3× the rest of the stack), but the **per-torrent path-bag** form measures **13.54 GiB**, so even *with* interactive CJK-correct free-text the saving is **~83%** (scenario D, ~48 GB). The index now costs about the same as the optimized DuckDB tier, not 3× the whole stack.
 
-⟹ **Drop `torrent_files`, keep the cheap composition → ~245 GB saved (−87 to −90%). Add the CJK free-text index → only ~150 GB saved (−55%).** This is the clearest reason to gate the inverted index behind a hard, measured product need for interactive broad free-text rather than build it by default — the cheap tiers already give near-complete parity at a fraction of the cost.
+⟹ **Drop `torrent_files`, keep the cheap composition → ~245 GB saved (−87 to −90%). Add the per-torrent free-text index → still ~228 GB saved (−83%).** The inverted index is still **gated on a hard, measured product demand** — but now because no demand has been demonstrated (it's purely additive and never gates the DROP), *not* because it's expensive. The cheap tiers already give near-complete parity; the index buys only realtime per-keystroke substring/CJK free-text.
 
 ### Also measured & REJECTED (would have erased the savings)
 - **Slim per-file PG table** (a thinned `torrent_files`): **+78–113 GB** — RUN-3, rejected.
@@ -90,5 +92,5 @@ The one capability the cheap tiers can't make *interactive* is **broad free-text
 - `torrent_files` 276 GB / DB 397→121 GB, blob 14.5 GB / summary 3.3 GB: backfill + RUN-2 ([`file-grained-search-benchmark-results.md`](./file-grained-search-benchmark-results.md), MEMORY).
 - DuckDB-Parquet slim 3.86 GB / optimized 12.3 GB / rollup costs: RUN-2 + ARCH-C ([`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md), [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parity-architecture.md)).
 - PG aggregate +3–5 GB / slim-table +78–113 GB: RUN-3.
-- ngram CJK free-text index 94 GB / default broken / DuckDB-FTS +35 GB: EXP-D/D2 ([`cjk-tokenizer-and-incremental-merge-bench-RESULTS.md`](./cjk-tokenizer-and-incremental-merge-bench-RESULTS.md)).
+- ngram CJK free-text index: per-FILE 94 GB / default broken / DuckDB-FTS +35 GB: EXP-D/D2 ([`cjk-tokenizer-and-incremental-merge-bench-RESULTS.md`](./cjk-tokenizer-and-incremental-merge-bench-RESULTS.md)); **per-torrent path-bag 13.54 GiB measured: PS-MB1** ([`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md), investigation [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md)).
 - Per-file Tantivy structured index +14–25 GB rejected: RUN-4 ([`file-index-bench-RESULTS.md`](./file-index-bench-RESULTS.md)).

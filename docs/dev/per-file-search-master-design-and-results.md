@@ -20,6 +20,7 @@ This document is **self-contained**: load-bearing numbers and code anchors are r
 This document was reviewed externally; the full triage + verdicts are in **[`../feedback/feedback_1-response.md`](../feedback/feedback_1-response.md)** (every claim re-verified against the code + the DuckDB source). Accepted changes that **supersede parts of §5/§7** below (the inline prose fold-in is in progress — tasks FB-A0…FB-DOC):
 
 - **DROP gate — use the deployed `file_extensions` JSONB; `agg_torrent_ext` dropped.** ✅ **MEASURED (FB-A1, 2026-06-09 — [`fba1-jsonb-dropgate-results.md`](./fba1-jsonb-dropgate-results.md)):** `file_extensions @>` beats both the `torrent_files` EXISTS and a built `agg_torrent_ext` on every axis — disk **+119 MB vs +9.5 GB** (already deployed), **real-time** freshness, filter **44–114 ms**, facet **~1 ms** (budgeted `EXPLAIN`, with better estimates), and **exact set-parity** (50–110× faster to evaluate). So L2-P0 collapses to a flag-gated `EXISTS→file_extensions @>` swap + parity check; **`agg_torrent_ext`, its seed, delta-upsert, readers, and agg checker are removed** (kept only as a future option if `ext ∧ max_size` is ever needed).
+- **L3 free-text path index — per-torrent path-bag = 13.54 GiB measured (not the per-file ~90 GB); the index is no longer a footprint-tripler.** ✅ **MEASURED (PS-MB1, 2026-06-09 — [`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md); full investigation [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md) + threads `pathsearch-T1…T5`):** the *realtime per-keystroke <50 ms free-text PATH search* investigation (PS-T1–T5) concluded **NO-GO by default** — nice-to-have, no demonstrated demand, purely additive, **never gates the DROP**. The gated micro-bench then ran on the full 879.5 M-row restore: a **per-torrent path-bag char-ngram(2,3) `WithFreqs`** index measures **13.54 GiB** (vs the per-FILE ~90 GB — the unlock is indexing the path field `WithFreqs`, dropping positions, which are **83.5 % dead weight** for ngram), `ascii3` warm p50 **24.71 ms** (p95/p99 tail **~55–65 ms** on the broadest substrings — median-interactive, not uniformly <50 ms), CJK **sub-ms**, recall **1.0000**. Edge-ngram and external engines (Meilisearch/Typesense/Quickwit/Manticore/pg_trgm) were weighed and rejected (PS-T2). ⟹ adding L3 now drops the saving only **87 % → ~83 %** (was −55 % on the per-file figure). **This supersedes the per-file L3 numbers in §4.11 below.** The `WithFreqs`-not-`WithFreqsAndPositions` fix (lossless 83.5 % cut) is a standing recommendation for any path-ngram field, including the existing Tantivy sidecar.
 - **Freshness — tombstone the base+delta anti-join.** Anti-join base against a **`delta_changed_torrents` key set** (one row per changed `info_hash`, incl. deletes / zero-row), not the delta *file* rows — else a deleted/zero-file torrent's base rows leak (confirmed: the classifier's `ErrDeleteTorrent` hard-`DELETE`s torrents).
 - **DuckDB fact — v1 = file-facts-only.** `content_type`/`published_at` change outside `files_data` and don't bump `torrents.updated_at` → the denorm goes stale; resolve them via a live PG join, defer denorm to a v2 multi-table change-stream (`created_at` is the lone immutable denorm).
 - **DuckDB deploy — immutable read-only generations.** DuckDB's file lock (1 RW xor N RO) *forbids* a CronJob mutating the server's live DB; build generations offline + swap a `current` pointer + open `READ_ONLY`. Per-query deadlines use `Connection::Interrupt()` — **DuckDB has no `statement_timeout`**. Treat SQL as code (lockdown `enable_external_access` etc.); escape `%`/`_`/`\` before `ILIKE`.
@@ -286,7 +287,7 @@ Base 20M with default `LogMergePolicy`: **fresh-lag ≈ 2 ms, flat** across +1k/
 |---|---|
 | **L1 — blob (deployed)** | `files_data` ~16 GB + summary 3.3 GB = **~19 GB** |
 | **L2 — cheap search** (per component) | **DuckDB** slim +3.9 GB / optimized +12.3 GB · **PG agg** +3–6 GB *(or +0 if the JSONB path clears the gate — see the Revisions banner)* → **all-in L2 ≈ +8–18 GB** |
-| **L3 — CJK free-text index (optional)** | ~**90 GB** |
+| **L3 — CJK free-text index (optional)** | **per-torrent path-bag 13.54 GiB** (PS-MB1, measured) · ~~per-file ~90 GB~~ (superseded) |
 
 *(All-in L1+L2 ≈ **27–37 GB**, matching the scenario table below. The earlier "+4–12 GB" conflated DuckDB-only with the all-in figure.)*
 
@@ -295,18 +296,28 @@ Base 20M with default `LogMergePolicy`: **fresh-lag ≈ 2 ms, flat** across +1k/
 | Migration only (blob) | ~19 GB | **−93%** |
 | + cheap search | ~27 GB | **−90%** |
 | + optimized search | ~35 GB | **−87%** |
-| + CJK free-text index | ~125 GB | **−55%** |
+| + free-text index (**per-torrent**, PS-MB1) | ~**48 GB** | **−83%** |
+| ~~+ free-text index (per-FILE, superseded)~~ | ~~~125 GB~~ | ~~−55%~~ |
 
-**Headline:** the migration alone is **~93%**; complete per-file *search* parity barely dents it (**~87%**); the **CJK free-text index is the swing factor** (−93% → −55%) → gate it on a hard product need.
+**Headline:** the migration alone is **~93%**; complete per-file *search* parity barely dents it (**~87%**). The free-text index used to read as the swing factor (−55%) on the **per-file** ngram — but **PS-MB1 measured the per-torrent path-bag form at 13.54 GiB**, so even *with* interactive free-text the saving is **~83%**. The index stays **NO-GO by default** (gate on a hard demonstrated demand) — not because it's expensive anymore, but because no demand has been shown; it remains purely additive and never gates the DROP. See §12.
 
 ### Synthesis — structured vs broad free-text
 
 | Workload | DuckDB-on-Parquet | PG | Inverted index |
 |---|---|---|---|
 | **Structured** (ext∧size, collapse, ranges, counts, analytics, faceting) | **<250 ms** (most <35 ms) at +3.9–12.3 GB | <50 ms (PG aggregate) | no advantage (+14–50 GB) |
-| **Broad free-text** (ranked / leading-wildcard substring) | ~23 s (ILIKE) | 15–49 s (`ts_rank_cd`) | **<1 ms–sub-second** (only winner) — +35 GB ASCII / **~90 GB CJK** |
+| **Broad free-text** (ranked / leading-wildcard substring) | ~23 s (ILIKE) | 15–49 s (`ts_rank_cd`) | **<1 ms–sub-second** (only winner) — +35 GB ASCII (DuckDB-FTS) · per-file ~90 GB · **per-torrent path-bag 13.54 GiB CJK-correct (PS-MB1)** |
 
-The existing PG main search already lives with the broad-ranked wall and is DROP-independent — so the file-search decision introduces nothing new. **Ship the cheap composition; reject the structured Tantivy index; gate any inverted index on a measured `<50 ms` broad/CJK free-text need.**
+The existing PG main search already lives with the broad-ranked wall and is DROP-independent — so the file-search decision introduces nothing new. **Ship the cheap composition; reject the structured Tantivy index; gate any inverted index on a measured `<50 ms` broad/CJK free-text need** — and if it ever is built, the cheap form is the **per-torrent path-bag char-ngram `WithFreqs`** index (§12), not the per-file one.
+
+### 12. PS-MB1 — per-torrent path-bag (the L3 reframing, MEASURED 2026-06-09)
+
+The realtime per-keystroke `<50 ms` free-text **path** search question got its own 5-thread investigation (PS-T1–T5, [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md)) + a gated micro-bench that **ran on the full 879.5 M-row restore** ([`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md), spec [`pathsearch-microbench-spec.md`](./pathsearch-microbench-spec.md)).
+
+- **Decision: NO-GO by default.** Greenfield on both UI and backend, zero demand signal; `<50 ms` is structurally met only at the median (per-keystroke generates the *broadest* match-sets first); purely additive; **never gates the `torrent_files` DROP** (the build-gate is unchanged).
+- **The cost case flipped (measured).** Per-FILE ngram = ~90 GB (873 M docs, EXP-D2) — a footprint-tripler. The **per-torrent path-bag** (one doc per torrent, ~17 M docs; each file path a separate field value so no cross-file boundary grams) measured **13.54 GiB** production (`WithFreqs`; as-built 81.86 GiB − **83.5 % dead-weight positions** dropped — the lossless unlock). Latency `ascii3` warm **p50 24.71 ms**, CJK **0.21 ms**, recall **1.0000**; the broadest synthetic substrings breach 50 ms only at the **p95/p99 tail (~55–65 ms)** — median-interactive, mitigated by min-chars≥3 + real-query selectivity + debounce + top-k.
+- **Alternatives rejected (PS-T2/PS-MB1):** edge-ngram (bigger in prod 21.3 GiB *and* misses substrings, `264`→0.19 recall); external engines (Meilisearch/Typesense are *prefix not infix*; Quickwit misses local `<50 ms`; Manticore a lone gated-spike; pg_trgm loses); per-file ngram (90 GB, breaks the gate at scale).
+- **Net:** adding L3 now costs ~13.5 GiB and drops the saving only **87 % → ~83 %** (was −55 %). It's a cheap, viable add-on **if** a real product demand + an in-prod ILIKE wall ever fire — otherwise deferred.
 
 ---
 
