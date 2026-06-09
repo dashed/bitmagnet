@@ -361,13 +361,40 @@ pub struct RecallFields {
 /// Build the path-only schema for the `recall` subcommand: one tokenized `path`
 /// field (per `tok`) + a FAST identity hash. Everything else is deliberately
 /// omitted to isolate path-field cost (spec §"skip the other fields").
-pub fn build_recall_schema(tok: PathTokenizer) -> (Schema, RecallFields) {
+///
+/// `with_positions` selects the path field's `IndexRecordOption`
+/// (PS-D2-L3 (A) — the production-shape confirmation knob):
+///   * `true`  → `WithFreqsAndPositions` (default; the EXP-D/PS-MB1 as-built
+///     shape — writes `.pos` segment files, needed for `PhraseQuery` so the
+///     `Default`/`Lindera` word-run path stays sound).
+///   * `false` → `WithFreqs` (the recommended PRODUCTION shape — drops the
+///     `.pos` files, which the conjunction-of-grams ngram query never reads,
+///     `main.rs:build_path_query`). This is the build that *measures* the
+///     PS-MB1 "13.54 GiB" number that was previously only computed by exact
+///     `.pos` subtraction. `IndexRecordOption` is `PartialOrd`, so postings
+///     (`.idx`) + term dict (`.term`) are byte-identical to the positions-on
+///     build (`index_record_option.rs`: `has_freq` true for both, `has_positions`
+///     the only difference) → `WithFreqs total == WithFreqsAndPositions total − .pos`.
+///
+/// CAUTION: `WithFreqs` is only sound for the *conjunction* tokenizers
+/// (`Ngram`/`EdgeNgram`, which query as a `BooleanQuery` of `Must` `TermQuery`s
+/// and never build a `PhraseQuery`). The caller MUST reject
+/// `with_positions == false` for `Default`/`Lindera` (their multi-token query is
+/// a `PhraseQuery`, which requires positions).
+pub fn build_recall_schema(tok: PathTokenizer, with_positions: bool) -> (Schema, RecallFields) {
     let mut b = Schema::builder();
-    // Positions kept for ALL tokenizers so phrase/substring queries work and the
-    // size comparison is apples-to-apples (ngram positions are all 0 → cheap).
+    // Positions-on = the apples-to-apples EXP-D/PS-MB1 as-built shape (phrase
+    // queries work, ngram positions are all 0 → cheap-but-present). Positions-off
+    // (`--no-positions`) = the production shape: the ngram conjunction never reads
+    // `.pos`, so dropping it is a lossless ~83% size cut for a per-torrent path-bag.
+    let record_option = if with_positions {
+        IndexRecordOption::WithFreqsAndPositions
+    } else {
+        IndexRecordOption::WithFreqs
+    };
     let indexing = TextFieldIndexing::default()
         .set_tokenizer(tok.tantivy_name())
-        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        .set_index_option(record_option);
     let path = b.add_text_field("path", TextOptions::default().set_indexing_options(indexing));
     let ident = b.add_u64_field("ident", NumericOptions::default().set_fast());
     let schema = b.build();

@@ -224,6 +224,15 @@ struct RecallArgs {
     /// `pathquery` subcommand for repeatable cold/warm latency on the built index.)
     #[arg(long, default_value_t = false)]
     skip_truth: bool,
+    /// PS-D2-L3 (A): index the `path` field `WithFreqs` (drop `.pos`) instead of
+    /// the default `WithFreqsAndPositions`. This BUILDS the production-shape
+    /// per-torrent path-bag index whose size PS-MB1 only *computed* by exact
+    /// `.pos` subtraction (13.54 GiB) — confirming size, recall, and the p95/p99
+    /// tail on the real shipping shape. SOUND ONLY for the conjunction tokenizers
+    /// (`ngram`/`edge-ngram`); rejected for `default`/`lindera` (their multi-token
+    /// query is a PhraseQuery, which requires positions).
+    #[arg(long, default_value_t = false)]
+    no_positions: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1134,7 +1143,23 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
     let dir = &args.index_path;
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
-    let (schema, fields) = build_recall_schema(args.tokenizer);
+    // PS-D2-L3 (A): `--no-positions` ⇒ build the `path` field `WithFreqs` (drop
+    // `.pos`). The conjunction-of-grams query (ngram/edge-ngram) never reads
+    // positions, so this is a lossless ~83% size cut. Reject it for the phrase
+    // tokenizers, whose multi-token query is a PhraseQuery (needs positions).
+    if args.no_positions
+        && matches!(
+            args.tokenizer,
+            PathTokenizer::Default | PathTokenizer::Lindera
+        )
+    {
+        bail!(
+            "--no-positions is only sound for --tokenizer ngram|edge-ngram \
+             (the {:?} tokenizer's multi-token query is a PhraseQuery, which requires positions)",
+            args.tokenizer
+        );
+    }
+    let (schema, fields) = build_recall_schema(args.tokenizer, !args.no_positions);
     let index = Index::create_in_dir(dir, schema).context("create recall index")?;
     register_path_tokenizer(&index, args.tokenizer, (args.ngram_min, args.ngram_max))?;
     // Single-thread (default) writer with a big arena: ngram (min=2,max=3 per
@@ -1232,8 +1257,9 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
     writer.garbage_collect_files().await.context("gc")?;
     let segs = index.searchable_segment_ids().map(|s| s.len()).unwrap_or(0);
     println!(
-        "\n=== recall {:?} | {docs} docs | ingest {:.1}s ({:.0} docs/s) | {segs} segment(s) ===",
+        "\n=== recall {:?} ({}) | {docs} docs | ingest {:.1}s ({:.0} docs/s) | {segs} segment(s) ===",
         args.tokenizer,
+        if args.no_positions { "WithFreqs / no .pos" } else { "WithFreqsAndPositions" },
         ingest.as_secs_f64(),
         docs as f64 / ingest.as_secs_f64().max(1e-9),
     );
