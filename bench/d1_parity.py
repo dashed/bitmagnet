@@ -7,7 +7,12 @@
 Order-INDEPENDENT checksum (SUM of per-row hashes) — avoids an 856M-row sort that
 string_agg(ORDER BY) would force. Compares row count, distinct info_hash, sum(size),
 null-ext count, and a tuple checksum over (info_hash, file_index, extension, size)
-[+ path for --full]. Any mismatch -> anti-join localizer (first 50 divergent rows).
+[+ path for --full].
+
+The blob Parquet may be a SUBSET (first-N torrents, if the bench encode was sampled).
+The torrent_files baseline is therefore ALWAYS restricted to the blob's distinct
+info_hash set via a semi-join — so the comparison is exact whether blob is the full
+corpus or a sample. Any mismatch -> anti-join localizer (first 50 divergent rows).
 
 usage:
   uv run d1_parity.py <blob.parquet> <tf.parquet> [--full]
@@ -22,21 +27,26 @@ blob_pq, tf_pq = args[0], args[1]
 
 con = duckdb.connect()
 con.execute("PRAGMA threads=8;")
+con.execute(f"CREATE VIEW b AS SELECT * FROM read_parquet('{blob_pq}');")
+# tf restricted to the blob's info_hash set (no-op when blob == full corpus).
+con.execute(
+    f"CREATE VIEW t AS SELECT * FROM read_parquet('{tf_pq}') "
+    f"WHERE info_hash IN (SELECT DISTINCT info_hash FROM b);"
+)
 
-# tuple expression — order-independent SUM(hash(...)) as HUGEINT to avoid overflow.
 tuple_expr = "info_hash || '|' || file_index || '|' || coalesce(extension,'∅') || '|' || size"
 if full:
     tuple_expr += " || '|' || path"
 
 
-def stats(path: str) -> dict:
+def stats(view: str) -> dict:
     q = f"""
-      SELECT count(*)                              AS rows,
-             count(DISTINCT info_hash)             AS distinct_ih,
-             sum(size)                             AS sum_size,
+      SELECT count(*)                                  AS rows,
+             count(DISTINCT info_hash)                 AS distinct_ih,
+             sum(size)                                 AS sum_size,
              count(*) FILTER (WHERE extension IS NULL) AS null_ext,
-             sum(hash({tuple_expr})::HUGEINT)      AS checksum
-      FROM read_parquet('{path}')
+             sum(hash({tuple_expr})::HUGEINT)          AS checksum
+      FROM {view}
     """
     r = con.execute(q).fetchone()
     return dict(rows=r[0], distinct_ih=r[1], sum_size=r[2], null_ext=r[3], checksum=r[4])
@@ -44,9 +54,9 @@ def stats(path: str) -> dict:
 
 print(f"== D1 parity (full={full}) ==")
 print(f"  blob: {blob_pq}")
-print(f"  tf  : {tf_pq}")
-b = stats(blob_pq)
-t = stats(tf_pq)
+print(f"  tf  : {tf_pq}  (restricted to blob's info_hash set)")
+b = stats("b")
+t = stats("t")
 print(f"\n  {'metric':<14} {'blob':>22} {'torrent_files':>22} {'match':>7}")
 ok = True
 for k in ("rows", "distinct_ih", "sum_size", "null_ext", "checksum"):
@@ -57,18 +67,11 @@ for k in ("rows", "distinct_ih", "sum_size", "null_ext", "checksum"):
 print(f"\n  VERDICT: {'PARITY ✅ (identical)' if ok else 'MISMATCH ❌'}")
 
 if not ok:
-    print("\n  -- anti-join localizer (blob rows not in torrent_files, first 50) --")
     key = "info_hash, file_index, extension, size" + (", path" if full else "")
-    rows = con.execute(
-        f"""SELECT {key} FROM read_parquet('{blob_pq}')
-            EXCEPT SELECT {key} FROM read_parquet('{tf_pq}') LIMIT 50"""
-    ).fetchall()
-    for row in rows:
+    print("\n  -- blob rows NOT in tf (first 50) --")
+    for row in con.execute(f"SELECT {key} FROM b EXCEPT SELECT {key} FROM t LIMIT 50").fetchall():
         print("   blob-only:", row)
-    rows2 = con.execute(
-        f"""SELECT {key} FROM read_parquet('{tf_pq}')
-            EXCEPT SELECT {key} FROM read_parquet('{blob_pq}') LIMIT 50"""
-    ).fetchall()
-    for row in rows2:
+    print("  -- tf rows NOT in blob (first 50) --")
+    for row in con.execute(f"SELECT {key} FROM t EXCEPT SELECT {key} FROM b LIMIT 50").fetchall():
         print("   tf-only:  ", row)
     sys.exit(1)
