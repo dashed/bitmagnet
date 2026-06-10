@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the L2 DuckDB-on-Parquet file-search sidecar.
+# One image, multiple entrypoints (DV-2 build-notes §"Image"):
+#   * bitmagnet-filesearch  — the gRPC FileSearchService server (DuckDB engine)
+#   * bitmagnet-parquet     — the export / minute-delta / compaction CLI (CronJobs)
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.filesearch -t bitmagnet-filesearch bitmagnet-rs
+#
+# Builder + runtime pinned to Debian bookworm so the glibc/libstdc++ the binary
+# links against matches the runtime image. The filesearch binary is built with
+# `--features duckdb-engine`, which statically compiles the bundled libduckdb
+# (a large C++ amalgamation) into the binary — so the runtime needs NO libduckdb,
+# only a C++ stdlib.
+
+# ---- builder ----------------------------------------------------------------
+FROM rust:1.95-slim-bookworm AS builder
+
+# protobuf-compiler: bitmagnet-proto build script (tonic-prost-build).
+# build-essential + cmake: the duckdb crate's `bundled` feature compiles the
+# libduckdb C++ amalgamation from source (needs a C++17 toolchain + cmake).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        protobuf-compiler build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the whole workspace; .dockerignore keeps target/ and VCS noise out.
+COPY . .
+
+# Build the export/refresh CLI (no DuckDB) + the sidecar server (real DuckDB
+# engine via the bundled libduckdb compile). Release mode.
+RUN cargo build --release -p bitmagnet-parquet \
+    && cargo build --release -p bitmagnet-filesearch --features duckdb-engine
+
+# ---- runtime ----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# libstdc++6 ships in debian:bookworm-slim; the statically-linked libduckdb needs
+# only that. ca-certificates kept for completeness (no outbound by default).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet \
+    && mkdir -p /var/lib/bitmagnet/filesearch \
+    && chown -R 65532:65532 /var/lib/bitmagnet
+
+COPY --from=builder /build/target/release/bitmagnet-filesearch /usr/local/bin/bitmagnet-filesearch
+COPY --from=builder /build/target/release/bitmagnet-parquet    /usr/local/bin/bitmagnet-parquet
+
+# Serve on all interfaces inside the container; generations live on a volume
+# (immutable read-only generations + `current` pointer, atomic-swapped by the
+# refresh CronJob — FB-B1c).
+# BITMAGNET_PARQUET_ROOT (shared with the export CLI) = the {base,delta}/…
+# generation tree the sidecar serves and the refresh CronJob writes.
+ENV BITMAGNET_FILESEARCH_ADDR=0.0.0.0:50052 \
+    BITMAGNET_PARQUET_ROOT=/var/lib/bitmagnet/filesearch
+VOLUME ["/var/lib/bitmagnet/filesearch"]
+
+USER 65532:65532
+EXPOSE 50052
+# Health via the FileSearchService HealthCheck RPC; wire a gRPC probe in the
+# orchestrator (grpc_health_probe / tcpSocket) rather than a shell HEALTHCHECK.
+ENTRYPOINT ["/usr/local/bin/bitmagnet-filesearch"]
