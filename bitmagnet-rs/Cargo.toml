@@ -64,7 +64,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 tantivy = "0.26"
 
 # CLI.
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Columnar export (L2 — bitmagnet-parquet). 55.x (not the bench's 53.x: arrow
 # 53's `arrow-arith` fails to compile against chrono ≥0.4.45 — a `quarter`

@@ -97,20 +97,31 @@ const STREAM_CHANGED_SQL: &str = "\
 SELECT info_hash, name, size, files_status::text AS files_status, files_count, files_data \
 FROM torrents \
 WHERE updated_at > to_timestamp($1) \
-AND ($2::bytea IS NULL OR info_hash > $2) \
+AND updated_at <= to_timestamp($2) \
+AND ($3::bytea IS NULL OR info_hash > $3) \
 ORDER BY info_hash ASC \
-LIMIT $3";
+LIMIT $4";
 
-/// Reads up to `limit` torrents changed since `since_epoch` (exclusive) whose
-/// `info_hash` is greater than `after_info_hash`, ordered by `info_hash` — the
-/// per-minute delta carve for the L2 Parquet/agg refresh. Requires an index on
-/// `torrents.updated_at` for an efficient carve (see the L2 spec §2a/§6).
+/// Reads up to `limit` torrents changed in the half-open window
+/// `(since_epoch, until_epoch]` whose `info_hash` is greater than
+/// `after_info_hash`, ordered by `info_hash` — the per-minute delta carve for
+/// the L2 Parquet/agg refresh. Requires an index on `torrents.updated_at` for
+/// an efficient carve (see the L2 spec §2a/§6).
+///
+/// `until_epoch` MUST be a commit-visibility-lagged "now" (now − ~30 s; see
+/// `bitmagnet_parquet::export::CARVE_LAG_SECS`): `updated_at` is set at
+/// statement time inside the writer's transaction, so an UNBOUNDED carve whose
+/// watermark then advances to `now` would permanently skip any row whose
+/// transaction committed between the query and `now`. Bounding the window at
+/// now−lag (and persisting exactly that bound as the new watermark) guarantees
+/// every row is read by exactly the run whose window contains its `updated_at`.
 ///
 /// Returns the same [`TorrentWithBlob`] shape as
 /// [`stream_torrents_with_files`]; decode each blob with [`TorrentWithBlob::files`].
 pub async fn stream_changed_torrents(
     pool: &PgPool,
     since_epoch: i64,
+    until_epoch: i64,
     after_info_hash: Option<&InfoHash>,
     limit: i64,
 ) -> Result<Vec<TorrentWithBlob>> {
@@ -118,6 +129,7 @@ pub async fn stream_changed_torrents(
 
     let rows = sqlx::query(STREAM_CHANGED_SQL)
         .bind(since_epoch)
+        .bind(until_epoch)
         .bind(after)
         .bind(limit)
         .fetch_all(pool)
@@ -417,12 +429,18 @@ mod tests {
 
     #[test]
     fn changed_sql_shape() {
-        // The delta carve: updated_at window + keyset on info_hash.
+        // The delta carve: a BOUNDED half-open updated_at window
+        // (since, until] + keyset on info_hash. The upper bound is the
+        // commit-visibility-lagged "now" (export::CARVE_LAG_SECS) that the
+        // caller also persists as the new watermark — an unbounded carve with
+        // watermark=now would permanently skip rows whose transaction commits
+        // between the query and now.
         assert!(STREAM_CHANGED_SQL.contains("FROM torrents"));
         assert!(STREAM_CHANGED_SQL.contains("updated_at > to_timestamp($1)"));
-        assert!(STREAM_CHANGED_SQL.contains("info_hash > $2"));
+        assert!(STREAM_CHANGED_SQL.contains("updated_at <= to_timestamp($2)"));
+        assert!(STREAM_CHANGED_SQL.contains("info_hash > $3"));
         assert!(STREAM_CHANGED_SQL.contains("ORDER BY info_hash ASC"));
-        assert!(STREAM_CHANGED_SQL.contains("LIMIT $3"));
+        assert!(STREAM_CHANGED_SQL.contains("LIMIT $4"));
         assert!(STREAM_CHANGED_SQL.contains("files_data"));
     }
 

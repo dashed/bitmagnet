@@ -156,7 +156,9 @@ async fn main() -> Result<()> {
                 .await
                 .context("connecting to postgres")?;
             let version = version.unwrap_or_else(|| now_epoch().to_string());
-            let new_wm = watermark.unwrap_or_else(now_epoch);
+            // Lagged now: the carve window end + persisted cursor (see
+            // export::CARVE_LAG_SECS — closes the commit-visibility race).
+            let new_wm = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
             let deleted = read_deleted(deleted_file.as_deref())?;
             let stats =
                 export::run_delta(&pool, &layout, &version, new_wm, &deleted, page_size).await?;
@@ -173,7 +175,14 @@ async fn main() -> Result<()> {
                 .context("connecting to postgres")?;
             let version = version.unwrap_or_else(|| now_epoch().to_string());
             let stats =
-                export::run_compaction(&pool, &layout, &version, now_epoch(), sort.into(), page_size)
+                export::run_compaction(
+                    &pool,
+                    &layout,
+                    &version,
+                    now_epoch() - export::CARVE_LAG_SECS,
+                    sort.into(),
+                    page_size,
+                )
                     .await?;
             report("compact", &stats);
         }

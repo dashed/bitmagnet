@@ -151,9 +151,20 @@ pub async fn run_base(
     Ok(stats)
 }
 
-/// Minute delta: carve torrents changed since `layout.read_watermark()`, plus
-/// the supplied `deleted` hashes (from the deletion audit source), into a fresh
-/// delta generation; then advance the watermark to `new_watermark` and swap.
+/// Commit-visibility lag for the delta carve window (seconds). The carve reads
+/// `(watermark, now − CARVE_LAG_SECS]` and persists the window END as the new
+/// watermark: rows whose transaction commits late (after the carve ran) still
+/// have `updated_at > window_end`, so the NEXT run picks them up — nothing can
+/// fall between runs as long as writer transactions are shorter than the lag.
+pub const CARVE_LAG_SECS: i64 = 30;
+
+/// Minute delta: carve torrents changed in `(layout.read_watermark(),
+/// new_watermark]`, plus the supplied `deleted` hashes (from the deletion audit
+/// source), into a fresh delta generation; then advance the watermark to
+/// `new_watermark` and swap.
+///
+/// `new_watermark` is BOTH the carve window end and the persisted cursor — pass
+/// a lagged now (`now_epoch() − CARVE_LAG_SECS`), never a raw `now`.
 ///
 /// `deleted` is the set of hard-deleted info_hashes since the last run — see the
 /// build notes for the audit-source wiring (a delete trigger / audit table).
@@ -173,7 +184,7 @@ pub async fn run_delta(
 
     let mut cursor = None;
     loop {
-        let page = stream_changed_torrents(pool, since, cursor.as_ref(), page_size)
+        let page = stream_changed_torrents(pool, since, new_watermark, cursor.as_ref(), page_size)
             .await
             .context("streaming delta page")?;
         if page.is_empty() {
