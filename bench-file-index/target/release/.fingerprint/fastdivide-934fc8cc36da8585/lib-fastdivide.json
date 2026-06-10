@@ -1,0 +1,1 @@
+{"rustc":2179919275645516985,"features":"[]","declared_features":"[\"std\"]","target":644584283375519024,"profile":9336706378672418649,"path":2303019644870656973,"deps":[],"local":[{"CheckDepInfo":{"dep_info":"release/.fingerprint/fastdivide-934fc8cc36da8585/dep-lib-fastdivide","checksum":false}}],"rustflags":[],"config":8247474407144887393,"compile_kind":0}

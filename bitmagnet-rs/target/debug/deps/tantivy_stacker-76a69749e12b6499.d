@@ -1,0 +1,11 @@
+/Users/me/aaa/github/bitmagnet/bitmagnet-rs/target/debug/deps/tantivy_stacker-76a69749e12b6499.d: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/arena_hashmap.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/expull.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcmp.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcpy.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/memory_arena.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/shared_arena_hashmap.rs
+
+/Users/me/aaa/github/bitmagnet/bitmagnet-rs/target/debug/deps/libtantivy_stacker-76a69749e12b6499.rmeta: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/arena_hashmap.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/expull.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcmp.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcpy.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/memory_arena.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/shared_arena_hashmap.rs
+
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/lib.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/arena_hashmap.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/expull.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcmp.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/fastcpy.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/memory_arena.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-stacker-0.7.0/src/shared_arena_hashmap.rs:
