@@ -29,14 +29,25 @@ FROM debian:bookworm-slim AS runtime
 # Non-root user (uid/gid 65532, the conventional "nonroot" id).
 RUN groupadd --system --gid 65532 bitmagnet \
     && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet \
-    && mkdir -p /var/lib/bitmagnet/search \
+    && mkdir -p /var/lib/bitmagnet/search /var/lib/bitmagnet/search-files \
     && chown -R 65532:65532 /var/lib/bitmagnet
 
 COPY --from=builder /build/target/release/bitmagnet-search /usr/local/bin/bitmagnet-search
+# L3 path-FTS (per-torrent path-bag) typeahead engine: the serving sidecar +
+# the one-shot backfill. Both come from the same `cargo build -p bitmagnet-search`
+# (cargo names the bins after src/bin/<file>.rs). The path-search Deployment /
+# Job override the container command to one of these.
+COPY --from=builder /build/target/release/pathsearch_server /usr/local/bin/pathsearch-server
+COPY --from=builder /build/target/release/backfill_files    /usr/local/bin/backfill-files
 
 # Listen on all interfaces inside the container; persist the index on a volume.
+# The L3 sidecar uses BITMAGNET_PATHSEARCH_* (index at .../search-files); the
+# parent /var/lib/bitmagnet is the PVC mount (D0) so a sibling watermark file and
+# any future index dir land on the volume, not ephemeral fs.
 ENV BITMAGNET_SEARCH_ADDR=0.0.0.0:50051 \
-    BITMAGNET_SEARCH_INDEX=/var/lib/bitmagnet/search
+    BITMAGNET_SEARCH_INDEX=/var/lib/bitmagnet/search \
+    BITMAGNET_PATHSEARCH_ADDR=0.0.0.0:50051 \
+    BITMAGNET_PATHSEARCH_INDEX=/var/lib/bitmagnet/search-files
 VOLUME ["/var/lib/bitmagnet/search"]
 
 USER 65532:65532

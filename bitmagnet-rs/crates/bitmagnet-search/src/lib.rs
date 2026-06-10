@@ -22,6 +22,7 @@
 pub mod facets;
 pub mod index;
 pub mod indexer;
+pub mod pathsearch;
 pub mod query;
 pub mod schema;
 pub mod server;
@@ -31,5 +32,6 @@ pub mod transform;
 /// The generated `bitmagnet.v1` protobuf + gRPC bindings this sidecar serves.
 pub use bitmagnet_proto::v1 as proto;
 
+pub use pathsearch::PathSearchServer;
 pub use schema::Fields;
 pub use server::SearchServer;

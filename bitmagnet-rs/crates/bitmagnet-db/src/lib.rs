@@ -18,11 +18,15 @@
 
 mod config;
 mod error;
+mod pathsearch_stream;
 mod pool;
 mod stream;
 
 pub use config::DbConfig;
 pub use error::{DbError, Result};
+pub use pathsearch_stream::{
+    stream_torrents_for_pathsearch, stream_torrents_for_pathsearch_since, TorrentForPathIndex,
+};
 pub use pool::{connect, ping};
 pub use stream::{
     stream_torrents_for_index, stream_torrents_with_files, TorrentForIndex, TorrentWithBlob,

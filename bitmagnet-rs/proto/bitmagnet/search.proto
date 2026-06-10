@@ -173,8 +173,81 @@ message HealthCheckResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Path-FTS typeahead (L3) — a SECOND, narrow engine on the same sidecar process.
+//
+// Doc granularity is PER-TORRENT (one "path-bag" doc per torrent, NOT per file —
+// PS-T3 Lever 5), so a hit identifies a torrent, ranked by seeders. Free-text
+// substring matching is CJK-correct via a char-ngram(2,3) analyzer; structured
+// per-file (ext ∧ size ∧ path) queries are served by the DuckDB-on-Parquet tier,
+// not here. See docs/dev/pathsearch-T3-index-design.md / dv3-l3-build-notes.md.
+// ---------------------------------------------------------------------------
+
+message PathTypeaheadRequest {
+  // Free-text path substring. Tokenized with the SAME char-ngram(2,3) analyzer
+  // the writer uses; a query whose tokenized gram-count < 2 (i.e. < 3 ASCII
+  // chars / < 2 CJK chars) is rejected server-side (INVALID_ARGUMENT).
+  string query = 1;
+  // Typeahead page: small top-k (default 20, capped at 50). Offset is honoured
+  // for "show more"; ordering is seeders DESC.
+  Pagination pagination = 2;
+}
+
+// One typeahead hit = a torrent (per-torrent path-bag granularity). Display text
+// and the matched files are hydrated downstream from the blob / DuckDB by
+// info_hash; this engine returns only identity + ranking signals.
+message PathHit {
+  bytes info_hash = 1;     // 20-byte v1 info hash (the hit identity)
+  uint32 seeders = 2;      // FAST rank key
+  uint32 files_count = 3;  // shortest-path proxy / display
+  uint64 size = 4;         // total torrent size, bytes
+  float score = 5;         // relevance score (gram-conjunction)
+}
+
+message PathTypeaheadResponse {
+  repeated PathHit hits = 1;
+  // NOTE: typeahead deliberately SKIPS a full match-set Count (it is O(match-set)
+  // — query.rs avoids it on the hot path). This is the number of hits returned
+  // on this page, NOT the total corpus match count.
+  uint64 total_hits = 2;
+}
+
+// Per-torrent path-bag push doc (optional Phase-4 source (a): the Go app
+// dual-writes each persisted torrent). The keep-everything default does NOT use
+// this — the in-pod PG-tail follow loop keeps the index fresh with zero Go
+// change. Provided so the push upgrade needs no further proto work.
+message TorrentPathDocument {
+  bytes info_hash = 1;             // delete key + hit identity
+  repeated string file_paths = 2;  // every file path in the torrent (one ngram field value each)
+  uint32 seeders = 3;
+  uint32 files_count = 4;
+  uint64 size = 5;
+}
+
+message IndexPathsResponse {
+  uint64 indexed_count = 1;
+  uint64 error_count = 2;
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
+
+// Path-FTS typeahead service (L3). Lives alongside SearchService on the same
+// :50051 listener but is a distinct engine over a distinct path-bag index.
+service PathSearchService {
+  // Per-keystroke path typeahead → ranked torrents (seeders DESC).
+  rpc PathTypeahead(PathTypeaheadRequest) returns (PathTypeaheadResponse);
+
+  // Steady-state writer ingress (push source (a), optional). delete_term +
+  // re-add per torrent. The follow loop is the keep-everything default instead.
+  rpc IndexTorrentPaths(stream TorrentPathDocument) returns (IndexPathsResponse);
+
+  // Remove a torrent's path-bag doc by info hash (supersession / removal).
+  rpc DeleteTorrent(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+
+  // Liveness / readiness probe (doc_count = path-bag docs = torrents indexed).
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
 
 service SearchService {
   // Index (upsert) a single document.
