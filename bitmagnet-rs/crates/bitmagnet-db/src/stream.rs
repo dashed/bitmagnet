@@ -21,7 +21,8 @@ pub struct TorrentWithBlob {
     pub size: i64,
     /// Files-status enum value as text (e.g. `"single"`, `"multi"`).
     pub files_status: String,
-    /// Number of files, when known.
+    /// Number of files, when known (`int4` in PG, cast to `bigint` in SQL —
+    /// sqlx errors on an OID-mismatched `i64` read).
     pub files_count: Option<i64>,
     /// Compressed file list (`NULL` when no blob is stored).
     pub files_data: Option<Vec<u8>>,
@@ -43,7 +44,8 @@ impl TorrentWithBlob {
 /// `$2` the page size. `files_status` is cast to `text` so it decodes into a
 /// `String` regardless of whether the column is a PostgreSQL enum.
 const STREAM_SQL: &str = "\
-SELECT info_hash, name, size, files_status::text AS files_status, files_count, files_data \
+SELECT info_hash, name, size, files_status::text AS files_status, \
+files_count::bigint AS files_count, files_data \
 FROM torrents \
 WHERE ($1::bytea IS NULL OR info_hash > $1) \
 ORDER BY info_hash ASC \
@@ -94,7 +96,8 @@ pub async fn stream_torrents_with_files(
 /// set (see `bitmagnet_parquet::delta`), and the read-time anti-join makes a
 /// pure-tombstone (no fact rows) torrent vanish.
 const STREAM_CHANGED_SQL: &str = "\
-SELECT info_hash, name, size, files_status::text AS files_status, files_count, files_data \
+SELECT info_hash, name, size, files_status::text AS files_status, \
+files_count::bigint AS files_count, files_data \
 FROM torrents \
 WHERE updated_at > to_timestamp($1) \
 AND updated_at <= to_timestamp($2) \
@@ -387,6 +390,9 @@ mod tests {
         assert!(STREAM_SQL.contains("ORDER BY info_hash ASC"));
         assert!(STREAM_SQL.contains("LIMIT $2"));
         assert!(STREAM_SQL.contains("files_data"));
+        // files_count is int4 in PG; sqlx needs the exact int8 OID for an i64
+        // read (caught live by the GATE A smoke run, 2026-06-10).
+        assert!(STREAM_SQL.contains("files_count::bigint"));
     }
 
     #[test]
@@ -442,6 +448,7 @@ mod tests {
         assert!(STREAM_CHANGED_SQL.contains("ORDER BY info_hash ASC"));
         assert!(STREAM_CHANGED_SQL.contains("LIMIT $4"));
         assert!(STREAM_CHANGED_SQL.contains("files_data"));
+        assert!(STREAM_CHANGED_SQL.contains("files_count::bigint"));
     }
 
     #[test]
