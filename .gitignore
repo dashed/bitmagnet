@@ -50,3 +50,7 @@ bench-file-index/target/
 
 # PSX campaign raw logs + work scripts (throwaway; HEL1 paths/conn details)
 docs/dev/psx-logs/
+
+# CB campaign raw logs (throwaway; HEL1 conn details)
+docs/dev/cb-logs/
+bench/__pycache__/

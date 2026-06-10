@@ -356,6 +356,15 @@ pub struct RecallFields {
     /// in-process truth set. FAST → reported under the separate "FAST columns"
     /// component, so it never contaminates the path-field size attribution.
     pub ident: Field,
+    /// OPTIONAL indexed 20-byte `info_hash` delete/upsert key (`--with-delete-key`).
+    /// Off by default (the EXP-D/PS-MB1 recall artifact omits it — `ident` is
+    /// FAST-only and non-indexed, so a recall index has NO term usable for
+    /// `delete_term`). Turn it on to build a per-torrent path-bag index that
+    /// supports the production supersession idiom (`delete_term(info_hash)` +
+    /// re-add), which the `loadtest` E2b sweep exercises under concurrent read
+    /// load. Mirrors `build_file_schema`'s mandatory `info_hash` bytes key
+    /// (`schema.rs:182`).
+    pub info_hash: Option<Field>,
 }
 
 /// Build the path-only schema for the `recall` subcommand: one tokenized `path`
@@ -381,7 +390,16 @@ pub struct RecallFields {
 /// and never build a `PhraseQuery`). The caller MUST reject
 /// `with_positions == false` for `Default`/`Lindera` (their multi-token query is
 /// a `PhraseQuery`, which requires positions).
-pub fn build_recall_schema(tok: PathTokenizer, with_positions: bool) -> (Schema, RecallFields) {
+///
+/// `with_delete_key` adds an indexed (not stored, not fast) 20-byte `info_hash`
+/// bytes field — the `loadtest` E2b supersession key. DEFAULT off keeps the
+/// EXP-D/PS-MB1 artifact shape byte-identical (the field would otherwise add a
+/// tiny term dict + postings the size measurements never accounted for).
+pub fn build_recall_schema(
+    tok: PathTokenizer,
+    with_positions: bool,
+    with_delete_key: bool,
+) -> (Schema, RecallFields) {
     let mut b = Schema::builder();
     // Positions-on = the apples-to-apples EXP-D/PS-MB1 as-built shape (phrase
     // queries work, ngram positions are all 0 → cheap-but-present). Positions-off
@@ -397,8 +415,19 @@ pub fn build_recall_schema(tok: PathTokenizer, with_positions: bool) -> (Schema,
         .set_index_option(record_option);
     let path = b.add_text_field("path", TextOptions::default().set_indexing_options(indexing));
     let ident = b.add_u64_field("ident", NumericOptions::default().set_fast());
+    // Optional supersession delete key: indexed bytes, not stored, not fast —
+    // same flags as the mandatory key in `build_file_schema` (`schema.rs:182`).
+    let info_hash = with_delete_key
+        .then(|| b.add_bytes_field("info_hash", BytesOptions::default().set_indexed()));
     let schema = b.build();
-    (schema, RecallFields { path, ident })
+    (
+        schema,
+        RecallFields {
+            path,
+            ident,
+            info_hash,
+        },
+    )
 }
 
 // ===========================================================================

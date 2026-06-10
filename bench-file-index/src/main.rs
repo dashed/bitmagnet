@@ -16,7 +16,7 @@ mod schema;
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -25,7 +25,7 @@ use tantivy::query::{
     BooleanQuery, EmptyQuery, Occur, PhraseQuery, Query, RangeQuery, TermQuery,
 };
 use tantivy::schema::{Field, IndexRecordOption, Value};
-use tantivy::{Index, IndexWriter, Order, TantivyDocument, Term};
+use tantivy::{Index, IndexReader, IndexWriter, Order, TantivyDocument, Term};
 
 use bitmagnet_model::file_extension_from_path;
 
@@ -87,6 +87,15 @@ enum Cmd {
     /// warm-rep query latency (no rebuild). Decouples the one-time full-corpus
     /// build from cheap repeatable latency measurement (the RUN-2 pattern).
     Pathquery(PathqueryArgs),
+    /// PS-E1/E2: concurrency load test on an already-built path index. E1 sweeps
+    /// N reader threads (sharing ONE Index+reader, per-request `searcher()`) over
+    /// a query mix for a fixed wall-clock and reports per-N×per-group
+    /// p50/p95/p99 + aggregate QPS for both `Count` and the production `TopDocs`
+    /// page collector. E2 adds ONE live writer doing paced appends (or
+    /// `delete_term`+re-add supersession on a `--with-delete-key` index) and
+    /// measures reader latency under write, commit→searchable fresh-lag under
+    /// read load, and segment growth. No rebuild; no DB (synthetic writer docs).
+    Loadtest(LoadtestArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -233,6 +242,15 @@ struct RecallArgs {
     /// query is a PhraseQuery, which requires positions).
     #[arg(long, default_value_t = false)]
     no_positions: bool,
+    /// Add an indexed 20-byte `info_hash` delete/upsert key to each path-bag doc
+    /// (`build_recall_schema` `with_delete_key`). OFF by default so the size
+    /// numbers stay apples-to-apples with EXP-D/PS-MB1. Turn ON (with
+    /// `--granularity per-torrent --tokenizer ngram --no-positions --skip-truth`)
+    /// to build the keyed per-torrent index the `loadtest` E2b supersession sweep
+    /// needs — a recall index otherwise has NO indexed term usable for
+    /// `delete_term` (`ident` is FAST-only).
+    #[arg(long, default_value_t = false)]
+    with_delete_key: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -293,6 +311,94 @@ struct PathqueryArgs {
     topdocs: bool,
 }
 
+/// Which phase(s) the load test runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LoadMode {
+    /// E1 only: N-reader sweep, read-only (safe on the real artifact).
+    E1,
+    /// E2 only: readers + 1 live writer (MUTATES — run on a cp -r copy).
+    E2,
+    /// E1 then E2.
+    Both,
+}
+
+/// What the E2 writer does each tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum WriteOp {
+    /// Pick supersede if the index has an indexed `info_hash` key, else append.
+    Auto,
+    /// Append-only path-bag docs (works on any path index incl. the keyless
+    /// recall artifact). Measures reader-under-write + add-fresh-lag + seg growth.
+    Append,
+    /// `delete_term(info_hash)` + re-add a path-bag (true per-torrent
+    /// supersession). REQUIRES a `--with-delete-key` index; errors otherwise.
+    Supersede,
+}
+
+#[derive(Parser, Debug)]
+struct LoadtestArgs {
+    /// Directory of an already-built path index (from `recall`). NOT rebuilt.
+    /// E1 is read-only (run on the real artifact); E2 MUTATES — point it at a
+    /// `cp -r` COPY (see the spec's artifact-protection step).
+    #[arg(long)]
+    index_path: PathBuf,
+    /// Tokenizer the index was built with — drives query construction (must
+    /// match the build; tokenizers are runtime state, not persisted).
+    #[arg(long, value_enum, default_value_t = PathTokenizer::Ngram)]
+    tokenizer: PathTokenizer,
+    /// Ngram min length (must match the build; only for --tokenizer ngram).
+    #[arg(long, default_value_t = 2)]
+    ngram_min: usize,
+    /// Ngram max length (must match the build; only for --tokenizer ngram).
+    #[arg(long, default_value_t = 3)]
+    ngram_max: usize,
+    /// One or more TSV `group<TAB>query` files (repeatable). The canonical mix =
+    /// queries_realistic.tsv + the ascii3/cjk3 GATE rows of ps_prefix_sweep.tsv
+    /// (build a merged file, or pass both with `--groups ascii3,cjk3,...`).
+    #[arg(long = "queries-file", required = true)]
+    queries_files: Vec<PathBuf>,
+    /// Optional allowlist of group names (CSV). When set, only matching rows are
+    /// kept — e.g. restrict ps_prefix_sweep.tsv to `ascii3,cjk3`.
+    #[arg(long, default_value = "")]
+    groups: String,
+    /// Which phase(s) to run.
+    #[arg(long, value_enum, default_value_t = LoadMode::E1)]
+    mode: LoadMode,
+    /// E1 reader-thread counts to sweep (CSV). HEL1 has 24 cores.
+    #[arg(long, default_value = "1,2,4,8,16,24")]
+    levels: String,
+    /// Wall-clock seconds of timed load per level / per write-rate.
+    #[arg(long, default_value_t = 60)]
+    duration_secs: u64,
+    /// Warm-up seconds per level (untimed; lets the OS page cache settle).
+    #[arg(long, default_value_t = 3)]
+    warmup_secs: u64,
+    /// E2: reader-thread count held fixed while the write rate is swept. Default
+    /// 24 = the worst-contention level, compared against the E1 N=24 baseline.
+    #[arg(long, default_value_t = 24)]
+    e2_readers: usize,
+    /// E2: writer supersession/append rates to sweep, in torrents/s (CSV).
+    #[arg(long, default_value = "5,20,50")]
+    write_rates: String,
+    /// E2 writer op.
+    #[arg(long, value_enum, default_value_t = WriteOp::Auto)]
+    write_op: WriteOp,
+    /// E2 writer worker threads (EXP-D arena rule: 1 thread = one big arena).
+    #[arg(long, default_value_t = 1)]
+    writer_threads: usize,
+    /// E2 writer memory arena (MiB) — the EXP-D ngram crash fix needs ≥2000.
+    #[arg(long, default_value_t = 2000)]
+    writer_heap_mb: usize,
+    /// E2: number of distinct rotating sentinel info_hashes the supersede writer
+    /// cycles through (each re-crawl deletes the prior generation of that hash).
+    #[arg(long, default_value_t = 100_000)]
+    supersede_window: u64,
+    /// E2: synthetic file paths per written path-bag doc (≈ the median fileset),
+    /// so each re-add's ngram tokenization cost mirrors production.
+    #[arg(long, default_value_t = 6)]
+    paths_per_doc: usize,
+}
+
 /// One torrent normalized across sources.
 struct SrcTorrent {
     info_hash: [u8; 20],
@@ -313,6 +419,7 @@ async fn main() -> Result<()> {
         Cmd::Recall(args) => run_recall(args).await,
         Cmd::Freshness(args) => run_freshness(args).await,
         Cmd::Pathquery(args) => run_pathquery(args),
+        Cmd::Loadtest(args) => run_loadtest(args),
     }
 }
 
@@ -1108,6 +1215,7 @@ fn index_unit(
     skip_truth: bool,
     truth_cap: usize,
     ident: u64,
+    info_hash: &[u8; 20],
     paths: &[String],
 ) -> Result<()> {
     if !skip_truth {
@@ -1132,6 +1240,11 @@ fn index_unit(
         td.add_text(fields.path, p);
     }
     td.add_u64(fields.ident, ident);
+    // Optional supersession delete key (`--with-delete-key`): the per-torrent
+    // path-bag is keyed by info_hash so `loadtest` E2b can `delete_term` it.
+    if let Some(f) = fields.info_hash {
+        td.add_bytes(f, info_hash);
+    }
     writer.add_document(td).context("add_document")?;
     Ok(())
 }
@@ -1168,7 +1281,7 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
             args.tokenizer
         );
     }
-    let (schema, fields) = build_recall_schema(args.tokenizer, !args.no_positions);
+    let (schema, fields) = build_recall_schema(args.tokenizer, !args.no_positions, args.with_delete_key);
     let index = Index::create_in_dir(dir, schema).context("create recall index")?;
     register_path_tokenizer(&index, args.tokenizer, (args.ngram_min, args.ngram_max))?;
     // Single-thread (default) writer with a big arena: ngram (min=2,max=3 per
@@ -1202,7 +1315,7 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
                 };
                 index_unit(
                     &writer, &mut truth, &specs, &fields, args.skip_truth, args.truth_cap,
-                    ident_hash(&ih, idx), std::slice::from_ref(&path),
+                    ident_hash(&ih, idx), &ih, std::slice::from_ref(&path),
                 )?;
                 docs += 1;
                 since_commit += 1;
@@ -1229,7 +1342,7 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
                             if let Some((cur, paths)) = pend.take() {
                                 index_unit(
                                     &writer, &mut truth, &specs, &fields, args.skip_truth,
-                                    args.truth_cap, ident_hash(&cur, 0), &paths,
+                                    args.truth_cap, ident_hash(&cur, 0), &cur, &paths,
                                 )?;
                                 docs += 1;
                                 since_commit += 1;
@@ -1245,7 +1358,7 @@ async fn run_recall(args: RecallArgs) -> Result<()> {
                         if let Some((cur, paths)) = pend.take() {
                             index_unit(
                                 &writer, &mut truth, &specs, &fields, args.skip_truth,
-                                args.truth_cap, ident_hash(&cur, 0), &paths,
+                                args.truth_cap, ident_hash(&cur, 0), &cur, &paths,
                             )?;
                             docs += 1;
                         }
@@ -1788,4 +1901,641 @@ async fn run_freshness(args: FreshnessArgs) -> Result<()> {
         println!("\n  supersession: skipped (no base doc captured)");
     }
     Ok(())
+}
+
+// ===========================================================================
+// PS-E1/E2 — loadtest: concurrent readers (+ optional 1 live writer)
+// ===========================================================================
+//
+// Threading model (verified against vendored tantivy 0.26.1):
+//   * ONE `Index` (Index::open_in_dir) + ONE `IndexReader` (Manual reload). All
+//     reader threads clone the IndexReader (it `#[derive(Clone)]`s over an Arc,
+//     `reader/mod.rs:267`) and call `reader.searcher()` PER QUERY — the doc'd
+//     production contract: "This method should be called every single time a
+//     search query is performed" (`reader/mod.rs:290-298`). `searcher()` is a
+//     lock-free `arc_swap::ArcSwap::load().clone()` (`reader/mod.rs:156,298`).
+//   * The default `Executor::SingleThread` (`index/index.rs:392`) runs each
+//     `search()` inline on the calling thread (`core/executor.rs` SingleThread
+//     map), so N reader threads = N independent single-threaded searches → true
+//     parallelism up to the core count.
+//   * E2's single writer holds the directory lock (`indexer/index_writer.rs:74`)
+//     and `commit(&mut self)`; after each commit it calls `reader.reload()` =
+//     `ArcSwap::store` (`reader/mod.rs:243-253`). In-flight reader queries keep
+//     their old `Arc<SearcherInner>` generation (MVCC: the SearcherGeneration
+//     inventory pins those segment files against GC) → safe under live writes.
+//     We never call `garbage_collect_files` during E2.
+
+/// Per-reader-thread latency accumulator, bucketed by group index.
+struct ReaderResult {
+    /// `Count`-collector latency samples per group (ms).
+    count_ms: Vec<Vec<f64>>,
+    /// Production `TopDocs(order_by_fast_field ident DESC)` latency per group.
+    td_ms: Vec<Vec<f64>>,
+    /// Sum of `Count` hits per group (→ avg hits/query).
+    hits: Vec<u64>,
+    /// Timed query-iterations per group (1 iter = 1 Count + 1 TopDocs).
+    iters: Vec<u64>,
+    /// Total timed iterations across all groups (→ aggregate QPS).
+    ops: u64,
+}
+
+impl ReaderResult {
+    fn new(n_groups: usize) -> Self {
+        Self {
+            count_ms: vec![Vec::new(); n_groups],
+            td_ms: vec![Vec::new(); n_groups],
+            hits: vec![0; n_groups],
+            iters: vec![0; n_groups],
+            ops: 0,
+        }
+    }
+}
+
+/// Aggregated reader latencies for one (N or write-rate) level.
+struct LevelAgg {
+    count_ms: Vec<Vec<f64>>,
+    td_ms: Vec<Vec<f64>>,
+    hits: Vec<u64>,
+    iters: Vec<u64>,
+    total_ops: u64,
+    wall_secs: f64,
+}
+
+impl LevelAgg {
+    fn merge(results: Vec<ReaderResult>, n_groups: usize, wall_secs: f64) -> Self {
+        let mut agg = LevelAgg {
+            count_ms: vec![Vec::new(); n_groups],
+            td_ms: vec![Vec::new(); n_groups],
+            hits: vec![0; n_groups],
+            iters: vec![0; n_groups],
+            total_ops: 0,
+            wall_secs,
+        };
+        for r in results {
+            agg.total_ops += r.ops;
+            for g in 0..n_groups {
+                agg.count_ms[g].extend(&r.count_ms[g]);
+                agg.td_ms[g].extend(&r.td_ms[g]);
+                agg.hits[g] += r.hits[g];
+                agg.iters[g] += r.iters[g];
+            }
+        }
+        agg
+    }
+
+    /// Flattened Count latencies across all groups (for the "all" ratio row).
+    fn all_count(&self) -> Vec<f64> {
+        self.count_ms.iter().flatten().copied().collect()
+    }
+}
+
+/// Sort a copy and return the p-th percentile (reuses `pct`).
+fn pctile(v: &[f64], p: f64) -> f64 {
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    pct(&s, p)
+}
+
+/// Writer-thread results for one E2 write-rate level.
+struct WriterResult {
+    commit_ms: Vec<f64>,
+    fresh_ms: Vec<f64>,
+    /// (seconds-since-start, segment-count) samples, ~1 Hz.
+    seg_series: Vec<(f64, usize)>,
+    target_rate: f64,
+    achieved_ops: u64,
+}
+
+/// The reader hot loop, shared by E1 and E2. Builds its own per-thread query
+/// set from the shared `&Index` (so `Box<dyn Query>` need never be `Send`), runs
+/// an untimed warm-up to `warm_deadline`, then times to `end_deadline` doing a
+/// `Count` + a production `TopDocs` page collect per query with a fresh
+/// per-request `searcher()`.
+#[allow(clippy::too_many_arguments)]
+fn reader_worker(
+    index: &Index,
+    reader: &IndexReader,
+    path_field: Field,
+    specs: &[QuerySpec],
+    group_of: &[usize],
+    n_groups: usize,
+    tok: PathTokenizer,
+    warm_deadline: Instant,
+    end_deadline: Instant,
+) -> Result<ReaderResult> {
+    let queries: Vec<(usize, Box<dyn Query>)> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (group_of[i], build_path_query(index, tok, path_field, &s.query)))
+        .collect();
+    if queries.is_empty() {
+        bail!("no queries to run");
+    }
+    let mut rr = ReaderResult::new(n_groups);
+    let mut qi = 0usize;
+    // Warm-up (untimed): page-cache the postings the query mix touches.
+    while Instant::now() < warm_deadline {
+        let (_g, q) = &queries[qi % queries.len()];
+        qi += 1;
+        let _ = reader.searcher().search(q, &Count)?;
+    }
+    // Timed window.
+    qi = 0;
+    while Instant::now() < end_deadline {
+        let (g, q) = &queries[qi % queries.len()];
+        qi += 1;
+        // Per-request searcher() = production model; also picks up any reload.
+        let searcher = reader.searcher();
+        let t = Instant::now();
+        let n = searcher.search(q, &Count)? as u64;
+        rr.count_ms[*g].push(t.elapsed().as_secs_f64() * 1000.0);
+        let t2 = Instant::now();
+        let _td: Vec<(Option<u64>, _)> = searcher.search(
+            q,
+            &TopDocs::with_limit(30).order_by_fast_field::<u64>("ident", Order::Desc),
+        )?;
+        rr.td_ms[*g].push(t2.elapsed().as_secs_f64() * 1000.0);
+        rr.hits[*g] += n;
+        rr.iters[*g] += 1;
+        rr.ops += 1;
+    }
+    Ok(rr)
+}
+
+/// Print one reader-latency level table (E1 row or E2-under-write row).
+fn print_level(header: &str, agg: &LevelAgg, labels: &[String]) {
+    let qps = agg.total_ops as f64 / agg.wall_secs.max(1e-9);
+    println!(
+        "\n{header}  | aggregate {:.0} iters/s ({:.0} searches/s) | {} timed iters over {:.0}s",
+        qps,
+        qps * 2.0,
+        agg.total_ops,
+        agg.wall_secs,
+    );
+    println!(
+        "  {:<10} {:>9} {:>9} | {:>8} {:>8} {:>8} | {:>8} {:>8} {:>8}",
+        "group", "iters", "avgHits", "C-p50", "C-p95", "C-p99", "TD-p50", "TD-p95", "TD-p99"
+    );
+    for (g, label) in labels.iter().enumerate() {
+        let it = agg.iters[g];
+        if it == 0 {
+            continue;
+        }
+        println!(
+            "  {:<10} {:>9} {:>9} | {:>6.2}ms {:>6.2}ms {:>6.2}ms | {:>6.2}ms {:>6.2}ms {:>6.2}ms",
+            label,
+            it,
+            agg.hits[g] / it.max(1),
+            pctile(&agg.count_ms[g], 50.0),
+            pctile(&agg.count_ms[g], 95.0),
+            pctile(&agg.count_ms[g], 99.0),
+            pctile(&agg.td_ms[g], 50.0),
+            pctile(&agg.td_ms[g], 95.0),
+            pctile(&agg.td_ms[g], 99.0),
+        );
+    }
+}
+
+/// Rotating supersession key: 0xAA marker + `n` (little-endian tail) → the
+/// writer re-crawls this hash, deleting its prior generation each cycle.
+fn rot_ih(n: u64) -> [u8; 20] {
+    let mut ih = [0xAAu8; 20];
+    ih[12..20].copy_from_slice(&n.to_le_bytes());
+    ih
+}
+
+/// Globally-unique per-tick probe key (0xBB marker + tick counter). Distinct
+/// from `rot_ih`'s 0xAA space, so a term-probe on it measures THIS commit's
+/// visibility (used for fresh-lag on a `--with-delete-key` index).
+fn probe_ih(tick: u64) -> [u8; 20] {
+    let mut ih = [0xBBu8; 20];
+    ih[12..20].copy_from_slice(&tick.to_le_bytes());
+    ih
+}
+
+/// Synthesize a realistic per-torrent path bag (release boilerplate + ~12% CJK)
+/// so each written doc's ngram tokenization cost mirrors production.
+fn synth_pathbag(seed: u64, k: usize) -> Vec<String> {
+    const TAGS: [&str; 12] = [
+        "1080p", "720p", "2160p", "x264", "x265", "hevc", "bluray", "web-dl", "hdtv", "aac",
+        "dts", "flac",
+    ];
+    let h = fnv1a(&seed.to_le_bytes());
+    let base = format!(
+        "Show.S{:02}.{}.{}",
+        seed % 40,
+        TAGS[(h % TAGS.len() as u64) as usize],
+        TAGS[((h >> 8) % TAGS.len() as u64) as usize],
+    );
+    (0..k.max(1))
+        .map(|j| {
+            let fh = fnv1a(&[(seed & 0xff) as u8, (j & 0xff) as u8, (j >> 8) as u8]);
+            let ext = QUERY_EXTS[(fh % QUERY_EXTS.len() as u64) as usize];
+            if fh % 100 < 12 {
+                format!("{base}/中文字幕.第{j}集.{ext}")
+            } else {
+                format!("{base}/file_{j}.{ext}")
+            }
+        })
+        .collect()
+}
+
+/// Resolve the effective write op from the flag + whether the index is keyed.
+fn resolve_write_op(want: WriteOp, has_key: bool) -> Result<WriteOp> {
+    match want {
+        WriteOp::Auto => Ok(if has_key {
+            WriteOp::Supersede
+        } else {
+            WriteOp::Append
+        }),
+        WriteOp::Append => Ok(WriteOp::Append),
+        WriteOp::Supersede if has_key => Ok(WriteOp::Supersede),
+        WriteOp::Supersede => bail!(
+            "--write-op supersede needs an indexed `info_hash` delete key, but this index has \
+             none (a plain `recall` artifact is path+ident only). Rebuild a keyed index with: \
+             `recall --with-delete-key --granularity per-torrent --tokenizer ngram --no-positions \
+             --skip-truth ...`, or use --write-op append."
+        ),
+    }
+}
+
+fn run_loadtest(args: LoadtestArgs) -> Result<()> {
+    // --- Load + filter the query mix ------------------------------------
+    let allow: HashSet<String> = args
+        .groups
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut specs: Vec<QuerySpec> = Vec::new();
+    for f in &args.queries_files {
+        for s in load_queries(f)? {
+            if allow.is_empty() || allow.contains(&s.group) {
+                specs.push(s);
+            }
+        }
+    }
+    if specs.is_empty() {
+        bail!("no queries loaded (check --queries-file / --groups)");
+    }
+    // Stable group label list (first-seen order) + per-spec group index.
+    let mut labels: Vec<String> = Vec::new();
+    let mut idx_of: BTreeMap<String, usize> = BTreeMap::new();
+    let group_of: Vec<usize> = specs
+        .iter()
+        .map(|s| {
+            *idx_of.entry(s.group.clone()).or_insert_with(|| {
+                labels.push(s.group.clone());
+                labels.len() - 1
+            })
+        })
+        .collect();
+    let n_groups = labels.len();
+
+    // --- Open the index (no rebuild) + register the tokenizer -----------
+    let index = Index::open_in_dir(&args.index_path)
+        .with_context(|| format!("open index {}", args.index_path.display()))?;
+    register_path_tokenizer(&index, args.tokenizer, (args.ngram_min, args.ngram_max))?;
+    let path_field = index
+        .schema()
+        .get_field("path")
+        .context("index has no `path` field")?;
+    let info_hash_field = index.schema().get_field("info_hash").ok();
+    // Manual reload so the E2 writer controls commit→searchable visibility.
+    let reader: IndexReader = index
+        .reader_builder()
+        .reload_policy(tantivy::ReloadPolicy::Manual)
+        .try_into()
+        .context("reader")?;
+    let searcher0 = reader.searcher();
+    println!(
+        "loadtest: index={} tokenizer={:?} | {} docs over {} segment(s) | groups={:?} queries={} | keyed={}",
+        args.index_path.display(),
+        args.tokenizer,
+        searcher0.num_docs(),
+        searcher0.segment_readers().len(),
+        labels,
+        specs.len(),
+        info_hash_field.is_some(),
+    );
+
+    let warmup = Duration::from_secs(args.warmup_secs);
+    let dur = Duration::from_secs(args.duration_secs);
+
+    // --- E1: N-reader sweep ---------------------------------------------
+    let mut e1_aggs: BTreeMap<usize, LevelAgg> = BTreeMap::new();
+    if matches!(args.mode, LoadMode::E1 | LoadMode::Both) {
+        let levels = parse_usize_csv(&args.levels)?;
+        println!("\n===== E1: reader-concurrency sweep (read-only) =====");
+        for n in levels {
+            let warm_deadline = Instant::now() + warmup;
+            let end_deadline = warm_deadline + dur;
+            let results: Vec<Result<ReaderResult>> = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..n.max(1))
+                    .map(|_| {
+                        s.spawn(|| {
+                            reader_worker(
+                                &index, &reader, path_field, &specs, &group_of, n_groups,
+                                args.tokenizer, warm_deadline, end_deadline,
+                            )
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("reader thread panicked"))
+                    .collect()
+            });
+            let results = results.into_iter().collect::<Result<Vec<_>>>()?;
+            let agg = LevelAgg::merge(results, n_groups, dur.as_secs_f64());
+            print_level(&format!("N={n:<3} readers"), &agg, &labels);
+            e1_aggs.insert(n, agg);
+        }
+    }
+
+    // --- E2: readers + 1 live writer ------------------------------------
+    if matches!(args.mode, LoadMode::E2 | LoadMode::Both) {
+        let op = resolve_write_op(args.write_op, info_hash_field.is_some())?;
+        let rates = parse_f64_csv(&args.write_rates)?;
+        let ident_field = index
+            .schema()
+            .get_field("ident")
+            .context("index has no `ident` fast field (need it for the writer + TopDocs)")?;
+        println!(
+            "\n===== E2: {} readers + 1 live writer ({:?}, threads={} heap={}MiB) =====",
+            args.e2_readers, op, args.writer_threads, args.writer_heap_mb,
+        );
+        if args.writer_heap_mb < 2000 {
+            println!(
+                "  ⚠️  writer heap {}MiB < 2000 — EXP-D found ngram single-writer needs ≥2GiB arena",
+                args.writer_heap_mb
+            );
+        }
+        // ONE writer for the whole sweep (continuous, default LogMergePolicy —
+        // intentionally NO NoMergePolicy and NO force-merge).
+        let heap = (args.writer_heap_mb * 1024 * 1024).max(WRITER_HEAP_BYTES);
+        let mut writer: IndexWriter = index
+            .writer_with_num_threads(args.writer_threads.max(1), heap)
+            .context("writer")?;
+
+        for rate in rates {
+            let end_deadline = Instant::now() + dur;
+            let (reader_results, writer_result) = std::thread::scope(|s| {
+                let rhandles: Vec<_> = (0..args.e2_readers.max(1))
+                    .map(|_| {
+                        // No separate warm-up: the writer needs readers live from
+                        // t0; the index is already warm from E1 / first reads.
+                        s.spawn(|| {
+                            reader_worker(
+                                &index, &reader, path_field, &specs, &group_of, n_groups,
+                                args.tokenizer, Instant::now(), end_deadline,
+                            )
+                        })
+                    })
+                    .collect();
+                let whandle = s.spawn(|| {
+                    writer_worker(
+                        &mut writer, &reader, &index, path_field, ident_field, info_hash_field,
+                        op, rate, args.supersede_window, args.paths_per_doc, end_deadline,
+                    )
+                });
+                let rr: Vec<Result<ReaderResult>> = rhandles
+                    .into_iter()
+                    .map(|h| h.join().expect("reader thread panicked"))
+                    .collect();
+                let wr = whandle.join().expect("writer thread panicked");
+                (rr, wr)
+            });
+            let reader_results = reader_results.into_iter().collect::<Result<Vec<_>>>()?;
+            let wr = writer_result?;
+            let agg = LevelAgg::merge(reader_results, n_groups, dur.as_secs_f64());
+            print_level(
+                &format!("write {rate:.0}/s | {} readers", args.e2_readers),
+                &agg,
+                &labels,
+            );
+            // Writer-side stats.
+            println!(
+                "    writer: target {:.0}/s → achieved {:.1}/s ({} commits) | commit p50 {:.1}ms p95 {:.1}ms | fresh-lag p50 {:.1}ms p95 {:.1}ms p99 {:.1}ms | segs {}→{} (min {}, max {})",
+                wr.target_rate,
+                wr.achieved_ops as f64 / dur.as_secs_f64(),
+                wr.achieved_ops,
+                pctile(&wr.commit_ms, 50.0),
+                pctile(&wr.commit_ms, 95.0),
+                pctile(&wr.fresh_ms, 50.0),
+                pctile(&wr.fresh_ms, 95.0),
+                pctile(&wr.fresh_ms, 99.0),
+                wr.seg_series.first().map(|s| s.1).unwrap_or(0),
+                wr.seg_series.last().map(|s| s.1).unwrap_or(0),
+                wr.seg_series.iter().map(|s| s.1).min().unwrap_or(0),
+                wr.seg_series.iter().map(|s| s.1).max().unwrap_or(0),
+            );
+            // Reader-under-write vs the E1 baseline at the SAME N (if E1 ran).
+            if let Some(base) = e1_aggs.get(&args.e2_readers) {
+                let base_p95 = pctile(&base.all_count(), 95.0);
+                let load_p95 = pctile(&agg.all_count(), 95.0);
+                let ratio = if base_p95 > 0.0 {
+                    load_p95 / base_p95
+                } else {
+                    f64::NAN
+                };
+                println!(
+                    "    reader Count p95 under write {:.2}ms vs E1 N={} baseline {:.2}ms → {:.2}× (gate ≲2×)",
+                    load_p95, args.e2_readers, base_p95, ratio
+                );
+            } else {
+                println!(
+                    "    (run --mode both for the E1 N={} reader-p95 baseline ratio)",
+                    args.e2_readers
+                );
+            }
+        }
+
+        // Supersession correctness (one off, only when keyed) — mirrors the
+        // freshness subcommand's delete_term + re-add + reload verify.
+        if op == WriteOp::Supersede {
+            if let Some(ih_field) = info_hash_field {
+                let vih = rot_ih(u64::MAX); // a key untouched by the rotating sweep
+                let term = Term::from_field_bytes(ih_field, &vih);
+                // Gen 1: 5 files.
+                for (j, p) in synth_pathbag(7, 5).iter().enumerate() {
+                    let mut td = TantivyDocument::new();
+                    td.add_text(path_field, p);
+                    td.add_u64(ident_field, ident_hash(&vih, j as u32));
+                    td.add_bytes(ih_field, &vih);
+                    writer.add_document(td).context("verify gen1")?;
+                }
+                writer.commit().context("verify gen1 commit")?;
+                reader.reload().ok();
+                let before = reader
+                    .searcher()
+                    .search(&TermQuery::new(term.clone(), IndexRecordOption::Basic), &Count)?;
+                // Gen 2: delete + 3 files.
+                let t = Instant::now();
+                writer.delete_term(term.clone());
+                for (j, p) in synth_pathbag(8, 3).iter().enumerate() {
+                    let mut td = TantivyDocument::new();
+                    td.add_text(path_field, p);
+                    td.add_u64(ident_field, ident_hash(&vih, j as u32));
+                    td.add_bytes(ih_field, &vih);
+                    writer.add_document(td).context("verify gen2")?;
+                }
+                writer.commit().context("verify gen2 commit")?;
+                reader.reload().context("reload")?;
+                let supersede_ms = t.elapsed().as_secs_f64() * 1000.0;
+                let after = reader
+                    .searcher()
+                    .search(&TermQuery::new(term, IndexRecordOption::Basic), &Count)?;
+                println!(
+                    "\n  supersession verify: key had {before} docs → delete_term + re-add 3 + commit + reload = {:.1}ms → now {after} (expect 3; old gen gone = {})",
+                    supersede_ms,
+                    if after == 3 { "OK" } else { "MISMATCH" }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The E2 writer hot loop: paced appends or per-torrent supersession, each
+/// followed by a commit + `reader.reload()`, timing commit cost and
+/// commit→searchable fresh-lag, and sampling segment count ~1 Hz.
+#[allow(clippy::too_many_arguments)]
+fn writer_worker(
+    writer: &mut IndexWriter,
+    reader: &IndexReader,
+    index: &Index,
+    path_field: Field,
+    ident_field: Field,
+    info_hash_field: Option<Field>,
+    op: WriteOp,
+    rate: f64,
+    window: u64,
+    paths_per_doc: usize,
+    end_deadline: Instant,
+) -> Result<WriterResult> {
+    let interval = Duration::from_secs_f64(1.0 / rate.max(1e-3));
+    let start = Instant::now();
+    let mut next = start;
+    let mut tick: u64 = 0;
+    let mut commit_ms = Vec::new();
+    let mut fresh_ms = Vec::new();
+    let mut seg_series: Vec<(f64, usize)> = Vec::new();
+    let mut last_seg = start - Duration::from_secs(2);
+    // Append-only fresh-lag is measured by a monotonic num_docs delta; track the
+    // running committed-doc target relative to the opening count.
+    let mut committed_target = reader.searcher().num_docs();
+
+    while Instant::now() < end_deadline {
+        // Pace to the target rate (real find: if commit cost > interval the
+        // writer can't keep up — surfaced as achieved < target rate).
+        let now = Instant::now();
+        if now < next {
+            std::thread::sleep(next - now);
+        }
+        next += interval;
+
+        let rot = rot_ih(tick % window.max(1));
+        let paths = synth_pathbag(tick, paths_per_doc);
+
+        // Supersede: delete the prior generation of this rotating key first.
+        if op == WriteOp::Supersede {
+            if let Some(f) = info_hash_field {
+                writer.delete_term(Term::from_field_bytes(f, &rot));
+            }
+        }
+        // Add the path-bag doc (one per torrent).
+        let mut td = TantivyDocument::new();
+        for p in &paths {
+            td.add_text(path_field, p);
+        }
+        td.add_u64(ident_field, ident_hash(&rot, 0));
+        if let Some(f) = info_hash_field {
+            td.add_bytes(f, &rot);
+        }
+        writer.add_document(td).context("writer add")?;
+        committed_target += 1; // the path-bag doc
+
+        // Keyed fresh-lag probe: a guaranteed-unique sentinel committed in the
+        // same batch, searched by its exact info_hash term (visibility of THIS
+        // commit). Keyless append uses the num_docs delta instead.
+        let probe = probe_ih(tick);
+        if op == WriteOp::Supersede {
+            if let Some(f) = info_hash_field {
+                let mut sd = TantivyDocument::new();
+                sd.add_text(path_field, "fresh/probe.sentinel.mkv");
+                sd.add_u64(ident_field, ident_hash(&probe, 0));
+                sd.add_bytes(f, &probe);
+                writer.add_document(sd).context("probe add")?;
+                committed_target += 1;
+            }
+        }
+
+        let tc = Instant::now();
+        writer.commit().context("writer commit")?;
+        commit_ms.push(tc.elapsed().as_secs_f64() * 1000.0);
+
+        // Fresh-lag: time commit-return → searchable under the concurrent read
+        // load. reload() is an ArcSwap store; loop until the new generation is
+        // visible (term probe for keyed, num_docs delta for append).
+        let t0 = Instant::now();
+        loop {
+            reader.reload().context("reload")?;
+            let s = reader.searcher();
+            let visible = match (op, info_hash_field) {
+                (WriteOp::Supersede, Some(f)) => {
+                    s.search(
+                        &TermQuery::new(
+                            Term::from_field_bytes(f, &probe),
+                            IndexRecordOption::Basic,
+                        ),
+                        &Count,
+                    )? >= 1
+                }
+                // Append-only never deletes → num_docs is monotonic.
+                _ => s.num_docs() >= committed_target,
+            };
+            if visible {
+                break;
+            }
+        }
+        fresh_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+
+        // Sample segment count ~1 Hz (watch for LogMergePolicy fan-out).
+        if last_seg.elapsed() >= Duration::from_secs(1) {
+            let segs = index.searchable_segment_ids().map(|s| s.len()).unwrap_or(0);
+            seg_series.push((start.elapsed().as_secs_f64(), segs));
+            last_seg = Instant::now();
+        }
+        tick += 1;
+    }
+    // Final segment sample.
+    let segs = index.searchable_segment_ids().map(|s| s.len()).unwrap_or(0);
+    seg_series.push((start.elapsed().as_secs_f64(), segs));
+
+    Ok(WriterResult {
+        commit_ms,
+        fresh_ms,
+        seg_series,
+        target_rate: rate,
+        achieved_ops: tick,
+    })
+}
+
+/// Parse a CSV of `usize` (the E1 reader-level sweep).
+fn parse_usize_csv(s: &str) -> Result<Vec<usize>> {
+    s.split(',')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse::<usize>().with_context(|| format!("bad level {x:?}")))
+        .collect()
+}
+
+/// Parse a CSV of `f64` (the E2 write-rate sweep).
+fn parse_f64_csv(s: &str) -> Result<Vec<f64>> {
+    s.split(',')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse::<f64>().with_context(|| format!("bad rate {x:?}")))
+        .collect()
 }
