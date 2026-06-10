@@ -10,6 +10,8 @@ Thread docs: [T1 requirements/UX](./pathsearch-T1-requirements-ux.md) · [T2 gap
 
 ---
 
+> 🚦 **LATER SAME DAY:** the user **committed to building L3** (the NO-GO-by-default is superseded), and the [PSX campaign](./psx-campaign-RESULTS.md) **BUILT** the production `WithFreqs` index: **13.32 GiB**, recall 1.0000. Production-shape correction: broad-single-gram **p95 ≈ 77–94 ms** (`TopDocs` page collector; the 55–65 ms below is a `Count` lower bound); realistic multi-word < 50 ms; tail engine-irreducible → UX.
+
 ## 🟢 MEASURED UPDATE — PS-MB1 ran (2026-06-09): the cost case flips
 
 The investigation below (§1–§7) reached its decision on the **per-file** index (~90 GB, broad-prefix 100–320 ms). The gated micro-bench it recommended was then **executed on the full 879.5 M-row HEL1 restore** (team `bitmagnet-bench`, runner+analyst; arms A/B/C + recall + the full-corpus capstone A2). The headline numbers move materially — **per-torrent path-bag granularity transforms the economics**:
