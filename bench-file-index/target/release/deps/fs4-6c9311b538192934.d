@@ -1,0 +1,12 @@
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/fs4-6c9311b538192934.d: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/fs_stats.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl/std_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl/std_impl.rs
+
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/libfs4-6c9311b538192934.rmeta: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/fs_stats.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl/std_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl/std_impl.rs
+
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/lib.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/fs_stats.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/unix/sync_impl/std_impl.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fs4-0.13.1/src/file_ext/sync_impl/std_impl.rs:
