@@ -70,3 +70,13 @@ The L3 line *used* to read −55 % on the per-FILE index; **PS-MB1 measured (and
 **Don't drop `torrent_files` until each needed replacement layer is DEPLOYED *and* PROVEN in production.** Order: **L1 ✅ → L2 (deploy + prove parity/latency) → L3 (now a GO; bench-built, deploy after/with L2) → DROP last, gated.** `torrent_files` stays the live fallback/source-of-truth throughout; the **DROP is deferred indefinitely**.
 
 **Next concrete step toward the drop:** deploy and prove **L2** (DuckDB-on-Parquet) in prod; L3 deploy follows per [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md).
+
+---
+
+## Measurement-completeness audit (2026-06-09) — the benchmark phase is DONE
+
+Every architectural decision above now rests on a built artifact or a measured number (L1 verified in prod; the DROP gate, L2 latency/size/freshness/fidelity, the L3 index, agg's retirement, and the FIND-2 wall+fix all measured — see [`psx-campaign-RESULTS.md`](./psx-campaign-RESULTS.md) for the final campaign). **No further research benchmarks are needed to proceed.** What remains, by bucket:
+
+1. **Optional, the single unmeasured production dimension — concurrency/load.** All latency numbers are single-client. Production adds concurrent typeahead users + the live single-writer on the same mmap'd L3 index, and the DuckDB sidecar serves through a gRPC layer never exercised (numbers are direct DuckDB calls). Expected to behave (lock-free Tantivy readers; DuckDB RO scales), but zero measurement. Cheap to run against the existing bench indexes **before RUN-6 teardown**; equally valid to confirm during the prod shadow phase. Nice-to-have, not blocking.
+2. **Deploy-phase validations** (arrive *with* the deployment, not separate benches): prod ext-parity confirm before flipping the JSONB gate · the L2 dual-read shadow vs `torrent_files` (the actual DROP gate) · full-corpus blob-export "0 errors across all 16.97 M" (proven by the real production export) · per-torrent live-writer freshness (reasoning-settled; confirm when the writer ships).
+3. **Implementation, not measurement:** the FIND-2 popularity-sort default (product call + small Go change) · FB-B1a/c/d hardening with correctness tests · the L3 sidecar + GraphQL/UX per [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md) (incl. the node-hostname fix and the unimplemented `--follow` mode).
