@@ -133,8 +133,23 @@ toolchain) failed with exactly this. Fix: `duckdb = { features = ["bundled",
 "parquet"] }` — the extension is statically linked, the lockdown stays. With it,
 all 33 filesearch tests pass on real DuckDB on the FSN1 builder.
 
+**Third catch (the first GATE A smoke run, live):** `torrents.files_count` is
+`int4`; the base/delta stream readers decoded it as `i64` without a `::bigint`
+cast — sqlx 0.9 errors on the OID mismatch, so `verify` (and the base export,
+same reader) crashed on the first page. These readers had never run against a
+real database (the for-index reader casts everywhere, which is why the Tantivy
+backfill never hit it). Fixed + SQL-shape-test-guarded.
+
 **Image supersession:** `l2-1` = routing bug · `l2-2` = routing fixed but NO
-parquet extension (cannot serve at all) · **`l2-3`+ = good (serve only this).**
+parquet extension (cannot serve at all) · `l2-3` = sidecar fine but the
+`bitmagnet-parquet` CLI crashes on the int4 read · **`l2-4`+ = good (use only
+this).** Ops note: the GHCR package is PRIVATE (anonymous pull 401s) — the
+homelab role wires an imagePullSecret from the vaulted PAT; flipping the
+package public in the GitHub UI would make that unnecessary.
+
+**GATE A status (2026-06-10):** smoke `--mode sample` (100 k) =
+`exact=100000 mismatched=0 decode_errors=0 clean=true` at ~550 torrents/s;
+the full ~16.99 M run (~9 h) is in flight.
 
 ## 6. Order of operations (per the hard rule)
 
