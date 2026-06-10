@@ -714,6 +714,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-shadow"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitmagnet-common",
+ "bitmagnet-db",
+ "bitmagnet-proto",
+ "clap",
+ "prost",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tracing",
+]
+
+[[package]]
 name = "bitpacking"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

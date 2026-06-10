@@ -9,6 +9,11 @@
 //! * [`stream_torrents_for_index`] + [`TorrentForIndex`] — keyset-paginated read
 //!   of `torrent_contents` joined with torrents + content (one row per search
 //!   document), for the Phase 3 search backfill.
+//! * [`batch_torrent_files_ext_agg`] + [`FileExtAgg`] — the per-(torrent,
+//!   extension) `torrent_files` aggregate, the actual side of the L2 `verify`
+//!   parity checker (Job A).
+//! * [`read_deleted_torrents`] — the `deleted_torrents` audit window read, the
+//!   delta tombstone's deletion source.
 //!
 //! All queries use the runtime [`sqlx::query`] API (not the compile-time
 //! `query!` macros), so the crate builds and tests green without a live
@@ -16,12 +21,16 @@
 //!
 //! See `docs/rust-rewrite-plan.md`.
 
+mod agg;
 mod config;
+mod deleted;
 mod error;
 mod pool;
 mod stream;
 
+pub use agg::{batch_torrent_files_ext_agg, FileExtAgg};
 pub use config::DbConfig;
+pub use deleted::read_deleted_torrents;
 pub use error::{DbError, Result};
 pub use pool::{connect, ping};
 pub use stream::{

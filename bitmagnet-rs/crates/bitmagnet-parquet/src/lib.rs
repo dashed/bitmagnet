@@ -18,6 +18,9 @@
 //!    (FB-B1a supersession incl. deletes); read-time anti-join is the sidecar's job.
 //!
 //! Jobs: [`export::run_base`], [`export::run_delta`], [`export::run_compaction`].
+//!
+//! The DROP-gate parity checker (Job A, blob ⟺ `torrent_files`) lives in
+//! [`verify`] and runs as the `verify` CLI subcommand.
 
 pub mod decode;
 pub mod delta;
@@ -26,8 +29,10 @@ pub mod fact;
 pub mod generation;
 pub mod rollup;
 pub mod schema;
+pub mod verify;
 
 pub use decode::{DecodeStats, FileRow};
 pub use export::{BuildStats, Sinks};
 pub use fact::SortMode;
 pub use generation::{Kind, Layout};
+pub use verify::{VerifyOpts, VerifyStats};

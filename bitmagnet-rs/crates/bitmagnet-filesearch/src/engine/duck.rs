@@ -175,9 +175,38 @@ impl Engine for DuckEngine {
         q: &FileQuery,
         deadline: Duration,
     ) -> Result<Vec<GroupRow>> {
-        let sq = sql::build_collapse_rollup(q, &gen.paths);
-        let (rows, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
-        Ok(rows)
+        match sql::rollup_plan(&q.filters) {
+            // Rollup aggregates exact (ext-only / unfiltered) — the <50 ms path.
+            sql::RollupPlan::Exact => {
+                let sq = sql::build_collapse_rollup(q, &gen.paths);
+                let (rows, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                Ok(rows)
+            }
+            // size_min: rollup set/ordering exact, but file_count/total_size
+            // would include sub-threshold files — hydrate exact aggregates per
+            // returned group from the fact (bounded point queries, ~0.2 ms each
+            // on the sorted layout; page size is clamped).
+            sql::RollupPlan::ExactSetApproxAggs => {
+                let sq = sql::build_collapse_rollup(q, &gen.paths);
+                let (mut groups, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                for g in &mut groups {
+                    let agg = sql::build_group_aggregate(&g.info_hash, &q.filters, &gen.paths);
+                    let (row, _) = self.with_conn(deadline, |conn| query_group_agg(conn, &agg))?;
+                    if let Some((count, total, max)) = row {
+                        g.matching_file_count = count;
+                        g.matching_total_size = total;
+                        g.matching_max_size = max;
+                    }
+                }
+                Ok(groups)
+            }
+            // path / size_max: the rollup cannot serve this shape at all.
+            sql::RollupPlan::FactOnly => {
+                let sq = sql::build_collapse_fact(q, &gen.paths);
+                let (rows, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                Ok(rows)
+            }
+        }
     }
 
     fn preview(
@@ -227,7 +256,13 @@ impl Engine for DuckEngine {
         filters: &Filters,
         deadline: Duration,
     ) -> Result<Vec<FacetBucketRow>> {
-        let sq = sql::build_facet_ext(filters, &gen.paths);
+        // Facet buckets count MATCHING FILES: the rollup form is exact only
+        // when no size/path filter is in play (otherwise it would drop the
+        // path filter and mis-handle size bounds — see sql::rollup_plan).
+        let sq = match sql::rollup_plan(filters) {
+            sql::RollupPlan::Exact => sql::build_facet_ext(filters, &gen.paths),
+            _ => sql::build_facet_fact(filters, &gen.paths),
+        };
         let (rows, _) = self.with_conn(deadline, |conn| query_facets(conn, &sq))?;
         Ok(rows)
     }
@@ -300,6 +335,22 @@ fn query_scalar_u64(conn: &Connection, sq: &SafeQuery) -> Result<u64> {
     Ok(n as u64)
 }
 
+/// One torrent's exact matching aggregates (`count, sum, max`). `count(*)` is
+/// never NULL; `sum`/`max` are NULL on zero matches → `None` (the group should
+/// not have been produced, but guard anyway).
+fn query_group_agg(conn: &Connection, sq: &SafeQuery) -> Result<Option<(u64, u64, u64)>> {
+    let mut stmt = conn.prepare(&sq.sql)?;
+    let values = DuckEngine::bind_values(&sq.params);
+    let row: (i64, Option<i64>, Option<i64>) =
+        stmt.query_row(params_from_iter(values.iter()), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+    match row {
+        (c, Some(ts), Some(ms)) if c > 0 => Ok(Some((c as u64, ts as u64, ms as u64))),
+        _ => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,8 +377,17 @@ mod tests {
             extension: "x".to_owned(),
             size,
         };
+        // aa carries a SUB-threshold mkv too, so the size_min collapse must
+        // hydrate exact aggregates (the raw rollup would count it).
         sinks
-            .push_torrent("aa", Ok(vec![blob("Movie/big.mkv", 2_000_000_000), blob("Movie/s.srt", 1)]))
+            .push_torrent(
+                "aa",
+                Ok(vec![
+                    blob("Movie/big.mkv", 2_000_000_000),
+                    blob("Movie/small.mkv", 5),
+                    blob("Movie/s.srt", 1),
+                ]),
+            )
             .unwrap();
         sinks
             .push_torrent("bb", Ok(vec![blob("Show/ep.mkv", 1_500_000_000)]))
@@ -370,11 +430,17 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].info_hash, "aa"); // size DESC
 
-        // collapse via rollup → 2 torrents
+        // collapse (size_min → rollup set + exact hydration): 2 torrents, and
+        // aa's matching_file_count must be 1 (only big.mkv ≥ 1 GB — the raw
+        // rollup would have said 2, counting small.mkv).
         let groups = engine
             .collapse(&gen, &fq(filters.clone(), true, 50), dl)
             .unwrap();
         assert_eq!(groups.len(), 2);
+        let aa = groups.iter().find(|g| g.info_hash == "aa").unwrap();
+        assert_eq!(aa.matching_file_count, 1);
+        assert_eq!(aa.matching_total_size, 2_000_000_000);
+        assert_eq!(aa.matching_max_size, 2_000_000_000);
 
         // count distinct torrents = 2
         let (c, _) = engine
@@ -410,6 +476,89 @@ mod tests {
                 Duration::from_secs(30),
             )
             .unwrap();
-        assert_eq!(rows.len(), 2); // both Movie/* files
+        assert_eq!(rows.len(), 3); // all Movie/* files (big.mkv, small.mkv, s.srt)
+    }
+
+    #[test]
+    fn duck_collapse_respects_path_and_size_max() {
+        let mgr = seed_generation("route");
+        let gen = mgr.current();
+        let engine = DuckEngine::open(DuckConfig::default()).unwrap();
+        let dl = Duration::from_secs(30);
+
+        // path filter (FactOnly): only aa has Movie/* files. The raw rollup
+        // would have silently dropped the path filter and returned bb too.
+        let groups = engine
+            .collapse(
+                &gen,
+                &fq(
+                    Filters {
+                        path_query: Some("Movie".into()),
+                        ..Default::default()
+                    },
+                    true,
+                    50,
+                ),
+                dl,
+            )
+            .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].info_hash, "aa");
+        assert_eq!(groups[0].matching_file_count, 3);
+
+        // size_max (FactOnly): files ≤ 10 bytes exist in aa only (small.mkv,
+        // s.srt). The rollup's max_size<=? would wrongly EXCLUDE aa (its mkv
+        // group max is 2 GB) — the fact path must include it.
+        let groups = engine
+            .collapse(
+                &gen,
+                &fq(
+                    Filters {
+                        size_max: Some(10),
+                        ..Default::default()
+                    },
+                    true,
+                    50,
+                ),
+                dl,
+            )
+            .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].info_hash, "aa");
+        assert_eq!(groups[0].matching_file_count, 2);
+
+        // count distinct with size_max routes to the fact too.
+        let (c, _) = engine
+            .count(
+                &gen,
+                &CountQuery {
+                    filters: Filters {
+                        extensions: vec!["mkv".into()],
+                        size_max: Some(10),
+                        ..Default::default()
+                    },
+                    collapse_to_torrent: true,
+                },
+                dl,
+            )
+            .unwrap();
+        assert_eq!(c, 1); // only aa has an mkv ≤ 10 bytes
+
+        // facet under a size filter counts MATCHING files only.
+        let buckets = engine
+            .facet_ext(
+                &gen,
+                &Filters {
+                    size_min: Some(1_000_000_000),
+                    ..Default::default()
+                },
+                dl,
+            )
+            .unwrap();
+        let mkv = buckets
+            .iter()
+            .find(|b| b.value.as_deref() == Some("mkv"))
+            .unwrap();
+        assert_eq!(mkv.count, 2); // big.mkv + ep.mkv; small.mkv excluded
     }
 }

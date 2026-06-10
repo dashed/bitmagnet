@@ -74,7 +74,13 @@ enum Cmd {
         /// default = the carve start time.
         #[arg(long)]
         watermark: Option<i64>,
-        /// File of newline-separated deleted info_hash hex (the audit source).
+        /// Where the deleted-torrents list comes from: `audit` reads the
+        /// `deleted_torrents` trigger table over the SAME carve window;
+        /// `file` reads --deleted-file; `none` carries no deletions.
+        #[arg(long, value_enum, default_value = "none")]
+        deleted_source: DeletedSource,
+        /// File of newline-separated deleted info_hash hex (with
+        /// `--deleted-source file`).
         #[arg(long)]
         deleted_file: Option<PathBuf>,
         #[arg(long, default_value_t = 20_000)]
@@ -102,11 +108,45 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         fail_on_decode_error: bool,
     },
-    /// STUB — agg-vs-torrent_files parity (Job A). See dv2-l2-build-notes.md §V.
+    /// Job A — the DROP-gate parity checker: blob ⟺ torrent_files at the
+    /// per-(torrent, extension) aggregate grain. Read-only; exits non-zero on
+    /// ANY mismatch or blob decode error (structural divergence is zero, so a
+    /// mismatch is a bug, never an accepted loss).
     Verify {
         #[arg(long, env = "BITMAGNET_POSTGRES_DSN")]
         dsn: String,
+        /// `full` walks the whole corpus; `sample` stops at --sample-size.
+        #[arg(long, value_enum, default_value = "sample")]
+        mode: VerifyMode,
+        #[arg(long, default_value_t = 100_000)]
+        sample_size: u64,
+        /// Resume/start cursor: exclusive info_hash hex lower bound.
+        #[arg(long)]
+        after: Option<String>,
+        /// Torrents per page / per ANY(...) batch.
+        #[arg(long, default_value_t = 1_000)]
+        batch_size: i64,
+        /// Print at most this many mismatch details (all are counted).
+        #[arg(long, default_value_t = 20)]
+        max_mismatch_print: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum VerifyMode {
+    Full,
+    Sample,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DeletedSource {
+    /// No deletions this run.
+    None,
+    /// Newline-separated info_hash hex from --deleted-file.
+    File,
+    /// The `deleted_torrents` audit table (AFTER DELETE trigger on torrents),
+    /// read over the same (watermark, new_watermark] window as the carve.
+    Audit,
 }
 
 /// Epoch seconds now (binary context: std::time is fine).
@@ -149,6 +189,7 @@ async fn main() -> Result<()> {
             dsn,
             version,
             watermark,
+            deleted_source,
             deleted_file,
             page_size,
         } => {
@@ -159,7 +200,22 @@ async fn main() -> Result<()> {
             // Lagged now: the carve window end + persisted cursor (see
             // export::CARVE_LAG_SECS — closes the commit-visibility race).
             let new_wm = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
-            let deleted = read_deleted(deleted_file.as_deref())?;
+            let deleted = match deleted_source {
+                DeletedSource::None => Vec::new(),
+                DeletedSource::File => read_deleted(deleted_file.as_deref())?,
+                DeletedSource::Audit => {
+                    // Same half-open (since, until] window as the change carve,
+                    // so a deletion is tombstoned by exactly the run whose
+                    // window contains its deleted_at.
+                    let since = layout.read_watermark();
+                    bitmagnet_db::read_deleted_torrents(&pool, since, new_wm, 1_000_000)
+                        .await
+                        .context("reading deleted_torrents audit window")?
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                }
+            };
             let stats =
                 export::run_delta(&pool, &layout, &version, new_wm, &deleted, page_size).await?;
             report("delta", &stats);
@@ -202,11 +258,47 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Verify { dsn: _ } => {
-            anyhow::bail!(
-                "verify is a STUB — the agg-vs-torrent_files parity checker (Job A/B) \
-                 is specified in docs/dev/dv2-l2-build-notes.md §V and L2-P0 spec §7, not yet implemented"
+        Cmd::Verify {
+            dsn,
+            mode,
+            sample_size,
+            after,
+            batch_size,
+            max_mismatch_print,
+        } => {
+            let pool = bitmagnet_db::PgPool::connect(&dsn)
+                .await
+                .context("connecting to postgres")?;
+            let after = after
+                .map(|h| h.parse())
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("--after must be 40-char info_hash hex: {e}"))?;
+            let opts = bitmagnet_parquet::VerifyOpts {
+                sample_size: match mode {
+                    VerifyMode::Full => None,
+                    VerifyMode::Sample => Some(sample_size),
+                },
+                after,
+                batch_size,
+                max_mismatch_print,
+            };
+            let stats = bitmagnet_parquet::verify::run_verify(&pool, &opts).await?;
+            println!(
+                "verify: torrents_checked={} exact={} mismatched={} decode_errors={} clean={}",
+                stats.torrents_checked,
+                stats.exact,
+                stats.mismatched,
+                stats.decode_errors,
+                stats.is_clean(),
             );
+            if !stats.is_clean() {
+                anyhow::bail!(
+                    "VERIFY FAILED: {} mismatches, {} decode errors (target 0 — \
+                     structural divergence is zero, so any difference is a bug)",
+                    stats.mismatched,
+                    stats.decode_errors
+                );
+            }
         }
     }
     Ok(())

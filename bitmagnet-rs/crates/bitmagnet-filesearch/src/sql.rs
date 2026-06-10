@@ -164,9 +164,11 @@ pub fn build_search_files(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
     SafeQuery { sql, params }
 }
 
-/// Distinct-torrent collapse via the `agg_torrent_ext` rollup — the fast path
-/// when there is no `path_query` (ext/size predicates only). Returns one row
-/// per torrent with the matching file_count/total/max.
+/// Distinct-torrent collapse via the `agg_torrent_ext` rollup — the fast path,
+/// valid only when [`rollup_plan`] says so: exact under [`RollupPlan::Exact`];
+/// exact SET + max (hydrate count/total via [`build_group_aggregate`]) under
+/// [`RollupPlan::ExactSetApproxAggs`]; NEVER for [`RollupPlan::FactOnly`]
+/// shapes (use [`build_collapse_fact`]). Returns one row per torrent.
 pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate_rollup(&q.filters, &mut params);
@@ -185,6 +187,46 @@ pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
     );
     params.push(Param::U64(u64::from(q.limit) + 1));
     SafeQuery { sql, params }
+}
+
+/// How a collapse / distinct-count / facet may be served, decided purely from
+/// the filter shape. The `att` rollup has NO `path` column and only a
+/// per-(torrent,ext) `max_size` for size, so:
+///
+/// * `path_query` present → [`RollupPlan::FactOnly`] — the rollup would
+///   silently DROP the path filter (wrong results, not just approximate);
+/// * `size_max` present → [`RollupPlan::FactOnly`] — `max_size <= X` means
+///   "ALL files of this ext ≤ X", NOT "∃ file ≤ X": wrong set membership;
+/// * `size_min` only → [`RollupPlan::ExactSetApproxAggs`] — the torrent SET
+///   is exact (`max_size >= X ⟺ ∃ file ≥ X`) and so is the per-torrent
+///   matching max (each matching group's `max_size` IS a matching file's
+///   size), so ordering/pagination hold — but `file_count`/`total_size`
+///   would include sub-threshold files of matching extensions; the caller
+///   hydrates exact aggregates per returned group ([`build_group_aggregate`]);
+/// * ext-only / unfiltered → [`RollupPlan::Exact`] — rollup aggregates exact.
+///
+/// The `InMemoryEngine` is the reference semantics this routing must converge
+/// to (it always computes matching-file aggregates exactly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollupPlan {
+    /// Rollup serves the query exactly.
+    Exact,
+    /// Rollup gives the exact torrent set + max, approximate count/total —
+    /// hydrate per-group aggregates from the fact.
+    ExactSetApproxAggs,
+    /// Rollup cannot serve this filter shape — use the fact CTE.
+    FactOnly,
+}
+
+/// Decide the [`RollupPlan`] for `filters` (pure; unit-tested without DuckDB).
+pub fn rollup_plan(filters: &Filters) -> RollupPlan {
+    if filters.path_query.is_some() || filters.size_max.is_some() {
+        RollupPlan::FactOnly
+    } else if filters.size_min.is_some() {
+        RollupPlan::ExactSetApproxAggs
+    } else {
+        RollupPlan::Exact
+    }
 }
 
 /// Rollup predicate: ext/size on the per-(torrent,ext) grain (`max_size` for
@@ -222,11 +264,74 @@ fn predicate_rollup(filters: &Filters, params: &mut Vec<Param>) -> String {
     clauses.join(" AND ")
 }
 
+/// Distinct-torrent collapse over the fact CTE — the correct (slower) path for
+/// filter shapes the rollup cannot serve ([`RollupPlan::FactOnly`]): exact
+/// matching-file aggregates per torrent, same ordering contract as the rollup
+/// form (`matching_max_size DESC, info_hash ASC`).
+pub fn build_collapse_fact(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
+    let mut params = Vec::new();
+    let pred = predicate(&q.filters, &mut params);
+    let where_clause = if pred.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {pred}")
+    };
+    let sql = format!(
+        "{cte} SELECT info_hash, count(*) AS matching_file_count, \
+            sum(size) AS matching_total_size, max(size) AS matching_max_size \
+         FROM files{where_clause} GROUP BY info_hash \
+         ORDER BY matching_max_size DESC, info_hash ASC LIMIT ?",
+        cte = files_cte(paths),
+    );
+    params.push(Param::U64(u64::from(q.limit) + 1));
+    SafeQuery { sql, params }
+}
+
+/// Exact matching-file aggregates for ONE torrent (a bounded point query) —
+/// hydrates a rollup-served group's `file_count`/`total_size`/`max_size` under
+/// [`RollupPlan::ExactSetApproxAggs`]. `info_hash` comes from an engine result
+/// row (server data) but is bound as a parameter anyway.
+pub fn build_group_aggregate(info_hash: &str, filters: &Filters, paths: &GenPaths) -> SafeQuery {
+    let mut params = vec![Param::Text(info_hash.to_owned())];
+    let pred = predicate(filters, &mut params);
+    let and_clause = if pred.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {pred}")
+    };
+    let sql = format!(
+        "{cte} SELECT count(*) AS c, sum(size) AS ts, max(size) AS ms \
+         FROM files WHERE info_hash = ?{and_clause}",
+        cte = files_cte(paths),
+    );
+    SafeQuery { sql, params }
+}
+
+/// Per-extension facet over the fact CTE — the correct path whenever size/path
+/// filters are present (facet buckets count MATCHING FILES; the rollup form
+/// would drop the path filter and mis-handle size bounds).
+pub fn build_facet_fact(filters: &Filters, paths: &GenPaths) -> SafeQuery {
+    let mut params = Vec::new();
+    let pred = predicate(filters, &mut params);
+    let where_clause = if pred.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {pred}")
+    };
+    let sql = format!(
+        "{cte} SELECT extension, count(*) AS c, sum(size) AS ts \
+         FROM files{where_clause} GROUP BY extension ORDER BY c DESC",
+        cte = files_cte(paths),
+    );
+    SafeQuery { sql, params }
+}
+
 /// COUNT — files (collapse=false) or distinct torrents (collapse=true). The
-/// distinct-torrent count uses the rollup when there is no path_query.
+/// distinct-torrent count uses the rollup whenever the plan is not
+/// [`RollupPlan::FactOnly`] (set membership stays exact under `size_min`).
 pub fn build_count(q: &CountQuery, paths: &GenPaths) -> SafeQuery {
     let mut params = Vec::new();
-    if q.collapse_to_torrent && q.filters.path_query.is_none() {
+    if q.collapse_to_torrent && rollup_plan(&q.filters) != RollupPlan::FactOnly {
         let pred = predicate_rollup(&q.filters, &mut params);
         let where_clause = if pred.is_empty() {
             String::new()
@@ -413,5 +518,151 @@ mod tests {
         assert!(cte.contains("NOT EXISTS"));
         assert!(cte.contains("UNION ALL"));
         assert!(!cte.contains("row_number"));
+    }
+
+    #[test]
+    fn rollup_plan_routes_by_filter_shape() {
+        // path filter: the rollup has no path column — must NOT be used.
+        assert_eq!(
+            rollup_plan(&Filters {
+                path_query: Some("x".into()),
+                ..Default::default()
+            }),
+            RollupPlan::FactOnly
+        );
+        // size_max: max_size <= X is "ALL files <= X", wrong set membership.
+        assert_eq!(
+            rollup_plan(&Filters {
+                size_max: Some(10),
+                ..Default::default()
+            }),
+            RollupPlan::FactOnly
+        );
+        // size_min only: set exact, aggregates approximate.
+        assert_eq!(
+            rollup_plan(&Filters {
+                extensions: vec!["mkv".into()],
+                size_min: Some(1),
+                ..Default::default()
+            }),
+            RollupPlan::ExactSetApproxAggs
+        );
+        // ext-only / unfiltered: rollup exact.
+        assert_eq!(
+            rollup_plan(&Filters {
+                extensions: vec!["mkv".into()],
+                ..Default::default()
+            }),
+            RollupPlan::Exact
+        );
+        assert_eq!(rollup_plan(&Filters::default()), RollupPlan::Exact);
+    }
+
+    #[test]
+    fn collapse_fact_groups_with_full_predicate() {
+        let q = FileQuery {
+            filters: Filters {
+                extensions: vec!["mkv".into()],
+                size_min: None,
+                size_max: Some(100),
+                path_query: Some("Movie".into()),
+            },
+            sort: Sort::default(),
+            limit: 50,
+            collapse_to_torrent: true,
+            preview_limit: 5,
+        };
+        let sq = build_collapse_fact(&q, &paths());
+        // Fact CTE (per-file grain), full predicate incl. path + size_max.
+        assert!(sq.sql.contains("WITH files AS"));
+        assert!(!sq.sql.contains("WITH att AS"));
+        assert!(sq.sql.contains("GROUP BY info_hash"));
+        assert!(sq.sql.contains("size <= ?"));
+        assert!(sq.sql.contains("ILIKE ? ESCAPE"));
+        assert!(sq.sql.contains("ORDER BY matching_max_size DESC, info_hash ASC"));
+        // ext, size_max, path-pattern, limit+1 — all bound.
+        assert_eq!(
+            sq.params,
+            vec![
+                Param::Text("mkv".into()),
+                Param::U64(100),
+                Param::Text("%Movie%".into()),
+                Param::U64(51),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_aggregate_binds_info_hash_first() {
+        let f = Filters {
+            extensions: vec!["mkv".into()],
+            size_min: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let sq = build_group_aggregate("aabb", &f, &paths());
+        assert!(sq.sql.contains("WHERE info_hash = ?"));
+        assert!(sq.sql.contains("count(*)"));
+        assert!(sq.sql.contains("WITH files AS"));
+        assert_eq!(
+            sq.params,
+            vec![
+                Param::Text("aabb".into()),
+                Param::Text("mkv".into()),
+                Param::U64(1_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn facet_fact_counts_matching_files() {
+        let f = Filters {
+            size_min: Some(1),
+            path_query: Some("Movie".into()),
+            ..Default::default()
+        };
+        let sq = build_facet_fact(&f, &paths());
+        assert!(sq.sql.contains("WITH files AS"));
+        assert!(!sq.sql.contains("WITH att AS"));
+        assert!(sq.sql.contains("GROUP BY extension"));
+        assert!(sq.sql.contains("ILIKE ? ESCAPE"));
+    }
+
+    #[test]
+    fn count_torrents_with_size_max_uses_fact() {
+        // size_max on the rollup would be wrong set membership — must route to
+        // the fact CTE even for a collapse count.
+        let sq = build_count(
+            &CountQuery {
+                filters: Filters {
+                    extensions: vec!["mkv".into()],
+                    size_max: Some(100),
+                    ..Default::default()
+                },
+                collapse_to_torrent: true,
+            },
+            &paths(),
+        );
+        assert!(sq.sql.contains("WITH files AS"));
+        assert!(!sq.sql.contains("WITH att AS"));
+        assert!(sq.sql.contains("count(DISTINCT info_hash)"));
+        assert!(sq.sql.contains("size <= ?"));
+    }
+
+    #[test]
+    fn count_torrents_with_size_min_keeps_rollup() {
+        // size_min set-membership is exact on the rollup (max_size >= X).
+        let sq = build_count(
+            &CountQuery {
+                filters: Filters {
+                    extensions: vec!["mkv".into()],
+                    size_min: Some(1),
+                    ..Default::default()
+                },
+                collapse_to_torrent: true,
+            },
+            &paths(),
+        );
+        assert!(sq.sql.contains("WITH att AS"));
+        assert!(sq.sql.contains("max_size >= ?"));
     }
 }

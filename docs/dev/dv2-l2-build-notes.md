@@ -101,11 +101,18 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 
 ## 5. What's STUBBED (explicit list)
 
+> **2026-06-10 update (L2-D3):** stubs **2** and **5** are CLOSED, and a serving
+> bug was fixed alongside — `DuckEngine` routed collapse/facet/count through the
+> rollup unconditionally, silently dropping `path_query` and mis-handling size
+> bounds (`sql::rollup_plan` + fact-path builders + per-group hydration fix it;
+> **`l2-1` images carry the bug, deploy `l2-2`+**). See
+> [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md).
+
 1. **`DuckEngine` not compiled by the default gate** — behind `--features duckdb-engine` (§2). Code written + a gated e2e test; the heavy bundled compile is the production image's job.
-2. **`bitmagnet-parquet verify`** — the agg-vs-`torrent_files` parity checker (Job A one-time + Job B continuous; L2-P0 spec §7) is a CLI stub that errors with a pointer. The data path it would check (blob→fact/agg via G1) is fully built and the same code the export uses.
-3. **Full-scale `(extension,size)` global sort** — `FactWriter::SortMode::InMemory` sorts bounded inputs (delta, tests, `--limit`). The full ~856 M-row base needs a spilling external sort; the deploy compaction job runs the sort in DuckDB (`COPY (SELECT * FROM read_parquet(...) ORDER BY extension, size) TO …`) — a one-line post-pass, noted but not wired into the streaming writer.
+2. ~~**`bitmagnet-parquet verify`** — a CLI stub.~~ ✅ **BUILT (2026-06-10):** Job A implemented — expected agg recomputed **from the blob** (the actual post-DROP source; the L2-P0 PG `agg_torrent_ext` table was superseded by the JSONB gate), compared against `torrent_files GROUP BY info_hash, extension` via the new `bitmagnet_db::batch_torrent_files_ext_agg` batched reader. `--mode full|sample --after <hex> --batch-size`; exit ≠ 0 on any mismatch/decode error. Pure compare fn unit-tested.
+3. **Full-scale `(extension,size)` global sort** — `FactWriter::SortMode::InMemory` sorts bounded inputs (delta, tests, `--limit`). The full ~856 M-row base needs a spilling external sort; the deploy compaction job runs the sort in DuckDB (`COPY (SELECT * FROM read_parquet(...) ORDER BY extension, size) TO …`) — a one-line post-pass, noted but not wired into the streaming writer. (The first prod export therefore runs `--sort none` — the unsorted slim base; queries stay correct, row-group pruning arrives with the sort.)
 4. **Keyset pagination resumption** — the first page is fully implemented (filter/sort/limit/`has_next` via overfetch/collapse/preview/count/facets). `next_cursor` is returned as an (empty) token; **resuming** a deep page (applying the cursor predicate) is a follow-up: add an `after` keyset predicate to `sql::build_search_files` and thread the opaque cursor through the service.
-5. **Deletion audit source** — `run_delta` accepts a `deleted` info_hash list (CLI `--deleted-file`). WHERE that list comes from (a delete trigger / audit table, since hard-deleted rows aren't in `torrents`) is a deploy-time input; the tombstone *data path* (carry deletes, anti-join them away) is built and tested.
+5. ~~**Deletion audit source** — a deploy-time input.~~ ✅ **BUILT (2026-06-10):** `deleted_torrents` audit table + `AFTER DELETE` trigger (DDL = homelab playbook `bitmagnet_deleted_audit.yml`; deliberately not a goose migration — image digest-pinned, `00023` contested), `bitmagnet_db::read_deleted_torrents` window reader, and `delta --deleted-source none|file|audit` consuming the same half-open lagged carve window.
 6. **`content_type`/`published_at` denorm columns** — deferred per the L2 spec revision (they go stale vs the `updated_at` watermark); v1 fact is file-facts only. The proto reserves `content_types` for v2.
 7. **PG `agg_torrent_ext` migration + the Go shadow client** — these are the **DV-4 (Go-side)** deliverable, not this crate. The DuckDB-side `agg_torrent_ext` rollup (parity mirror) IS built here.
 
@@ -130,7 +137,7 @@ v2-shadow --pg <restore-dsn> --sidecar 127.0.0.1:50052 --pairs v2_pairs.json --w
 #   each row: shape, filter, pg_set_size, sidecar_set_size, set_equal, pg_ms, sidecar_ms
 # GATE: 0 mismatches across the suite; sidecar latency within the CB envelope (<250ms structured).
 ```
-The `v2-shadow` driver itself is **not** built here (it's a deploy-wave harness); the sidecar side it drives **is**. The live in-request shadow (Go running both `EXISTS torrent_files` and `EXISTS agg_torrent_ext` and emitting the mismatch metric) is the **DV-4** L2a piece.
+~~The `v2-shadow` driver itself is **not** built here (it's a deploy-wave harness); the sidecar side it drives **is**.~~ ✅ **BUILT (2026-06-10):** the `bitmagnet-shadow` workspace crate (bin `v2-shadow`) implements exactly this — five shapes, exact comparison (ordered rows/groups, counts incl. the `estimated` flag failing the gate, facet maps), `COLLATE "C"`/hex/ILIKE-escape mirror rules, CSV + non-zero exit on mismatch, a built-in suite covering every sidecar routing class plus `--pairs` JSON. See [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md). The Go in-request shadow for L2a is moot — the JSONB gate already flipped with direct SQL parity proven.
 
 ---
 
