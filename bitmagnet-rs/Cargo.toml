@@ -6,6 +6,8 @@ members = [
     "crates/bitmagnet-model",
     "crates/bitmagnet-db",
     "crates/bitmagnet-search",
+    "crates/bitmagnet-parquet",
+    "crates/bitmagnet-filesearch",
 ]
 
 [workspace.package]
@@ -63,6 +65,26 @@ tantivy = "0.26"
 
 # CLI.
 clap = { version = "4", features = ["derive"] }
+
+# Columnar export (L2 — bitmagnet-parquet). 55.x (not the bench's 53.x: arrow
+# 53's `arrow-arith` fails to compile against chrono ≥0.4.45 — a `quarter`
+# method-ambiguity fixed in arrow 54+). `parquet` opts into arrow + zstd so the
+# fact/rollup files are ZSTD-compressed Arrow.
+arrow = "55"
+parquet = { version = "55", features = ["arrow", "zstd"] }
+
+# Embedded analytical engine for the file-search sidecar (L2b —
+# bitmagnet-filesearch). `bundled` statically compiles libduckdb (needs a C++
+# toolchain), so it is opt-in behind that crate's `duckdb-engine` feature; the
+# default workspace build/test never compiles it.
+duckdb = { version = "1.3", features = ["bundled"] }
+
+# Async stream combinators (client-streaming gRPC, DB row streams).
+futures = "0.3"
+# UDS / TCP listener wrappers for the gRPC transport.
+tokio-stream = { version = "0.1", features = ["net"] }
+# Hex for info-hash <-> text at the export/Parquet boundary.
+hex = "0.4"
 
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D

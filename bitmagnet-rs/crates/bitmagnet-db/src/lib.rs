@@ -25,7 +25,8 @@ pub use config::DbConfig;
 pub use error::{DbError, Result};
 pub use pool::{connect, ping};
 pub use stream::{
-    stream_torrents_for_index, stream_torrents_with_files, TorrentForIndex, TorrentWithBlob,
+    stream_changed_torrents, stream_torrents_for_index, stream_torrents_with_files,
+    TorrentForIndex, TorrentWithBlob,
 };
 
 /// Re-exported so callers can name the pool type without depending on `sqlx`

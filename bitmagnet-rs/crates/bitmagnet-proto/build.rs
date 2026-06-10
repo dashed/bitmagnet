@@ -12,11 +12,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_root = manifest_dir.join("..").join("..").join("proto");
     let common = proto_root.join("bitmagnet").join("common.proto");
     let search = proto_root.join("bitmagnet").join("search.proto");
+    // L2b file-search service (DuckDB-on-Parquet sidecar). Shares the
+    // `bitmagnet.v1` package, so prost folds it into the same generated module.
+    let file_search = proto_root.join("bitmagnet").join("file_search.proto");
 
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[common, search], std::slice::from_ref(&proto_root))?;
+        .compile_protos(
+            &[common, search, file_search],
+            std::slice::from_ref(&proto_root),
+        )?;
 
     // Rebuild when any proto changes.
     println!("cargo:rerun-if-changed={}", proto_root.display());

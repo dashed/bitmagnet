@@ -25,6 +25,10 @@ pub use v1::search_service_client::SearchServiceClient;
 pub use v1::search_service_server::{SearchService, SearchServiceServer};
 pub use v1::{ContentType, FileType, TorrentDocument};
 
+// L2b file-search service (DuckDB-on-Parquet sidecar).
+pub use v1::file_search_service_client::FileSearchServiceClient;
+pub use v1::file_search_service_server::{FileSearchService, FileSearchServiceServer};
+
 #[cfg(test)]
 mod tests {
     use super::v1::{ContentType, FileType};

@@ -85,6 +85,61 @@ pub async fn stream_torrents_with_files(
     Ok(out)
 }
 
+/// SQL for [`stream_changed_torrents`]. The L2 delta carve: torrents whose
+/// `updated_at` advanced past the watermark `$1` (an epoch-seconds bound). Note
+/// `persist.go` bumps `updated_at` on every `DoUpdates`, so this captures both
+/// brand-new torrents and re-crawls. Keyset on `info_hash` (`$2`) within the
+/// window so a big delta still pages. Deleted torrents are NOT visible here (the
+/// row is gone) — the delta job carries deletions as a separate tombstone key
+/// set (see `bitmagnet_parquet::delta`), and the read-time anti-join makes a
+/// pure-tombstone (no fact rows) torrent vanish.
+const STREAM_CHANGED_SQL: &str = "\
+SELECT info_hash, name, size, files_status::text AS files_status, files_count, files_data \
+FROM torrents \
+WHERE updated_at > to_timestamp($1) \
+AND ($2::bytea IS NULL OR info_hash > $2) \
+ORDER BY info_hash ASC \
+LIMIT $3";
+
+/// Reads up to `limit` torrents changed since `since_epoch` (exclusive) whose
+/// `info_hash` is greater than `after_info_hash`, ordered by `info_hash` — the
+/// per-minute delta carve for the L2 Parquet/agg refresh. Requires an index on
+/// `torrents.updated_at` for an efficient carve (see the L2 spec §2a/§6).
+///
+/// Returns the same [`TorrentWithBlob`] shape as
+/// [`stream_torrents_with_files`]; decode each blob with [`TorrentWithBlob::files`].
+pub async fn stream_changed_torrents(
+    pool: &PgPool,
+    since_epoch: i64,
+    after_info_hash: Option<&InfoHash>,
+    limit: i64,
+) -> Result<Vec<TorrentWithBlob>> {
+    let after: Option<Vec<u8>> = after_info_hash.map(|ih| ih.as_slice().to_vec());
+
+    let rows = sqlx::query(STREAM_CHANGED_SQL)
+        .bind(since_epoch)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw: Vec<u8> = row.try_get("info_hash")?;
+        let info_hash =
+            InfoHash::from_slice(&raw).map_err(|e| DbError::Decode(format!("info_hash: {e}")))?;
+        out.push(TorrentWithBlob {
+            info_hash,
+            name: row.try_get("name")?,
+            size: row.try_get("size")?,
+            files_status: row.try_get("files_status")?,
+            files_count: row.try_get("files_count")?,
+            files_data: row.try_get("files_data")?,
+        });
+    }
+    Ok(out)
+}
+
 /// One `torrent_contents` row joined with its torrent and (when classified) its
 /// content metadata — everything the search backfill needs to build a proto
 /// `TorrentDocument`. One value per torrent_content row (NOT per torrent): a
@@ -358,6 +413,17 @@ mod tests {
             files_data: Some(blob),
         };
         assert_eq!(row.files().unwrap(), original);
+    }
+
+    #[test]
+    fn changed_sql_shape() {
+        // The delta carve: updated_at window + keyset on info_hash.
+        assert!(STREAM_CHANGED_SQL.contains("FROM torrents"));
+        assert!(STREAM_CHANGED_SQL.contains("updated_at > to_timestamp($1)"));
+        assert!(STREAM_CHANGED_SQL.contains("info_hash > $2"));
+        assert!(STREAM_CHANGED_SQL.contains("ORDER BY info_hash ASC"));
+        assert!(STREAM_CHANGED_SQL.contains("LIMIT $3"));
+        assert!(STREAM_CHANGED_SQL.contains("files_data"));
     }
 
     #[test]
