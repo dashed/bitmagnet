@@ -124,3 +124,21 @@ Prereqs: PS-T5 GO (already decided GO for CJK free-text per MEMORY), the node-la
 ## 6. Status
 
 Code complete on `feat/l3-pathsearch`, `cargo build`/`clippy` green, 87 unit tests pass, committed (conventional-commits, **not pushed**). Homelab role delta + V4 runbook described above; **nothing applied, no image built, no prod touch.**
+
+---
+
+## 7. Review fixes (lead review, 2026-06-10)
+
+Two findings fixed on this branch after the wave-1 review:
+
+1. **Follow-cursor index usability:** `FOLLOW_SQL` originally compared/ordered on `CAST(EXTRACT(EPOCH FROM t.updated_at)…)` — a computed expression that defeats any btree on `updated_at` (≈48 M-row sort per poll on prod). Now compares/orders the **raw columns**: `(t.updated_at, t.info_hash) > (to_timestamp($1/1e6), $2)`; micros are still *surfaced* for the chrono-free cursor (output expressions don't affect index use).
+2. **Commit-visibility race:** strict `>` keyset could permanently skip a row whose transaction committed *after* the watermark advanced past its `updated_at`. Fixed with a **30 s lag** (`AND t.updated_at <= now() - interval '30 seconds'`): the watermark can never overtake a still-invisible row from any writer transaction shorter than 30 s; overlap re-processing is safe (supersession is idempotent).
+
+🚨 **Deploy prerequisite (new):** `torrents` has no btree on `updated_at` in the upstream schema — the follow loop needs one. Add a goose migration (or one-time DDL) **before** enabling `--follow` in prod:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_torrents_updated_at_info_hash
+    ON torrents (updated_at, info_hash);
+```
+
+(`CONCURRENTLY` → no write lock; size ≈ a few GB at 48 M rows; verify with `\di+` after.) The same index serves dv2's L2 delta carve (`WHERE updated_at > to_timestamp($1)`).

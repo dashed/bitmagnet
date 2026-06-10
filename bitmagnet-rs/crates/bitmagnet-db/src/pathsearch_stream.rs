@@ -82,10 +82,30 @@ WHERE ($1::bytea IS NULL OR t.info_hash > $1) \
 ORDER BY t.info_hash ASC \
 LIMIT $2";
 
-/// Follow SQL: keyset on the `(updated_at_micros, info_hash)` watermark. `$1` =
-/// last seen `updated_at` micros, `$2` = last seen info_hash (the tiebreak for
-/// rows sharing a timestamp), `$3` = page size. `updated_at` is surfaced as
-/// `bigint` micros for a `chrono`-free cursor compare.
+/// Follow SQL: keyset on the `(updated_at, info_hash)` watermark. `$1` = last
+/// seen `updated_at` in Unix micros (converted to `timestamptz` server-side so
+/// the comparison and `ORDER BY` use the RAW column — index-friendly; an
+/// expression like `EXTRACT(EPOCH ...)` here would defeat any
+/// `torrents (updated_at, info_hash)` btree and force a full sort per poll),
+/// `$2` = last seen info_hash (the tiebreak for rows sharing a timestamp),
+/// `$3` = page size. `updated_at` is still SURFACED as `bigint` micros for a
+/// `chrono`-free cursor compare (an output expression doesn't affect index use).
+///
+/// The `now() - interval '30 seconds'` LAG closes the commit-visibility race:
+/// `updated_at` is set at statement time inside the writer's transaction, so a
+/// transaction that COMMITS after the loop has already read past its
+/// `updated_at` would otherwise be skipped forever. By never reading rows newer
+/// than now()-30s, the watermark can't advance past a row that is still
+/// invisible (any writer transaction shorter than 30s commits while its rows
+/// are still ahead of the watermark). Re-processing on overlap is safe —
+/// supersession (delete_term + re-add) is idempotent.
+///
+/// Round-trip precision: PG timestamps are integral microseconds; micros ≈
+/// 1.7e15 ≪ 2^53, so the f64 division in `to_timestamp($1/1e6)` is exact to
+/// <0.5 µs and to_timestamp's round-to-µs recovers the original instant.
+///
+/// ⚠️ Deploy prerequisite: `torrents` needs a btree on `(updated_at, info_hash)`
+/// (or at least `(updated_at)`) — see dv3-l3-build-notes.md.
 const FOLLOW_SQL: &str = "\
 SELECT t.info_hash AS info_hash, t.name AS name, t.size AS size, \
 t.files_status::text AS files_status, t.files_count AS files_count, \
@@ -93,8 +113,9 @@ COALESCE((SELECT MAX(tc.seeders) FROM torrent_contents tc WHERE tc.info_hash = t
 CAST(EXTRACT(EPOCH FROM t.updated_at) * 1000000 AS bigint) AS updated_at_micros, \
 t.files_data AS files_data \
 FROM torrents t \
-WHERE (CAST(EXTRACT(EPOCH FROM t.updated_at) * 1000000 AS bigint), t.info_hash) > ($1, $2) \
-ORDER BY CAST(EXTRACT(EPOCH FROM t.updated_at) * 1000000 AS bigint) ASC, t.info_hash ASC \
+WHERE (t.updated_at, t.info_hash) > (to_timestamp(($1::bigint)::double precision / 1000000.0), $2) \
+AND t.updated_at <= now() - interval '30 seconds' \
+ORDER BY t.updated_at ASC, t.info_hash ASC \
 LIMIT $3";
 
 /// Map a backfill/`info_hash`-cursor row (no `updated_at` column).
@@ -191,12 +212,30 @@ mod tests {
     fn follow_sql_shape() {
         let sql = FOLLOW_SQL;
         assert!(sql.contains("FROM torrents t"));
-        // Composite (updated_at_micros, info_hash) keyset watermark.
-        assert!(sql.contains("updated_at_micros"));
-        assert!(sql.contains("> ($1, $2)"));
+        // Cursor compares the RAW (updated_at, info_hash) columns (index-usable;
+        // an EXTRACT(...) expression in WHERE/ORDER BY would defeat the btree).
+        assert!(sql.contains("(t.updated_at, t.info_hash) > (to_timestamp("));
+        assert!(sql.contains("ORDER BY t.updated_at ASC, t.info_hash ASC"));
+        // The 30s commit-visibility lag: never read rows newer than now()-30s,
+        // so the watermark can't overtake a still-invisible transaction.
+        assert!(sql.contains("now() - interval '30 seconds'"));
         assert!(sql.contains("LIMIT $3"));
-        // chrono-free: micros via EXTRACT(EPOCH ...) * 1e6 cast to bigint.
+        // micros are still SURFACED for the chrono-free cursor (output only —
+        // does not affect index use).
+        assert!(sql.contains("updated_at_micros"));
         assert!(sql.contains("EXTRACT(EPOCH FROM t.updated_at) * 1000000"));
+        // ...but the OUTER WHERE clause must NOT wrap the cursor compare in
+        // EXTRACT. (Split after FROM: the seeders correlated subquery in the
+        // SELECT list has its own inner WHERE.)
+        let after_from = sql.split("FROM torrents t").nth(1).unwrap();
+        let where_only = after_from
+            .split("WHERE")
+            .nth(1)
+            .unwrap()
+            .split("ORDER BY")
+            .next()
+            .unwrap();
+        assert!(!where_only.contains("EXTRACT"));
     }
 
     #[test]
