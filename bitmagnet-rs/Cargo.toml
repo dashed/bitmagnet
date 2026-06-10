@@ -78,7 +78,12 @@ parquet = { version = "55", features = ["arrow", "zstd"] }
 # bitmagnet-filesearch). `bundled` statically compiles libduckdb (needs a C++
 # toolchain), so it is opt-in behind that crate's `duckdb-engine` feature; the
 # default workspace build/test never compiles it.
-duckdb = { version = "1.3", features = ["bundled"] }
+# 🚨 `parquet` is LOAD-BEARING: it statically compiles the parquet extension
+# into the bundled libduckdb. Without it `read_parquet` is not in the catalog
+# and the FB-B1d lockdown (autoinstall/autoload=false) rightly blocks loading
+# it at runtime — every sidecar query fails (caught by the FSN1 duck-e2e run;
+# the l2-1/l2-2 images shipped without it and cannot serve).
+duckdb = { version = "1.3", features = ["bundled", "parquet"] }
 
 # Async stream combinators (client-streaming gRPC, DB row streams).
 futures = "0.3"
