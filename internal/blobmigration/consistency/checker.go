@@ -91,6 +91,27 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 				Got:       fmt.Sprintf("%d", b.Size),
 			})
 		}
+
+		// Extension is checked as the PATH-DERIVED value on both sides, never the
+		// raw stored field (FB-A0/G1): crawl-path blobs legitimately carry an
+		// empty `e`, and the torrent_files.extension column is itself
+		// path-derived (a generated column). Comparing b.Extension to r.Extension
+		// would therefore flag every crawl-path torrent as a false mismatch. The
+		// contract every consumer must honour is "extension := FileExtensionFromPath(path)",
+		// so that is exactly what we verify here. Because paths are compared above,
+		// this also catches a path that parses to a different extension after the
+		// blob round-trip.
+		bExt := model.FileExtensionFromPath(b.Path)
+		rExt := model.FileExtensionFromPath(r.Path)
+
+		if bExt.String != rExt.String {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: i,
+				Field:     "extension",
+				Expected:  rExt.String,
+				Got:       bExt.String,
+			})
+		}
 	}
 
 	result.Match = len(result.Mismatches) == 0
