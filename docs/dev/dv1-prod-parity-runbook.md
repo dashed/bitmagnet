@@ -299,3 +299,20 @@ Three independent Tier-1 runs (fresh `TABLESAMPLE` seed each) against **live pro
 | 3 | 103,077 | **0** |
 
 **≈307 k torrents (~1.8 % of the ~17 M blob population) sampled, zero mismatches.** Since any drift would be systematic (regex divergence / a stale class), this is a strong PASS of the Tier-1 gate. **Tier-2 (the full paced keyset pass, §3.4) remains open** — required for certainty before flipping `SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB` in prod, per GATE 2.
+
+## 9. RESULTS — Tier-2 FULL PASS (RAN 2026-06-10, user-gated): ✅ PARITY PROVEN
+
+The full paced keyset pass ran against **live prod** (read-only, BATCH=2000, SLEEP=0.2 s, single connection, serial): start 09:16Z → **DONE 11:03Z (~107 min)**, ~8,460 windows, cursor exhausted the keyspace (`ffffff85…`).
+
+> **`total_mismatches = 0` over the full ~16.99 M blob-torrent population.**
+
+Combined with Tier-1 (§8): **V1 is PASSED — `torrents.file_extensions` exactly equals the `torrent_files`-derived extension set on live production data, for every torrent.** The parity precondition for flipping `SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB` is satisfied. (The flip itself additionally requires deploying the `feat/deploy-go-integration` image — the flag doesn't exist in the running image.)
+
+### 9.1 Driver errata (fixed live; future runs use this corrected form)
+
+Three latent bugs in the §3.4 driver (it had never been executed before):
+1. **`kubectl exec` must be `kubectl exec -i`** — without `-i` the heredoc never reaches psql; psql exits 0 with NO output (a silent false-success; the loop terminates immediately reporting 0 scanned).
+2. **`max(info_hash)` does not exist** — PostgreSQL has no `max(bytea)` aggregate. Use an ordered scalar subquery: `(SELECT encode(c2.info_hash,'hex') FROM cmp c2 ORDER BY c2.info_hash DESC LIMIT 1)`.
+3. **psql needs `-q`** — without quiet mode, `SET` command tags are emitted on stdout and the driver appends them to the mismatch file (3 spurious "mismatches" per window). With `-At` alone they are NOT suppressed.
+
+Run telemetry: ~4–5 k torrents/s sustained at BATCH=2000/SLEEP=0.2 (≈2× the §3.2 estimate); prod load and crawler write latency unobserved-to-degrade throughout; the run survived a client-side ssh-agent failure (detached `setsid` + flock + cursor resume worked as designed).
