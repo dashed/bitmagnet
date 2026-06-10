@@ -285,3 +285,17 @@ SELECT count(*) AS multifile_with_blob FROM torrents WHERE files_data IS NOT NUL
 ```
 
 **Anchors verified for this runbook** (fork @ deploy branch): `serializer.go:74` (`ExtractUniqueExtensions`), `persist.go:121,228` (crawler dual-write), `queue/handler.go:172,208` (backfill recompute), `torrent_files.go:33` (Go regex), `00001_init.sql:68` (PG generated column), `00021_blob_storage.sql:5` (`file_extensions` JSONB DDL), `consistency/live_checker.go:103` (blob heal = `files_data=NULL`, no ext handling), `fba1-jsonb-dropgate-results.md` (bench parity + `/dev/shm` caveat).
+
+---
+
+## 8. RESULTS — Tier-1 (RAN 2026-06-10, user-gated)
+
+Three independent Tier-1 runs (fresh `TABLESAMPLE` seed each) against **live prod** (`bitmagnet-postgres-0`), read-only, serial, `statement_timeout=8min`; each completed in ~1–2 min with no observable impact:
+
+| run | sampled (blob torrents) | mismatches |
+|---|---|---|
+| 1 | 101,867 | **0** |
+| 2 | 102,231 | **0** |
+| 3 | 103,077 | **0** |
+
+**≈307 k torrents (~1.8 % of the ~17 M blob population) sampled, zero mismatches.** Since any drift would be systematic (regex divergence / a stale class), this is a strong PASS of the Tier-1 gate. **Tier-2 (the full paced keyset pass, §3.4) remains open** — required for certainty before flipping `SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB` in prod, per GATE 2.
