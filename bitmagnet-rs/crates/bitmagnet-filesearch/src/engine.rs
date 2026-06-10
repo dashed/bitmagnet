@@ -241,7 +241,7 @@ impl Engine for InMemoryEngine {
 pub use duck::DuckEngine;
 
 #[cfg(feature = "duckdb-engine")]
-mod duck;
+pub mod duck;
 
 #[cfg(test)]
 mod tests {
