@@ -1,0 +1,9 @@
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/tantivy_bitpacker-6c733a428ae38993.d: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/bitpacker.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/blocked_bitpacker.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/mod.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/scalar.rs
+
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/libtantivy_bitpacker-6c733a428ae38993.rmeta: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/bitpacker.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/blocked_bitpacker.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/mod.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/scalar.rs
+
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/lib.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/bitpacker.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/blocked_bitpacker.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/mod.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tantivy-bitpacker-0.10.0/src/filter_vec/scalar.rs:

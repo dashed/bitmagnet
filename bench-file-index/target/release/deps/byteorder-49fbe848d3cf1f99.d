@@ -1,0 +1,6 @@
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/byteorder-49fbe848d3cf1f99.d: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/io.rs
+
+/Users/me/aaa/github/bitmagnet/bench-file-index/target/release/deps/libbyteorder-49fbe848d3cf1f99.rmeta: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/io.rs
+
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/lib.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/byteorder-1.5.0/src/io.rs:

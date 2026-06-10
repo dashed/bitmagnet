@@ -3,6 +3,7 @@ package gqlmodel
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"sort"
 
 	q "github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -88,6 +89,13 @@ func (t TorrentQuery) filesFromBlob(
 	ctx context.Context,
 	in TorrentFilesQueryInput,
 ) (search.TorrentFilesResult, error) {
+	if t.Dao == nil {
+		// Defensive: a mis-wired resolver must degrade to an error, never panic
+		// (the field resolver constructs TorrentQuery itself; see
+		// query.resolvers.go Files).
+		return search.TorrentFilesResult{}, errors.New("filesFromBlob: Dao not wired")
+	}
+
 	limit := uint(10)
 	if in.Limit.Valid {
 		limit = in.Limit.Uint

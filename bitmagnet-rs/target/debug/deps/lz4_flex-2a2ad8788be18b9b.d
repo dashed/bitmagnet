@@ -1,0 +1,12 @@
+/Users/me/aaa/github/bitmagnet/bitmagnet-rs/target/debug/deps/lz4_flex-2a2ad8788be18b9b.d: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/mod.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/compress.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/hashtable.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/decompress.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy_unsafe.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/sink.rs
+
+/Users/me/aaa/github/bitmagnet/bitmagnet-rs/target/debug/deps/liblz4_flex-2a2ad8788be18b9b.rmeta: /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/lib.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/mod.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/compress.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/hashtable.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/decompress.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy_unsafe.rs /Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/sink.rs
+
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/lib.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/mod.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/compress.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/hashtable.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/block/decompress.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/fastcpy_unsafe.rs:
+/Users/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lz4_flex-0.13.1/src/sink.rs:
