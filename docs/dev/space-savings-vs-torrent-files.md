@@ -51,7 +51,7 @@ The one capability the cheap tiers can't make *interactive* is **broad free-text
 
 | index option | size | source | notes |
 |---|---|---|---|
-| **per-torrent path-bag ngram, CJK-correct** ✅ recommended | **13.32 GiB BUILT** (PSX; confirms the 13.54 computed, −1.6%) | **PS-MB1 + PSX** | `WithFreqs`; recall 1.0; `ascii3` p50 24.7 ms; broad-gram **production** p95 ~77–94 ms (`TopDocs`, not the `Count` 55–65 ms) → engine-irreducible tail = UX |
+| **per-torrent path-bag ngram, CJK-correct** ✅ recommended | **14.0 GiB DEPLOYABLE** (keyed, CB E2b; 13.32 GiB keyless — the delete-key is mandatory in prod and adds no read cost) | **PS-MB1 + PSX + CB** | `WithFreqs`; recall 1.0; `ascii3` p50 24.7 ms; broad-gram **production** p95 ~77–94 ms (`TopDocs`); concurrency-validated (24 readers + live writer, fresh-lag sub-ms) |
 | ~~per-file ngram CJK-correct path index~~ (superseded) | ~~~90 GB~~ (94 GB @879.5M) | EXP-D2 | footprint-tripler; per-file docs → latency breaks at scale; PS-MB1 replaced it |
 | (default-tokenizer path index, ASCII-only) | ~19–30 GB | EXP-D | **CJK recall 0.0037 — broken**, not viable for this 15%-CJK corpus |
 | (DuckDB-FTS / BM25, ASCII-only) | +35 GB | ARCH-C | also CJK-token-only |

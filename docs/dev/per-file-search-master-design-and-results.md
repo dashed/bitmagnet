@@ -329,6 +329,15 @@ After the user committed to building L3, a follow-up campaign ([`psx-campaign-RE
 - ↩ **`agg_torrent_ext` RETIRED:** `ext ∧ max_size` (the one query `file_extensions` JSONB can't serve) is served by the DuckDB tier at 5–132 ms with **+0 PG disk** — re-adding ~10 GB + a pipeline to PG is against the DROP goal.
 - 🔎 **FIND-2 (separate, DROP-independent):** the main search's broad-term relevance wall (`ts_rank_cd`, x264 ≈ 49 s) has a **cheap code-only fix** — default broad typed queries to popularity sort (`seeders`/`published_at` btree backward scan = **1.9–4.9 ms**); offer relevance as an honest opt-in. RUM **deferred** (write-amp on the upsert-heavy table + 30–50 GB).
 
+### 14. CB campaign — concurrency/load (MEASURED 2026-06-10; closes the last gap)
+
+The one remaining unmeasured production dimension — concurrency — is now measured ([`cb-campaign-RESULTS.md`](./cb-campaign-RESULTS.md)); **single-client latency survives production concurrency**:
+
+- **L3 readers (E1):** graceful to **24 concurrent readers** — gate-row p95 grows only **1.86–2.6×** at 24× load (QPS 26→291, plateaus at core count, no collapse); N=1 reproduces the PSX baselines exactly.
+- **L3 readers + live writer (E2a/E2b):** the always-on single writer is **invisible to readers** (p95 ≤1.05× baseline even at 50 torrents/s); commit ~13–17 ms keeps 50 t/s with headroom; **fresh-lag sub-ms p95 under full read load**; per-torrent `delete_term` supersession **correct + 5.2 ms under load** (closes the deferred freshness item); segments bounded. 📐 **Deployable L3 index size = 14.0 GiB** (15,017,420,811 B — the keyed build with the mandatory `info_hash` delete-key; the 13.32 GiB figure is the keyless variant; the key adds **no read cost**).
+- **L2 DuckDB (E3):** cursors of one connection **parallelize** (QPS scales 10→27; the docs' contradiction resolved empirically; separate connections add nothing — same instance). The `<250 ms @ N=8` bar **holds for rollup-backed/light shapes to N=16**; unbounded `COUNT(DISTINCT)`/full-scan shapes are CPU-bound and breach at N=2–4 → **route heavy shapes through rollups**. Memory never the constraint (zero spill). *(A hydrate "breach" was a cold-harness `disable_object_cache` artifact — warm sidecar ≈17 ms.)*
+- **Sidecar config that falls out:** one instance + cursor pool, per-query `threads≈4`, semaphore at the knee (~4–8), heavy ranges via rollups, serve the optimized Parquet (the raw native table measured 100–1000× slower), run warm. gRPC-layer overhead remains the only deploy-time validation.
+
 ---
 
 ## 5. L2 Architecture (PROPOSED)
