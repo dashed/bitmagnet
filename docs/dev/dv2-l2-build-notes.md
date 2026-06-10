@@ -101,11 +101,15 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 
 ## 5. What's STUBBED (explicit list)
 
-> **2026-06-10 update (L2-D3):** stubs **2** and **5** are CLOSED, and a serving
-> bug was fixed alongside — `DuckEngine` routed collapse/facet/count through the
-> rollup unconditionally, silently dropping `path_query` and mis-handling size
-> bounds (`sql::rollup_plan` + fact-path builders + per-group hydration fix it;
-> **`l2-1` images carry the bug, deploy `l2-2`+**). See
+> **2026-06-10 update (L2-D3):** stubs **2** and **5** are CLOSED, and TWO
+> serving bugs were fixed alongside: (1) `DuckEngine` routed collapse/facet/count
+> through the rollup unconditionally, silently dropping `path_query` and
+> mis-handling size bounds (`sql::rollup_plan` + fact-path builders + per-group
+> hydration); (2) the bare `bundled` duckdb feature shipped libduckdb WITHOUT the
+> parquet extension — `read_parquet` absent + the FB-B1d lockdown blocking
+> autoload ⇒ every query failed (the §0/§2 "tested under the feature" claim was
+> never exercised on a real toolchain; now it is — 33/33 on the FSN1 builder).
+> **Images `l2-1`/`l2-2` cannot serve; deploy `l2-3`+.** See
 > [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md).
 
 1. **`DuckEngine` not compiled by the default gate** — behind `--features duckdb-engine` (§2). Code written + a gated e2e test; the heavy bundled compile is the production image's job.

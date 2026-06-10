@@ -120,14 +120,27 @@ ext) `max_size` for size (`size_max` ⇒ wrong set membership; `size_min` ⇒
 inflated counts). The fix (`sql::rollup_plan` + fact-path builders + per-group
 exact hydration) keeps the <50 ms rollup wins where they are exact and routes
 the rest to the fact CTE; the `InMemoryEngine` reference semantics + new unit
-and duck-e2e tests pin it. **`l2-1` images serve the buggy routing — deploy
-`l2-2`+ only.** This is precisely the class of bug GATE C exists to catch; the
+and duck-e2e tests pin it. **Deploy `l2-3`+ only (see the supersession note below).** This is precisely the class of bug GATE C exists to catch; the
 shadow suite exercises all three routing classes.
+
+**Second catch (the FSN1 e2e run itself, 2026-06-10):** the duckdb crate's bare
+`bundled` feature compiles libduckdb **without the parquet extension** —
+`read_parquet` is not in the catalog at runtime, and the FB-B1d lockdown
+(`autoinstall/autoload_known_extensions=false`) rightly blocks loading it, so
+EVERY sidecar query fails. All three duck-e2e tests (including the two
+pre-existing ones, whose "tested" status was never actually exercised on a real
+toolchain) failed with exactly this. Fix: `duckdb = { features = ["bundled",
+"parquet"] }` — the extension is statically linked, the lockdown stays. With it,
+all 33 filesearch tests pass on real DuckDB on the FSN1 builder.
+
+**Image supersession:** `l2-1` = routing bug · `l2-2` = routing fixed but NO
+parquet extension (cannot serve at all) · **`l2-3`+ = good (serve only this).**
 
 ## 6. Order of operations (per the hard rule)
 
-1. Build image `l2-2` (this commit) on FSN1; run the duck-e2e tests there (the
-   macOS toolchain can't compile bundled libduckdb).
+1. ✅ DONE — image `l2-3` built on FSN1 from the duck-e2e-green tree (33/33
+   tests on real DuckDB there; the macOS toolchain can't compile bundled
+   libduckdb).
 2. Deploy the serving role (homelab `make bitmagnet-filesearch`) — empty PVC,
    pod NotReady until a generation exists (expected).
 3. **GATE A** (`verify --mode full`) — supervised, prod-PG read, needs explicit OK.

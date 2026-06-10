@@ -25,7 +25,7 @@ The answer is a **layered stack** — stack L1 → L2 → L3, drop `torrent_file
 | Layer | What | Size | Covers | Status |
 |---|---|---|---|---|
 | **L1 — Hybrid Blob** | `files_data` = zstd(msgpack `{i,p,e,s}`) per torrent (~16 GB, 4.96×) + `torrent_file_summary` (~3.3 GB) + `file_extensions` JSONB (+119 MB) | **~19 GB** | (a)(b)(c) | ✅ **DEPLOYED + verified** (real-time dual-write) |
-| **L2 — DuckDB-on-Parquet** | blobs → sorted Parquet (per-file) + native rollup tables; gRPC sidecar (HEL1) | **~3.9–12.3 GB** | (d) structured | 🛠 **BUILT, deploy gated** — image `l2-2` (routing-fixed; do NOT serve `l2-1`), homelab serving role, `verify` + `v2-shadow` gate tooling, deletion audit; gates per [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) |
+| **L2 — DuckDB-on-Parquet** | blobs → sorted Parquet (per-file) + native rollup tables; gRPC sidecar (HEL1) | **~3.9–12.3 GB** | (d) structured | 🛠 **BUILT, deploy gated** — image `l2-3` (routing + parquet-extension fixed; `l2-1`/`l2-2` cannot serve), homelab serving role, `verify` + `v2-shadow` gate tooling, deletion audit; gates per [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) |
 | **L3 — Tantivy ngram** | per-torrent path-bag char-ngram(2,3) `WithFreqs` + delete-key | **14.0 GiB (BUILT, keyed)** | (d) realtime free-text path | 🟢 **GO (user decision 2026-06-09)** — built ([PSX](./psx-campaign-RESULTS.md)) + concurrency-validated ([CB](./cb-campaign-RESULTS.md)); deploy pending |
 
 Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parity-architecture.md); L3 = [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md) + [`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md).
