@@ -152,6 +152,28 @@ bitmagnet-parquet delta --dsn "$DSN" --deleted-source audit
 (`--deleted-source file --deleted-file <f>` and `none` remain for manual runs.)
 Rows older than the last full base rebuild are prunable after compaction.
 
+### Freshness loop — LIVE (2026-06-11) + the cumulative-delta contract
+
+The DDL is applied (trigger functionally verified with a synthetic
+insert+delete riding a real tick's tombstones) and the minute cadence runs:
+CronJob `*/1` → `delta --deleted-source=audit` → atomic swap → the `l2-7`+
+sidecar **self-reloads** (`BITMAGNET_FILESEARCH_RELOAD_SECS`, default 30 s).
+Freshness SLA ≈ cadence + reload + the 30 s carve lag ≈ ≤2 min.
+
+🚨 **The cumulative-delta contract (a live catch, fixed in `l2-8`):** delta
+ticks must NEVER advance the carve origin. The first implementation advanced
+the watermark per tick, so each tick carved a 1-minute sliver that REPLACED
+the whole delta — un-hiding stale base rows for everything earlier ticks had
+carved (observed live: tick 2's 15 torrents evicted tick 1's 1,303). Correct
+semantics (EXP-B): `watermark` = the BASE's cut, written only by
+base/compaction; every tick re-carves the whole `(watermark, now − 30 s]`
+window (changes + audit deletes) and idempotently replaces `delta/current`;
+`delta_mark` (new file) carries freshness for `HealthCheck.delta_age_seconds`.
+Tick cost grows with the window until a compaction folds it into a new base —
+schedule compacts accordingly (~18.5 min each; the delta stays trivially small
+for days at current crawl rates). Verified live: consecutive ticks grow
+monotonically (39→56→70; after origin heal 1,589→1,617), origin pinned.
+
 ## 5. Fixed alongside (found BY this work): DuckEngine rollup routing
 
 Writing the comparator forced the question "what exactly does each path
