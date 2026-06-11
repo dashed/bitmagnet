@@ -147,18 +147,23 @@ this).** Ops note: the GHCR package is PRIVATE (anonymous pull 401s) — the
 homelab role wires an imagePullSecret from the vaulted PAT; flipping the
 package public in the GitHub UI would make that unnecessary.
 
-**GATE A status (2026-06-10):** smoke `--mode sample` (100 k) =
-`exact=100000 mismatched=0 decode_errors=0 clean=true` at ~550 torrents/s;
-the full ~16.99 M run (~9 h) is in flight.
+**GATE A status: ✅ PASSED (2026-06-11).** The full run swept the ENTIRE
+`torrents` table — **48,195,834 checked, 48,195,834 exact, mismatched=0,
+decode_errors=0, clean=true** — in 3 h 25 m (~3.9 k torrents/s, single
+Job on HEL1, read-only, crawler live throughout). That is ~2.8× the ~17 M
+with-blob estimate: the keyset walks every torrent, so the run also proved
+every no-blob torrent has no stray `torrent_files` rows (the backfill's
+"0 with-files torrents left" claim re-proven). Job
+`bitmagnet-filesearch-verify`, 2026-06-10T21:12:11Z → 2026-06-11T00:36:54Z.
 
 ## 6. Order of operations (per the hard rule)
 
 1. ✅ DONE — image `l2-3` built on FSN1 from the duck-e2e-green tree (33/33
    tests on real DuckDB there; the macOS toolchain can't compile bundled
    libduckdb).
-2. Deploy the serving role (homelab `make bitmagnet-filesearch`) — empty PVC,
-   pod NotReady until a generation exists (expected).
-3. **GATE A** (`verify --mode full`) — supervised, prod-PG read, needs explicit OK.
+2. ✅ DONE — serving role deployed to HEL1 (PVC Bound, Service, CNPs; pod
+   NotReady-by-design pending the first export).
+3. ✅ DONE — **GATE A PASSED** (48,195,834/48,195,834 exact, 0 mismatches, 0 decode errors; 2026-06-11).
 4. Supervised base export (V3: `decode_errors=0`) → sidecar Ready.
 5. **GATE C** (`v2-shadow`) on the HEL1 restore snapshot; optionally an
    indicative run against prod + delta freshness.
