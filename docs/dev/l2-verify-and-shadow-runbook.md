@@ -92,6 +92,43 @@ sidecar latency within the CB envelope — the CSV carries both timings). Agains
 live prod the run is indicative only: `torrent_files` moves while the generation
 is as fresh as its last delta.
 
+### GATE C result (2026-06-11): 12/13 exact + 1 EXPLAINED superset → accepted
+
+Run on a truly frozen snapshot (crawler scaled to 0; compact export 06:07–06:25Z;
+suite immediately after). **12 of 13 pairs exactly equal** — every `find` (incl.
+path-sort under `COLLATE "C"`), every `collapse` (all three routing classes),
+every count, and the 5 086-bucket size facet. The 13th (`facet:video`) differed
+by **+10 avi files on the sidecar** — root-caused, corpus-quantified, and the
+LEGACY side is the wrong one:
+
+* `torrent_files`' **primary key is `(info_hash, path)`** (live schema:
+  `torrent_files_pkey ON (info_hash, path)`), and the crawler persists file rows
+  with `OnConflict{DoNothing}` — so **duplicate-path files (BEP-47 `.pad/N`
+  padding, identical path at many indexes) are silently dropped**. The blob
+  keeps the faithful list (matches `torrents.files_count`).
+* Corpus-wide (frozen): **18 torrents, +18 726 blob-side files (0.002 % of
+  882.8 M)**, 99.9 % NULL-extension `.pad` entries; one torrent holds 17 229 of
+  them. Affected torrents span 2025-01 → today: long-standing upstream
+  behavior, not a dual-write regression.
+* GATE A was structurally blind to it (per-(torrent, ext) presence+max survives
+  dropped duplicates) — the count-grain facet pair is what caught it.
+
+**Disposition: the sidecar is a strict SUPERSET of `torrent_files` — files the
+legacy PK cannot represent. No capability regresses at the DROP; the gate's
+intent is met.** Optional strict mode (if exact equality is ever preferred):
+dedup `(info_hash, path)` at blob decode, making L2 bug-compatible with the
+legacy table. Also caught and fixed live by this gate run, on the serving side:
+the DuckDB spill dir (relative `.tmp` vs cwd `/` → `workingDir` = the PVC) and
+an OOMKill (engine `memory_limit` bounds the buffer pool, not the process —
+now 3 GB engine / 8 Gi container).
+
+**Latency note (unsorted v1 base):** rollup-served shapes are fast (counts
+0.5–1.6 s, facets 1.3–4.3 s, collapse 3–5.7 s — beating PG by 5–40× on heavy
+shapes), but fact-scan `find`s run 11–18 s and path-ILIKE ~70 s at threads=4
+over the unsorted 13 G fact — several exceed the 10 s production deadline. The
+CB `<250 ms` envelope assumed the SORTED layout + row-group pruning: wiring the
+external sort (stub #3) is the next perf step, not a correctness issue.
+
 ## 4. The deletion audit (closes delta stub #5)
 
 `deleted_torrents` (bytea PK + `deleted_at`, upsert) is fed by an
