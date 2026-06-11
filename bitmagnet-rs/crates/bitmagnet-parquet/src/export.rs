@@ -124,6 +124,55 @@ impl Sinks {
     }
 }
 
+/// Spilling global `(extension, size)` sort of the base fact — the ARCH-C
+/// row-group-pruning lever (collapse 1311→132 ms, exact-count 1024→17 ms
+/// class wins). Runs INSIDE the still-unpublished generation dir: DuckDB
+/// `COPY … ORDER BY` rewrites the fact (spill to `<dir>/.sort-tmp`, ZSTD,
+/// row_group 1 M, stats on / bloom off — DuckDB's defaults match the writer),
+/// then renames over the unsorted file. Knobs via env:
+/// `BITMAGNET_SORT_MEMORY` (default `8GB`), `BITMAGNET_SORT_THREADS`
+/// (default `8` — match the Job's CPU limit).
+#[cfg(feature = "duckdb-sort")]
+fn sort_fact_external(dir: &Path) -> Result<()> {
+    let q = |p: &Path| p.to_string_lossy().replace('\'', "''");
+    let fact = dir.join(artifact::FACT);
+    let sorted = dir.join("fact.sorted.parquet");
+    let tmp = dir.join(".sort-tmp");
+    std::fs::create_dir_all(&tmp)?;
+    let mem = std::env::var("BITMAGNET_SORT_MEMORY").unwrap_or_else(|_| "8GB".to_owned());
+    let threads: u32 = std::env::var("BITMAGNET_SORT_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let started = std::time::Instant::now();
+
+    let conn = duckdb::Connection::open_in_memory().context("opening duckdb for the sort")?;
+    conn.execute_batch(&format!(
+        "SET threads={threads};          SET memory_limit='{mem}';          SET temp_directory='{tmpdir}';          SET preserve_insertion_order=false;",
+        tmpdir = q(&tmp),
+    ))
+    .context("configuring the sort")?;
+    conn.execute_batch(&format!(
+        "COPY (SELECT info_hash, file_index, path, extension, size, is_padding          FROM read_parquet('{src}') ORDER BY extension, size)          TO '{dst}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 1000000);",
+        src = q(&fact),
+        dst = q(&sorted),
+    ))
+    .context("external (extension, size) sort")?;
+    drop(conn);
+
+    std::fs::rename(&sorted, &fact).context("swapping the sorted fact in")?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    tracing::info!(elapsed_secs = started.elapsed().as_secs(), "external sort done");
+    Ok(())
+}
+
+#[cfg(not(feature = "duckdb-sort"))]
+fn sort_fact_external(_dir: &Path) -> Result<()> {
+    anyhow::bail!(
+        "--sort external requires the `duckdb-sort` feature (the production          image builds bitmagnet-parquet with it; the default workspace build          stays DuckDB-free)"
+    )
+}
+
 /// Full base export: stream every torrent → sorted fact + rollups → atomic
 /// base swap. V3: the returned [`BuildStats::is_clean`] must hold on the first
 /// production run.
@@ -153,6 +202,11 @@ pub async fn run_base(
     }
 
     let stats = sinks.finish(&dir)?;
+    // The spilling global sort happens INSIDE the unpublished dir — readers
+    // never see the intermediate; a crash leaves the old generation current.
+    if sort == SortMode::External {
+        sort_fact_external(&dir)?;
+    }
     layout.publish(Kind::Base, &dir)?;
     Ok(stats)
 }
@@ -319,6 +373,64 @@ mod tests {
         assert_eq!(stats.fact_rows, 1);
         assert_eq!(stats.tombstones, 2);
         assert!(d.join(artifact::TOMBSTONES).exists());
+    }
+
+    /// Feature-gated: the spilling external sort round-trip — runs on the
+    /// FSN1 builder (macOS can't compile bundled libduckdb).
+    #[cfg(feature = "duckdb-sort")]
+    #[test]
+    fn external_sort_orders_ext_size_nulls_last_and_keeps_columns() {
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let d = dir("extsort");
+        let mut s = Sinks::create(&d, SortMode::External, false).unwrap();
+        // Arrival order deliberately unsorted; includes a NULL-ext and a pad.
+        s.push_torrent("aa", Ok(files(&[("z.srt", 5), ("a.mkv", 9), ("noext", 1)])))
+            .unwrap();
+        s.push_torrent("bb", Ok(files(&[("b.mkv", 3), (".pad/7", 7)])))
+            .unwrap();
+        let stats = s.finish(&d).unwrap();
+        assert_eq!(stats.fact_rows, 5);
+        sort_fact_external(&d).unwrap();
+
+        let f = std::fs::File::open(d.join(artifact::FACT)).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(f).unwrap();
+        assert_eq!(
+            reader.schema().fields().len(),
+            6,
+            "all columns incl. is_padding survive the sort"
+        );
+        let mut rows: Vec<(Option<String>, u64)> = Vec::new();
+        for batch in reader.build().unwrap() {
+            let batch = batch.unwrap();
+            let ext = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>()
+                .unwrap();
+            let size = batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<arrow::array::UInt64Array>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    (!ext.is_null(i)).then(|| ext.value(i).to_owned()),
+                    size.value(i),
+                ));
+            }
+        }
+        assert_eq!(rows.len(), 5);
+        // (extension ASC NULLS LAST, size ASC) — matches opt_ext_cmp/InMemory.
+        let expected = vec![
+            (Some("mkv".to_owned()), 3),
+            (Some("mkv".to_owned()), 9),
+            (Some("srt".to_owned()), 5),
+            (None, 1),
+            (None, 7),
+        ];
+        assert_eq!(rows, expected);
     }
 
     #[test]

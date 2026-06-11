@@ -676,6 +676,7 @@ dependencies = [
  "bitmagnet-db",
  "bitmagnet-model",
  "clap",
+ "duckdb",
  "hex",
  "parquet",
  "sqlx",

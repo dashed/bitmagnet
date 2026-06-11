@@ -32,10 +32,14 @@ struct Cli {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SortArg {
-    /// Arrival order (info_hash keyset); pair with a downstream DuckDB sort.
+    /// Arrival order (info_hash keyset) — queries correct, no row-group pruning.
     None,
-    /// Buffer + sort by (extension, size) in memory (bounded inputs).
+    /// Buffer + sort by (extension, size) in memory (bounded inputs ONLY).
     Memory,
+    /// Spilling DuckDB post-pass sort (full-corpus safe; production image only
+    /// — needs the `duckdb-sort` feature). Env knobs: BITMAGNET_SORT_MEMORY
+    /// (8GB), BITMAGNET_SORT_THREADS (8).
+    External,
 }
 
 impl From<SortArg> for SortMode {
@@ -43,6 +47,7 @@ impl From<SortArg> for SortMode {
         match s {
             SortArg::None => SortMode::None,
             SortArg::Memory => SortMode::InMemory,
+            SortArg::External => SortMode::External,
         }
     }
 }

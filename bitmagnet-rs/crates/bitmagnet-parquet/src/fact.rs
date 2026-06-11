@@ -43,6 +43,11 @@ pub enum SortMode {
     None,
     /// Buffer all rows, sort by `(extension, size)`, then write.
     InMemory,
+    /// Write in arrival order, then a spilling DuckDB
+    /// `COPY … ORDER BY extension, size` post-pass rewrites the fact
+    /// (full-corpus safe; needs the `duckdb-sort` feature — see
+    /// [`crate::export`]). At the WRITER level this behaves like [`Self::None`].
+    External,
 }
 
 /// ZSTD level mirroring the blob serializer / `bench/blob_export`.
@@ -109,7 +114,7 @@ impl FactWriter {
     /// Append one file row.
     pub fn push(&mut self, row: FileRow) -> Result<()> {
         match self.mode {
-            SortMode::None => self.append_now(&row)?,
+            SortMode::None | SortMode::External => self.append_now(&row)?,
             SortMode::InMemory => self.buffer.push(row),
         }
         Ok(())

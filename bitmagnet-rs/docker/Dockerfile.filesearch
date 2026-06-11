@@ -31,7 +31,9 @@ COPY . .
 
 # Build the export/refresh CLI (no DuckDB) + the sidecar server (real DuckDB
 # engine via the bundled libduckdb compile). Release mode.
-RUN cargo build --release -p bitmagnet-parquet \
+# duckdb-sort: the spilling external (extension, size) sort of the base fact
+# (--sort external) embeds DuckDB in the parquet CLI too.
+RUN cargo build --release -p bitmagnet-parquet --features duckdb-sort \
     && cargo build --release -p bitmagnet-filesearch --features duckdb-engine
 
 # ---- runtime ----------------------------------------------------------------
