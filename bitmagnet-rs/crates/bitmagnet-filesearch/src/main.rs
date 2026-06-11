@@ -48,6 +48,39 @@ struct Args {
     /// DuckDB memory limit (production engine only).
     #[arg(long, env = "BITMAGNET_FILESEARCH_MEMORY", default_value = "4GB")]
     memory: String,
+
+    /// Periodic generation re-resolve interval in seconds (0 = disabled).
+    /// The refresh CronJob publishes new generations by atomic symlink swap;
+    /// without a self-reload the sidecar would keep serving its open
+    /// generation until a Reload RPC or restart. `reload()` short-circuits
+    /// when the `current` pointers haven't moved, so the idle cost is two
+    /// readlinks per tick.
+    #[arg(long, env = "BITMAGNET_FILESEARCH_RELOAD_SECS", default_value_t = 30)]
+    reload_secs: u64,
+}
+
+/// Spawn the periodic self-reload loop (freshness: delta swaps become visible
+/// within `reload_secs` without any RPC coordination).
+fn spawn_reload_loop(gens: Arc<GenerationManager>, reload_secs: u64) {
+    if reload_secs == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(reload_secs));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            match gens.reload(None) {
+                Ok((gen, true)) => tracing::info!(
+                    base = %gen.base_version,
+                    delta = %gen.delta_version,
+                    "generation reloaded"
+                ),
+                Ok((_, false)) => {}
+                Err(e) => tracing::warn!(error = %e, "generation reload failed; keeping current"),
+            }
+        }
+    });
 }
 
 #[tokio::main]
@@ -64,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         max_concurrency: args.concurrency,
         query_deadline: Duration::from_millis(args.deadline_ms),
     };
+    spawn_reload_loop(gens.clone(), args.reload_secs);
 
     run(&args, gens, cfg).await
 }
