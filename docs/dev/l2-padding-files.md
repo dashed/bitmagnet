@@ -1,6 +1,6 @@
 # L2 padding files — retain, flag, filter by default
 
-**Date:** 2026-06-11 · **Status:** BUILT (rides image `l2-5`+). Found by GATE C; design settled with the user ("retain the files, make search better by filtering").
+**Date:** 2026-06-11 · **Status:** ✅ **LIVE (image `l2-6`)** — final quiesced cycle verified: export `padding_rows=33,040,027`, suite 12/13 exact with only the documented dup-path residue. Found by GATE C; design settled with the user ("retain the files, make search better by filtering").
 **Parent docs:** [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) (the GATE C finding) · [`torrent-files-replacement-options.md`](./torrent-files-replacement-options.md).
 
 ## What they are, and what they actually cost (measured, frozen snapshot 2026-06-11)
@@ -36,9 +36,10 @@ predates L2; L2 just made it visible by being faithful.
 fact keeps every row — flagged:
 
 1. **`decode::is_padding_path(path)`** — the single classification point
-   (`.pad/` prefix OR contains `_____padding_file`), computed once per row at
-   export and materialized as the **`is_padding` BOOLEAN fact column**
-   (RLE ≈ free on disk). Queries never pattern-match 880 M paths.
+   (`.pad/` prefix, OR contains `_____padding_file`, OR contains
+   `.____padding_file/`), computed once per row at export and materialized as
+   the **`is_padding` BOOLEAN fact column** (RLE ≈ free on disk). Queries
+   never pattern-match 880 M paths.
 2. **Rollups (`agg_ext`, `agg_torrent_ext`) are built padding-free** — facet /
    collapse / distinct-count numbers are clean on the fast path, which is where
    the junk was most visible.

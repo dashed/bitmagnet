@@ -185,8 +185,20 @@ backfill never hit it). Fixed + SQL-shape-test-guarded.
 
 **Image supersession:** `l2-1` = routing bug · `l2-2` = routing fixed but NO
 parquet extension (cannot serve at all) · `l2-3` = sidecar fine but the
-`bitmagnet-parquet` CLI crashes on the int4 read · **`l2-4`+ = good (use only
-this).** Ops note: the GHCR package is PRIVATE (anonymous pull 401s) — the
+`bitmagnet-parquet` CLI crashes on the int4 read · `l2-4` = correct but
+pre-padding-filter · `l2-5` = padding filter with a 2-convention classifier
+(misses libtorrent's 7.9 M rows) · **`l2-6`+ = good (use only this).**
+
+### FINAL GATE C cycle (2026-06-11, l2-6, frozen snapshot): 12/13 + the known residue
+
+Export `compact: torrents_ok=48,200,070 decode_errors=0 file_rows=882,894,529
+padding_rows=33,040,027 clean=true` (~18.5 min). Suite: **12/13 exactly equal
+with padding invisible by default on BOTH sides** (incl. `find:nullext`, now
+genuinely pad-free). The single mismatch is precisely the documented dup-path
+residue: `facet:video` avi `9,263,039 (pg) vs 9,263,049 (sidecar)` = the +10
+real dup-path avi files the legacy `(info_hash, path)` PK cannot store. The
+harness reports it as a mismatch BY DESIGN (it is a true data difference);
+the disposition is the accepted, bounded, fully-explained superset. Ops note: the GHCR package is PRIVATE (anonymous pull 401s) — the
 homelab role wires an imagePullSecret from the vaulted PAT; flipping the
 package public in the GitHub UI would make that unnecessary.
 
