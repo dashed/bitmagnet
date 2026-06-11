@@ -97,7 +97,9 @@ fn predicate(spec: &PairSpec, binds: &mut Vec<Bind>) -> String {
     // (left/strpos, NOT LIKE — underscores would be wildcards).
     if !spec.include_padding {
         clauses.push(
-            "NOT (left(path, 5) = '.pad/' OR strpos(path, '_____padding_file') > 0)".to_owned(),
+            "NOT (left(path, 5) = '.pad/' OR strpos(path, '_____padding_file') > 0 \
+             OR strpos(path, '.____padding_file/') > 0)"
+                .to_owned(),
         );
     }
     clauses.join(" AND ")

@@ -11,16 +11,22 @@
 use bitmagnet_model::{deserialize_files, file_extension_from_path, BlobError, BlobFile};
 
 /// BitTorrent padding-file classification (computed ONCE at export; queries
-/// filter on the materialized column instead of pattern-matching 880 M paths):
-/// * **BEP-47**: padding files live in a `.pad/` directory (`.pad/<size>`).
-/// * **BitComet** (pre-BEP-47): `_____padding_file…` name markers.
+/// filter on the materialized column instead of pattern-matching 880 M paths).
+/// THREE conventions, inventoried on the real corpus (33,039,281 rows = 3.74 %,
+/// 55 % of the NULL-extension bucket; the residue beyond these is ~759 rows of
+/// coincidental substrings):
+/// * **BEP-47**: a `.pad/` directory at the torrent root (`.pad/<size>`).
+/// * **BitComet** (pre-BEP-47): `_____padding_file…` (5 underscores) markers.
+/// * **libtorrent** (older): a `.____padding_file/` (4 underscores) directory,
+///   possibly nested under the torrent's root folder.
 ///
-/// Padding is alignment filler, not content — measured 33.0 M rows (3.74 % of
-/// the corpus, 55 % of the NULL-extension bucket). The fact keeps the rows
-/// (faithful to the metainfo); the ROLLUPS exclude them, and the query layer
-/// defaults to `NOT is_padding` with an opt-in (`include_padding`).
+/// Padding is alignment filler, not content. The fact keeps the rows (faithful
+/// to the metainfo); the ROLLUPS exclude them, and the query layer defaults to
+/// `NOT is_padding` with an opt-in (`include_padding`).
 pub fn is_padding_path(path: &str) -> bool {
-    path.starts_with(".pad/") || path.contains("_____padding_file")
+    path.starts_with(".pad/")
+        || path.contains("_____padding_file")
+        || path.contains(".____padding_file/")
 }
 
 /// One file inside a torrent, flattened for the columnar fact table.
@@ -160,6 +166,9 @@ mod tests {
         assert!(!is_padding_path("Movie/video.mkv"));
         assert!(!is_padding_path("pad/notpad.txt")); // no leading dot-dir
         assert!(!is_padding_path("my_padding_file.txt")); // fewer underscores
+        // libtorrent's older pad-directory convention, incl. nested
+        assert!(is_padding_path(".____padding_file/0"));
+        assert!(is_padding_path("show-s01/.____padding_file/3"));
         let rows = rows_from_files("aa", &[BlobFile {
             index: 0,
             path: ".pad/123".to_owned(),

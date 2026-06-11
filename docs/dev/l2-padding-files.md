@@ -5,9 +5,16 @@
 
 ## What they are, and what they actually cost (measured, frozen snapshot 2026-06-11)
 
-BitTorrent **padding files** are alignment filler, not content: BEP-47 puts them
-in a `.pad/<size>` directory (the same path repeated at many indexes in hybrid
-torrents); older BitComet clients used `_____padding_file…` name markers.
+BitTorrent **padding files** are alignment filler, not content. THREE
+conventions exist in the corpus (inventoried exhaustively on the new
+generation): BEP-47's `.pad/<size>` directory (the same path repeated at many
+indexes in hybrid torrents); BitComet's `_____padding_file…` (5 underscores)
+name markers; and libtorrent's older `.____padding_file/` (4 underscores)
+directory, possibly nested. The first classifier shipped only the first two —
+the `padding_rows=25,104,231` of the first l2-5 export exposed the 7.9 M-row
+libtorrent variant against the 33.0 M corpus scan; the 3-convention classifier
+covers 33,039,281 rows with a residue of ~759 coincidental substrings (1 in
+~1.2 M — accepted).
 
 | Dimension | Measured |
 |---|---|
