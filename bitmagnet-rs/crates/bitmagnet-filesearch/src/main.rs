@@ -19,10 +19,17 @@ use clap::Parser;
 use tracing::info;
 
 #[derive(Debug, Parser)]
-#[command(name = "bitmagnet-filesearch", about = "DuckDB-on-Parquet file-search sidecar")]
+#[command(
+    name = "bitmagnet-filesearch",
+    about = "DuckDB-on-Parquet file-search sidecar"
+)]
 struct Args {
     /// gRPC listen address (`HOST:PORT`), or a `unix:` socket path.
-    #[arg(long, env = "BITMAGNET_FILESEARCH_ADDR", default_value = "127.0.0.1:50052")]
+    #[arg(
+        long,
+        env = "BITMAGNET_FILESEARCH_ADDR",
+        default_value = "127.0.0.1:50052"
+    )]
     addr: String,
 
     /// Generation root (the `{base,delta}/…` tree written by bitmagnet-parquet).
@@ -38,7 +45,11 @@ struct Args {
     concurrency: usize,
 
     /// Per-query deadline in milliseconds.
-    #[arg(long, env = "BITMAGNET_FILESEARCH_DEADLINE_MS", default_value_t = 10_000)]
+    #[arg(
+        long,
+        env = "BITMAGNET_FILESEARCH_DEADLINE_MS",
+        default_value_t = 10_000
+    )]
     deadline_ms: u64,
 
     /// DuckDB per-query threads (production engine only).
@@ -123,7 +134,11 @@ async fn run(args: &Args, gens: Arc<GenerationManager>, cfg: ServiceConfig) -> a
 
 /// Default build: no engine compiled — refuse to serve with a clear message.
 #[cfg(not(feature = "duckdb-engine"))]
-async fn run(_args: &Args, _gens: Arc<GenerationManager>, _cfg: ServiceConfig) -> anyhow::Result<()> {
+async fn run(
+    _args: &Args,
+    _gens: Arc<GenerationManager>,
+    _cfg: ServiceConfig,
+) -> anyhow::Result<()> {
     anyhow::bail!(
         "bitmagnet-filesearch was built WITHOUT the `duckdb-engine` feature — the production \
          image must build with `--features duckdb-engine` (needs a C++ toolchain for libduckdb). \
@@ -152,7 +167,9 @@ impl Listen {
 #[cfg(feature = "duckdb-engine")]
 async fn serve(
     service: bitmagnet_proto::v1::file_search_service_server::FileSearchServiceServer<
-        bitmagnet_filesearch::service::FileSearchServer<bitmagnet_filesearch::engine::duck::DuckEngine>,
+        bitmagnet_filesearch::service::FileSearchServer<
+            bitmagnet_filesearch::engine::duck::DuckEngine,
+        >,
     >,
     listen: Listen,
 ) -> anyhow::Result<()> {

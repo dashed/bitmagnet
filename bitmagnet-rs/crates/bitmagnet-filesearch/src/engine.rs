@@ -47,6 +47,9 @@ pub struct FacetBucketRow {
     pub total_size: u64,
 }
 
+/// Per-torrent previews keyed by info_hash.
+pub type PreviewRows = std::collections::BTreeMap<String, Vec<FileHitRow>>;
+
 /// The query engine the service depends on.
 pub trait Engine: Send + Sync {
     /// File-rows search (collapse = false). Returns up to `limit + 1` rows so
@@ -75,6 +78,26 @@ pub trait Engine: Send + Sync {
         limit: u32,
         deadline: Duration,
     ) -> Result<Vec<FileHitRow>>;
+
+    /// Matching-file previews for many torrents. The default keeps simple
+    /// engines correct; production overrides it to batch the fact scan.
+    fn previews(
+        &self,
+        gen: &LoadedGeneration,
+        info_hashes: &[String],
+        filters: &Filters,
+        limit: u32,
+        deadline: Duration,
+    ) -> Result<PreviewRows> {
+        let mut out = PreviewRows::new();
+        for info_hash in info_hashes {
+            out.insert(
+                info_hash.clone(),
+                self.preview(gen, info_hash, filters, limit, deadline)?,
+            );
+        }
+        Ok(out)
+    }
 
     /// Count files or distinct torrents. The `bool` is `true` if estimated
     /// (e.g. a deadline-capped scan).
@@ -196,6 +219,40 @@ impl Engine for InMemoryEngine {
         Ok(rows)
     }
 
+    fn previews(
+        &self,
+        _gen: &LoadedGeneration,
+        info_hashes: &[String],
+        filters: &Filters,
+        limit: u32,
+        _deadline: Duration,
+    ) -> Result<PreviewRows> {
+        use std::collections::BTreeSet;
+        let wanted: BTreeSet<&str> = info_hashes.iter().map(String::as_str).collect();
+        let mut out = PreviewRows::new();
+        for info_hash in info_hashes {
+            out.entry(info_hash.clone()).or_default();
+        }
+        let mut rows: Vec<FileHitRow> = self
+            .matching(filters)
+            .filter(|r| wanted.contains(r.info_hash.as_str()))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            a.info_hash
+                .cmp(&b.info_hash)
+                .then(b.size.cmp(&a.size))
+                .then(a.file_index.cmp(&b.file_index))
+        });
+        for row in rows {
+            let bucket = out.entry(row.info_hash.clone()).or_default();
+            if bucket.len() < limit as usize {
+                bucket.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     fn count(
         &self,
         _gen: &LoadedGeneration,
@@ -223,11 +280,13 @@ impl Engine for InMemoryEngine {
         use std::collections::BTreeMap;
         let mut buckets: BTreeMap<Option<String>, FacetBucketRow> = BTreeMap::new();
         for r in self.matching(filters) {
-            let b = buckets.entry(r.extension.clone()).or_insert(FacetBucketRow {
-                value: r.extension.clone(),
-                count: 0,
-                total_size: 0,
-            });
+            let b = buckets
+                .entry(r.extension.clone())
+                .or_insert(FacetBucketRow {
+                    value: r.extension.clone(),
+                    count: 0,
+                    total_size: 0,
+                });
             b.count += 1;
             b.total_size = b.total_size.saturating_add(r.size);
         }
@@ -343,7 +402,10 @@ mod tests {
         // mkv(3), srt(1), NULL(1)
         let null = buckets.iter().find(|b| b.value.is_none()).unwrap();
         assert_eq!(null.count, 1);
-        let mkv = buckets.iter().find(|b| b.value.as_deref() == Some("mkv")).unwrap();
+        let mkv = buckets
+            .iter()
+            .find(|b| b.value.as_deref() == Some("mkv"))
+            .unwrap();
         assert_eq!(mkv.count, 3);
     }
 
@@ -395,5 +457,27 @@ mod tests {
             .unwrap();
         assert_eq!(prev.len(), 2);
         assert!(prev.iter().all(|r| r.info_hash == "aa"));
+    }
+
+    #[test]
+    fn previews_returns_limited_matching_files_for_many_torrents() {
+        let e = engine();
+        let hashes = vec!["aa".to_owned(), "bb".to_owned()];
+        let previews = e
+            .previews(
+                &gen(),
+                &hashes,
+                &Filters {
+                    extensions: vec!["mkv".into()],
+                    ..Default::default()
+                },
+                1,
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(previews["aa"].len(), 1);
+        assert_eq!(previews["aa"][0].path, "Movie/big.mkv");
+        assert_eq!(previews["bb"].len(), 1);
+        assert_eq!(previews["bb"][0].path, "Show/ep.mkv");
     }
 }

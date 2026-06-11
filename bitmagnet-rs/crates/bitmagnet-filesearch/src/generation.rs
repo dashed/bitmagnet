@@ -82,13 +82,19 @@ impl GenerationManager {
 
     /// The active generation (cheap `Arc` clone; held by a query for its life).
     pub fn current(&self) -> Arc<LoadedGeneration> {
-        self.current.read().expect("generation lock poisoned").clone()
+        self.current
+            .read()
+            .expect("generation lock poisoned")
+            .clone()
     }
 
     /// Re-resolve `current` symlinks and swap. Returns the new generation (or
     /// the unchanged one if the symlinks didn't move). `expect_version`, when
     /// set, short-circuits if the delta version already matches.
-    pub fn reload(&self, expect_version: Option<&str>) -> Result<(Arc<LoadedGeneration>, bool), GenError> {
+    pub fn reload(
+        &self,
+        expect_version: Option<&str>,
+    ) -> Result<(Arc<LoadedGeneration>, bool), GenError> {
         if let Some(v) = expect_version {
             if self.current().delta_version == v {
                 return Ok((self.current(), false));
@@ -123,11 +129,20 @@ mod tests {
     fn seed(layout: &Layout, base_v: &str, delta_v: &str) {
         layout.ensure_dirs().unwrap();
         for (kind, v, files) in [
-            (Kind::Base, base_v, vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT]),
+            (
+                Kind::Base,
+                base_v,
+                vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT],
+            ),
             (
                 Kind::Delta,
                 delta_v,
-                vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT, artifact::TOMBSTONES],
+                vec![
+                    artifact::FACT,
+                    artifact::AGG_TORRENT_EXT,
+                    artifact::AGG_EXT,
+                    artifact::TOMBSTONES,
+                ],
             ),
         ] {
             let dir = layout.new_version_dir(kind, v).unwrap();
@@ -144,7 +159,10 @@ mod tests {
         seed(&layout, "100", "100");
         let g = resolve(&layout).unwrap();
         assert!(g.paths.base_fact.ends_with("base/v100/fact.parquet"));
-        assert!(g.paths.delta_tombstones.ends_with("delta/v100/tombstones.parquet"));
+        assert!(g
+            .paths
+            .delta_tombstones
+            .ends_with("delta/v100/tombstones.parquet"));
         assert_eq!(g.base_version, "v100");
     }
 
@@ -157,7 +175,11 @@ mod tests {
 
         // publish a newer delta
         let dir = layout.new_version_dir(Kind::Delta, "200").unwrap();
-        for f in [artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::TOMBSTONES] {
+        for f in [
+            artifact::FACT,
+            artifact::AGG_TORRENT_EXT,
+            artifact::TOMBSTONES,
+        ] {
             std::fs::write(dir.join(f), b"").unwrap();
         }
         layout.publish(Kind::Delta, &dir).unwrap();

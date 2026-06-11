@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use duckdb::types::Value;
 use duckdb::{params_from_iter, Connection};
 
-use crate::engine::{Engine, FacetBucketRow, FileHitRow, GroupRow};
+use crate::engine::{Engine, FacetBucketRow, FileHitRow, GroupRow, PreviewRows};
 use crate::generation::LoadedGeneration;
 use crate::query::{CountQuery, FileQuery, Filters};
 use crate::sql::{self, Param, SafeQuery};
@@ -183,16 +183,16 @@ impl Engine for DuckEngine {
                 Ok(rows)
             }
             // size_min: rollup set/ordering exact, but file_count/total_size
-            // would include sub-threshold files — hydrate exact aggregates per
-            // returned group from the fact (bounded point queries, ~0.2 ms each
-            // on the sorted layout; page size is clamped).
+            // would include sub-threshold files — hydrate exact aggregates for
+            // the returned groups in one fact scan (page size is clamped).
             sql::RollupPlan::ExactSetApproxAggs => {
                 let sq = sql::build_collapse_rollup(q, &gen.paths);
                 let (mut groups, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                let info_hashes: Vec<String> = groups.iter().map(|g| g.info_hash.clone()).collect();
+                let agg = sql::build_group_aggregates(&info_hashes, &q.filters, &gen.paths);
+                let (rows, _) = self.with_conn(deadline, |conn| query_group_aggs(conn, &agg))?;
                 for g in &mut groups {
-                    let agg = sql::build_group_aggregate(&g.info_hash, &q.filters, &gen.paths);
-                    let (row, _) = self.with_conn(deadline, |conn| query_group_agg(conn, &agg))?;
-                    if let Some((count, total, max)) = row {
+                    if let Some((count, total, max)) = rows.get(&g.info_hash).copied() {
                         g.matching_file_count = count;
                         g.matching_total_size = total;
                         g.matching_max_size = max;
@@ -217,25 +217,20 @@ impl Engine for DuckEngine {
         limit: u32,
         deadline: Duration,
     ) -> Result<Vec<FileHitRow>> {
-        // A preview is a file-rows search constrained to one torrent.
-        let mut filters = filters.clone();
-        // info_hash is server-side here (a result row we already trust), but we
-        // still bind it; reuse the file query path with an extra predicate.
-        let q = FileQuery {
-            filters: filters.clone(),
-            sort: crate::query::Sort {
-                field: crate::query::SortField::Size,
-                dir: crate::query::SortDir::Desc,
-            },
-            limit,
-            collapse_to_torrent: false,
-            preview_limit: limit,
-        };
-        let mut sq = sql::build_search_files(&q, &gen.paths);
-        // splice an `info_hash = ?` predicate (bound) — keep it parameterized.
-        splice_info_hash(&mut sq, info_hash);
-        let _ = &mut filters;
-        let (rows, _) = self.with_conn(deadline, |conn| query_files(conn, &sq))?;
+        let mut previews = self.previews(gen, &[info_hash.to_owned()], filters, limit, deadline)?;
+        Ok(previews.remove(info_hash).unwrap_or_default())
+    }
+
+    fn previews(
+        &self,
+        gen: &LoadedGeneration,
+        info_hashes: &[String],
+        filters: &Filters,
+        limit: u32,
+        deadline: Duration,
+    ) -> Result<PreviewRows> {
+        let sq = sql::build_previews(info_hashes, filters, limit, &gen.paths);
+        let (rows, _) = self.with_conn(deadline, |conn| query_previews(conn, &sq))?;
         Ok(rows)
     }
 
@@ -265,24 +260,6 @@ impl Engine for DuckEngine {
         };
         let (rows, _) = self.with_conn(deadline, |conn| query_facets(conn, &sq))?;
         Ok(rows)
-    }
-}
-
-/// Add an `AND info_hash = ?` to a built file query's WHERE (bound param). The
-/// builder always emits a single SELECT … FROM files [WHERE …] ORDER … LIMIT ?,
-/// and the LIMIT param is last, so we insert before it.
-fn splice_info_hash(sq: &mut SafeQuery, info_hash: &str) {
-    // Inject the predicate textually around the ORDER BY (identifier-only edit).
-    if let Some(idx) = sq.sql.find(" ORDER BY ") {
-        let connector = if sq.sql[..idx].contains(" WHERE ") {
-            " AND info_hash = ?"
-        } else {
-            " WHERE info_hash = ?"
-        };
-        sq.sql.insert_str(idx, connector);
-        // the new ? must bind before LIMIT's param (the last one)
-        let last = sq.params.len() - 1;
-        sq.params.insert(last, Param::Text(info_hash.to_owned()));
     }
 }
 
@@ -335,20 +312,41 @@ fn query_scalar_u64(conn: &Connection, sq: &SafeQuery) -> Result<u64> {
     Ok(n as u64)
 }
 
-/// One torrent's exact matching aggregates (`count, sum, max`). `count(*)` is
-/// never NULL; `sum`/`max` are NULL on zero matches → `None` (the group should
-/// not have been produced, but guard anyway).
-fn query_group_agg(conn: &Connection, sq: &SafeQuery) -> Result<Option<(u64, u64, u64)>> {
+fn query_previews(conn: &Connection, sq: &SafeQuery) -> Result<PreviewRows> {
+    let rows = query_files(conn, sq)?;
+    let mut out = PreviewRows::new();
+    for row in rows {
+        out.entry(row.info_hash.clone()).or_default().push(row);
+    }
+    Ok(out)
+}
+
+/// Exact matching aggregates (`count, sum, max`) keyed by torrent. `GROUP BY`
+/// emits no row for zero matches, so missing keys are ignored by the caller.
+fn query_group_aggs(
+    conn: &Connection,
+    sq: &SafeQuery,
+) -> Result<std::collections::BTreeMap<String, (u64, u64, u64)>> {
     let mut stmt = conn.prepare(&sq.sql)?;
     let values = DuckEngine::bind_values(&sq.params);
-    let row: (i64, Option<i64>, Option<i64>) =
-        stmt.query_row(params_from_iter(values.iter()), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
-    match row {
-        (c, Some(ts), Some(ms)) if c > 0 => Ok(Some((c as u64, ts as u64, ms as u64))),
-        _ => Ok(None),
+    let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (info_hash, count, total, max) = row?;
+        if let (c, Some(ts), Some(ms)) = (count, total, max) {
+            if c > 0 {
+                out.insert(info_hash, (c as u64, ts as u64, ms as u64));
+            }
+        }
     }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -454,6 +452,23 @@ mod tests {
         assert_eq!(aa.matching_total_size, 2_000_000_000);
         assert_eq!(aa.matching_max_size, 2_000_000_000);
 
+        let previews = engine
+            .previews(
+                &gen,
+                &["aa".to_owned(), "bb".to_owned()],
+                &Filters {
+                    extensions: vec!["mkv".into()],
+                    ..Default::default()
+                },
+                1,
+                dl,
+            )
+            .unwrap();
+        assert_eq!(previews["aa"].len(), 1);
+        assert_eq!(previews["aa"][0].path, "Movie/big.mkv");
+        assert_eq!(previews["bb"].len(), 1);
+        assert_eq!(previews["bb"][0].path, "Show/ep.mkv");
+
         // count distinct torrents = 2
         let (c, _) = engine
             .count(
@@ -492,9 +507,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(files, 5); // 3(aa) + 1(bb) + 1(cc real); pads excluded
-        let buckets = engine
-            .facet_ext(&gen, &Filters::default(), dl)
-            .unwrap();
+        let buckets = engine.facet_ext(&gen, &Filters::default(), dl).unwrap();
         let null_bucket = buckets.iter().find(|b| b.value.is_none());
         assert!(null_bucket.is_none()); // the only NULL-ext rows were pads
 

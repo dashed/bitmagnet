@@ -173,7 +173,7 @@ pub fn build_search_files(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
 
 /// Distinct-torrent collapse via the `agg_torrent_ext` rollup — the fast path,
 /// valid only when [`rollup_plan`] says so: exact under [`RollupPlan::Exact`];
-/// exact SET + max (hydrate count/total via [`build_group_aggregate`]) under
+/// exact SET + max (hydrate count/total via [`build_group_aggregates`]) under
 /// [`RollupPlan::ExactSetApproxAggs`]; NEVER for [`RollupPlan::FactOnly`]
 /// shapes (use [`build_collapse_fact`]). Returns one row per torrent.
 pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
@@ -209,7 +209,7 @@ pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
 ///   matching max (each matching group's `max_size` IS a matching file's
 ///   size), so ordering/pagination hold — but `file_count`/`total_size`
 ///   would include sub-threshold files of matching extensions; the caller
-///   hydrates exact aggregates per returned group ([`build_group_aggregate`]);
+///   hydrates exact aggregates for the returned groups ([`build_group_aggregates`]);
 /// * ext-only / unfiltered → [`RollupPlan::Exact`] — rollup aggregates exact.
 ///
 /// The `InMemoryEngine` is the reference semantics this routing must converge
@@ -313,6 +313,81 @@ pub fn build_group_aggregate(info_hash: &str, filters: &Filters, paths: &GenPath
          FROM files WHERE info_hash = ?{and_clause}",
         cte = files_cte(paths),
     );
+    SafeQuery { sql, params }
+}
+
+/// Exact matching-file aggregates for MANY torrents in one fact scan — the
+/// sorted-layout fix for [`RollupPlan::ExactSetApproxAggs`]. `info_hashes` are
+/// server-side result rows, but still bound as parameters.
+pub fn build_group_aggregates(
+    info_hashes: &[String],
+    filters: &Filters,
+    paths: &GenPaths,
+) -> SafeQuery {
+    if info_hashes.is_empty() {
+        return SafeQuery {
+            sql: format!(
+                "{cte} SELECT info_hash, count(*) AS c, sum(size) AS ts, max(size) AS ms \
+                 FROM files WHERE FALSE GROUP BY info_hash",
+                cte = files_cte(paths),
+            ),
+            params: Vec::new(),
+        };
+    }
+    let mut params: Vec<Param> = info_hashes.iter().map(|h| Param::Text(h.clone())).collect();
+    let pred = predicate(filters, &mut params);
+    let holes = vec!["?"; info_hashes.len()].join(", ");
+    let mut clauses = vec![format!("info_hash IN ({holes})")];
+    if !pred.is_empty() {
+        clauses.push(pred);
+    }
+    let where_clause = format!(" WHERE {}", clauses.join(" AND "));
+    let sql = format!(
+        "{cte} SELECT info_hash, count(*) AS c, sum(size) AS ts, max(size) AS ms \
+         FROM files{where_clause} GROUP BY info_hash",
+        cte = files_cte(paths),
+    );
+    SafeQuery { sql, params }
+}
+
+/// Matching-file previews for MANY torrents in one fact scan. The `IN` filter
+/// runs before the window, so `row_number()` partitions only the requested
+/// torrents' matching files.
+pub fn build_previews(
+    info_hashes: &[String],
+    filters: &Filters,
+    limit: u32,
+    paths: &GenPaths,
+) -> SafeQuery {
+    if info_hashes.is_empty() {
+        return SafeQuery {
+            sql: format!(
+                "{cte} SELECT info_hash, file_index, path, extension, size \
+                 FROM files WHERE FALSE LIMIT ?",
+                cte = files_cte(paths),
+            ),
+            params: vec![Param::U64(u64::from(limit))],
+        };
+    }
+    let mut params: Vec<Param> = info_hashes.iter().map(|h| Param::Text(h.clone())).collect();
+    let pred = predicate(filters, &mut params);
+    let holes = vec!["?"; info_hashes.len()].join(", ");
+    let mut clauses = vec![format!("info_hash IN ({holes})")];
+    if !pred.is_empty() {
+        clauses.push(pred);
+    }
+    let where_clause = format!("WHERE {}", clauses.join(" AND "));
+    let sql = format!(
+        "{cte} SELECT info_hash, file_index, path, extension, size \
+         FROM (\
+           SELECT info_hash, file_index, path, extension, size, \
+             row_number() OVER (PARTITION BY info_hash ORDER BY size DESC, file_index ASC) AS rn \
+           FROM files {where_clause}\
+         ) ranked WHERE rn <= ? \
+         ORDER BY info_hash ASC, rn ASC",
+        cte = files_cte(paths),
+    );
+    params.push(Param::U64(u64::from(limit)));
     SafeQuery { sql, params }
 }
 
@@ -592,7 +667,7 @@ mod tests {
             &mut params,
         );
         assert!(pred.is_empty()); // opt-in: no padding clause at all
-        // and the files CTE carries the column for the predicate to act on
+                                  // and the files CTE carries the column for the predicate to act on
         assert!(files_cte(&paths()).contains("is_padding"));
     }
 
@@ -618,7 +693,9 @@ mod tests {
         assert!(sq.sql.contains("GROUP BY info_hash"));
         assert!(sq.sql.contains("size <= ?"));
         assert!(sq.sql.contains("ILIKE ? ESCAPE"));
-        assert!(sq.sql.contains("ORDER BY matching_max_size DESC, info_hash ASC"));
+        assert!(sq
+            .sql
+            .contains("ORDER BY matching_max_size DESC, info_hash ASC"));
         // ext, size_max, path-pattern, limit+1 — all bound.
         assert_eq!(
             sq.params,
@@ -649,6 +726,106 @@ mod tests {
                 Param::Text("mkv".into()),
                 Param::U64(1_000_000_000),
             ]
+        );
+    }
+
+    #[test]
+    fn group_aggregates_batch_binds_hashes_before_filters() {
+        let f = Filters {
+            extensions: vec!["mkv".into()],
+            size_min: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let hashes = vec!["aa".to_owned(), "bb".to_owned()];
+        let sq = build_group_aggregates(&hashes, &f, &paths());
+        assert!(sq.sql.contains("WHERE info_hash IN (?, ?)"));
+        assert!(sq.sql.contains("GROUP BY info_hash"));
+        assert_eq!(
+            sq.params,
+            vec![
+                Param::Text("aa".into()),
+                Param::Text("bb".into()),
+                Param::Text("mkv".into()),
+                Param::U64(1_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_aggregates_batch_empty_hashes_short_circuits() {
+        let sq = build_group_aggregates(&[], &Filters::default(), &paths());
+        assert!(sq.sql.contains("WHERE FALSE"));
+        assert!(!sq.sql.contains("IN ()"));
+        assert!(sq.params.is_empty());
+    }
+
+    #[test]
+    fn group_aggregates_batch_handles_null_extension_padding_and_hash_binding() {
+        let f = Filters {
+            extensions: vec!["".into()],
+            include_padding: true,
+            ..Default::default()
+        };
+        let hashes = vec!["aa' OR 1=1".to_owned()];
+        let sq = build_group_aggregates(&hashes, &f, &paths());
+        assert!(!sq.sql.contains("aa' OR 1=1"));
+        assert!(sq.sql.contains("info_hash IN (?)"));
+        assert!(sq.sql.contains("extension IS NULL"));
+        assert!(!sq.sql.contains("NOT is_padding"));
+        assert_eq!(sq.params, vec![Param::Text("aa' OR 1=1".into())]);
+    }
+
+    #[test]
+    fn previews_batch_windows_after_info_hash_filter() {
+        let f = Filters {
+            extensions: vec!["mkv".into()],
+            size_min: Some(1_000_000_000),
+            ..Default::default()
+        };
+        let hashes = vec!["aa".to_owned(), "bb".to_owned()];
+        let sq = build_previews(&hashes, &f, 3, &paths());
+        assert!(sq.sql.contains("WHERE info_hash IN (?, ?)"));
+        assert!(sq.sql.contains(
+            "row_number() OVER (PARTITION BY info_hash ORDER BY size DESC, file_index ASC)"
+        ));
+        assert!(sq.sql.contains("WHERE rn <= ?"));
+        assert!(sq.sql.contains("ORDER BY info_hash ASC, rn ASC"));
+        assert_eq!(
+            sq.params,
+            vec![
+                Param::Text("aa".into()),
+                Param::Text("bb".into()),
+                Param::Text("mkv".into()),
+                Param::U64(1_000_000_000),
+                Param::U64(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn previews_batch_empty_hashes_short_circuits() {
+        let sq = build_previews(&[], &Filters::default(), 5, &paths());
+        assert!(sq.sql.contains("WHERE FALSE"));
+        assert!(!sq.sql.contains("IN ()"));
+        assert_eq!(sq.params, vec![Param::U64(5)]);
+    }
+
+    #[test]
+    fn previews_batch_handles_null_extension_padding_and_hash_binding() {
+        let f = Filters {
+            extensions: vec!["".into()],
+            include_padding: true,
+            ..Default::default()
+        };
+        let hashes = vec!["aa' OR 1=1".to_owned()];
+        let sq = build_previews(&hashes, &f, 2, &paths());
+        assert!(!sq.sql.contains("aa' OR 1=1"));
+        assert!(sq.sql.contains("info_hash IN (?)"));
+        assert!(sq.sql.contains("extension IS NULL"));
+        assert!(!sq.sql.contains("NOT is_padding"));
+        assert_eq!(
+            sq.params,
+            vec![Param::Text("aa' OR 1=1".into()), Param::U64(2)]
         );
     }
 

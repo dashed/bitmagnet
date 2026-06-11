@@ -33,7 +33,7 @@ impl Filters {
         }
         if !self.extensions.is_empty() {
             let hit = self.extensions.iter().any(|e| match (e.is_empty(), ext) {
-                (true, None) => true,             // '' selects NULL ext
+                (true, None) => true, // '' selects NULL ext
                 (false, Some(x)) => x == e,
                 _ => false,
             });
@@ -98,7 +98,11 @@ impl Sort {
         };
         Self {
             field,
-            dir: if descending { SortDir::Desc } else { SortDir::Asc },
+            dir: if descending {
+                SortDir::Desc
+            } else {
+                SortDir::Asc
+            },
         }
     }
 }
@@ -153,7 +157,7 @@ mod tests {
             size_min: Some(10),
             size_max: Some(100),
             path_query: Some("Movie".into()),
-        
+
             include_padding: false,
         };
         assert!(f.matches(&Some("mkv".into()), 50, "Movie/a.mkv"));
@@ -178,7 +182,10 @@ mod tests {
         assert!(!f.matches(&None, 123, ".pad/123"));
         assert!(!f.matches(&None, 1, "_____padding_file_0_x"));
         assert!(f.matches(&None, 1, "readme"));
-        let f = Filters { include_padding: true, ..Default::default() };
+        let f = Filters {
+            include_padding: true,
+            ..Default::default()
+        };
         assert!(f.matches(&None, 123, ".pad/123"));
     }
 

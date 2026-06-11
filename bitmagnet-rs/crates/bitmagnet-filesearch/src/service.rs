@@ -147,16 +147,20 @@ impl<E: Engine + 'static> proto::file_search_service_server::FileSearchService
                     let mut groups = engine.collapse(&gen, &qc, deadline)?;
                     let has_more = groups.len() > qc.limit as usize;
                     groups.truncate(qc.limit as usize);
-                    // fill each group's preview (bounded point lookups)
+                    // Fill previews in one engine call; the DuckDB engine uses
+                    // one fact scan for the whole collapsed page.
+                    let info_hashes: Vec<String> =
+                        groups.iter().map(|g| g.info_hash.clone()).collect();
+                    let mut previews = engine.previews(
+                        &gen,
+                        &info_hashes,
+                        &qc.filters,
+                        qc.preview_limit,
+                        deadline,
+                    )?;
                     let mut out = Vec::with_capacity(groups.len());
                     for g in groups {
-                        let preview = engine.preview(
-                            &gen,
-                            &g.info_hash,
-                            &qc.filters,
-                            qc.preview_limit,
-                            deadline,
-                        )?;
+                        let preview = previews.remove(&g.info_hash).unwrap_or_default();
                         out.push(to_proto_group(g, preview));
                     }
                     Ok((out, has_more))
@@ -200,7 +204,10 @@ impl<E: Engine + 'static> proto::file_search_service_server::FileSearchService
         let (count, estimated) = self
             .run_blocking(move |engine, gen, deadline| engine.count(&gen, &q, deadline))
             .await?;
-        Ok(Response::new(proto::CountFilesResponse { count, estimated }))
+        Ok(Response::new(proto::CountFilesResponse {
+            count,
+            estimated,
+        }))
     }
 
     async fn facets(
@@ -209,11 +216,13 @@ impl<E: Engine + 'static> proto::file_search_service_server::FileSearchService
     ) -> Result<Response<proto::FacetsResponse>, Status> {
         let req = request.into_inner();
         let filters = map_filters(req.filters);
-        let want_ext = req.facet_fields.is_empty()
-            || req.facet_fields.iter().any(|f| f == "extension");
+        let want_ext =
+            req.facet_fields.is_empty() || req.facet_fields.iter().any(|f| f == "extension");
         let buckets = if want_ext {
-            self.run_blocking(move |engine, gen, deadline| engine.facet_ext(&gen, &filters, deadline))
-                .await?
+            self.run_blocking(move |engine, gen, deadline| {
+                engine.facet_ext(&gen, &filters, deadline)
+            })
+            .await?
         } else {
             Vec::new()
         };
@@ -284,10 +293,18 @@ mod tests {
         layout.ensure_dirs().unwrap();
         layout.write_watermark(0).unwrap();
         for (kind, files) in [
-            (Kind::Base, vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT]),
+            (
+                Kind::Base,
+                vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT],
+            ),
             (
                 Kind::Delta,
-                vec![artifact::FACT, artifact::AGG_TORRENT_EXT, artifact::AGG_EXT, artifact::TOMBSTONES],
+                vec![
+                    artifact::FACT,
+                    artifact::AGG_TORRENT_EXT,
+                    artifact::AGG_EXT,
+                    artifact::TOMBSTONES,
+                ],
             ),
         ] {
             let dir = layout.new_version_dir(kind, "1").unwrap();
@@ -347,7 +364,11 @@ mod tests {
             collapse_to_torrent: true,
             preview_limit: 5,
         };
-        let resp = s.search_files(Request::new(req)).await.unwrap().into_inner();
+        let resp = s
+            .search_files(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
         assert_eq!(resp.groups.len(), 2);
         assert_eq!(resp.groups[0].info_hash, "aa");
         assert_eq!(resp.groups[0].matching_file_count, 1);
@@ -374,7 +395,11 @@ mod tests {
             collapse_to_torrent: false,
             preview_limit: 0,
         };
-        let resp = s.search_files(Request::new(req)).await.unwrap().into_inner();
+        let resp = s
+            .search_files(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
         assert_eq!(resp.files.len(), 1);
         assert_eq!(resp.files[0].info_hash, "aa"); // 2GB mkv first
         assert!(resp.has_next); // bb mkv overfetched
