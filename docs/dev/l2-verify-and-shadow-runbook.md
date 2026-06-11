@@ -128,12 +128,11 @@ the DuckDB spill dir (relative `.tmp` vs cwd `/` → `workingDir` = the PVC) and
 an OOMKill (engine `memory_limit` bounds the buffer pool, not the process —
 now 3 GB engine / 8 Gi container).
 
-**Latency note (unsorted v1 base):** rollup-served shapes are fast (counts
-0.5–1.6 s, facets 1.3–4.3 s, collapse 3–5.7 s — beating PG by 5–40× on heavy
-shapes), but fact-scan `find`s run 11–18 s and path-ILIKE ~70 s at threads=4
-over the unsorted 13 G fact — several exceed the 10 s production deadline. The
-CB `<250 ms` envelope assumed the SORTED layout + row-group pruning: wiring the
-external sort (stub #3) is the next perf step, not a correctness issue.
+**Latency note:** ~~unsorted v1 base: finds 11–18 s vs the 10 s deadline~~ —
+the external sort SHIPPED and ran in prod (2026-06-11): finds now 0.75–3.4 s,
+counts <1 s. Trade-off + the collapse regression it exposed (info_hash
+locality; the l2-10 batch-probe fix) and a watchdog bug: see
+[`l2-sorted-layout-results.md`](./l2-sorted-layout-results.md).
 
 ## 4. The deletion audit (closes delta stub #5)
 
