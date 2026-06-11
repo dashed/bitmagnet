@@ -10,7 +10,9 @@
 //! <root>/
 //!   base/  v<ver>/{fact,agg_ext,agg_torrent_ext}.parquet   current -> v<ver>
 //!   delta/ v<ver>/{fact,agg_ext,agg_torrent_ext,tombstones}.parquet  current -> v<ver>
-//!   watermark    # epoch seconds of the last successful delta carve
+//!   watermark    # the BASE'S cut point (compaction-only; the cumulative
+//!                # delta carve origin)
+//!   delta_mark   # the latest delta window end (freshness display)
 //! ```
 //!
 //! The swap is a symlink `rename(2)` over an existing name — atomic on POSIX.
@@ -154,28 +156,63 @@ impl Layout {
         p.exists().then_some(p)
     }
 
-    // ---- watermark ----
+    // ---- marks ----
+    //
+    // TWO marks with distinct lifetimes (the CUMULATIVE-delta contract):
+    // * `watermark`  — the BASE'S cut point. Written ONLY by compaction (and
+    //   the first base). Every delta tick re-carves the WHOLE
+    //   `(watermark, now − lag]` window and atomically REPLACES the delta —
+    //   the published delta is always cumulative-since-base. (A tick that
+    //   advanced this mark would shrink the next carve to a sliver and
+    //   un-hide stale base rows — the bug the first live cadence exposed.)
+    // * `delta_mark` — the latest delta window END (freshness display only).
 
     fn watermark_path(&self) -> PathBuf {
         self.root.join("watermark")
     }
 
-    /// Read the delta watermark (epoch seconds), or `0` if unset.
+    fn delta_mark_path(&self) -> PathBuf {
+        self.root.join("delta_mark")
+    }
+
+    /// Read the BASE watermark — the cumulative delta carve origin (epoch
+    /// seconds), or `0` if unset.
     pub fn read_watermark(&self) -> i64 {
-        fs::read_to_string(self.watermark_path())
+        Self::read_epoch(&self.watermark_path())
+    }
+
+    /// Persist the BASE watermark (compaction/base only).
+    pub fn write_watermark(&self, epoch: i64) -> Result<()> {
+        self.write_epoch(&self.watermark_path(), ".watermark.tmp", epoch)
+    }
+
+    /// Read the latest delta window end (freshness), falling back to the base
+    /// watermark when no delta has run yet.
+    pub fn read_delta_mark(&self) -> i64 {
+        match Self::read_epoch(&self.delta_mark_path()) {
+            0 => self.read_watermark(),
+            v => v,
+        }
+    }
+
+    /// Persist the delta window end (every delta tick).
+    pub fn write_delta_mark(&self, epoch: i64) -> Result<()> {
+        self.write_epoch(&self.delta_mark_path(), ".delta_mark.tmp", epoch)
+    }
+
+    fn read_epoch(path: &Path) -> i64 {
+        fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0)
     }
 
-    /// Persist the delta watermark via a temp-file rename (atomic).
-    pub fn write_watermark(&self, epoch: i64) -> Result<()> {
-        let path = self.watermark_path();
-        let tmp = self.root.join(".watermark.tmp");
+    fn write_epoch(&self, path: &Path, tmp_name: &str, epoch: i64) -> Result<()> {
+        let tmp = self.root.join(tmp_name);
         let mut f = fs::File::create(&tmp)?;
         write!(f, "{epoch}")?;
         f.sync_all().ok();
-        fs::rename(&tmp, &path)?;
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 }
@@ -232,6 +269,20 @@ mod tests {
         assert!(cur.ends_with("v200"));
         // old generation dir still exists (immutable; GC is a separate concern)
         assert!(l.kind_dir(Kind::Base).join("v100").is_dir());
+    }
+
+    #[test]
+    fn delta_mark_falls_back_to_watermark_and_roundtrips() {
+        let l = Layout::new(tmp("marks"));
+        l.ensure_dirs().unwrap();
+        assert_eq!(l.read_delta_mark(), 0);
+        l.write_watermark(100).unwrap();
+        // No delta yet → freshness falls back to the base cut.
+        assert_eq!(l.read_delta_mark(), 100);
+        l.write_delta_mark(160).unwrap();
+        assert_eq!(l.read_delta_mark(), 160);
+        // The carve origin is untouched by delta ticks.
+        assert_eq!(l.read_watermark(), 100);
     }
 
     #[test]

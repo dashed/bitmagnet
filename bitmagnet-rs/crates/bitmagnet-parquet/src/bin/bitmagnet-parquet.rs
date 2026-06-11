@@ -197,8 +197,9 @@ async fn main() -> Result<()> {
                 .await
                 .context("connecting to postgres")?;
             let version = version.unwrap_or_else(|| now_epoch().to_string());
-            // Lagged now: the carve window end + persisted cursor (see
-            // export::CARVE_LAG_SECS — closes the commit-visibility race).
+            // Lagged now: the carve window END (export::CARVE_LAG_SECS closes
+            // the commit-visibility race). The carve ORIGIN is the base
+            // watermark — compaction-owned; ticks never advance it.
             let new_wm = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
             let deleted = match deleted_source {
                 DeletedSource::None => Vec::new(),

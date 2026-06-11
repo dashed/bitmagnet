@@ -164,33 +164,38 @@ pub async fn run_base(
 /// fall between runs as long as writer transactions are shorter than the lag.
 pub const CARVE_LAG_SECS: i64 = 30;
 
-/// Minute delta: carve torrents changed in `(layout.read_watermark(),
-/// new_watermark]`, plus the supplied `deleted` hashes (from the deletion audit
-/// source), into a fresh delta generation; then advance the watermark to
-/// `new_watermark` and swap.
+/// CUMULATIVE delta tick: carve EVERYTHING changed in `(base watermark,
+/// window_end]` — plus the `deleted` hashes from the audit source over the
+/// same window — into a fresh delta generation that atomically REPLACES the
+/// current one. The base watermark is NOT advanced (compaction owns it):
+/// advancing it per tick would shrink the next carve to a sliver and un-hide
+/// stale base rows the moment the new delta swapped in (caught live on the
+/// first cadence, 2026-06-11). The published delta is therefore always
+/// "everything since the base", and the tick is idempotent.
 ///
-/// `new_watermark` is BOTH the carve window end and the persisted cursor — pass
-/// a lagged now (`now_epoch() − CARVE_LAG_SECS`), never a raw `now`.
-///
-/// `deleted` is the set of hard-deleted info_hashes since the last run — see the
-/// build notes for the audit-source wiring (a delete trigger / audit table).
+/// `window_end` is the carve end — pass a lagged now
+/// (`now_epoch() − CARVE_LAG_SECS`), never a raw `now`; it is persisted as the
+/// `delta_mark` (freshness display). Tick cost grows with the window until a
+/// compaction folds the delta into a new base and resets the origin.
 pub async fn run_delta(
     pool: &PgPool,
     layout: &Layout,
     version: &str,
-    new_watermark: i64,
+    window_end: i64,
     deleted: &[String],
     page_size: i64,
 ) -> Result<BuildStats> {
     layout.ensure_dirs()?;
+    // Cumulative: ALWAYS carve from the base watermark (compaction-owned).
     let since = layout.read_watermark();
     let dir = layout.new_version_dir(Kind::Delta, version)?;
-    // Delta is small → in-memory sort keeps it (extension, size)-ordered too.
+    // The delta stays bounded by the compaction cadence → in-memory sort keeps
+    // it (extension, size)-ordered too.
     let mut sinks = Sinks::create(&dir, SortMode::InMemory, true)?;
 
     let mut cursor = None;
     loop {
-        let page = stream_changed_torrents(pool, since, new_watermark, cursor.as_ref(), page_size)
+        let page = stream_changed_torrents(pool, since, window_end, cursor.as_ref(), page_size)
             .await
             .context("streaming delta page")?;
         if page.is_empty() {
@@ -207,8 +212,8 @@ pub async fn run_delta(
 
     let stats = sinks.finish(&dir)?;
     layout.publish(Kind::Delta, &dir)?;
-    // Advance the watermark only after a successful publish.
-    layout.write_watermark(new_watermark)?;
+    // Freshness mark only — the carve ORIGIN (watermark) is compaction's.
+    layout.write_delta_mark(window_end)?;
     Ok(stats)
 }
 
@@ -226,6 +231,7 @@ pub async fn run_compaction(
     let stats = run_base(pool, layout, version, sort, page_size).await?;
     publish_empty_delta(layout, version)?;
     layout.write_watermark(new_watermark)?;
+    layout.write_delta_mark(new_watermark)?;
     Ok(stats)
 }
 

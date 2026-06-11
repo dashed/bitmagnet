@@ -59,7 +59,7 @@ pub fn resolve(layout: &Layout) -> Result<LoadedGeneration, GenError> {
         paths,
         base_version: version_of(&base_dir),
         delta_version: version_of(&delta_dir),
-        delta_watermark: layout.read_watermark(),
+        delta_watermark: layout.read_delta_mark(),
     })
 }
 
