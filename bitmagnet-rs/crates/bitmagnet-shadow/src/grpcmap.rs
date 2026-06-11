@@ -16,6 +16,7 @@ fn filters(spec: &PairSpec) -> proto::FileFilters {
         size_min: spec.size_min,
         size_max: spec.size_max,
         path_query: spec.path_query.clone(),
+        include_padding: spec.include_padding,
     }
 }
 

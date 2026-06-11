@@ -67,11 +67,11 @@ pub fn quote_literal(s: &str) -> String {
 pub fn files_cte(paths: &GenPaths) -> String {
     format!(
         "WITH files AS (\
-           SELECT info_hash, file_index, path, extension, size \
+           SELECT info_hash, file_index, path, extension, size, is_padding \
            FROM read_parquet({base}) b \
            WHERE NOT EXISTS (SELECT 1 FROM read_parquet({tomb}) t WHERE t.info_hash = b.info_hash) \
            UNION ALL \
-           SELECT info_hash, file_index, path, extension, size FROM read_parquet({delta}))",
+           SELECT info_hash, file_index, path, extension, size, is_padding FROM read_parquet({delta}))",
         base = quote_literal(&paths.base_fact),
         tomb = quote_literal(&paths.delta_tombstones),
         delta = quote_literal(&paths.delta_fact),
@@ -131,6 +131,13 @@ fn predicate(filters: &Filters, params: &mut Vec<Param>) -> String {
     if let Some(q) = &filters.path_query {
         clauses.push("path ILIKE ? ESCAPE '\\'".to_owned());
         params.push(Param::Text(format!("%{}%", escape_like(q))));
+    }
+    // Padding files are excluded BY DEFAULT (the materialized export-time
+    // column — no per-row path pattern cost). include_padding=true omits the
+    // clause; rollup_plan() routes such queries to the fact (rollups are
+    // built padding-free).
+    if !filters.include_padding {
+        clauses.push("NOT is_padding".to_owned());
     }
     clauses.join(" AND ")
 }
@@ -220,7 +227,9 @@ pub enum RollupPlan {
 
 /// Decide the [`RollupPlan`] for `filters` (pure; unit-tested without DuckDB).
 pub fn rollup_plan(filters: &Filters) -> RollupPlan {
-    if filters.path_query.is_some() || filters.size_max.is_some() {
+    // include_padding: the rollups are built PADDING-FREE — only the fact
+    // (which keeps flagged padding rows) can serve a pads-included query.
+    if filters.path_query.is_some() || filters.size_max.is_some() || filters.include_padding {
         RollupPlan::FactOnly
     } else if filters.size_min.is_some() {
         RollupPlan::ExactSetApproxAggs
@@ -414,6 +423,7 @@ mod tests {
                 size_min: Some(1_000_000_000),
                 size_max: None,
                 path_query: Some("rm -rf' OR 1=1".into()),
+                include_padding: false,
             },
             sort: Sort {
                 field: SortField::Size,
@@ -466,6 +476,7 @@ mod tests {
                 size_min: Some(1),
                 size_max: None,
                 path_query: None,
+                include_padding: false,
             },
             sort: Sort::default(),
             limit: 50,
@@ -556,6 +567,33 @@ mod tests {
             RollupPlan::Exact
         );
         assert_eq!(rollup_plan(&Filters::default()), RollupPlan::Exact);
+        // include_padding: rollups are built padding-free → only the fact can
+        // serve a pads-included query.
+        assert_eq!(
+            rollup_plan(&Filters {
+                include_padding: true,
+                ..Default::default()
+            }),
+            RollupPlan::FactOnly
+        );
+    }
+
+    #[test]
+    fn padding_excluded_by_default_in_fact_predicates() {
+        let mut params = Vec::new();
+        let pred = predicate(&Filters::default(), &mut params);
+        assert_eq!(pred, "NOT is_padding");
+        assert!(params.is_empty());
+        let pred = predicate(
+            &Filters {
+                include_padding: true,
+                ..Default::default()
+            },
+            &mut params,
+        );
+        assert!(pred.is_empty()); // opt-in: no padding clause at all
+        // and the files CTE carries the column for the predicate to act on
+        assert!(files_cte(&paths()).contains("is_padding"));
     }
 
     #[test]
@@ -566,6 +604,7 @@ mod tests {
                 size_min: None,
                 size_max: Some(100),
                 path_query: Some("Movie".into()),
+                include_padding: false,
             },
             sort: Sort::default(),
             limit: 50,

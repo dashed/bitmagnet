@@ -90,6 +90,16 @@ fn predicate(spec: &PairSpec, binds: &mut Vec<Bind>) -> String {
         binds.push(Bind::Text(format!("%{}%", escape_like(q))));
         clauses.push(format!("path ILIKE ${} ESCAPE '\\'", binds.len()));
     }
+    // Mirror of the sidecar's default `NOT is_padding`: torrent_files has no
+    // such column, so the SAME classification the export materializes
+    // (bitmagnet_parquet::decode::is_padding_path — BEP-47 `.pad/` prefix +
+    // BitComet `_____padding_file` marker) is expressed as exact string ops
+    // (left/strpos, NOT LIKE — underscores would be wildcards).
+    if !spec.include_padding {
+        clauses.push(
+            "NOT (left(path, 5) = '.pad/' OR strpos(path, '_____padding_file') > 0)".to_owned(),
+        );
+    }
     clauses.join(" AND ")
 }
 
@@ -233,6 +243,7 @@ mod tests {
             size_min: Some(1_000_000_000),
             size_max: None,
             path_query: Some("100%_a".into()),
+            include_padding: false,
             sort_field: Some("path".into()),
             sort_desc: false,
             limit: 50,

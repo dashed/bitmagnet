@@ -40,6 +40,11 @@ message FileFilters {
   optional uint64 size_min = 3;
   optional uint64 size_max = 4;
   optional string path_query = 5;        // escaped ILIKE substring
+  // BitTorrent padding files (BEP-47 `.pad/`, BitComet markers) are excluded
+  // by default — they are alignment filler, 3.7% of rows and 55% of the
+  // NULL-extension bucket. true = include them (forces the fact path; the
+  // rollups are built padding-free).
+  bool include_padding = 6;
 }
 
 // Keyset cursor: opaque token from a previous response (sort-key + tiebreak).

@@ -79,10 +79,16 @@ impl Sinks {
                 let rows = rows_from_files(info_hash_hex, &files);
                 self.stats.torrents_ok += 1;
                 self.stats.file_rows += rows.len() as u64;
-                for r in &rows {
+                // Rollups are the DEFAULT-served aggregates — padding files
+                // (alignment filler, 3.74% of the corpus) are excluded here so
+                // facets/collapse/counts are clean without losing the rows:
+                // the fact keeps them, flagged, behind `include_padding`.
+                let content: Vec<_> = rows.iter().filter(|r| !r.is_padding).cloned().collect();
+                self.stats.padding_rows += (rows.len() - content.len()) as u64;
+                for r in &content {
                     self.agg_ext.add_file(&r.extension, r.size);
                 }
-                self.agg_torrent_ext.push_torrent(info_hash_hex, &rows)?;
+                self.agg_torrent_ext.push_torrent(info_hash_hex, &content)?;
                 self.fact.push_rows(rows)?;
             }
             Err(_) => self.stats.decode_errors += 1,

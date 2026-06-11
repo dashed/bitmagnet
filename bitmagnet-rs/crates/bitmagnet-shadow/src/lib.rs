@@ -59,6 +59,10 @@ pub struct PairSpec {
     /// ASCII substring (see the module docs for the non-ASCII ILIKE caveat).
     #[serde(default)]
     pub path_query: Option<String>,
+    /// Include BitTorrent padding files (default false, mirroring the server
+    /// default — the PG mirror applies the equivalent path-pattern predicate).
+    #[serde(default)]
+    pub include_padding: bool,
     /// `size` | `path` | `info_hash`; `None` = the server default.
     #[serde(default)]
     pub sort_field: Option<String>,
@@ -87,6 +91,9 @@ impl PairSpec {
         }
         if let Some(q) = &self.path_query {
             parts.push(format!("path~{q}"));
+        }
+        if self.include_padding {
+            parts.push("pads=in".to_owned());
         }
         if let Some(f) = &self.sort_field {
             parts.push(format!(
@@ -245,6 +252,7 @@ pub fn default_suite() -> Vec<PairSpec> {
         size_min: None,
         size_max: None,
         path_query: None,
+        include_padding: false,
         sort_field: None,
         sort_desc: false,
         limit: 100,

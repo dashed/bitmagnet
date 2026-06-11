@@ -113,6 +113,12 @@ LEGACY side is the wrong one:
 * GATE A was structurally blind to it (per-(torrent, ext) presence+max survives
   dropped duplicates) — the count-grain facet pair is what caught it.
 
+> **2026-06-11 follow-up:** padding is now retained-but-filtered — see
+> [`l2-padding-files.md`](./l2-padding-files.md) (`is_padding` fact column,
+> padding-free rollups, default `NOT is_padding`, proto `include_padding`,
+> comparator mirror). The remaining strict-equality residue is the ~18 real
+> dup-path files below.
+
 **Disposition: the sidecar is a strict SUPERSET of `torrent_files` — files the
 legacy PK cannot represent. No capability regresses at the DROP; the gate's
 intent is met.** Optional strict mode (if exact equality is ever preferred):

@@ -91,6 +91,7 @@ fn map_filters(f: Option<proto::FileFilters>) -> Filters {
         size_min: f.size_min,
         size_max: f.size_max,
         path_query: f.path_query.filter(|s| !s.is_empty()),
+        include_padding: f.include_padding,
     }
 }
 

@@ -16,11 +16,21 @@ pub struct Filters {
     pub size_max: Option<u64>,
     /// Case-insensitive path substring (escaped before ILIKE).
     pub path_query: Option<String>,
+    /// Include BitTorrent padding files (default FALSE — they are alignment
+    /// filler: 3.7% of rows, 55% of the NULL-ext bucket). The default rides
+    /// the fact's materialized `is_padding` column; `true` forces the fact
+    /// path (rollups are built padding-free).
+    pub include_padding: bool,
 }
 
 impl Filters {
     /// Evaluate the filter against one in-memory file row (InMemoryEngine).
+    /// Padding classification uses the SAME [`bitmagnet_parquet::decode::is_padding_path`]
+    /// the export materializes, so both engines agree by construction.
     pub fn matches(&self, ext: &Option<String>, size: u64, path: &str) -> bool {
+        if !self.include_padding && bitmagnet_parquet::decode::is_padding_path(path) {
+            return false;
+        }
         if !self.extensions.is_empty() {
             let hit = self.extensions.iter().any(|e| match (e.is_empty(), ext) {
                 (true, None) => true,             // '' selects NULL ext
@@ -143,6 +153,8 @@ mod tests {
             size_min: Some(10),
             size_max: Some(100),
             path_query: Some("Movie".into()),
+        
+            include_padding: false,
         };
         assert!(f.matches(&Some("mkv".into()), 50, "Movie/a.mkv"));
         assert!(!f.matches(&Some("avi".into()), 50, "Movie/a.avi")); // ext
@@ -158,6 +170,16 @@ mod tests {
         };
         assert!(f.matches(&None, 1, "readme"));
         assert!(!f.matches(&Some("mkv".into()), 1, "a.mkv"));
+    }
+
+    #[test]
+    fn padding_excluded_by_default_included_on_opt_in() {
+        let f = Filters::default();
+        assert!(!f.matches(&None, 123, ".pad/123"));
+        assert!(!f.matches(&None, 1, "_____padding_file_0_x"));
+        assert!(f.matches(&None, 1, "readme"));
+        let f = Filters { include_padding: true, ..Default::default() };
+        assert!(f.matches(&None, 123, ".pad/123"));
     }
 
     #[test]

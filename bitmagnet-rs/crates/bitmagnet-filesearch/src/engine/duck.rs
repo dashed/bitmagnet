@@ -392,6 +392,18 @@ mod tests {
         sinks
             .push_torrent("bb", Ok(vec![blob("Show/ep.mkv", 1_500_000_000)]))
             .unwrap();
+        // cc is a BEP-47-style torrent: one real file + padding entries (kept
+        // in the fact flagged is_padding, excluded from rollups).
+        sinks
+            .push_torrent(
+                "cc",
+                Ok(vec![
+                    blob("Show/finale.mkv", 1_200_000_000),
+                    blob(".pad/999", 999),
+                    blob(".pad/999", 999),
+                ]),
+            )
+            .unwrap();
         sinks.finish(&dir).unwrap();
         layout.publish(Kind::Base, &dir).unwrap();
         publish_empty_delta(&layout, "1").unwrap();
@@ -427,7 +439,7 @@ mod tests {
         let rows = engine
             .search_files(&gen, &fq(filters.clone(), false, 50), dl)
             .unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3); // aa/big, bb/ep, cc/finale
         assert_eq!(rows[0].info_hash, "aa"); // size DESC
 
         // collapse (size_min → rollup set + exact hydration): 2 torrents, and
@@ -436,7 +448,7 @@ mod tests {
         let groups = engine
             .collapse(&gen, &fq(filters.clone(), true, 50), dl)
             .unwrap();
-        assert_eq!(groups.len(), 2);
+        assert_eq!(groups.len(), 3);
         let aa = groups.iter().find(|g| g.info_hash == "aa").unwrap();
         assert_eq!(aa.matching_file_count, 1);
         assert_eq!(aa.matching_total_size, 2_000_000_000);
@@ -453,7 +465,57 @@ mod tests {
                 dl,
             )
             .unwrap();
-        assert_eq!(c, 2);
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn duck_padding_excluded_by_default_included_on_opt_in() {
+        let mgr = seed_generation("pads");
+        let gen = mgr.current();
+        let engine = DuckEngine::open(DuckConfig::default()).unwrap();
+        let dl = Duration::from_secs(30);
+
+        // Default: cc shows only its real file; the pad rows are invisible to
+        // finds, counts and facets (rollups are built padding-free).
+        let rows = engine
+            .search_files(&gen, &fq(Filters::default(), false, 50), dl)
+            .unwrap();
+        assert!(rows.iter().all(|r| !r.path.starts_with(".pad/")));
+        let (files, _) = engine
+            .count(
+                &gen,
+                &CountQuery {
+                    filters: Filters::default(),
+                    collapse_to_torrent: false,
+                },
+                dl,
+            )
+            .unwrap();
+        assert_eq!(files, 5); // 3(aa) + 1(bb) + 1(cc real); pads excluded
+        let buckets = engine
+            .facet_ext(&gen, &Filters::default(), dl)
+            .unwrap();
+        let null_bucket = buckets.iter().find(|b| b.value.is_none());
+        assert!(null_bucket.is_none()); // the only NULL-ext rows were pads
+
+        // Opt-in: the pads come back (forced onto the fact path).
+        let inc = Filters {
+            include_padding: true,
+            ..Default::default()
+        };
+        let (files, _) = engine
+            .count(
+                &gen,
+                &CountQuery {
+                    filters: inc.clone(),
+                    collapse_to_torrent: false,
+                },
+                dl,
+            )
+            .unwrap();
+        assert_eq!(files, 7); // + the 2 pad rows
+        let rows = engine.search_files(&gen, &fq(inc, false, 50), dl).unwrap();
+        assert!(rows.iter().any(|r| r.path.starts_with(".pad/")));
     }
 
     #[test]
@@ -559,6 +621,6 @@ mod tests {
             .iter()
             .find(|b| b.value.as_deref() == Some("mkv"))
             .unwrap();
-        assert_eq!(mkv.count, 2); // big.mkv + ep.mkv; small.mkv excluded
+        assert_eq!(mkv.count, 3); // big.mkv + ep.mkv + finale.mkv; small.mkv excluded
     }
 }

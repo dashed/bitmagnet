@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arrow::array::{ArrayRef, StringBuilder, UInt32Builder, UInt64Builder};
+use arrow::array::{ArrayRef, BooleanBuilder, StringBuilder, UInt32Builder, UInt64Builder};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -81,6 +81,7 @@ pub struct FactWriter {
     path: StringBuilder,
     extension: StringBuilder,
     size: UInt64Builder,
+    is_padding: BooleanBuilder,
     pending: usize,
     rows_written: u64,
 }
@@ -99,6 +100,7 @@ impl FactWriter {
             path: StringBuilder::new(),
             extension: StringBuilder::new(),
             size: UInt64Builder::new(),
+            is_padding: BooleanBuilder::new(),
             pending: 0,
             rows_written: 0,
         })
@@ -130,6 +132,7 @@ impl FactWriter {
             None => self.extension.append_null(),
         }
         self.size.append_value(row.size);
+        self.is_padding.append_value(row.is_padding);
         self.pending += 1;
         self.rows_written += 1;
         if self.pending >= BATCH_ROWS {
@@ -148,6 +151,7 @@ impl FactWriter {
             Arc::new(self.path.finish()),
             Arc::new(self.extension.finish()),
             Arc::new(self.size.finish()),
+            Arc::new(self.is_padding.finish()),
         ];
         let batch = RecordBatch::try_new(fact_schema(), cols)?;
         self.writer.write(&batch)?;
@@ -184,6 +188,7 @@ mod tests {
             path: format!("{ih}/{idx}"),
             extension: ext.map(str::to_owned),
             size,
+            is_padding: false,
         }
     }
 

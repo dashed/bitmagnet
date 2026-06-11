@@ -306,10 +306,11 @@ async fn main() -> Result<()> {
 
 fn report(job: &str, s: &export::BuildStats) {
     println!(
-        "{job}: torrents_ok={} decode_errors={} file_rows={} agg_ext={} agg_torrent_ext={} tombstones={} clean={}",
+        "{job}: torrents_ok={} decode_errors={} file_rows={} padding_rows={} agg_ext={} agg_torrent_ext={} tombstones={} clean={}",
         s.decode.torrents_ok,
         s.decode.decode_errors,
         s.fact_rows,
+        s.decode.padding_rows,
         s.agg_ext_rows,
         s.agg_torrent_ext_rows,
         s.tombstones,

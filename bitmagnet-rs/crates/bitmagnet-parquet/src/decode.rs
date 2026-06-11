@@ -10,6 +10,19 @@
 
 use bitmagnet_model::{deserialize_files, file_extension_from_path, BlobError, BlobFile};
 
+/// BitTorrent padding-file classification (computed ONCE at export; queries
+/// filter on the materialized column instead of pattern-matching 880 M paths):
+/// * **BEP-47**: padding files live in a `.pad/` directory (`.pad/<size>`).
+/// * **BitComet** (pre-BEP-47): `_____padding_file…` name markers.
+///
+/// Padding is alignment filler, not content — measured 33.0 M rows (3.74 % of
+/// the corpus, 55 % of the NULL-extension bucket). The fact keeps the rows
+/// (faithful to the metainfo); the ROLLUPS exclude them, and the query layer
+/// defaults to `NOT is_padding` with an opt-in (`include_padding`).
+pub fn is_padding_path(path: &str) -> bool {
+    path.starts_with(".pad/") || path.contains("_____padding_file")
+}
+
 /// One file inside a torrent, flattened for the columnar fact table.
 ///
 /// `extension == None` is a SQL `NULL` extension (a file with no path-derived
@@ -27,6 +40,9 @@ pub struct FileRow {
     pub extension: Option<String>,
     /// File size in bytes.
     pub size: u64,
+    /// BitTorrent padding file ([`is_padding_path`]) — kept in the fact,
+    /// excluded from rollups and (by default) from queries.
+    pub is_padding: bool,
 }
 
 /// Running counters for an export, surfaced by V3 (the first production base
@@ -39,6 +55,9 @@ pub struct DecodeStats {
     pub decode_errors: u64,
     /// Total file rows emitted.
     pub file_rows: u64,
+    /// Of [`Self::file_rows`], rows classified as padding ([`is_padding_path`])
+    /// — kept in the fact, excluded from rollups/default queries.
+    pub padding_rows: u64,
 }
 
 impl DecodeStats {
@@ -67,6 +86,7 @@ pub fn rows_from_files(info_hash_hex: &str, files: &[BlobFile]) -> Vec<FileRow> 
             // G1: ALWAYS path-derive; ignore the blob `e`.
             extension: file_extension_from_path(&f.path),
             size: f.size,
+            is_padding: is_padding_path(&f.path),
         })
         .collect()
 }
@@ -130,6 +150,24 @@ mod tests {
         assert_eq!(rows[0].extension.as_deref(), Some("mkv"));
         assert_eq!(rows[1].extension, None);
         assert_eq!(rows[0].size, 2_000_000_000);
+    }
+
+    #[test]
+    fn padding_classification_covers_both_conventions() {
+        assert!(is_padding_path(".pad/2095104"));
+        assert!(is_padding_path("_____padding_file_0_if you see this file please update to BitComet"));
+        assert!(is_padding_path("dir/_____padding_file_12_"));
+        assert!(!is_padding_path("Movie/video.mkv"));
+        assert!(!is_padding_path("pad/notpad.txt")); // no leading dot-dir
+        assert!(!is_padding_path("my_padding_file.txt")); // fewer underscores
+        let rows = rows_from_files("aa", &[BlobFile {
+            index: 0,
+            path: ".pad/123".to_owned(),
+            extension: String::new(),
+            size: 123,
+        }]);
+        assert!(rows[0].is_padding);
+        assert_eq!(rows[0].extension, None);
     }
 
     #[test]

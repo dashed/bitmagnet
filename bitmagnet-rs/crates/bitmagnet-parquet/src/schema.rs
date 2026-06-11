@@ -24,6 +24,7 @@ pub mod col {
     pub const PATH: &str = "path";
     pub const EXTENSION: &str = "extension";
     pub const SIZE: &str = "size";
+    pub const IS_PADDING: &str = "is_padding";
     pub const FILE_COUNT: &str = "file_count";
     pub const TOTAL_SIZE: &str = "total_size";
     pub const MAX_SIZE: &str = "max_size";
@@ -39,6 +40,11 @@ pub fn fact_schema() -> Arc<Schema> {
         Field::new(col::PATH, DataType::Utf8, false),
         Field::new(col::EXTENSION, DataType::Utf8, true),
         Field::new(col::SIZE, DataType::UInt64, false),
+        // BitTorrent padding files (BEP-47 `.pad/` + BitComet markers) are KEPT
+        // in the fact (faithful to the metainfo) but flagged: rollups exclude
+        // them and the sidecar defaults to `NOT is_padding` (opt-in via the
+        // proto `include_padding`). Boolean RLE — costs ~nothing on disk.
+        Field::new(col::IS_PADDING, DataType::Boolean, false),
     ]))
 }
 
@@ -73,7 +79,7 @@ mod tests {
         let names: Vec<_> = s.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,
-            vec!["info_hash", "file_index", "path", "extension", "size"]
+            vec!["info_hash", "file_index", "path", "extension", "size", "is_padding"]
         );
         // extension is the only nullable column (G1 None => SQL NULL).
         assert!(s.field_with_name("extension").unwrap().is_nullable());

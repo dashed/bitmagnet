@@ -212,6 +212,7 @@ mod tests {
             path: "p".to_owned(),
             extension: ext.map(str::to_owned),
             size,
+            is_padding: false,
         }
     }
 
