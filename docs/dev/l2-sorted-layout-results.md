@@ -1,6 +1,6 @@
 # L2 sorted layout — production results (the external sort, and what it traded away)
 
-**Date:** 2026-06-11 · **Status:** measured in production (image `l2-9`, fork `5b36aab4`); fix plan below pending (`l2-10`).
+**Date:** 2026-06-11 · **Status:** measured in production. External sort shipped as image `l2-9` (fork `5b36aab4`); batch-probe fix shipped as image `l2-10` (fork `48d9c73b`, digest `sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`).
 **Closes:** dv2 stub #3 (the spilling external sort). **Parent:** [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) · ARCH-C ([`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md), the design's source).
 
 ## What ran
@@ -48,7 +48,7 @@ carve-out regardless.
 Confirmed structural, not cold-cache: an immediate warm second run reproduced
 the numbers within noise.
 
-## Fix plan (`l2-10`, contained sql.rs/duck.rs change)
+## Fix (`l2-10`, contained sql.rs/duck.rs/service.rs change)
 
 **Batch the probes — one scan instead of fifty:**
 1. Hydration: one `… WHERE info_hash IN (?,…50) AND <pred> GROUP BY info_hash`.
@@ -62,6 +62,33 @@ win. Alternatives considered and deferred: a second info_hash-sorted slim fact
 (+4–10 G, only if point-grain lookups become a served need — G2 already serves
 per-torrent hydration from the blob in Go); dropping sidecar previews outright
 (`clamp_preview` floors at 1, and the proto promises them).
+
+### l2-10 live result (2026-06-11)
+
+Built on FSN1 and deployed to HEL1 as
+`ghcr.io/dashed/bitmagnet-filesearch:l2-10@sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`.
+The first l2-10 delta tick completed cleanly:
+`torrents_ok=7673 decode_errors=0 file_rows=316633 padding_rows=11497 agg_ext=701 agg_torrent_ext=16437 tombstones=8073 clean=true`.
+
+Live `v2-shadow` subset (12 pairs, `collapse:path` excluded; temporary 240s
+deadline restored to 10s afterward) confirms the batch-probe fix:
+
+| shape | equality | sidecar |
+|---|---:|---:|
+| `collapse:mkv>1g` | ✅ | **1.498 s** |
+| `collapse:flac` | ✅ | **1.744 s** |
+| `collapse:smallmkv` | ✅ | **0.401 s** |
+| `find:mkv>1g` | ✅ | 0.747 s |
+| `find:range` | ✅ | 2.204 s |
+| `find:nullext` | ✅ | 3.222 s |
+| `count:flac-files` | ✅ | 0.947 s |
+| `count:flac-torrents` | ✅ | 0.440 s |
+
+Strict live gate result: `pairs=12 mismatches=3 gate=FAIL`, for expected live
+reasons only: the known `facet:video` `avi +10` dup-path residue, plus two
+±1 freshness drifts on moving prod data (`count:mkv>4g-torrents`,
+`facet:>1g`). A frozen-snapshot run is still the strict DROP gate; this live
+run is the post-rollout parity/perf smoke.
 
 ## Watchdog bug (separate, production-relevant)
 
