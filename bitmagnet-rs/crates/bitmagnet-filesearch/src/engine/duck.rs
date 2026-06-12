@@ -16,11 +16,13 @@
 //! * `threads`/`memory_limit` are bounded per the pod (CB: threads≈4).
 //!
 //! ## Deadlines
-//! DuckDB has no `statement_timeout`; each query arms an interrupt watchdog
-//! ([`InterruptHandle`]) that fires after the deadline and is cancelled on
-//! completion.
+//! DuckDB has no `statement_timeout`; each query runs on a worker thread while
+//! the caller waits up to the deadline. On timeout, the caller interrupts the
+//! connection and returns immediately; the connection is returned to the pool
+//! only after DuckDB unwinds.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,10 +30,15 @@ use anyhow::{anyhow, Context, Result};
 use duckdb::types::Value;
 use duckdb::{params_from_iter, Connection};
 
-use crate::engine::{Engine, FacetBucketRow, FileHitRow, GroupRow, PreviewRows};
+use crate::engine::{Engine, EngineError, FacetBucketRow, FileHitRow, GroupRow, PreviewRows};
 use crate::generation::LoadedGeneration;
 use crate::query::{CountQuery, FileQuery, Filters};
 use crate::sql::{self, Param, SafeQuery};
+
+const QUERY_RUNNING: u8 = 0;
+const QUERY_FINISHED: u8 = 1;
+const QUERY_INTERRUPTING: u8 = 2;
+const QUERY_INTERRUPTED: u8 = 3;
 
 /// Per-pod DuckDB tuning (CB-measured: threads≈4, memory bounded, warm object
 /// cache; heavy shapes already routed through rollups by [`crate::sql`]).
@@ -55,8 +62,7 @@ impl Default for DuckConfig {
 
 /// The embedded engine: a free-list of cloned connections sharing one instance.
 pub struct DuckEngine {
-    pool: Mutex<Vec<Connection>>,
-    config: DuckConfig,
+    pool: Arc<Mutex<Vec<Connection>>>,
 }
 
 impl DuckEngine {
@@ -73,8 +79,7 @@ impl DuckEngine {
         // keep the primary too
         pool.push(primary);
         Ok(Self {
-            pool: Mutex::new(pool),
-            config,
+            pool: Arc::new(Mutex::new(pool)),
         })
     }
 
@@ -102,46 +107,63 @@ impl DuckEngine {
         }
     }
 
-    fn checkin(&self, conn: Connection) {
-        self.pool.lock().expect("duck pool poisoned").push(conn);
-    }
-
-    /// Run `f` with a pooled connection and a deadline-armed interrupt watchdog.
+    /// Run `f` with a pooled connection and a hard caller deadline.
     fn with_conn<T>(
         &self,
         deadline: Duration,
-        f: impl FnOnce(&Connection) -> Result<T>,
-    ) -> Result<(T, bool)> {
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<(T, bool)>
+    where
+        T: Send + 'static,
+    {
+        debug_assert!(!deadline.is_zero(), "query deadline must be non-zero");
         let conn = self.checkout()?;
         let handle = conn.interrupt_handle();
-        let fired = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
-        let (fired_t, done_t) = (fired.clone(), done.clone());
-        let watchdog = std::thread::spawn(move || {
-            // Poll so we can exit promptly once the query finishes.
-            let step = Duration::from_millis(10);
-            let mut waited = Duration::ZERO;
-            while waited < deadline {
-                if done_t.load(Ordering::Relaxed) {
-                    return;
+        let pool = Arc::clone(&self.pool);
+        let state = Arc::new(AtomicU8::new(QUERY_RUNNING));
+        let worker_state = Arc::clone(&state);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = f(&conn);
+            match worker_state.compare_exchange(
+                QUERY_RUNNING,
+                QUERY_FINISHED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {}
+                Err(QUERY_INTERRUPTING) => {
+                    while worker_state.load(Ordering::Acquire) == QUERY_INTERRUPTING {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                 }
-                std::thread::sleep(step.min(deadline - waited));
-                waited += step;
+                Err(_) => {}
             }
-            if !done_t.load(Ordering::Relaxed) {
-                fired_t.store(true, Ordering::Relaxed);
-                handle.interrupt();
-            }
+            pool.lock().expect("duck pool poisoned").push(conn);
+            let _ = tx.send(result);
         });
-        let result = f(&conn);
-        done.store(true, Ordering::Relaxed);
-        let _ = watchdog.join();
-        self.checkin(conn);
-        let interrupted = fired.load(Ordering::Relaxed);
-        match result {
-            Ok(v) => Ok((v, interrupted)),
-            Err(e) if interrupted => Err(anyhow!("query exceeded deadline: {e}")),
-            Err(e) => Err(e),
+
+        match rx.recv_timeout(deadline) {
+            Ok(Ok(v)) => Ok((v, false)),
+            Ok(Err(e)) => Err(e),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if state
+                    .compare_exchange(
+                        QUERY_RUNNING,
+                        QUERY_INTERRUPTING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    handle.interrupt();
+                    state.store(QUERY_INTERRUPTED, Ordering::Release);
+                }
+                Err(EngineError::QueryDeadlineExceeded.into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(anyhow!("query worker terminated without result"))
+            }
         }
     }
 
@@ -165,7 +187,7 @@ impl Engine for DuckEngine {
         deadline: Duration,
     ) -> Result<Vec<FileHitRow>> {
         let sq = sql::build_search_files(q, &gen.paths);
-        let (rows, _) = self.with_conn(deadline, |conn| query_files(conn, &sq))?;
+        let (rows, _) = self.with_conn(deadline, move |conn| query_files(conn, &sq))?;
         Ok(rows)
     }
 
@@ -179,7 +201,7 @@ impl Engine for DuckEngine {
             // Rollup aggregates exact (ext-only / unfiltered) — the <50 ms path.
             sql::RollupPlan::Exact => {
                 let sq = sql::build_collapse_rollup(q, &gen.paths);
-                let (rows, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                let (rows, _) = self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 Ok(rows)
             }
             // size_min: rollup set/ordering exact, but file_count/total_size
@@ -187,10 +209,12 @@ impl Engine for DuckEngine {
             // the returned groups in one fact scan (page size is clamped).
             sql::RollupPlan::ExactSetApproxAggs => {
                 let sq = sql::build_collapse_rollup(q, &gen.paths);
-                let (mut groups, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                let (mut groups, _) =
+                    self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 let info_hashes: Vec<String> = groups.iter().map(|g| g.info_hash.clone()).collect();
                 let agg = sql::build_group_aggregates(&info_hashes, &q.filters, &gen.paths);
-                let (rows, _) = self.with_conn(deadline, |conn| query_group_aggs(conn, &agg))?;
+                let (rows, _) =
+                    self.with_conn(deadline, move |conn| query_group_aggs(conn, &agg))?;
                 for g in &mut groups {
                     if let Some((count, total, max)) = rows.get(&g.info_hash).copied() {
                         g.matching_file_count = count;
@@ -203,7 +227,7 @@ impl Engine for DuckEngine {
             // path / size_max: the rollup cannot serve this shape at all.
             sql::RollupPlan::FactOnly => {
                 let sq = sql::build_collapse_fact(q, &gen.paths);
-                let (rows, _) = self.with_conn(deadline, |conn| query_groups(conn, &sq))?;
+                let (rows, _) = self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 Ok(rows)
             }
         }
@@ -230,7 +254,7 @@ impl Engine for DuckEngine {
         deadline: Duration,
     ) -> Result<PreviewRows> {
         let sq = sql::build_previews(info_hashes, filters, limit, &gen.paths);
-        let (rows, _) = self.with_conn(deadline, |conn| query_previews(conn, &sq))?;
+        let (rows, _) = self.with_conn(deadline, move |conn| query_previews(conn, &sq))?;
         Ok(rows)
     }
 
@@ -241,7 +265,8 @@ impl Engine for DuckEngine {
         deadline: Duration,
     ) -> Result<(u64, bool)> {
         let sq = sql::build_count(q, &gen.paths);
-        let (count, interrupted) = self.with_conn(deadline, |conn| query_scalar_u64(conn, &sq))?;
+        let (count, interrupted) =
+            self.with_conn(deadline, move |conn| query_scalar_u64(conn, &sq))?;
         Ok((count, interrupted))
     }
 
@@ -258,7 +283,7 @@ impl Engine for DuckEngine {
             sql::RollupPlan::Exact => sql::build_facet_ext(filters, &gen.paths),
             _ => sql::build_facet_fact(filters, &gen.paths),
         };
-        let (rows, _) = self.with_conn(deadline, |conn| query_facets(conn, &sq))?;
+        let (rows, _) = self.with_conn(deadline, move |conn| query_facets(conn, &sq))?;
         Ok(rows)
     }
 }
@@ -358,7 +383,7 @@ mod tests {
     use bitmagnet_parquet::export::{publish_empty_delta, Sinks};
     use bitmagnet_parquet::fact::SortMode;
     use bitmagnet_parquet::generation::{Kind, Layout};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Build a real base generation (+ empty delta) on disk and return a manager.
     fn seed_generation(tag: &str) -> GenerationManager {
@@ -419,6 +444,49 @@ mod tests {
             collapse_to_torrent: collapse,
             preview_limit: 5,
         }
+    }
+
+    #[test]
+    fn duck_deadline_interrupts_cloned_connection_and_returns_promptly() {
+        let engine = DuckEngine::open(DuckConfig {
+            threads: 1,
+            memory_limit: "1GB".to_owned(),
+            pool_size: 1,
+        })
+        .unwrap();
+        let held_primary = engine.checkout().unwrap();
+
+        let started = Instant::now();
+        let err = engine
+            .with_conn(Duration::from_millis(20), |conn| {
+                let mut stmt =
+                    conn.prepare("select count(*) from range(10000000) t1, range(1000000) t2")?;
+                Ok(stmt.execute([])?)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<EngineError>(),
+            Some(EngineError::QueryDeadlineExceeded)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "deadline call returned after {:?}",
+            started.elapsed()
+        );
+
+        engine
+            .pool
+            .lock()
+            .expect("duck pool poisoned")
+            .push(held_primary);
+        let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < cleanup_deadline {
+            if engine.pool.lock().expect("duck pool poisoned").len() == 2 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(engine.pool.lock().expect("duck pool poisoned").len(), 2);
     }
 
     #[test]

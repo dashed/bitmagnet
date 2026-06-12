@@ -16,7 +16,7 @@ use tonic::{Request, Response, Status};
 
 use bitmagnet_proto::v1 as proto;
 
-use crate::engine::{Engine, FileHitRow, GroupRow};
+use crate::engine::{Engine, EngineError, FileHitRow, GroupRow};
 use crate::generation::{GenerationManager, LoadedGeneration};
 use crate::query::{clamp_limit, clamp_preview, CountQuery, FileQuery, Filters, Sort};
 
@@ -78,7 +78,14 @@ impl<E: Engine + 'static> FileSearchServer<E> {
         })
         .await
         .map_err(|e| Status::internal(format!("worker join error: {e}")))?;
-        out.map_err(|e| Status::internal(e.to_string()))
+        out.map_err(status_from_engine_error)
+    }
+}
+
+fn status_from_engine_error(e: anyhow::Error) -> Status {
+    match e.downcast_ref::<EngineError>() {
+        Some(EngineError::QueryDeadlineExceeded) => Status::deadline_exceeded(e.to_string()),
+        None => Status::internal(e.to_string()),
     }
 }
 
@@ -346,6 +353,12 @@ mod tests {
     }
 
     use proto::file_search_service_server::FileSearchService as _;
+
+    #[test]
+    fn engine_deadline_maps_to_deadline_exceeded_status() {
+        let status = status_from_engine_error(EngineError::QueryDeadlineExceeded.into());
+        assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+    }
 
     #[tokio::test]
     async fn search_files_collapsed_default() {

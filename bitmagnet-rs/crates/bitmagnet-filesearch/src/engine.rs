@@ -20,6 +20,13 @@ use anyhow::Result;
 use crate::generation::LoadedGeneration;
 use crate::query::{CountQuery, FileQuery, Filters};
 
+/// Engine-level errors that callers may want to map to transport status codes.
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("query exceeded deadline")]
+    QueryDeadlineExceeded,
+}
+
 /// One file row returned by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHitRow {
