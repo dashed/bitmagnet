@@ -3,7 +3,7 @@
 **Date:** 2026-06-09 · **Reviewed doc:** `docs/dev/per-file-search-master-design-and-results.md` (2026-06-08).
 **Verdict:** the review is **high quality and substantially correct** — I accept essentially all of it. Every load-bearing claim below was **re-verified against the bitmagnet code and the canonical DuckDB source** (an opus verification team: `fb-jsonb`, `fb-freshness`, `fb-duckdb`). Nothing was rejected; refinements are noted. Tasks **FB-A0…FB-DOC (#60–#68)** track the work; the build order is revised (§ "Revised build order").
 
-> **One correction the review itself needs:** DuckDB has **no `statement_timeout`** setting (it's a Postgres-ism). Per-query time limits use the client **`Connection::Interrupt()`** API driven by a gRPC deadline/watchdog. Everything else in the DuckDB section verified.
+> **One correction the review itself needs:** DuckDB has **no `statement_timeout`** setting (it's a Postgres-ism). Per-query time limits use a hard caller deadline backed by the client **`Connection::Interrupt()`** API, with the connection kept out of the pool until DuckDB unwinds. Everything else in the DuckDB section verified.
 
 ---
 
@@ -55,7 +55,7 @@ If `agg_torrent_ext` survives FB-A1: the `(extension, info_hash)` index does **n
 
 **Confirmed (`fb-duckdb`):** DuckDB SQL can read/write files, load extensions, and reach the network (`enable_external_access` default **true**) → untrusted SQL is code. Grounded lockdown (open-time, then `lock_configuration=true`): `enable_external_access=false`, `autoload/autoinstall_known_extensions=false`, `allow_unsigned/community_extensions=false`, `allow_persistent_secrets=false`, optional `disabled_filesystems`/`allowed_directories`; resource caps `memory_limit`/`threads`/`operator_memory_limit` + an app-level query **semaphore**; container FS read-only except the generation mount; no network egress. **Never expose raw SQL** — only structured params compiled server-side.
 
-⚠️ **Correction:** **there is no `statement_timeout` in DuckDB.** Enforce per-query deadlines with a gRPC-side watchdog calling **`Connection::Interrupt()`** (`main/connection.hpp:57`, `client_context.hpp:121`).
+⚠️ **Correction:** **there is no `statement_timeout` in DuckDB.** Enforce per-query deadlines by returning from the caller at the deadline, calling **`Connection::Interrupt()`** (`main/connection.hpp:57`, `client_context.hpp:121`) on the running connection, and reusing that connection only after DuckDB unwinds.
 
 **Path substring (P2) — confirmed necessary:** binding stops SQL *injection* but **not wildcard injection** — a user-supplied `%`/`_` in the bound value is still a wildcard (`function/scalar/string/like.cpp:184-221`). So **escape `\`, `%`, `_`** before binding and use `path ILIKE '%' || escape_like($1) || '%' ESCAPE '\'`; plus **minimum `path_query` length**, **hard max page size**, the `Interrupt()` deadline, and **no broad/CJK promise** unless the optional ngram index is enabled. (FB-B1d.)
 

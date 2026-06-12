@@ -39,7 +39,7 @@ Two new workspace crates + one new proto + one new DB reader:
                       bitmagnet-filesearch (DuckDB sidecar, gRPC :50052)
    GenerationManager (RwLock<Arc<LoadedGeneration>>, reload-on-swap)
    Engine: base+delta anti-join VIEW over read_parquet(); rollups for collapse/facets/count
-   service: proto → domain query → SafeQuery → DuckDB; semaphore + spawn_blocking + interrupt deadline
+   service: proto → domain query → SafeQuery → DuckDB; semaphore + spawn_blocking + hard caller deadline
 ```
 
 ### Module map
@@ -58,7 +58,7 @@ Two new workspace crates + one new proto + one new DB reader:
 - `sql` — **FB-B1d safe SQL**: server-controlled paths/identifiers vs bound `?` params; `escape_like`; the base+delta **anti-join** `files`/`att` CTEs; rollup-served collapse/facet/count.
 - `generation` — `GenerationManager`: resolve current base+delta, `reload()` swap behind `RwLock<Arc<…>>`.
 - `engine` — `Engine` trait + `InMemoryEngine` (reference/tests) + `DuckEngine` (feature `duckdb-engine`).
-- `service` — gRPC `FileSearchService`: proto mapping, **semaphore + `spawn_blocking`** concurrency, per-query deadline.
+- `service` — gRPC `FileSearchService`: proto mapping, **semaphore + `spawn_blocking`** concurrency, per-query deadline mapped to gRPC `DEADLINE_EXCEEDED`.
 
 ---
 
@@ -82,7 +82,7 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 - **base+delta = TORRENT-granular anti-join** (`sql::files_cte`): `NOT EXISTS (tombstone) UNION ALL delta`. EXP-B proved `row_number() PARTITION BY info_hash = 1` is WRONG (keeps one file/torrent) and window-max is 80× slower. A **delete** is a tombstone with no delta fact rows ⇒ the torrent vanishes.
 - **FB-B1d safe SQL** — no user value is ever interpolated; extensions/sizes/path become bound `?` params; the path substring is `ILIKE`-escaped (`%`/`_`/`\`) + `ESCAPE '\'`. `read_parquet` paths are server-controlled generation paths only.
 - **FB-B1d external-access tension, resolved explicitly** (`engine/duck.rs` header): `enable_external_access=false` would block `read_parquet` (the engine's whole job), so it stays ON; the surface is constrained instead — server-only paths, bound params, `autoload/autoinstall_known_extensions=false`, and `lock_configuration=true` set **last** so a query can't re-open anything.
-- **CB serving config** — ONE DuckDB instance + a cloned-connection cursor pool; per-query `threads≈4`; a tokio **semaphore (default 6, the measured knee)**; heavy `COUNT(DISTINCT)`/collapse routed through the rollups; object cache ON (warm). DuckDB has **no `statement_timeout`** → each query arms an **interrupt watchdog** (`InterruptHandle`) for the deadline.
+- **CB serving config** — ONE DuckDB instance + a cloned-connection cursor pool; per-query `threads≈4`; a tokio **semaphore (default 6, the measured knee)**; heavy `COUNT(DISTINCT)`/collapse routed through the rollups; object cache ON (warm). DuckDB has **no `statement_timeout`** → each query runs on a worker thread; the caller returns at the deadline, interrupts the checked-out connection, and returns that connection to the pool only after DuckDB unwinds.
 
 ---
 
