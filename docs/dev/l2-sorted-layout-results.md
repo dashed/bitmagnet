@@ -111,6 +111,37 @@ Live repro/proof on HEL1:
   `query exceeded deadline` in **10.35 s**; pod remained Ready and
   `HealthCheck` returned `SERVING_STATUS_SERVING`.
 
+## Making `collapse:path` fast: route through L3, not a DuckDB scan
+
+The 582 s result is not a generic collapse problem; it is an unindexed path
+substring problem followed by a torrent collapse. A DuckDB `ILIKE '%...%'` or
+regex predicate over `path` cannot use row-group pruning, and the sorted
+`(extension,size)` fact makes the surviving `info_hash` values maximally
+scattered. More DuckDB-side point-lookup batching fixed the structured collapse
+regression, but it does not change the first-pass path scan.
+
+**Decision:** `collapse:path` should be served as a two-stage composition once
+L3 exists:
+
+1. **Candidate stage:** query the L3 per-torrent path-bag index
+   (`char-ngram(2,3)`, `WithFreqs`, indexed `info_hash` delete key) for the path
+   substring. This turns "scan every file path" into an inverted-index lookup
+   over torrent candidates.
+2. **Exact refine + hydrate:** take the candidate `info_hash` page/batches and
+   verify the exact substring plus any structured predicates (`extension`,
+   `size_min`, `size_max`) against the blob or L2 with
+   `info_hash IN (...)`. Hydrate previews from the blob/L2 after exact
+   filtering, then return collapsed torrent groups.
+3. **Counts:** do not require an exact global count on the request path for broad
+   path queries. Use the L3 hit count as an estimate, exact-refine the returned
+   page, or run/cache expensive exact counts in the background.
+
+This preserves DuckDB for the structured per-file tier (`extension`, size
+ranges, rollups, facets) and uses the only measured fast primitive for broad
+free-text path matching. A second `info_hash`-sorted Parquet can help point
+hydration if that ever becomes a hot path, but it does not solve the initial
+path-substring scan and is not the primary fix for `collapse:path`.
+
 ## Operational notes
 
 * The two live-run "mismatches" are fully understood: the known +10 dup-path

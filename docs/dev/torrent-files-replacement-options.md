@@ -26,7 +26,7 @@ The answer is a **layered stack** — stack L1 → L2 → L3, drop `torrent_file
 |---|---|---|---|---|
 | **L1 — Hybrid Blob** | `files_data` = zstd(msgpack `{i,p,e,s}`) per torrent (~16 GB, 4.96×) + `torrent_file_summary` (~3.3 GB) + `file_extensions` JSONB (+119 MB) | **~19 GB** | (a)(b)(c) | ✅ **DEPLOYED + verified** (real-time dual-write) |
 | **L2 — DuckDB-on-Parquet** | blobs → sorted Parquet (per-file) + native rollup tables; gRPC sidecar (HEL1) | **~3.9–12.3 GB** | (d) structured | 🛠 **BUILT, deploy gated** — image `l2-3` (routing + parquet-extension fixed; `l2-1`/`l2-2` cannot serve), homelab serving role, `verify` + `v2-shadow` gate tooling, deletion audit; gates per [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) |
-| **L3 — Tantivy ngram** | per-torrent path-bag char-ngram(2,3) `WithFreqs` + delete-key | **14.0 GiB (BUILT, keyed)** | (d) realtime free-text path | 🟢 **GO (user decision 2026-06-09)** — built ([PSX](./psx-campaign-RESULTS.md)) + concurrency-validated ([CB](./cb-campaign-RESULTS.md)); deploy pending |
+| **L3 — Tantivy ngram** | per-torrent path-bag char-ngram(2,3) `WithFreqs` + delete-key | **14.0 GiB (BUILT, keyed)** | (d) realtime free-text path + fast `collapse:path` candidates | 🟢 **GO (user decision 2026-06-09)** — built ([PSX](./psx-campaign-RESULTS.md)) + concurrency-validated ([CB](./cb-campaign-RESULTS.md)); deploy pending |
 
 Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parity-architecture.md); L3 = [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md) + [`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md).
 
@@ -44,7 +44,7 @@ Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parit
 - ❌ **per-file structured Tantivy index** — +14–25 GB, no latency win (scan-bound ~1.3 s) (RUN-4).
 
 **(d) Free-text path search — the L3 carve-out** *(PS-T1–T5 + PS-MB1)*
-- ✅ **per-torrent path-bag char-ngram(2,3) `WithFreqs`** — **BUILT at 13.32 GiB** (PSX; confirms the 13.54 computed), p50 24.7 ms, CJK sub-ms, recall 1.0000, latency-neutral vs positions. **Production-shape p95** (TopDocs-by-seeders, the real page collector) on the broadest single grams ≈ **77–94 ms** (the 55–65 ms `Count` figure was a lower bound); realistic multi-word queries **< 50 ms**; the broad tail is engine-irreducible → UX (debounce/min-chars).
+- ✅ **per-torrent path-bag char-ngram(2,3) `WithFreqs`** — **BUILT at 14.0 GiB with the production delete key** (13.32 GiB keyless in PSX; 14.0 GiB keyed in CB), p50 24.7 ms, CJK sub-ms, recall 1.0000, latency-neutral vs positions. **Production-shape p95** (TopDocs-by-seeders, the real page collector) on the broadest single grams ≈ **77–94 ms** (the 55–65 ms `Count` figure was a lower bound); realistic multi-word queries **< 50 ms**; the broad tail is engine-irreducible → UX (debounce/min-chars). This is also the first-pass candidate engine for fast `collapse:path`: L3 returns candidate `info_hash` values, then blob/L2 exact-refines the substring and any structured filters.
 - ❌ **per-file ngram** (~90 GB, 873 M docs) — footprint-tripler; latency breaks at scale.
 - ❌ **edge-ngram** — bigger in prod (21.3 GiB) *and* misses substrings (`264`→0.19 recall).
 - ❌ **external engines** — Meilisearch/Typesense are *prefix not infix*; Quickwit misses local <50 ms; pg_trgm loses 3 ways; **Manticore** the lone gated-spike candidate.

@@ -94,6 +94,14 @@ Needs: `path, size, info_hash`. Tier: ⚠️ **measured 134 s (ARCH-C)** — a G
 Needs: `path`. Tier: **unprunable full scan** (~0.08 s common+`LIMIT` / ~22–23 s rare/exhaustive — leading-wildcard, ARCH-C). Works (incl. CJK substrings — byte-level), but **not per-keystroke**.
 **The index option, now measured (ARCH-C):** a DuckDB **FTS/BM25** index on `path` → extrapolated **~27 min build, ~34.9 GB**, query **147–186 ms** (`1080p`/`bluray`/CJK `电影`). So an index *does* take path search 23 s → ~150 ms — but **+34.9 GB** (≈ the rejected Tantivy file index's whole cost) and 🚨 **NOT CJK-robust**: DuckDB FTS does **no CJK segmentation**, so it matched the exact `电影` token but a sub-token CJK query misses. ⟹ **`ILIKE` is the only CJK-*correct* substring option (but ~23 s); BM25 is fast but ASCII-token-only.** Interactive **AND** CJK-correct path search needs a **CJK-aware tokenizer** — the genuine, narrow Tantivy(path-only) carve-out (ARCH-A §7), gated on an explicit product requirement.
 
+**`collapse:path` serving contract:** do not serve broad path collapse by asking
+DuckDB to scan and group the full `path` column. Use L3 as the first-pass
+candidate engine: the per-torrent path-bag ngram index returns candidate
+`info_hash` values, then DuckDB/blob hydration exact-refines those candidates
+with the real substring and any structured filters. Exact global counts for
+broad path substrings are estimates or background/cache work, not the request
+path.
+
 ### 2.6 BEP-52 per-file merkle / content-identity dedup — **🚨 NEEDS NEW DATA**
 *"find the same file across torrents by cryptographic identity (not path/size collision)", "verify a file's piece layer".*
 - **Not available today.** The `feat/bittorrent-v2-*` branches add **torrent-level** v2 identity only (`infoHashV2`, `metaVersion`, btmh magnets, hybrid v1/v2 dedup — commits `8601766`/`c1a822c`/`6a2f77b`/`2f4e273`); they do **not** extract the **per-file merkle root** from the v2 file tree. The blob (`BlobFile`) carries only `{index,path,extension,size}`.
@@ -128,12 +136,12 @@ Needs: `extension, size, info_hash`. Tier: **measured 2,734 ms** (the `count(DIS
 | Time-trends / analytics (2.2) | ✅ | — | files + **dim.published_at** | ~1.3 s |
 | Content/video JOINs (2.3) | ✅ | — | files + **dim.content_*/video_***; **seeders → live PG** | ≤1.3 s |
 | Dedup / find-by-filename (2.4) | ✅ | — | files(path,size,ih) | ⚠️ **134 s — BATCH, not interactive** |
-| Fuzzy / regex path (2.5) | ✅ | — | files.path | best-effort (~0.08 s…23 s); BM25 index → 150 ms @ **+34.9 GB**, ASCII-only |
+| Fuzzy / regex path (2.5) | ✅ | — | files.path + L3 candidates for `collapse:path` | best-effort (~0.08 s…23 s); BM25 index → 150 ms @ **+34.9 GB**, ASCII-only; fast broad collapse routes L3 candidates → exact refine |
 | **BEP-52 per-file merkle (2.6)** | ✅ *(after)* | **🚨 yes — blob bump + re-export** | files.**merkle_root** | ~1.3 s once present |
 | Quality heuristics (2.7) | ✅ | — | files + dim | ≤1.3 s |
 | Faceting (2.8) | ✅ | — | files + `per_ext` rollup | **2.73 s** → **<35 ms** via `per_ext` rollup |
 
-**All 8 classes = new SQL on what ARCH-A exports today** (given the `torrents` dim + `path` column); only per-file merkle/mtime needs new data (one-shot capture + re-export, not a per-query cost). Two latency caveats from ARCH-C's measurements: **(a)** the `per_ext` + `per_torrent_ext` rollups (+~1.4 GB, emitted by the refresh Job) take season-packs/faceting/collapse/counts/histograms to **<35 ms**; **(b)** cross-torrent dup-by-(path,size) is a **134 s batch** job (cache it, don't serve it live) and path-FTS is best-effort/CJK-limited — these two are the only non-interactive future workloads, and only path-FTS could ever justify a (CJK-aware) index.
+**All 8 classes = new SQL on what ARCH-A exports today** (given the `torrents` dim + `path` column); only per-file merkle/mtime needs new data (one-shot capture + re-export, not a per-query cost). Two latency caveats from ARCH-C's measurements: **(a)** the `per_ext` + `per_torrent_ext` rollups (+~1.4 GB, emitted by the refresh Job) take season-packs/faceting/collapse/counts/histograms to **<35 ms**; **(b)** cross-torrent dup-by-(path,size) is a **134 s batch** job (cache it, don't serve it live) and path-FTS is best-effort/CJK-limited. The fast `collapse:path` composition is not "more DuckDB"; it is L3 candidate generation followed by exact DuckDB/blob refinement.
 
 ---
 

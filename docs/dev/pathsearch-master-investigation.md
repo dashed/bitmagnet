@@ -89,6 +89,13 @@ Three **match-set-shrinking** moves (the only lever that works), CJK preserved:
 
 Schema: one searchable `path_grams` ngram(2,3) field, **WithFreqs, no positions** (all ngrams at position 0), index-only never STORED; `info_hash` INDEXED+STORED (delete key + hit identity); `seeders/size/files_count` FAST. Writer = **1 thread + ≥2 GB arena** (multi-thread 256 MB writer **crashes** on ngram token explosion — measured), default `LogMergePolicy` (~2 ms freshness, bounded segments), `delete_term(info_hash)` supersession. Edge-ngram (ASCII-prefix, loses CJK-mid-run) kept only as a fallback arm.
 
+**Serving composition:** L3 is also the candidate engine for fast
+`collapse:path`. Do not ask L2/DuckDB to scan and group the full `path` column
+for broad substrings. Query L3 for candidate `info_hash` values, then exact-refine
+those candidates through the blob/L2 path with the real substring and any
+structured filters (`extension`, size bounds), hydrating previews only after
+exact filtering. Broad exact counts are estimates or background/cache work.
+
 ---
 
 ## 5. Deployment shape — if the gate ever fires (T4)
