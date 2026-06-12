@@ -45,6 +45,7 @@ Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parit
 
 **(d) Free-text path search — the L3 carve-out** *(PS-T1–T5 + PS-MB1)*
 - ✅ **per-torrent path-bag char-ngram(2,3) `WithFreqs`** — **BUILT at 14.0 GiB with the production delete key** (13.32 GiB keyless in PSX; 14.0 GiB keyed in CB), p50 24.7 ms, CJK sub-ms, recall 1.0000, latency-neutral vs positions. **Production-shape p95** (TopDocs-by-seeders, the real page collector) on the broadest single grams ≈ **77–94 ms** (the 55–65 ms `Count` figure was a lower bound); realistic multi-word queries **< 50 ms**; the broad tail is engine-irreducible → UX (debounce/min-chars). This is also the first-pass candidate engine for fast `collapse:path`: L3 returns candidate `info_hash` values, then blob/L2 exact-refines the substring and any structured filters.
+- ✅ **Batch/cache only:** cross-torrent duplicate discovery by `(path,size)` is a scheduled materialized rollup (`path_hash,size → torrent_count + samples`) with exact path verification, not a live DuckDB GROUP BY.
 - ❌ **per-file ngram** (~90 GB, 873 M docs) — footprint-tripler; latency breaks at scale.
 - ❌ **edge-ngram** — bigger in prod (21.3 GiB) *and* misses substrings (`264`→0.19 recall).
 - ❌ **external engines** — Meilisearch/Typesense are *prefix not infix*; Quickwit misses local <50 ms; pg_trgm loses 3 ways; **Manticore** the lone gated-spike candidate.

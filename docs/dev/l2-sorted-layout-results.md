@@ -142,6 +142,20 @@ free-text path matching. A second `info_hash`-sorted Parquet can help point
 hydration if that ever becomes a hot path, but it does not solve the initial
 path-substring scan and is not the primary fix for `collapse:path`.
 
+## Other slow-path policy
+
+Two related shapes are intentionally **not** request-path DuckDB scans:
+
+* **Rare/exhaustive path `ILIKE` or regex:** route through L3 when the query has a
+  required literal/ngram prefilter, then exact-refine candidates in blob/L2. A
+  regex with no selective literal remains a batch/offline scan behind the L2
+  deadline, not an interactive feature.
+* **Cross-torrent duplicate-by-`(path,size)`:** materialize it during
+  compaction/offline work. Emit a duplicate rollup keyed by `(path_hash,size)`
+  with exact path verification inside each bucket, `torrent_count`, and bounded
+  sample `info_hash` values for hydration. Serving should read that rollup/cache;
+  the raw 800M-row GROUP BY (~134 s) must not sit on the request path.
+
 ## Operational notes
 
 * The two live-run "mismatches" are fully understood: the known +10 dup-path

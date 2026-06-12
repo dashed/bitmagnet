@@ -89,18 +89,32 @@ FROM files GROUP BY path, size HAVING torrents > 1 ORDER BY torrents DESC LIMIT 
 ```
 Needs: `path, size, info_hash`. Tier: ⚠️ **measured 134 s (ARCH-C)** — a GROUP BY over ~800 M near-distinct `(path,size)` keys is a pathological all-pairs aggregate; it **completes (disk-spills, won't OOM)** but is a **BATCH job, not interactive**. This is **the one future query that is NOT cheap** — run it offline/scheduled and cache the result (e.g. a "popular files" materialized table), or scope it (only `size > 1 GB`, or within a content_type). Still possible in plain SQL — just not a per-request path. **Everything else stays ≤2.7 s or <35 ms via rollups.**
 
+**Acceleration plan:** materialize this, do not serve the raw GROUP BY. A
+compaction-adjacent batch job should emit a small duplicate rollup keyed by
+`(path_hash, size)` with `torrent_count`, a canonical/sample `path`, and a
+bounded sample/list of `info_hash` values for hydration. Use a strong hash only
+as the partition key, then exact-verify `path` inside each `(path_hash, size)`
+bucket so hash collisions cannot create false duplicates. Serving becomes
+`ORDER BY torrent_count DESC LIMIT N` over the rollup, plus optional exact
+hydrate of one bucket. Delta support can start as compact-lagged; if this
+becomes user-facing, recompute the changed buckets from the cumulative delta and
+merge them into the materialized view.
+
 ### 2.5 Fuzzy / regex path — **NEW SQL (best-effort latency)**
 *`regexp_matches(path, …)`, `ILIKE '%pattern%'`, Levenshtein-ish via `jaccard`/`damerau_levenshtein` (DuckDB built-ins).*
 Needs: `path`. Tier: **unprunable full scan** (~0.08 s common+`LIMIT` / ~22–23 s rare/exhaustive — leading-wildcard, ARCH-C). Works (incl. CJK substrings — byte-level), but **not per-keystroke**.
 **The index option, now measured (ARCH-C):** a DuckDB **FTS/BM25** index on `path` → extrapolated **~27 min build, ~34.9 GB**, query **147–186 ms** (`1080p`/`bluray`/CJK `电影`). So an index *does* take path search 23 s → ~150 ms — but **+34.9 GB** (≈ the rejected Tantivy file index's whole cost) and 🚨 **NOT CJK-robust**: DuckDB FTS does **no CJK segmentation**, so it matched the exact `电影` token but a sub-token CJK query misses. ⟹ **`ILIKE` is the only CJK-*correct* substring option (but ~23 s); BM25 is fast but ASCII-token-only.** Interactive **AND** CJK-correct path search needs a **CJK-aware tokenizer** — the genuine, narrow Tantivy(path-only) carve-out (ARCH-A §7), gated on an explicit product requirement.
 
-**`collapse:path` serving contract:** do not serve broad path collapse by asking
-DuckDB to scan and group the full `path` column. Use L3 as the first-pass
-candidate engine: the per-torrent path-bag ngram index returns candidate
-`info_hash` values, then DuckDB/blob hydration exact-refines those candidates
-with the real substring and any structured filters. Exact global counts for
-broad path substrings are estimates or background/cache work, not the request
-path.
+**Rare/exhaustive path serving contract:** do not serve broad path search or
+`collapse:path` by asking DuckDB to scan and group the full `path` column. Use
+L3 as the first-pass candidate engine whenever the query can provide a literal
+substring/ngram prefilter: the per-torrent path-bag ngram index returns
+candidate `info_hash` values, then DuckDB/blob hydration exact-refines those
+candidates with the real substring/regex and any structured filters. Regex
+queries must extract a required literal/ngram before they use the interactive
+path; a regex with no selective literal remains a batch/offline scan. Exact
+global counts for broad path substrings are estimates or background/cache work,
+not the request path.
 
 ### 2.6 BEP-52 per-file merkle / content-identity dedup — **🚨 NEEDS NEW DATA**
 *"find the same file across torrents by cryptographic identity (not path/size collision)", "verify a file's piece layer".*
@@ -135,13 +149,13 @@ Needs: `extension, size, info_hash`. Tier: **measured 2,734 ms** (the `count(DIS
 | Multi-file / season-packs (2.1) | ✅ | — | files(ih,ext,size,path) | **1.32 s** → **<35 ms** via `per_torrent_ext` rollup |
 | Time-trends / analytics (2.2) | ✅ | — | files + **dim.published_at** | ~1.3 s |
 | Content/video JOINs (2.3) | ✅ | — | files + **dim.content_*/video_***; **seeders → live PG** | ≤1.3 s |
-| Dedup / find-by-filename (2.4) | ✅ | — | files(path,size,ih) | ⚠️ **134 s — BATCH, not interactive** |
-| Fuzzy / regex path (2.5) | ✅ | — | files.path + L3 candidates for `collapse:path` | best-effort (~0.08 s…23 s); BM25 index → 150 ms @ **+34.9 GB**, ASCII-only; fast broad collapse routes L3 candidates → exact refine |
+| Dedup / find-by-filename (2.4) | ✅ | — | files(path,size,ih) + materialized duplicate rollup | raw GROUP BY **134 s**; interactive only from scheduled/cache rollup |
+| Fuzzy / regex path (2.5) | ✅ | — | files.path + L3 candidates for path/collapse | best-effort (~0.08 s…23 s); BM25 index → 150 ms @ **+34.9 GB**, ASCII-only; fast broad path routes L3 candidates → exact refine; literal-free regex stays batch |
 | **BEP-52 per-file merkle (2.6)** | ✅ *(after)* | **🚨 yes — blob bump + re-export** | files.**merkle_root** | ~1.3 s once present |
 | Quality heuristics (2.7) | ✅ | — | files + dim | ≤1.3 s |
 | Faceting (2.8) | ✅ | — | files + `per_ext` rollup | **2.73 s** → **<35 ms** via `per_ext` rollup |
 
-**All 8 classes = new SQL on what ARCH-A exports today** (given the `torrents` dim + `path` column); only per-file merkle/mtime needs new data (one-shot capture + re-export, not a per-query cost). Two latency caveats from ARCH-C's measurements: **(a)** the `per_ext` + `per_torrent_ext` rollups (+~1.4 GB, emitted by the refresh Job) take season-packs/faceting/collapse/counts/histograms to **<35 ms**; **(b)** cross-torrent dup-by-(path,size) is a **134 s batch** job (cache it, don't serve it live) and path-FTS is best-effort/CJK-limited. The fast `collapse:path` composition is not "more DuckDB"; it is L3 candidate generation followed by exact DuckDB/blob refinement.
+**All 8 classes = new SQL on what ARCH-A exports today** (given the `torrents` dim + `path` column); only per-file merkle/mtime needs new data (one-shot capture + re-export, not a per-query cost). Two latency caveats from ARCH-C's measurements: **(a)** the `per_ext` + `per_torrent_ext` rollups (+~1.4 GB, emitted by the refresh Job) take season-packs/faceting/collapse/counts/histograms to **<35 ms**; **(b)** cross-torrent dup-by-(path,size) and broad path substring/regex need a different serving shape. Duplicate discovery becomes fast only from a scheduled materialized rollup/cache; broad path search becomes fast only via L3 candidate generation followed by exact DuckDB/blob refinement.
 
 ---
 
