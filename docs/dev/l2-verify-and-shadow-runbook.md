@@ -131,7 +131,7 @@ now 3 GB engine / 8 Gi container).
 **Latency note:** ~~unsorted v1 base: finds 11–18 s vs the 10 s deadline~~ —
 the external sort SHIPPED and ran in prod (2026-06-11): finds now 0.75–3.4 s,
 counts <1 s. Trade-off + the collapse regression it exposed (info_hash
-locality; the l2-10 batch-probe fix) and a watchdog bug: see
+locality; the l2-10 batch-probe fix) and the l2-11 watchdog fix: see
 [`l2-sorted-layout-results.md`](./l2-sorted-layout-results.md).
 
 ## 4. The deletion audit (closes delta stub #5)

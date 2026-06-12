@@ -1,6 +1,6 @@
 # L2 sorted layout — production results (the external sort, and what it traded away)
 
-**Date:** 2026-06-11 · **Status:** measured in production. External sort shipped as image `l2-9` (fork `5b36aab4`); batch-probe fix shipped as image `l2-10` (fork `48d9c73b`, digest `sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`).
+**Date:** 2026-06-11 · **Status:** measured in production. External sort shipped as image `l2-9` (fork `5b36aab4`); batch-probe fix shipped as image `l2-10` (fork `48d9c73b`, digest `sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`); watchdog fix shipped as image `l2-11` (fork `48af5041`, digest `sha256:d2effbdff6e6df49dbe051abb9df706aea1e8cd59feb7b1be1e5e3737ce3ba7b`).
 **Closes:** dv2 stub #3 (the spilling external sort). **Parent:** [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) · ARCH-C ([`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md), the design's source).
 
 ## What ran
@@ -90,16 +90,26 @@ reasons only: the known `facet:video` `avi +10` dup-path residue, plus two
 `facet:>1g`). A frozen-snapshot run is still the strict DROP gate; this live
 run is the post-rollout parity/perf smoke.
 
-## Watchdog bug (separate, production-relevant)
+## Watchdog bug fixed (`l2-11`, #75)
 
-The 582 s collapse ran under a **240 s** test deadline *uninterrupted* — the
-`InterruptHandle` watchdog (`duck.rs::with_conn`) did not kill it. At the 10 s
-production deadline the same mechanism DID fire earlier in the day (the
-pre-sort `find:path` abort), so the failure is shape- or duration-dependent —
-possibly the interrupt handle's interaction with `try_clone`'d connections, or
-DuckDB only polling interrupts at certain pipeline boundaries (the hash
-aggregate + spill phase). **The deadline is the sidecar's production
-protection; needs a repro + fix.** Tracked as a follow-up.
+The 582 s collapse ran under a **240 s** test deadline *uninterrupted* — the old
+`InterruptHandle` watchdog (`duck.rs::with_conn`) was cooperative only, blocked
+the caller until DuckDB eventually returned, and returned late success/error
+through most call sites.
+
+`l2-11` runs each DuckDB query on a worker thread. The caller waits only for the
+configured deadline, interrupts the checked-out connection on timeout, returns a
+typed `query exceeded deadline` error mapped to gRPC `DEADLINE_EXCEEDED`, and
+keeps the connection out of the pool until DuckDB actually unwinds.
+
+Live repro/proof on HEL1:
+* `l2-10`, production 10 s deadline, `collapse:path` (`S01E01`, limit 50):
+  returned only after the long interrupt path as gRPC `Internal`
+  (`query exceeded deadline: INTERRUPT Error: Interrupted!`); total shadow wall
+  time was **180.66 s** including the PG comparison leg.
+* `l2-11`, same shape via direct gRPC: returned `DeadlineExceeded` /
+  `query exceeded deadline` in **10.35 s**; pod remained Ready and
+  `HealthCheck` returned `SERVING_STATUS_SERVING`.
 
 ## Operational notes
 
