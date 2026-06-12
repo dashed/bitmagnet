@@ -2,8 +2,8 @@
 
 **Author:** `dv2-l2` (team `bitmagnet-deploy`, task #2 — BUILD wave, local code only)
 **Branch/bookmark:** `feat/l2-filesearch` (off `feat/file-grained-search`; **not** rebased onto the `rust_rewrite` git-chain — `feat/rust-infrastructure` is 8 commits behind `rust-rewrite-plan`, a known pending rebase, and this work stays independent of it).
-**Date:** 2026-06-10
-**Status:** Skeleton-with-critical-paths COMPLETE. `cargo build` + `cargo test` green on the default workspace (no DuckDB). The production DuckDB engine compiles behind a feature flag (see §2). Nothing deployed/applied.
+**Date:** 2026-06-12
+**Status:** Historical build notes plus production follow-up. The crates, verify/shadow tooling, sorted export, delta freshness loop, l2-10 batch-probe fix, and l2-11 hard deadline fix are built; l2-11 is deployed on HEL1 and proven over a production window. Default workspace tests still avoid DuckDB; production images build the feature-gated DuckDB paths (see §2).
 
 > Implements **L2** of the prove-then-retire plan ([`L2-duckdb-parquet-search-rust-spec.md`](./L2-duckdb-parquet-search-rust-spec.md)). L2 runs *beside* the live `torrent_files` path, proves parity, and only then becomes primary; the `torrent_files` DROP stays deferred until every replacement layer is proven live (the standing sequencing constraint).
 
@@ -93,7 +93,7 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 - `delta   --watermark <epoch> --deleted-file <f>` — minute carve + tombstone + watermark advance + swap.
 - `compact` — full rebuild + empty-delta reset.
 - `from-hex --input <psv>` — OFFLINE smoke (no DB), the CI/local path.
-- `verify` — **STUB** (agg-vs-`torrent_files` parity, Job A/B; see §5 + L2-P0 spec §7).
+- `verify` — full-corpus blob-vs-`torrent_files` parity checker (Job A/B; see §5 + L2-P0 spec §7).
 
 `bitmagnet-filesearch` (env `BITMAGNET_FILESEARCH_ADDR=:50052`, `BITMAGNET_PARQUET_ROOT`, concurrency/deadline/threads/memory).
 
@@ -143,6 +143,13 @@ v2-shadow --pg <restore-dsn> --sidecar 127.0.0.1:50052 --pairs v2_pairs.json --w
 ```
 ~~The `v2-shadow` driver itself is **not** built here (it's a deploy-wave harness); the sidecar side it drives **is**.~~ ✅ **BUILT (2026-06-10):** the `bitmagnet-shadow` workspace crate (bin `v2-shadow`) implements exactly this — five shapes, exact comparison (ordered rows/groups, counts incl. the `estimated` flag failing the gate, facet maps), `COLLATE "C"`/hex/ILIKE-escape mirror rules, CSV + non-zero exit on mismatch, a built-in suite covering every sidecar routing class plus `--pairs` JSON. See [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md). The Go in-request shadow for L2a is moot — the JSONB gate already flipped with direct SQL parity proven.
 
+> **2026-06-12 status:** GATE A passed full corpus
+> (48,195,834/48,195,834 exact, `decode_errors=0`), frozen GATE C is accepted
+> (12/13 exact plus the documented dup-path superset), and l2-11 passed a live
+> prod window: readiness stable, hard 10s `DEADLINE_EXCEEDED` on pathological
+> path scans, minute delta freshness healthy, and live shadow residue limited to
+> dup-path/freshness drift. Path-query acceleration remains L3 work.
+
 ---
 
 ## 7. V3 — first production base export = the 0-errors validation
@@ -157,7 +164,14 @@ Run: `bitmagnet-parquet base --dsn <dsn> --root <root> --fail-on-decode-error` �
 
 ---
 
-## 8. Homelab deploy deltas (DESCRIBED — for the deploy wave, not applied)
+## 8. Homelab deploy deltas (historical plan; now applied in homelab-infra)
+
+The production manifests/role now live in `homelab-infra` as
+`ansible/roles/bitmagnet-filesearch` and
+`docs/bitmagnet/bitmagnet-l2-filesearch-deploy.md`. The original plan below is
+kept as design context; actual deployment uses the HEL1 PVC, service `:50052`,
+minute refresh CronJob, deletion audit, self-reload, sorted compact export, and
+l2-11 image/digest documented there.
 
 Model on the existing `roles/bitmagnet-search` (Tantivy sidecar). New role **`roles/bitmagnet-filesearch`**:
 

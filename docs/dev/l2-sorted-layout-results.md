@@ -1,6 +1,6 @@
 # L2 sorted layout — production results (the external sort, and what it traded away)
 
-**Date:** 2026-06-11 · **Status:** measured in production. External sort shipped as image `l2-9` (fork `5b36aab4`); batch-probe fix shipped as image `l2-10` (fork `48d9c73b`, digest `sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`); watchdog fix shipped as image `l2-11` (fork `48af5041`, digest `sha256:d2effbdff6e6df49dbe051abb9df706aea1e8cd59feb7b1be1e5e3737ce3ba7b`).
+**Date:** 2026-06-12 · **Status:** measured and proven in production. External sort shipped as image `l2-9` (fork `5b36aab4`); batch-probe fix shipped as image `l2-10` (fork `48d9c73b`, digest `sha256:b8e68654f0450889ec205137c395ac15e4c554b5d7487b3dd6ef5a36fac4a049`); watchdog fix shipped as image `l2-11` (fork `48af5041`, digest `sha256:d2effbdff6e6df49dbe051abb9df706aea1e8cd59feb7b1be1e5e3737ce3ba7b`). l2-11 passed the 2026-06-12 prod observation window: readiness stable, hard 10s deadline behavior, healthy delta freshness, and live shadow residue limited to the documented dup-path/freshness classes.
 **Closes:** dv2 stub #3 (the spilling external sort). **Parent:** [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) · ARCH-C ([`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md), the design's source).
 
 ## What ran
@@ -111,6 +111,30 @@ Live repro/proof on HEL1:
   `query exceeded deadline` in **10.35 s**; pod remained Ready and
   `HealthCheck` returned `SERVING_STATUS_SERVING`.
 
+### l2-11 prod-window proof (2026-06-12)
+
+Observed from **01:18:38Z to 01:32:51Z** on HEL1:
+
+* Deployment stayed `1/1` Available; pod
+  `bitmagnet-filesearch-d57454d78-m88w2` stayed Ready/Running with **0**
+  restarts; the service endpoint stayed `10.42.2.33:50052`.
+* Image/runtime digest stayed pinned to
+  `sha256:d2effbdff6e6df49dbe051abb9df706aea1e8cd59feb7b1be1e5e3737ce3ba7b`.
+* Direct `collapse:path` (`S01E01`, limit 50) returned gRPC
+  `DeadlineExceeded` / `query exceeded deadline` in **10.36-10.37 s**;
+  `HealthCheck` stayed `SERVING_STATUS_SERVING`.
+* Delta freshness stayed inside SLA: refresh jobs completed every minute in
+  **4-5 s**, reloads advanced monotonically
+  (`delta v1781227141 -> v1781227921`), `decode_errors=0`, `clean=true`, final
+  `delta_mark=2026-06-12T01:31:31Z`, final `delta_age_seconds=50-54`.
+* Live structured `v2-shadow` excluding path-query shapes was **9/11 exact**.
+  The two accepted mismatches were the documented `facet:video` `avi +10`
+  dup-path legacy-PK residue and moving-prod freshness drift (`facet:>1g`
+  moved from `mkv -3` to `mp4 -2` after the next delta).
+* A path-query shadow leg (`find:path 1080p`) hit the documented unprunable
+  path class: PG spent **144 s**, while the sidecar correctly enforced the
+  10 s deadline.
+
 ## Making `collapse:path` fast: route through L3, not a DuckDB scan
 
 The 582 s result is not a generic collapse problem; it is an unindexed path
@@ -158,9 +182,9 @@ Two related shapes are intentionally **not** request-path DuckDB scans:
 
 ## Operational notes
 
-* The two live-run "mismatches" are fully understood: the known +10 dup-path
-  avi residue ([runbook §5](./l2-verify-and-shadow-runbook.md)) and ±1–6-file
-  crawl drift inside the ≤2 min freshness window — expected off-snapshot.
+* Live-run mismatches are fully understood: the known +10 dup-path avi residue
+  ([runbook §5](./l2-verify-and-shadow-runbook.md)) and small crawl drift inside
+  the ≤2 min freshness window — expected off-snapshot.
 * Generation housekeeping is now a real item: each compact leaves the previous
   ~13–21 G base behind, and the minute delta adds ~1,440 tiny dirs/day — prune
   non-current dirs after compacts (manual today; automate in `publish()`).

@@ -1,6 +1,6 @@
 # L2 verify + v2-shadow — the DROP-gate proof runbook
 
-**Date:** 2026-06-10 · **Status:** tooling BUILT (this commit); the gate runs are pending.
+**Date:** 2026-06-12 · **Status:** L2 gate tooling built, GATE A passed, frozen GATE C accepted, and l2-11 proven live over a production window. The DROP remains deferred until the remaining replacement layers, especially L3 pathsearch, are deployed and proven.
 **Parent:** [`dv2-l2-build-notes.md`](./dv2-l2-build-notes.md) (§5 stubs 2/5 + §6 are closed by this) · [`L2-P0-agg-torrent-ext-and-checker-spec.md`](./L2-P0-agg-torrent-ext-and-checker-spec.md) §7 (adapted — see below) · sequencing rule: [`torrent-files-replacement-options.md`](./torrent-files-replacement-options.md) §"The hard rule".
 
 The `torrent_files` DROP needs a **proof**, not a vibe. This doc is the map of that proof: what each tool checks, how the pieces compose, and the exact gate criteria.
@@ -134,6 +134,31 @@ counts <1 s. Trade-off + the collapse regression it exposed (info_hash
 locality; the l2-10 batch-probe fix) and the l2-11 watchdog fix: see
 [`l2-sorted-layout-results.md`](./l2-sorted-layout-results.md).
 
+### l2-11 live prod-window result (2026-06-12)
+
+This is not a replacement for same-snapshot GATE C; it proves the deployed
+l2-11 service behaves correctly while prod is moving.
+
+Window: **2026-06-12T01:18:38Z -> 01:32:51Z**.
+
+* Readiness stayed stable: Deployment `1/1` Available, pod
+  `bitmagnet-filesearch-d57454d78-m88w2` Ready/Running, **0** restarts,
+  endpoint `10.42.2.33:50052`, no warning events.
+* Deadline behavior stayed hard: direct `collapse:path` (`S01E01`, limit 50)
+  returned gRPC `DeadlineExceeded` / `query exceeded deadline` in
+  **10.36-10.37 s**; HealthCheck stayed `SERVING_STATUS_SERVING`.
+* Freshness stayed healthy: refresh jobs every minute, **4-5 s** duration,
+  `decode_errors=0`, `clean=true`, sidecar reloads every minute around
+  `:15.727Z`, deltas advanced `v1781227141 -> v1781227921`, final
+  `delta_mark=2026-06-12T01:31:31Z`, final `delta_age_seconds=50-54`.
+* Live structured `v2-shadow`, excluding path-query shapes, was **9/11 exact**.
+  The accepted residues were the known `facet:video` `avi +10` dup-path
+  superset and moving-prod freshness drift (`facet:>1g` changed from `mkv -3`
+  to `mp4 -2` after the next delta).
+* Path-query shadow is intentionally deadline-guarded until L3 candidate routing
+  exists: `find:path 1080p` took PG **144 s** and the sidecar returned the 10 s
+  deadline.
+
 ## 4. The deletion audit (closes delta stub #5)
 
 `deleted_torrents` (bytea PK + `deleted_at`, upsert) is fed by an
@@ -171,7 +196,10 @@ window (changes + audit deletes) and idempotently replaces `delta/current`;
 Tick cost grows with the window until a compaction folds it into a new base —
 schedule compacts accordingly (~18.5 min each; the delta stays trivially small
 for days at current crawl rates). Verified live: consecutive ticks grow
-monotonically (39→56→70; after origin heal 1,589→1,617), origin pinned.
+monotonically (39→56→70; after origin heal 1,589→1,617), origin pinned. The
+2026-06-12 l2-11 window confirmed the same contract under serving load:
+`delta v1781227141 -> v1781227921`, final `delta_age_seconds=50-54`, and recent
+refresh logs stayed `decode_errors=0 clean=true`.
 
 ## 5. Fixed alongside (found BY this work): DuckEngine rollup routing
 
@@ -240,9 +268,11 @@ every no-blob torrent has no stray `torrent_files` rows (the backfill's
 2. ✅ DONE — serving role deployed to HEL1 (PVC Bound, Service, CNPs; pod
    NotReady-by-design pending the first export).
 3. ✅ DONE — **GATE A PASSED** (48,195,834/48,195,834 exact, 0 mismatches, 0 decode errors; 2026-06-11).
-4. Supervised base export (V3: `decode_errors=0`) → sidecar Ready.
-5. **GATE C** (`v2-shadow`) on the HEL1 restore snapshot; optionally an
-   indicative run against prod + delta freshness.
-6. `make bitmagnet-deleted-audit` + flip the delta CronJob on → freshness SLA.
-7. Only after A+C pass and the layers run proven-in-prod does the DROP
-   conversation start. The DROP stays deferred indefinitely until then.
+4. ✅ DONE — supervised compact export (V3: `decode_errors=0`) published the
+   first serving generation and the sidecar became Ready.
+5. ✅ DONE — **GATE C** (`v2-shadow`) on a frozen snapshot: 12/13 exact plus the
+   accepted, bounded dup-path superset.
+6. ✅ DONE — deletion audit + minute delta CronJob live; l2-11 prod-window proof
+   confirmed freshness, readiness, deadline behavior, and live shadow residue.
+7. Next replacement-layer work: deploy/prove L3 pathsearch for fast path
+   candidates, then revisit the DROP plan. The DROP stays deferred until then.

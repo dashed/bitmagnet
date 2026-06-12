@@ -1,6 +1,6 @@
 # Replacing `torrent_files` — the options (one-page overview)
 
-**Date:** 2026-06-09 · **Status:** living summary. Every number below is **measured** (HEL1 throwaway restore / deployed FSN1), not estimated.
+**Date:** 2026-06-12 · **Status:** living summary. Every number below is **measured** (HEL1 restore/sidecar, FSN1 builder, or live K3s prod), not estimated.
 **This is the map.** Each option links to its authoritative deep doc; the full narrative is the [master design+results doc](./per-file-search-master-design-and-results.md); the footprint math is [`space-savings-vs-torrent-files.md`](./space-savings-vs-torrent-files.md).
 
 ---
@@ -25,7 +25,7 @@ The answer is a **layered stack** — stack L1 → L2 → L3, drop `torrent_file
 | Layer | What | Size | Covers | Status |
 |---|---|---|---|---|
 | **L1 — Hybrid Blob** | `files_data` = zstd(msgpack `{i,p,e,s}`) per torrent (~16 GB, 4.96×) + `torrent_file_summary` (~3.3 GB) + `file_extensions` JSONB (+119 MB) | **~19 GB** | (a)(b)(c) | ✅ **DEPLOYED + verified** (real-time dual-write) |
-| **L2 — DuckDB-on-Parquet** | blobs → sorted Parquet (per-file) + native rollup tables; gRPC sidecar (HEL1) | **~3.9–12.3 GB** | (d) structured | 🛠 **BUILT, deploy gated** — image `l2-3` (routing + parquet-extension fixed; `l2-1`/`l2-2` cannot serve), homelab serving role, `verify` + `v2-shadow` gate tooling, deletion audit; gates per [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md) |
+| **L2 — DuckDB-on-Parquet** | blobs → sorted Parquet (per-file) + native rollup tables; gRPC sidecar (HEL1) | **~3.9–12.3 GB** steady-state, sorted fact currently ~21 GB | (d) structured | ✅ **DEPLOYED + PROVEN** — image `l2-11` on HEL1, GATE A passed, frozen GATE C accepted (known dup-path superset), minute freshness live, hard 10s deadline behavior proven; path-query acceleration deferred to L3 |
 | **L3 — Tantivy ngram** | per-torrent path-bag char-ngram(2,3) `WithFreqs` + delete-key | **14.0 GiB (BUILT, keyed)** | (d) realtime free-text path + fast `collapse:path` candidates | 🟢 **GO (user decision 2026-06-09)** — built ([PSX](./psx-campaign-RESULTS.md)) + concurrency-validated ([CB](./cb-campaign-RESULTS.md)); deploy pending |
 
 Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parity-architecture.md); L3 = [`pathsearch-master-investigation.md`](./pathsearch-master-investigation.md) + [`pathsearch-microbench-RESULTS.md`](./pathsearch-microbench-RESULTS.md).
@@ -39,7 +39,7 @@ Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parit
 - ❌ **`agg_torrent_ext` PG rollup** — +9.5 GB + delta-upsert pipeline + checker; 80× costlier. Kept only as a *future* option if an `ext ∧ max_size` torrent-grain query is ever needed (JSONB carries no size).
 
 **(d) Per-file structured search** *(RUN-2/3/4, ARCH-C)*
-- ✅ **DuckDB-on-Parquet** — +3.9–12.3 GB; every realistic query 0.015–1.3 s (paginated mkv>1GB 35 ms; collapse 32 ms w/ rollups; ranges via row-group pruning). Freshness ~minute (base+delta) or seconds (PG-tail).
+- ✅ **DuckDB-on-Parquet** — +3.9–12.3 GB steady-state, sorted fact currently ~21 GB; deployed sidecar shapes are in the **0.37–3.4 s** class for structured find/collapse/count/facet, with pathological path scans guarded by the 10 s deadline. Freshness is minute-delta + self-reload, proven at `delta_age_seconds=50-54`.
 - ❌ **slim per-file PG table** — +78–113 GB (RUN-3). Defeats the purpose.
 - ❌ **per-file structured Tantivy index** — +14–25 GB, no latency win (scan-bound ~1.3 s) (RUN-4).
 
@@ -49,7 +49,7 @@ Deep docs: L2 = [`duckdb-parquet-parity-architecture.md`](./duckdb-parquet-parit
 - ❌ **per-file ngram** (~90 GB, 873 M docs) — footprint-tripler; latency breaks at scale.
 - ❌ **edge-ngram** — bigger in prod (21.3 GiB) *and* misses substrings (`264`→0.19 recall).
 - ❌ **external engines** — Meilisearch/Typesense are *prefix not infix*; Quickwit misses local <50 ms; pg_trgm loses 3 ways; **Manticore** the lone gated-spike candidate.
-- **Whole layer NO-GO by default** — no demonstrated demand; purely additive; never gates the DROP.
+- **Layer status:** GO for this homelab track. It is still additive for ordinary structured L2 search, but it is the chosen candidate engine for fast path free-text and `collapse:path` before any DROP plan is revisited.
 
 ---
 
@@ -68,16 +68,15 @@ The L3 line *used* to read −55 % on the per-FILE index; **PS-MB1 measured (and
 
 ## The hard rule
 
-**Don't drop `torrent_files` until each needed replacement layer is DEPLOYED *and* PROVEN in production.** Order: **L1 ✅ → L2 (deploy + prove parity/latency) → L3 (now a GO; bench-built, deploy after/with L2) → DROP last, gated.** `torrent_files` stays the live fallback/source-of-truth throughout; the **DROP is deferred indefinitely**.
+**Don't drop `torrent_files` until each needed replacement layer is DEPLOYED *and* PROVEN in production.** Order: **L1 ✅ → L2 ✅ → L3 (now a GO; bench-built, deploy/prove next) → DROP last, gated.** `torrent_files` stays the live fallback/source-of-truth throughout; the **DROP is deferred indefinitely**.
 
-**Next concrete step toward the drop:** deploy and prove **L2** (DuckDB-on-Parquet) in prod; L3 deploy follows per [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md).
+**Next concrete step toward the drop:** deploy and prove **L3 pathsearch** per [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md), then wire path-query/collapse candidate routing through L3 -> blob/L2 exact refine. Keep L2 compaction/pruning as operational housekeeping.
 
 ---
 
 ## Measurement-completeness audit (2026-06-09) — the benchmark phase is DONE
 
 Every architectural decision above now rests on a built artifact or a measured number (L1 verified in prod; the DROP gate, L2 latency/size/freshness/fidelity, the L3 index, agg's retirement, and the FIND-2 wall+fix all measured — see [`psx-campaign-RESULTS.md`](./psx-campaign-RESULTS.md) for the final campaign). **No further research benchmarks are needed to proceed.** What remains, by bucket:
-
-1. ~~Optional — concurrency/load~~ ✅ **MEASURED (CB campaign, 2026-06-10 — [`cb-campaign-RESULTS.md`](./cb-campaign-RESULTS.md)): single-client latency survives production concurrency.** L3: graceful to 24 readers (p95 ~1.9× at 24× load); the live writer is invisible to readers (≤1.05×), fresh-lag sub-ms, supersession 5.2 ms under load; **deployable keyed index = 14.0 GiB**. L2 DuckDB: cursors parallelize; the rollup hot path holds `<250 ms` to N=16; heavy `COUNT(DISTINCT)` shapes route through rollups; sidecar config = 1 instance + cursor pool, per-query `threads≈4`, run warm. The only remaining unexercised layer is the **gRPC wrapper** — validated at deploy.
-2. **Deploy-phase validations** (arrive *with* the deployment, not separate benches): ~~prod ext-parity confirm before flipping the JSONB gate~~ ✅ DONE (Tier-1+2, 0 mismatches; gate FLIPPED + verified, 2026-06-10) · the L2 dual-read shadow vs `torrent_files` (the actual DROP gate) — **harness BUILT (`v2-shadow`) + blob⟺torrent_files checker BUILT (`bitmagnet-parquet verify`), runs pending** ([runbook](./l2-verify-and-shadow-runbook.md)) · full-corpus blob-export "0 errors across all 16.97 M" (proven by the real production export — pending, supervised) · per-torrent live-writer freshness (reasoning-settled; confirm when the writer ships).
+1. ~~Optional — concurrency/load~~ ✅ **MEASURED (CB campaign, 2026-06-10 — [`cb-campaign-RESULTS.md`](./cb-campaign-RESULTS.md)): single-client latency survives production concurrency.** L3: graceful to 24 readers (p95 ~1.9× at 24× load); the live writer is invisible to readers (≤1.05×), fresh-lag sub-ms, supersession 5.2 ms under load; **deployable keyed index = 14.0 GiB**. L2 DuckDB: cursors parallelize; the rollup hot path holds `<250 ms` to N=16; heavy `COUNT(DISTINCT)` shapes route through rollups; sidecar config = 1 instance + cursor pool, per-query `threads≈4`, run warm. The gRPC wrapper is now validated in prod by the l2-11 window.
+2. **Deploy-phase validations** (arrive *with* the deployment, not separate benches): ~~prod ext-parity confirm before flipping the JSONB gate~~ ✅ DONE (Tier-1+2, 0 mismatches; gate FLIPPED + verified, 2026-06-10) · ~~the L2 dual-read shadow vs `torrent_files`~~ ✅ DONE/ACCEPTED (GATE A passed; frozen GATE C 12/13 + documented dup-path superset; l2-11 live shadow residue limited to dup-path/freshness drift) · ~~full-corpus blob-export "0 errors across all 16.97 M"~~ ✅ DONE by real production compact/export (`decode_errors=0`) · per-torrent live-writer freshness ✅ confirmed by minute delta CronJob and l2-11 prod-window `delta_age_seconds=50-54`.
 3. **Implementation, not measurement:** the FIND-2 popularity-sort default (product call + small Go change) · FB-B1a/c/d hardening with correctness tests · the L3 sidecar + GraphQL/UX per [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md) (incl. the node-hostname fix and the unimplemented `--follow` mode).
