@@ -11,10 +11,15 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 )
 
 type TorrentContentQuery struct {
 	TorrentContentSearch search.TorrentContentSearch
+	// Pathsearch is the L3 exact-refine composer, or nil when the pathsearch
+	// feature is disabled. When nil (or its typeahead flag is off) Search takes
+	// the existing PostgreSQL path unchanged.
+	Pathsearch *pathsearch.Composer
 }
 
 type TorrentContent struct {
@@ -130,22 +135,7 @@ func (t TorrentContentQuery) Search(
 	ctx context.Context,
 	input TorrentContentSearchQueryInput,
 ) (TorrentContentSearchResult, error) {
-	options := []q.Option{
-		q.DefaultOption(),
-		search.TorrentContentCoreJoins(),
-		search.HydrateTorrentContentContent(),
-		search.HydrateTorrentContentTorrent(),
-	}
-	options = append(options, input.Option())
 	hasQueryString := input.QueryString.Valid
-
-	if input.Facets != nil {
-		options = append(options, torrentContentFacetsOption(*input.Facets))
-	}
-
-	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
-		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
-	}
 
 	fullOrderBy := maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection]()
 
@@ -167,6 +157,44 @@ func (t TorrentContentQuery) Search(
 		fullOrderBy.Set(field, direction)
 	}
 
+	// L3 path-typeahead route (flag-gated). TypeaheadEnabled() is nil-safe: with
+	// the pathsearch feature off it returns false and this branch is skipped
+	// entirely, so the PostgreSQL path below runs byte-identically to before.
+	// served=false (ineligible / fail-loud fallback) also falls through to it.
+	if t.Pathsearch.TypeaheadEnabled() && hasQueryString && t.Pathsearch.Eligible(input.QueryString.String) {
+		result, served, err := t.Pathsearch.TorrentContent(
+			ctx,
+			pathSearchFilters(input),
+			torrentContentBaseOptions(input, fullOrderBy),
+			searchPageLimit(input.SearchParams),
+			searchPageOffset(input.SearchParams),
+			nil, // L3 sort is recall-selection only; PG applies the real order below
+		)
+		if err != nil {
+			return TorrentContentSearchResult{}, err
+		}
+
+		if served {
+			return transformTorrentContentSearchResult(result)
+		}
+	}
+
+	options := []q.Option{
+		q.DefaultOption(),
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+	options = append(options, input.Option())
+
+	if input.Facets != nil {
+		options = append(options, torrentContentFacetsOption(*input.Facets))
+	}
+
+	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
+		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
+	}
+
 	options = append(options, search.TorrentContentFullOrderBy(fullOrderBy).Option())
 
 	result, resultErr := t.TorrentContentSearch.TorrentContent(ctx, options...)
@@ -175,6 +203,86 @@ func (t TorrentContentQuery) Search(
 	}
 
 	return transformTorrentContentSearchResult(result)
+}
+
+// torrentContentBaseOptions builds the search options for the L3-routed query:
+// the same joins/hydration/facets/info-hash filters and user ordering as the
+// normal path, but WITHOUT pagination and WITHOUT the free-text tsquery (L3 owns
+// the path text and the composer paginates in Go after exact-refine).
+func torrentContentBaseOptions(
+	input TorrentContentSearchQueryInput,
+	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
+) []q.Option {
+	options := []q.Option{
+		q.DefaultOption(),
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+
+	if input.Facets != nil {
+		options = append(options, torrentContentFacetsOption(*input.Facets))
+	}
+
+	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
+		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
+	}
+
+	options = append(options, search.TorrentContentFullOrderBy(fullOrderBy).Option())
+
+	return options
+}
+
+// pathSearchFilters extracts the L3 exact-refine ingredients from the search
+// input: the path free-text plus any extensions implied by a file-type facet
+// (expanded via model.FileType.Extensions()).
+func pathSearchFilters(input TorrentContentSearchQueryInput) pathsearch.Filters {
+	f := pathsearch.Filters{Query: input.QueryString.String}
+
+	if input.Facets == nil {
+		return f
+	}
+
+	ft, ok := input.Facets.TorrentFileType.ValueOK()
+	if !ok || ft == nil {
+		return f
+	}
+
+	fileTypes, ok := ft.Filter.ValueOK()
+	if !ok {
+		return f
+	}
+
+	for _, fileType := range fileTypes {
+		f.Extensions = append(f.Extensions, fileType.Extensions()...)
+	}
+
+	return f
+}
+
+// searchPageLimit / searchPageOffset replicate q.SearchParams.Option's page-window
+// arithmetic so the composer can paginate in Go (the L3 route does not push the
+// page window into PostgreSQL).
+func searchPageLimit(s q.SearchParams) uint {
+	if s.Limit.Valid {
+		return s.Limit.Uint
+	}
+
+	return 0
+}
+
+func searchPageOffset(s q.SearchParams) uint {
+	offset := uint(0)
+
+	if s.Limit.Valid && s.Page.Valid && s.Page.Uint > 0 {
+		offset += (s.Page.Uint - 1) * s.Limit.Uint
+	}
+
+	if s.Offset.Valid {
+		offset += s.Offset.Uint
+	}
+
+	return offset
 }
 
 func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {

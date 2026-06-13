@@ -9,6 +9,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/metrics/torrentmetrics"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/manager"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 )
 
@@ -26,4 +27,8 @@ type Resolver struct {
 	TorrentMetricsClient torrentmetrics.Client
 	Processor            processor.Processor
 	BlockingManager      blocking.Manager
+	// Pathsearch is the L3 exact-refine composer, or nil when the pathsearch
+	// feature is disabled (SEARCH_PATHSEARCH_ENABLED=false). A nil composer means
+	// the GraphQL search layer takes its existing PostgreSQL path unchanged.
+	Pathsearch *pathsearch.Composer
 }

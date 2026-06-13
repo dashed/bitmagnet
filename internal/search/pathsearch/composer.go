@@ -39,6 +39,13 @@ type ComposerConfig struct {
 	// MaxCandidates hard-caps the candidates fetched and blob-decoded per request,
 	// regardless of OversampleFactor. 0 means no cap (not recommended in prod).
 	MaxCandidates uint
+	// TypeaheadEnabled gates the UI path-typeahead route
+	// (SEARCH_PATH_TYPEAHEAD_ENABLED). The master switch is the composer existing
+	// at all (nil composer = pathsearch disabled).
+	TypeaheadEnabled bool
+	// CollapseEnabled gates routing collapse:path through L3 candidates
+	// (SEARCH_PATH_COLLAPSE_L3_ENABLED).
+	CollapseEnabled bool
 }
 
 // Filters carries the typed exact-refine ingredients the call site extracts from
@@ -102,6 +109,18 @@ func NewComposer(
 // server-side broad-gram guard, complementing the UI min-chars/debounce).
 func (c *Composer) Eligible(queryText string) bool {
 	return len(strings.TrimSpace(queryText)) >= c.cfg.MinQueryLength
+}
+
+// TypeaheadEnabled reports whether the UI path-typeahead route is enabled
+// (SEARCH_PATH_TYPEAHEAD_ENABLED). A nil composer (feature off) reports false.
+func (c *Composer) TypeaheadEnabled() bool {
+	return c != nil && c.cfg.TypeaheadEnabled
+}
+
+// CollapseEnabled reports whether collapse:path should route through L3
+// (SEARCH_PATH_COLLAPSE_L3_ENABLED). A nil composer (feature off) reports false.
+func (c *Composer) CollapseEnabled() bool {
+	return c != nil && c.cfg.CollapseEnabled
 }
 
 // candidateBudget sizes the candidate set to fetch/decode for a page window. It

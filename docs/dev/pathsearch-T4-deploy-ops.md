@@ -328,7 +328,15 @@ Feature flags:
 |---|---|---|
 | `SEARCH_PATHSEARCH_ENABLED` | false | enable backend use of L3 |
 | `SEARCH_PATH_TYPEAHEAD_ENABLED` | false | enable UI typeahead |
-| `SEARCH_PATH_COLLAPSE_L3_ENABLED` | false | route `collapse:path` through L3 candidates |
+| `SEARCH_PATH_COLLAPSE_ENABLED` | false | route `collapse:path` through L3 candidates |
+
+These are fields on the `search` config section, so the env var is
+`SEARCH_` + the field name in screaming-snake-case (the loader derives keys via
+`strcase.ToSnake`). The collapse flag is `SEARCH_PATH_COLLAPSE_ENABLED` (not
+`..._L3_...`): `strcase.ToSnake` splits a letter→digit boundary, so a literal
+`L3` token can't be produced; the `L3` is an implementation detail dropped from
+the flag name. A unit test (`searchfx.TestPathsearchEnvVarNames`) pins all three
+names exactly.
 
 The UI should use min-character and debounce guards. Broad single grams are the
 known p95 tail; the fix is UX/backpressure, not a different Tantivy query plan.
