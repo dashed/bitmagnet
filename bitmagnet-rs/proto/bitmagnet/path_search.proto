@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package bitmagnet.v1;
+
+import "bitmagnet/search.proto";
+
+// PathSearchService is the L3 candidate surface for free-text file-path search.
+// It is torrent-grained: one indexed document is one torrent path-bag. Exact
+// file/path semantics are intentionally left to L1 blobs and L2 DuckDB after
+// candidate narrowing.
+
+message PathCandidatesRequest {
+  // Path substring / free text, tokenized by the path ngram analyzer.
+  string query = 1;
+  // Final candidate page size. The server clamps this to a bounded maximum.
+  uint32 limit = 2;
+  // Extra candidates to return for backend exact-refine headroom. A zero value
+  // uses the server default.
+  uint32 oversample = 3;
+  // First recognized sort wins. Supported fields: seeders, size, files_count,
+  // published_at. Unknown or empty sort uses relevance score.
+  //
+  // NOTE: "seeders" sort is INERT until seeders are denormalized into the index
+  // (every doc currently indexes seeders=0); the backend re-ranks candidates by
+  // fresh swarm seeders after hydration, so it must not rely on L3 seeder order.
+  repeated SortBy sort = 4;
+}
+
+message PathCandidate {
+  // 20-byte BitTorrent v1 info hash.
+  bytes info_hash = 1;
+  // Tantivy relevance score. Zero when ordered only by a fast field.
+  float score = 2;
+  // The selected sort value when sorted by a fast field. Zero otherwise.
+  uint64 sort_value = 3;
+}
+
+message PathCandidatesResponse {
+  repeated PathCandidate candidates = 1;
+  // Torrent-doc candidate count, not an exact matching-file count.
+  uint64 candidate_total = 2;
+  // Always true for this service: exact global file counts belong to L2/cache.
+  bool estimated = 3;
+}
+
+message PathSearchHealth {
+  enum ServingStatus {
+    SERVING_STATUS_UNKNOWN = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+  uint64 doc_count = 2;
+  uint64 index_bytes = 3;
+  // Last follow-loop watermark as Unix epoch seconds. Zero when follow is off
+  // or has not completed a tick.
+  int64 watermark_epoch = 4;
+  bool writable = 5;
+}
+
+service PathSearchService {
+  rpc PathCandidates(PathCandidatesRequest) returns (PathCandidatesResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (PathSearchHealth);
+}

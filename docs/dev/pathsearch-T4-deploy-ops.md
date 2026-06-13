@@ -1,7 +1,8 @@
 # PS-T4 - Pathsearch L3: Deploy / Integration / Ops Plan
 
-**Status:** PLAN ONLY - reconciled to the current L3 decision. Nothing
-applied, no image built, no prod change.
+**Status:** PLAN + fork-side implementation started. The Rust proto/schema,
+path-bag server, backfill binary, and follow-loop scaffold exist in the fork;
+no image built and no prod change.
 **Date:** 2026-06-12
 **Mode:** keep-everything. `torrent_files` remains the live
 fallback/source-of-truth until every replacement layer is deployed and proven.
@@ -46,8 +47,9 @@ concurrency, live writer, supersession) -
   HEL1-pinned Deployment, ClusterIP gRPC, node-bound local-path PVC,
   CiliumNetworkPolicy, single-writer backfill discipline, FSN1 -> GHCR build.
   Use a distinct workload name, `bitmagnet-pathsearch`.
-* **Still missing before prod:** fork code for the production pathsearch server,
-  backfill binary, candidate RPC, and `--follow`/watermark polling mode.
+* **Fork status:** the production pathsearch server, backfill binary, candidate
+  RPC, and PG-tail follow-loop scaffold are implemented locally. Backend
+  exact-refine routing, homelab manifests, image build, and prod proof remain.
 
 ---
 
@@ -90,7 +92,7 @@ substring verification and structured filtering."
   -------------------------------------------------------------------------
   Deployment bitmagnet-pathsearch (replicas: 1, strategy: Recreate)
     container: pathsearch-server
-      gRPC :50051, ClusterIP service bitmagnet-pathsearch
+      gRPC :50053, ClusterIP service bitmagnet-pathsearch
       holds the sole Tantivy IndexWriter in steady state
       follows PG by watermark and supersedes torrent docs
 
@@ -293,7 +295,7 @@ message PathSearchHealth {
 `candidate_total` is not an exact file count. Exact file counts and exact path
 matches come from L2 or background caches after candidate narrowing.
 
-Probes can start as `tcpSocket:50051`, matching the existing sidecar pattern.
+Probes can start as `tcpSocket:50053`, matching the existing sidecar pattern.
 Adding standard `grpc.health.v1` later would allow native Kubernetes gRPC
 readiness probes.
 
@@ -306,7 +308,7 @@ flag-gated step.
 
 Required backend composition:
 
-1. Dial `bitmagnet-pathsearch.bitmagnet.svc:50051`.
+1. Dial `bitmagnet-pathsearch.bitmagnet.svc:50053`.
 2. Ask L3 for oversampled `info_hash` candidates.
 3. Exact-refine the real path substring and any `extension`/size filters via L1
    blob decode or L2 DuckDB.
@@ -356,14 +358,15 @@ publish a pathsearch-specific image/tag.
 
 Expected fork deliverables before image build:
 
-* server binary that opens/serves the path-bag index
-* backfill binary for blob -> per-torrent path-bag index
-* `WithFreqs` no-position schema
-* indexed `info_hash` delete key
-* `PathCandidates` RPC
-* HealthCheck RPC
-* PG-tail follow mode
-* env wiring for DSN/index path/poll interval/writer heap
+* ~~server binary that opens/serves the path-bag index~~
+* ~~backfill binary for blob -> per-torrent path-bag index~~
+* ~~`WithFreqs` no-position schema~~
+* ~~indexed `info_hash` delete key~~
+* ~~`PathCandidates` RPC~~
+* ~~HealthCheck RPC~~
+* ~~PG-tail follow mode scaffold~~
+* ~~env wiring for DSN/index path/poll interval/writer heap~~
+* backend exact-refine integration and production image/deploy wiring
 
 Candidate naming:
 
@@ -383,7 +386,7 @@ homelab inventory.
 | workload name | `bitmagnet-search` | `bitmagnet-pathsearch` |
 | PVC | torrent sidecar size | `100Gi`, parent mount `/var/lib/bitmagnet` |
 | deployment | Recreate, one pod | keep Recreate; add follow env and PG egress |
-| container | search server | pathsearch server on `:50051` |
+| container | search server | pathsearch server on `:50053` |
 | backfill job | old torrent/search job | path-bag backfill, one doc/torrent, 2 GiB writer heap |
 | network policy | app ingress optional | keep app ingress disabled until backend flag wiring |
 | PG egress | optional/unused in old static serve | required for PG-tail follow |
@@ -497,6 +500,6 @@ PG, L1, L2, and `torrent_files` are untouched.
 
 ## 18. Current Next Step
 
-Implement and test the fork-side L3 pathsearch pieces against the measured
-contract above, then add the homelab `bitmagnet-pathsearch` role/manifests from
-this reconciled plan. The `torrent_files` DROP stays deferred.
+Next: add backend exact-refine routing and the homelab `bitmagnet-pathsearch`
+role/manifests from this reconciled plan, then build and prove the image in
+prod. The `torrent_files` DROP stays deferred.

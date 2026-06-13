@@ -24,6 +24,10 @@ pub struct TorrentWithBlob {
     /// Number of files, when known (`int4` in PG, cast to `bigint` in SQL —
     /// sqlx errors on an OID-mismatched `i64` read).
     pub files_count: Option<i64>,
+    /// Torrent creation time as Unix epoch seconds. Used by pathsearch as a
+    /// stable sort/debug field; exact result ordering can still be refined by
+    /// the app/PG layer.
+    pub published_at: i64,
     /// Compressed file list (`NULL` when no blob is stored).
     pub files_data: Option<Vec<u8>>,
 }
@@ -45,7 +49,9 @@ impl TorrentWithBlob {
 /// `String` regardless of whether the column is a PostgreSQL enum.
 const STREAM_SQL: &str = "\
 SELECT info_hash, name, size, files_status::text AS files_status, \
-files_count::bigint AS files_count, files_data \
+files_count::bigint AS files_count, \
+CAST(EXTRACT(EPOCH FROM created_at) AS bigint) AS published_at, \
+files_data \
 FROM torrents \
 WHERE ($1::bytea IS NULL OR info_hash > $1) \
 ORDER BY info_hash ASC \
@@ -81,6 +87,7 @@ pub async fn stream_torrents_with_files(
             size: row.try_get("size")?,
             files_status: row.try_get("files_status")?,
             files_count: row.try_get("files_count")?,
+            published_at: row.try_get("published_at")?,
             files_data: row.try_get("files_data")?,
         });
     }
@@ -97,7 +104,9 @@ pub async fn stream_torrents_with_files(
 /// pure-tombstone (no fact rows) torrent vanish.
 const STREAM_CHANGED_SQL: &str = "\
 SELECT info_hash, name, size, files_status::text AS files_status, \
-files_count::bigint AS files_count, files_data \
+files_count::bigint AS files_count, \
+CAST(EXTRACT(EPOCH FROM created_at) AS bigint) AS published_at, \
+files_data \
 FROM torrents \
 WHERE updated_at > to_timestamp($1) \
 AND updated_at <= to_timestamp($2) \
@@ -149,6 +158,7 @@ pub async fn stream_changed_torrents(
             size: row.try_get("size")?,
             files_status: row.try_get("files_status")?,
             files_count: row.try_get("files_count")?,
+            published_at: row.try_get("published_at")?,
             files_data: row.try_get("files_data")?,
         });
     }
@@ -364,6 +374,7 @@ mod tests {
             size: 12,
             files_status: "multi".to_owned(),
             files_count: Some(2),
+            published_at: 1_600_000_000,
             files_data: Some(blob),
         };
         assert_eq!(row.files().unwrap(), original);
@@ -377,6 +388,7 @@ mod tests {
             size: 0,
             files_status: "no_info".to_owned(),
             files_count: None,
+            published_at: 1_600_000_000,
             files_data: None,
         };
         assert!(row.files().unwrap().is_empty());
