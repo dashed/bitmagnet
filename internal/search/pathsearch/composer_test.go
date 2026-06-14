@@ -259,6 +259,116 @@ func TestComposer_TorrentContent_ZeroCandidates_HealthyServesEmpty(t *testing.T)
 	}
 }
 
+// #6 — facets/aggregations PG computed for the candidate set must pass through the
+// hand-built result. Pre-fix Composer.TorrentContent never copied
+// pgResult.Aggregations, so the UI facet sidebar blanked on path searches.
+func TestComposer_TorrentContent_PassesThroughAggregations(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1)}}}
+
+	aggs := query.Aggregations{
+		"content_type": query.AggregationGroup{Items: query.AggregationItems{
+			"movie": query.AggregationItem{Label: "movie", Count: 7},
+		}},
+	}
+	pg := &fakePG{result: search.TorrentContentResult{
+		Items:        []search.TorrentContentResultItem{item(1, tf("Inception.2010.1080p.mkv", "mkv", 1))},
+		Aggregations: aggs,
+	}}
+
+	c := newTestComposer(l3, pg)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+
+	grp, ok := res.Aggregations["content_type"]
+	if !ok || len(grp.Items) != 1 || grp.Items["movie"].Count != 7 {
+		t.Fatalf("aggregations must pass through to the served result, got %+v (#6)", res.Aggregations)
+	}
+}
+
+// #98 (relevance-order) — L3 returns candidate ids in recall (path-relevance)
+// order; the PG IN(...) requery returns PG-natural order. The served page MUST be
+// in L3 id order, not PG order. Pre-fix the composer served pgResult.Items in PG
+// order while advertising relevance. fakePG ignores the options and returns its
+// items in a DIFFERENT order than L3's ids, so the reorder is the only thing that
+// can make the page come back in recall order.
+func TestComposer_TorrentContent_ServesInL3RecallOrder(t *testing.T) {
+	// L3 recall order: 3, 1, 2.
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{
+		candidate(3), candidate(1), candidate(2),
+	}}}
+	// PG returns the SAME torrents but in PG-natural order 1, 2, 3.
+	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
+		item(1, tf("Inception.A.mkv", "mkv", 1)),
+		item(2, tf("Inception.B.mkv", "mkv", 2)),
+		item(3, tf("Inception.C.mkv", "mkv", 3)),
+	}}}
+
+	c := newTestComposer(l3, pg)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+
+	want := []byte{3, 1, 2}
+	if len(res.Items) != len(want) {
+		t.Fatalf("expected %d items, got %d", len(want), len(res.Items))
+	}
+
+	for i, b := range want {
+		if res.Items[i].InfoHash != ih(b) {
+			t.Fatalf("item[%d] = %v, want recall order ih(%d); page must follow L3 recall order, not PG order (#98)",
+				i, res.Items[i].InfoHash, b)
+		}
+	}
+}
+
+// #10 — HasNextPage must be computed from rows actually consumed by THIS page, not
+// from offset+limit. With limit==0 paginate returns ALL remaining rows, so there
+// is no next page even though offset+0 < len(refined). Pre-fix HasNextPage was
+// offset+limit < len(refined) → true for limit==0 (advertises a non-existent page).
+func TestComposer_TorrentContent_HasNextPage(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{
+		candidate(1), candidate(2), candidate(3),
+	}}}
+	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
+		item(1, tf("Inception.A.mkv", "mkv", 1)),
+		item(2, tf("Inception.B.mkv", "mkv", 2)),
+		item(3, tf("Inception.C.mkv", "mkv", 3)),
+	}}}
+
+	c := newTestComposer(l3, pg)
+
+	// limit==0 → paginate returns all 3 refined rows; there is NO next page.
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 0, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+
+	if len(res.Items) != 3 {
+		t.Fatalf("limit==0 must return all refined rows, got %d", len(res.Items))
+	}
+
+	if res.HasNextPage {
+		t.Fatal("limit==0 returns every remaining row → HasNextPage must be false (#10)")
+	}
+
+	// limit==2 over 3 refined rows → a real next page.
+	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 2, 0, nil)
+	if !res.HasNextPage {
+		t.Fatal("limit=2 over 3 refined rows must report HasNextPage=true")
+	}
+
+	// last page (offset=2, limit=2) consumes the final row → no next page.
+	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 2, 2, nil)
+	if res.HasNextPage {
+		t.Fatal("final page must report HasNextPage=false")
+	}
+}
+
 func TestComposer_CollapsePaths(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1), candidate(2)}}}
 	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{

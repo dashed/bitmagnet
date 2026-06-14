@@ -2,6 +2,7 @@ package pathsearch
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -270,6 +271,38 @@ func (c *Composer) orderedCandidateRows(
 	return c.pg.TorrentContent(ctx, opts...)
 }
 
+// orderItemsByIDs re-sorts the PostgreSQL candidate rows IN PLACE to match the L3
+// recall order of ids. The candidate IN(...) requery returns rows in PG-natural
+// order (no meaningful relevance order is available there: L3 owns the path
+// free-text, so no tsquery/rank is pushed into PG), but the route only reaches L3
+// for the relevance/unset ordering (structured sorts bypass it, P0-2), and L3's
+// ngram-recall order IS the path-relevance the route advertises. Serving the PG
+// order would therefore return results in the wrong order while claiming
+// relevance. A stable sort by recall position restores it; rows whose info_hash is
+// absent from the recall set (should not happen — candidates come from L3) sort to
+// the end rather than being dropped. (#98 relevance-order)
+func orderItemsByIDs(items []search.TorrentContentResultItem, ids []protocol.ID) {
+	pos := make(map[protocol.ID]int, len(ids))
+
+	for i, id := range ids {
+		if _, seen := pos[id]; !seen {
+			pos[id] = i
+		}
+	}
+
+	rank := func(it search.TorrentContentResultItem) int {
+		if p, ok := pos[it.Torrent.InfoHash]; ok {
+			return p
+		}
+
+		return len(ids) // unknown info_hash → after all recall-ranked rows
+	}
+
+	sort.SliceStable(items, func(a, b int) bool {
+		return rank(items[a]) < rank(items[b])
+	})
+}
+
 // TorrentContent runs the L3-routed path search and returns an exact, refined,
 // paginated result. served=false means the caller should fall back to the normal
 // PostgreSQL path: the query was ineligible (too short / no substring), or a
@@ -330,6 +363,12 @@ func (c *Composer) TorrentContent(
 		return search.TorrentContentResult{}, false, err
 	}
 
+	// Restore L3 recall (path-relevance) order: the PG IN(...) requery returns
+	// PG-natural order, but the route advertises relevance. Re-sort to the
+	// L3-returned id order BEFORE refine/paginate so the served page is in the
+	// recall order, not PG order. (#98 relevance-order)
+	orderItemsByIDs(pgResult.Items, ids)
+
 	refined, ok := keepMatching(pgResult.Items, func(it search.TorrentContentResultItem) (bool, bool) {
 		return torrentRefine(it.Torrent, pred)
 	})
@@ -350,10 +389,24 @@ func (c *Composer) TorrentContent(
 	c.metrics.IncRoute(RouteServed)
 
 	return search.TorrentContentResult{
-		Items:                page,
+		Items: page,
+		// TotalCount is an honest CAPPED estimate: it counts the refined matches
+		// within the candidate budget, NOT the global match total (which would
+		// require scanning all of PG). TotalCountIsEstimate stays true so callers
+		// treat it as a lower-bound-ish hint, not an exact count. We deliberately
+		// ignore the client's totalCount flag here — an exact count is not available
+		// on the L3 route. (#10)
 		TotalCount:           uint(len(refined)),
-		TotalCountIsEstimate: true, // L3 counts torrents (recall), not exact files
-		HasNextPage:          offset+limit < uint(len(refined)),
+		TotalCountIsEstimate: true,
+		// HasNextPage is computed from rows actually consumed by THIS page, not from
+		// offset+limit: with limit==0 paginate returns ALL remaining rows, so there
+		// is no next page even though offset+0 < len(refined). Base it on whether
+		// refined rows remain after the returned page. (#10)
+		HasNextPage: offset+uint(len(page)) < uint(len(refined)),
+		// Facets/aggregations PG computed for the candidate set must pass through —
+		// hand-building the result previously dropped them, blanking the UI facet
+		// sidebar on path searches. (#6)
+		Aggregations: pgResult.Aggregations,
 	}, true, nil
 }
 
@@ -419,12 +472,17 @@ func (c *Composer) CollapsePaths(
 		return nil, false, err
 	}
 
+	// Collapse builds groups in first-seen order; reorder the candidate rows to L3
+	// recall order so "first-seen" follows path-relevance, not PG-natural order
+	// (same #98 fix as TorrentContent).
+	orderItemsByIDs(pgResult.Items, ids)
+
 	index := make(map[string]int)
 
 	for i := range pgResult.Items {
 		item := pgResult.Items[i]
 
-		files, fok := filesForRefine(item.Torrent)
+		files, fok := filesForRefine(item.Torrent, pred)
 		if !fok {
 			// Fail loud: cannot verify this candidate's paths.
 			c.metrics.IncRoute(RouteFallback)

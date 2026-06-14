@@ -159,7 +159,7 @@ func TestFilesForRefine_DecodesBlobWhenRelationUnpopulated(t *testing.T) {
 
 	tor := model.Torrent{FilesStatus: model.FilesStatusMulti, FilesData: []byte("blob")}
 
-	files, ok := filesForRefine(tor)
+	files, ok := filesForRefine(tor, refinePredicate{substr: "inception"})
 	if !ok || len(files) != 1 || files[0].Path != "Inception.2010.mkv" {
 		t.Fatalf("expected blob-decoded files, got ok=%v files=%v", ok, files)
 	}
@@ -169,13 +169,22 @@ func TestFilesForRefine_DecodesBlobWhenRelationUnpopulated(t *testing.T) {
 	}
 }
 
-// CAVEAT C — a single-file torrent with no file list verifies the substring (and
-// path-derived ext / torrent size) against the torrent NAME, mirroring the Rust
-// doc builder's single-file name fallback. It must NOT be wrongly dropped.
+// CAVEAT C / #9 — a single-file torrent with no file list verifies the substring
+// and torrent size (both sound: the name IS the filename and t.Size IS the single
+// file's size) against the torrent NAME, mirroring the Rust doc builder's
+// single-file name fallback. It must NOT be wrongly dropped. BUT when an EXTENSION
+// filter is active the name-derived ext is unreliable, so it must FAIL LOUD
+// (ok=false) rather than serve a confidently-wrong ext match (#9).
 func TestTorrentRefine_SingleFileNameFallback(t *testing.T) {
+	// substring-only: sound surrogate, matches.
 	match := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.2010.1080p.mkv", Size: 1500}
-	if matched, ok := torrentRefine(match, refinePredicate{substr: "inception", extensions: extSet("mkv")}); !ok || !matched {
-		t.Fatalf("single-file name should match substring+ext, got matched=%v ok=%v", matched, ok)
+	if matched, ok := torrentRefine(match, refinePredicate{substr: "inception"}); !ok || !matched {
+		t.Fatalf("single-file name should match substring, got matched=%v ok=%v", matched, ok)
+	}
+
+	// substring + size: size is sound for single-file (t.Size == the one file).
+	if matched, ok := torrentRefine(match, refinePredicate{substr: "inception", minSize: 1000}); !ok || !matched {
+		t.Fatalf("single-file name+size should match, got matched=%v ok=%v", matched, ok)
 	}
 
 	noMatch := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Interstellar.2014.mkv", Size: 1500}
@@ -186,6 +195,25 @@ func TestTorrentRefine_SingleFileNameFallback(t *testing.T) {
 	tooSmall := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.mkv", Size: 100}
 	if matched, _ := torrentRefine(tooSmall, refinePredicate{substr: "inception", minSize: 1000}); matched {
 		t.Fatal("single-file surrogate must honor size bounds via torrent size")
+	}
+}
+
+// #9 — an extension predicate against a single-file name surrogate is UNSOUND (the
+// display name is not a reliable carrier of the real file extension), so when only
+// the name is available and an ext filter is active the refine must fail loud
+// (ok=false) so the composer falls back to PG — NOT silently serve a name-derived
+// ext match. Pre-fix filesForRefine returned ok=true and the predicate matched the
+// name-derived ext, serving a confidently-wrong result.
+func TestTorrentRefine_SingleFileExtFilterFailsLoud(t *testing.T) {
+	tor := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.2010.1080p.mkv", Size: 1500}
+
+	if _, ok := torrentRefine(tor, refinePredicate{substr: "inception", extensions: extSet("mkv")}); ok {
+		t.Fatal("single-file name surrogate under an ext filter must fail loud (ok=false), not serve a name-derived ext match (#9)")
+	}
+
+	// Same torrent without an ext filter: the surrogate is sound and is used.
+	if _, ok := filesForRefine(tor, refinePredicate{substr: "inception"}); !ok {
+		t.Fatal("single-file name surrogate without an ext filter must remain usable (ok=true)")
 	}
 }
 
