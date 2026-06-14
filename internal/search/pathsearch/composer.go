@@ -104,6 +104,13 @@ func WithHealthGate(gate HealthGate) ComposerOption {
 	return func(c *Composer) { c.health = gate }
 }
 
+// WithMetrics wires the L3 route-outcome counters (finding #4 / HP-3) so the
+// gate-7 harness can prove L3 was actually served. nil is a no-op (the Metrics
+// methods are nil-safe).
+func WithMetrics(metrics *Metrics) ComposerOption {
+	return func(c *Composer) { c.metrics = metrics }
+}
+
 // Composer routes a path-text search through the L3 candidate sidecar + in-process
 // L1 exact-refine. A nil *Composer means the feature is off; call sites must
 // short-circuit on the enable flag and a nil composer before invoking it.
@@ -116,6 +123,9 @@ type Composer struct {
 	// zero-candidate result is trusted as an exact empty only when health reports
 	// healthy; otherwise the route falls back to PostgreSQL (P0-3).
 	health HealthGate
+	// metrics, when non-nil, counts route outcomes (served|fallback|ineligible|
+	// error) so the gate-7 harness can prove L3 was actually exercised. nil-safe.
+	metrics *Metrics
 }
 
 // NewComposer builds a Composer. It is only constructed when the feature is
@@ -146,6 +156,22 @@ func NewComposer(
 // healthy — a known-unhealthy/stale L3 may be returning a false negative for a
 // torrent PostgreSQL still has, so the route falls back instead. (P0-3)
 func (c *Composer) trustEmpty() bool {
+	return c.health == nil || c.health()
+}
+
+// Healthy reports whether the L3 route should be attempted at all. It gates the
+// WHOLE route at the call site (torrent_content.go): when L3 is provably
+// unhealthy the route is skipped entirely so the query goes straight to
+// PostgreSQL, avoiding a per-query dial error + the latency of discovering L3 is
+// down on every request (finding #4). A nil composer reports false (feature
+// off); with no health gate wired it reports true (preserves today's behavior:
+// the route is always attempted). It reads only the cached HealthGate and never
+// performs a blocking RPC.
+func (c *Composer) Healthy() bool {
+	if c == nil {
+		return false
+	}
+
 	return c.health == nil || c.health()
 }
 
@@ -261,11 +287,15 @@ func (c *Composer) TorrentContent(
 ) (result search.TorrentContentResult, served bool, err error) {
 	pred := f.predicate()
 	if pred.substr == "" || !c.Eligible(f.Query) {
+		c.metrics.IncRoute(RouteIneligible)
+
 		return search.TorrentContentResult{}, false, nil
 	}
 
 	ids, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
+		c.metrics.IncRoute(RouteError)
+
 		return search.TorrentContentResult{}, false, err
 	}
 
@@ -278,8 +308,12 @@ func (c *Composer) TorrentContent(
 		// arbitrary file paths, so that fallback is name-semantics — acceptable ONLY
 		// because it is reached solely when L3 is provably unreliable. (P0-3 / #4)
 		if c.trustEmpty() {
+			c.metrics.IncRoute(RouteServed)
+
 			return search.TorrentContentResult{TotalCountIsEstimate: true}, true, nil
 		}
+
+		c.metrics.IncRoute(RouteFallback)
 
 		if c.logger != nil {
 			c.logger.Warnw("pathsearch: zero L3 candidates while L3 unhealthy; falling back to PostgreSQL",
@@ -291,6 +325,8 @@ func (c *Composer) TorrentContent(
 
 	pgResult, err := c.orderedCandidateRows(ctx, baseOptions, ids)
 	if err != nil {
+		c.metrics.IncRoute(RouteError)
+
 		return search.TorrentContentResult{}, false, err
 	}
 
@@ -300,6 +336,8 @@ func (c *Composer) TorrentContent(
 	if !ok {
 		// CAVEAT B: a candidate's files were unobtainable — fail loud, fall back to
 		// the plain PG path rather than serve a silently truncated result.
+		c.metrics.IncRoute(RouteFallback)
+
 		if c.logger != nil {
 			c.logger.Warnw("pathsearch: candidate files unobtainable; falling back to PostgreSQL",
 				"query", f.Query)
@@ -309,6 +347,7 @@ func (c *Composer) TorrentContent(
 	}
 
 	page := paginate(refined, offset, limit)
+	c.metrics.IncRoute(RouteServed)
 
 	return search.TorrentContentResult{
 		Items:                page,
@@ -342,11 +381,15 @@ func (c *Composer) CollapsePaths(
 ) (groups []PathGroup, served bool, err error) {
 	pred := f.predicate()
 	if pred.substr == "" || !c.Eligible(f.Query) {
+		c.metrics.IncRoute(RouteIneligible)
+
 		return nil, false, nil
 	}
 
 	ids, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
+		c.metrics.IncRoute(RouteError)
+
 		return nil, false, err
 	}
 
@@ -354,8 +397,12 @@ func (c *Composer) CollapsePaths(
 		// Same authoritative-empty gate as TorrentContent (P0-3): trust the empty
 		// only when L3 is healthy, else fall back.
 		if c.trustEmpty() {
+			c.metrics.IncRoute(RouteServed)
+
 			return nil, true, nil
 		}
+
+		c.metrics.IncRoute(RouteFallback)
 
 		if c.logger != nil {
 			c.logger.Warnw("pathsearch: zero L3 collapse candidates while L3 unhealthy; falling back",
@@ -367,6 +414,8 @@ func (c *Composer) CollapsePaths(
 
 	pgResult, err := c.orderedCandidateRows(ctx, baseOptions, ids)
 	if err != nil {
+		c.metrics.IncRoute(RouteError)
+
 		return nil, false, err
 	}
 
@@ -378,6 +427,8 @@ func (c *Composer) CollapsePaths(
 		files, fok := filesForRefine(item.Torrent)
 		if !fok {
 			// Fail loud: cannot verify this candidate's paths.
+			c.metrics.IncRoute(RouteFallback)
+
 			if c.logger != nil {
 				c.logger.Warnw("pathsearch: collapse candidate files unobtainable; falling back",
 					"query", f.Query)
@@ -397,6 +448,8 @@ func (c *Composer) CollapsePaths(
 			groups[gi].InfoHashes = append(groups[gi].InfoHashes, item.Torrent.InfoHash)
 		}
 	}
+
+	c.metrics.IncRoute(RouteServed)
 
 	return paginate(groups, offset, limit), true, nil
 }

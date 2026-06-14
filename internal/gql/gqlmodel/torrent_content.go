@@ -167,9 +167,17 @@ func (t TorrentContentQuery) Search(
 	// explicit structured sort (seeders/size/published_at/...) must take the
 	// PostgreSQL path, which sorts over the full match set rather than the capped
 	// candidate sample (P0-2).
+	//
+	// Healthy() gates the WHOLE route on the cached L3 health signal (finding #4):
+	// when L3 is provably unhealthy (unreachable / not SERVING / empty index) the
+	// route is skipped entirely so the query goes straight to PostgreSQL — avoiding
+	// a per-query dial error + the latency of rediscovering L3 is down on every
+	// request. The composer's trustEmpty() gate remains as defense-in-depth for the
+	// race where health flips between this check and the candidate dial.
 	if t.Pathsearch.TypeaheadEnabled() && hasQueryString &&
 		t.Pathsearch.Eligible(input.QueryString.String) &&
-		pathsearchOrderEligible(input.OrderBy) {
+		pathsearchOrderEligible(input.OrderBy) &&
+		t.Pathsearch.Healthy() {
 		result, served, err := t.Pathsearch.TorrentContent(
 			ctx,
 			pathSearchFilters(input),

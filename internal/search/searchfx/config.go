@@ -71,6 +71,19 @@ type Config struct {
 	// request so a broad gram never decodes an unbounded set
 	// (SEARCH_PATHSEARCH_MAX_CANDIDATES).
 	PathsearchMaxCandidates uint
+	// PathsearchHealthInterval is the cadence of the background L3 HealthCheck
+	// poller (SEARCH_PATHSEARCH_HEALTH_INTERVAL). The poll publishes the doc-count
+	// / healthy / watermark gauges and updates the cached HealthGate that fails the
+	// route closed to PostgreSQL when L3 is provably unhealthy (finding #4 / P0-3).
+	// <= 0 falls back to a safe default.
+	PathsearchHealthInterval time.Duration
+	// PathsearchMaxWatermarkLag, when > 0, marks L3 unhealthy if its follow-loop
+	// watermark is older than this (now - watermark_epoch > lag)
+	// (SEARCH_PATHSEARCH_MAX_WATERMARK_LAG). DEFAULT 0 = DISABLED: a fresh-but-lagging
+	// L3 stays healthy. Enabling it trades occasional name-semantics PG fallback
+	// during replication lag for never serving from a stale index. The follow loop
+	// normally keeps L3 fresh within seconds, so default-off is the safe choice.
+	PathsearchMaxWatermarkLag time.Duration
 }
 
 // NewDefaultConfig returns the safe, disabled-by-default search config.
@@ -87,14 +100,16 @@ func NewDefaultConfig() Config {
 		LogDiscrepancies: true,
 
 		// L3 pathsearch — all switches default false (feature off).
-		PathsearchEnabled:        false,
-		PathTypeaheadEnabled:     false,
-		PathCollapseEnabled:      false,
-		PathsearchAddress:        "bitmagnet-pathsearch.bitmagnet.svc:50053",
-		PathsearchTimeout:        5 * time.Second,
-		PathsearchMinQueryLength: 3,
-		PathsearchOversample:     4,
-		PathsearchMaxCandidates:  2000,
+		PathsearchEnabled:         false,
+		PathTypeaheadEnabled:      false,
+		PathCollapseEnabled:       false,
+		PathsearchAddress:         "bitmagnet-pathsearch.bitmagnet.svc:50053",
+		PathsearchTimeout:         5 * time.Second,
+		PathsearchMinQueryLength:  3,
+		PathsearchOversample:      4,
+		PathsearchMaxCandidates:   2000,
+		PathsearchHealthInterval:  15 * time.Second,
+		PathsearchMaxWatermarkLag: 0, // disabled by default (see field doc)
 	}
 }
 

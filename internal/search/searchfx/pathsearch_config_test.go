@@ -7,6 +7,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/iancoleman/strcase"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,11 @@ func TestNewComposerNilWhenDisabled(t *testing.T) {
 
 	cfg := NewDefaultConfig() // PathsearchEnabled == false
 
-	lz := newComposer(cfg, nil, lazy.New(func() (search.Search, error) { return nil, nil }), nil)
+	lz := newComposer(
+		cfg, nil,
+		lazy.New(func() (search.Search, error) { return nil, nil }),
+		pathsearch.NewHealthState(), pathsearch.NewMetrics(), nil,
+	)
 
 	c, err := lz.Get()
 	require.NoError(t, err)
