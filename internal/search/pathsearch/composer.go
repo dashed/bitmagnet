@@ -80,6 +80,30 @@ func (f Filters) predicate() refinePredicate {
 	return p
 }
 
+// HealthGate reports L3's last-known trustworthiness for the authoritative-empty
+// decision: true when the sidecar is SERVING and acceptably fresh, false when it
+// is down / mid-(re)build / lagging. It is consulted ONLY to decide whether a
+// ZERO-candidate result is an authoritative empty or a possible false negative
+// (see TorrentContent / CollapsePaths, P0-3).
+//
+// It is expected to read CACHED state published by a background health poller
+// (REVIEW-P1 #95 / finding #4) — it is NOT called on the hot path and MUST NOT
+// itself perform a blocking RPC. A nil gate means "no health signal wired": the
+// composer then trusts an empty L3 response as authoritative, which is only valid
+// once L3 recall coverage ⊇ PostgreSQL has been proven (the gate-7 T10
+// prerequisite). See the zero-candidate branches below.
+type HealthGate func() (healthy bool)
+
+// ComposerOption customises an otherwise-default Composer.
+type ComposerOption func(*Composer)
+
+// WithHealthGate wires a cached L3 health signal used to validate
+// authoritative-empty results (P0-3 / finding #4). nil leaves the composer
+// trusting empty results as today.
+func WithHealthGate(gate HealthGate) ComposerOption {
+	return func(c *Composer) { c.health = gate }
+}
+
 // Composer routes a path-text search through the L3 candidate sidecar + in-process
 // L1 exact-refine. A nil *Composer means the feature is off; call sites must
 // short-circuit on the enable flag and a nil composer before invoking it.
@@ -88,6 +112,10 @@ type Composer struct {
 	pg     torrentContentSearcher
 	cfg    ComposerConfig
 	logger *zap.SugaredLogger
+	// health, when non-nil, gates the authoritative-empty decision: a
+	// zero-candidate result is trusted as an exact empty only when health reports
+	// healthy; otherwise the route falls back to PostgreSQL (P0-3).
+	health HealthGate
 }
 
 // NewComposer builds a Composer. It is only constructed when the feature is
@@ -97,12 +125,28 @@ func NewComposer(
 	pg torrentContentSearcher,
 	cfg ComposerConfig,
 	logger *zap.SugaredLogger,
+	opts ...ComposerOption,
 ) *Composer {
 	if cfg.OversampleFactor < 1 {
 		cfg.OversampleFactor = 1
 	}
 
-	return &Composer{l3: l3, pg: pg, cfg: cfg, logger: logger}
+	c := &Composer{l3: l3, pg: pg, cfg: cfg, logger: logger}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
+}
+
+// trustEmpty reports whether a zero-candidate L3 response should be served as an
+// authoritative empty result. With no health gate wired it trusts the empty (the
+// gate-7 coverage assumption); with a gate it trusts the empty only when L3 is
+// healthy — a known-unhealthy/stale L3 may be returning a false negative for a
+// torrent PostgreSQL still has, so the route falls back instead. (P0-3)
+func (c *Composer) trustEmpty() bool {
+	return c.health == nil || c.health()
 }
 
 // Eligible reports whether the query is long enough for the L3 route (the
@@ -226,9 +270,23 @@ func (c *Composer) TorrentContent(
 	}
 
 	if len(ids) == 0 {
-		// No candidates: an exact (estimated) empty result — nothing to fall back
-		// to, this IS the answer for the path query.
-		return search.TorrentContentResult{TotalCountIsEstimate: true}, true, nil
+		// No candidates. When L3 is healthy this IS the answer for the path query —
+		// an exact (estimated) empty result, nothing to fall back to. But when L3 is
+		// known-unhealthy/stale the empty may be a false negative for a torrent
+		// PostgreSQL still has (mid-backfill / lagging / down), so fall back rather
+		// than serve a false "no results". NOTE: the PG path matches name/tsv, not
+		// arbitrary file paths, so that fallback is name-semantics — acceptable ONLY
+		// because it is reached solely when L3 is provably unreliable. (P0-3 / #4)
+		if c.trustEmpty() {
+			return search.TorrentContentResult{TotalCountIsEstimate: true}, true, nil
+		}
+
+		if c.logger != nil {
+			c.logger.Warnw("pathsearch: zero L3 candidates while L3 unhealthy; falling back to PostgreSQL",
+				"query", f.Query)
+		}
+
+		return search.TorrentContentResult{}, false, nil
 	}
 
 	pgResult, err := c.orderedCandidateRows(ctx, baseOptions, ids)
@@ -293,7 +351,18 @@ func (c *Composer) CollapsePaths(
 	}
 
 	if len(ids) == 0 {
-		return nil, true, nil
+		// Same authoritative-empty gate as TorrentContent (P0-3): trust the empty
+		// only when L3 is healthy, else fall back.
+		if c.trustEmpty() {
+			return nil, true, nil
+		}
+
+		if c.logger != nil {
+			c.logger.Warnw("pathsearch: zero L3 collapse candidates while L3 unhealthy; falling back",
+				"query", f.Query)
+		}
+
+		return nil, false, nil
 	}
 
 	pgResult, err := c.orderedCandidateRows(ctx, baseOptions, ids)

@@ -213,6 +213,52 @@ func TestComposer_BudgetSentToL3(t *testing.T) {
 	}
 }
 
+// P0-3: a zero-candidate response is an authoritative empty ONLY when L3 is
+// healthy. With a health gate reporting unhealthy, the route must fall back to PG
+// (served=false) rather than serve a false "no results" that could mask a torrent
+// PostgreSQL still has (mid-backfill / lagging / down). Pre-fix the composer had
+// no gate and always returned served=true on zero candidates.
+func TestComposer_TorrentContent_ZeroCandidates_UnhealthyFallsBack(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{}} // zero candidates
+	pg := &fakePG{}
+
+	c := NewComposer(l3, pg, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 1000}, nil,
+		WithHealthGate(func() bool { return false }))
+
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, nil, 10, 0, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if served {
+		t.Fatal("zero candidates + unhealthy L3 must fall back (served=false), not serve a false empty (P0-3)")
+	}
+
+	if pg.callCount != 0 {
+		t.Fatal("must fall back BEFORE hitting the candidate PG query (the GraphQL layer runs the plain PG path)")
+	}
+}
+
+// P0-3: with a healthy gate, a zero-candidate response is trusted as an exact
+// empty (served=true) — the gate must not regress the authoritative-empty
+// behaviour when L3 is healthy.
+func TestComposer_TorrentContent_ZeroCandidates_HealthyServesEmpty(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{}}
+	pg := &fakePG{}
+
+	c := NewComposer(l3, pg, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 1000}, nil,
+		WithHealthGate(func() bool { return true }))
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, nil, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("zero candidates + healthy L3 is a served (estimated empty) result, got served=%v err=%v", served, err)
+	}
+
+	if len(res.Items) != 0 || !res.TotalCountIsEstimate {
+		t.Fatalf("expected empty estimated result, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+	}
+}
+
 func TestComposer_CollapsePaths(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1), candidate(2)}}}
 	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{

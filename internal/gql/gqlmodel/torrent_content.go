@@ -161,7 +161,15 @@ func (t TorrentContentQuery) Search(
 	// the pathsearch feature off it returns false and this branch is skipped
 	// entirely, so the PostgreSQL path below runs byte-identically to before.
 	// served=false (ineligible / fail-loud fallback) also falls through to it.
-	if t.Pathsearch.TypeaheadEnabled() && hasQueryString && t.Pathsearch.Eligible(input.QueryString.String) {
+	//
+	// pathsearchOrderEligible additionally gates the route on the requested order:
+	// L3 returns recall/score (relevance) order over a CAPPED oversample, so any
+	// explicit structured sort (seeders/size/published_at/...) must take the
+	// PostgreSQL path, which sorts over the full match set rather than the capped
+	// candidate sample (P0-2).
+	if t.Pathsearch.TypeaheadEnabled() && hasQueryString &&
+		t.Pathsearch.Eligible(input.QueryString.String) &&
+		pathsearchOrderEligible(input.OrderBy) {
 		result, served, err := t.Pathsearch.TorrentContent(
 			ctx,
 			pathSearchFilters(input),
@@ -214,12 +222,21 @@ func (t TorrentContentQuery) Search(
 // the same joins/hydration/facets/info-hash filters and user ordering as the
 // normal path, but WITHOUT pagination and WITHOUT the free-text tsquery (L3 owns
 // the path text and the composer paginates in Go after exact-refine).
+//
+// CRITICAL (P0-1): unlike the PostgreSQL path, this MUST NOT carry a page limit.
+// q.DefaultOption() sets Limit(10); pushing that into the candidate IN(...) query
+// would cap it at 10 rows regardless of the candidate budget, so refine+paginate
+// would operate over <=10 torrents and every page past the first would be empty.
+// The candidate set is already bounded by the composer's MaxCandidates budget, so
+// the IN-query returns ALL budgeted rows (no LIMIT) and the composer applies the
+// real page window in Go after exact-refine. We keep DefaultOption's aggregation
+// budget (needed for facet computation) but drop its Limit.
 func torrentContentBaseOptions(
 	input TorrentContentSearchQueryInput,
 	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
 ) []q.Option {
 	options := []q.Option{
-		q.DefaultOption(),
+		q.WithAggregationBudget(defaultAggregationBudget),
 		search.TorrentContentCoreJoins(),
 		search.HydrateTorrentContentContent(),
 		search.HydrateTorrentContentTorrent(),
@@ -265,15 +282,51 @@ func pathSearchFilters(input TorrentContentSearchQueryInput) pathsearch.Filters 
 	return f
 }
 
+// defaultPageSize mirrors q.DefaultOption's Limit(10): the page size the
+// PostgreSQL path falls back to when GraphQL `limit` is omitted. The L3 route must
+// size its candidate budget AND paginate from the SAME default — otherwise an
+// omitted limit makes searchPageLimit return 0, collapsing candidateBudget to
+// ~OversampleFactor and serving that tiny set (with paginate(limit=0) returning
+// everything) as a falsely-complete result (P0-5).
+const defaultPageSize uint = 10
+
+// defaultAggregationBudget mirrors the aggregation budget set by q.DefaultOption
+// (WithAggregationBudget(5_000)); the L3 baseOptions keep it (for facets) while
+// dropping DefaultOption's page limit (see torrentContentBaseOptions, P0-1).
+const defaultAggregationBudget float64 = 5_000
+
+// pathsearchOrderEligible reports whether the requested ordering is compatible
+// with the L3 route. L3 returns candidates in recall/score (relevance) order over
+// a CAPPED oversample, and its seeders fast-field is hardcoded 0; PostgreSQL then
+// re-sorts only that capped subset. So an explicit structured sort
+// (seeders/size/published_at/files_count/...) over the capped sample is NOT the
+// global top-N — the globally highest-ranked match may never have entered the
+// candidate budget. Such queries must take the PostgreSQL path, which sorts over
+// the full match set.
+//
+// Eligible orderings: an empty OrderBy (the webui's default for a query, which is
+// relevance) and an explicit relevance sort. Any non-relevance field is
+// ineligible. (P0-2)
+func pathsearchOrderEligible(orderBy []gen.TorrentContentOrderByInput) bool {
+	for _, ob := range orderBy {
+		if ob.Field != gen.TorrentContentOrderByFieldRelevance {
+			return false
+		}
+	}
+
+	return true
+}
+
 // searchPageLimit / searchPageOffset replicate q.SearchParams.Option's page-window
 // arithmetic so the composer can paginate in Go (the L3 route does not push the
-// page window into PostgreSQL).
+// page window into PostgreSQL). An omitted limit resolves to defaultPageSize, the
+// same default the PostgreSQL path uses via q.DefaultOption (P0-5).
 func searchPageLimit(s q.SearchParams) uint {
 	if s.Limit.Valid {
 		return s.Limit.Uint
 	}
 
-	return 0
+	return defaultPageSize
 }
 
 func searchPageOffset(s q.SearchParams) uint {
