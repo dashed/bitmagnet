@@ -45,5 +45,13 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # byte-for-byte parity of the `TokenizeFlat` port.
 serde_json = { workspace = true }
 
+[[bin]]
+name = "bitmagnet-pathsearch"
+path = "src/bin/bitmagnet-pathsearch.rs"
+
+[[bin]]
+name = "bitmagnet-pathsearch-backfill"
+path = "src/bin/bitmagnet-pathsearch-backfill.rs"
+
 [lints]
 workspace = true

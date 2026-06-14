@@ -22,6 +22,7 @@
 pub mod facets;
 pub mod index;
 pub mod indexer;
+pub mod pathsearch;
 pub mod query;
 pub mod schema;
 pub mod server;

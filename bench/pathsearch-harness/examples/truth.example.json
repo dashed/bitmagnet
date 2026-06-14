@@ -1,0 +1,23 @@
+{
+  "meta": {
+    "generated_by": "EXAMPLE — the real truth file is docs/dev/l3-recall-truth.json (rev2)",
+    "info_hash_encoding": "lowercase_hex_40char_no_prefix",
+    "predicate": "position(lower($q) IN lower(path)) > 0",
+    "sampling": "TABLESAMPLE SYSTEM (2.0) REPEATABLE (4242)",
+    "freshness_filter": "torrents.updated_at <= to_timestamp(watermark_bound_epoch)",
+    "watermark_bound_epoch": null,
+    "watermark_margin_secs": 60,
+    "limit_per_query": 500,
+    "query_floor_chars": 3,
+    "l3_request": { "limit": 5000, "oversample": 0 },
+    "membership_valid_when": "candidate_total <= 5000"
+  },
+  "queries": [
+    { "id": "ascii_s01e01_1080p", "q": "s01e01.1080p", "class": "recall", "lang": "ascii", "expected": "selective",
+      "truth_info_hashes": [], "truth_sample_count": null,
+      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } },
+    { "id": "cjk_bluray_disc", "q": "蓝光原盘", "class": "recall", "lang": "cjk", "expected": "selective",
+      "truth_info_hashes": [], "truth_sample_count": null,
+      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } }
+  ]
+}

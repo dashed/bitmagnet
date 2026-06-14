@@ -15,6 +15,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/router"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/shadow"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
@@ -37,11 +38,58 @@ func New() fx.Option {
 		configfx.NewConfigModule[Config]("search", NewDefaultConfig()),
 		fx.Provide(
 			newClient,
+			newPathsearchClient,
+			newComposer,
 			func(c Config) router.Config { return c.routerConfig() },
 			shadow.New,
 		),
 		fx.Invoke(registerDocCountReporter),
 	)
+}
+
+// newPathsearchClient builds the L3 pathsearch gRPC client, or returns nil when
+// the feature is disabled. Like newClient, a nil client signals "off": the
+// composer is not built and no L3 dial happens.
+func newPathsearchClient(lc fx.Lifecycle, cfg Config) (*pathsearch.Client, error) {
+	if !cfg.PathsearchEnabled {
+		return nil, nil //nolint:nilnil // disabled: nil client signals "off"
+	}
+
+	client, err := pathsearch.NewClient(cfg.pathsearchConfig())
+	if err != nil {
+		return nil, err
+	}
+
+	lc.Append(fx.Hook{
+		OnStop: func(context.Context) error { return client.Close() },
+	})
+
+	return client, nil
+}
+
+// newComposer builds the L3 exact-refine composer, or a lazy resolving to nil
+// when the feature is disabled. A nil composer is the safe passthrough state:
+// the GraphQL search layer routes through it only when both the enable flag is
+// set and the composer is non-nil, so with PathsearchEnabled=false behavior is
+// byte-identical to today.
+func newComposer(
+	cfg Config,
+	client *pathsearch.Client,
+	pg lazy.Lazy[search.Search],
+	logger *zap.SugaredLogger,
+) lazy.Lazy[*pathsearch.Composer] {
+	return lazy.New(func() (*pathsearch.Composer, error) {
+		if !cfg.PathsearchEnabled || client == nil {
+			return nil, nil //nolint:nilnil // disabled: nil composer signals "off"
+		}
+
+		s, err := pg.Get()
+		if err != nil {
+			return nil, err
+		}
+
+		return pathsearch.NewComposer(client, s, cfg.composerConfig(), logger), nil
+	})
 }
 
 // registerDocCountReporter starts a background poller (when the feature is

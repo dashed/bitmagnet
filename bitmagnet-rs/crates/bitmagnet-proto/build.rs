@@ -15,12 +15,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // L2b file-search service (DuckDB-on-Parquet sidecar). Shares the
     // `bitmagnet.v1` package, so prost folds it into the same generated module.
     let file_search = proto_root.join("bitmagnet").join("file_search.proto");
+    // L3 pathsearch candidate sidecar. Also shares `bitmagnet.v1`.
+    let path_search = proto_root.join("bitmagnet").join("path_search.proto");
 
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .compile_protos(
-            &[common, search, file_search],
+            &[common, search, file_search, path_search],
             std::slice::from_ref(&proto_root),
         )?;
 

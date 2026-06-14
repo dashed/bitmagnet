@@ -29,6 +29,10 @@ pub use v1::{ContentType, FileType, TorrentDocument};
 pub use v1::file_search_service_client::FileSearchServiceClient;
 pub use v1::file_search_service_server::{FileSearchService, FileSearchServiceServer};
 
+// L3 pathsearch service (Tantivy path-bag candidate sidecar).
+pub use v1::path_search_service_client::PathSearchServiceClient;
+pub use v1::path_search_service_server::{PathSearchService, PathSearchServiceServer};
+
 #[cfg(test)]
 mod tests {
     use super::v1::{ContentType, FileType};
