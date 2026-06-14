@@ -16,7 +16,7 @@ use tonic::{Request, Response, Status};
 
 use bitmagnet_proto::v1 as proto;
 
-use crate::engine::{Engine, EngineError, FileHitRow, GroupRow};
+use crate::engine::{Deadline, Engine, EngineError, FileHitRow, GroupRow};
 use crate::generation::{GenerationManager, LoadedGeneration};
 use crate::query::{clamp_limit, clamp_preview, CountQuery, FileQuery, Filters, Sort};
 
@@ -58,10 +58,18 @@ impl<E: Engine + 'static> FileSearchServer<E> {
     }
 
     /// Acquire a permit and run `f` (a sync engine call) on a blocking thread.
+    ///
+    /// The request's deadline is a SINGLE shared [`Deadline`] computed once, when
+    /// the blocking work actually begins (after the permit is acquired, so
+    /// permit-wait time is not charged against it). Every engine scan `f` runs
+    /// — a `size_min` collapse fans out to groups + aggregates + previews — draws
+    /// from that one budget via `deadline.remaining()`, so the whole request can
+    /// never exceed `query_deadline` instead of granting each scan a fresh full
+    /// deadline (~N× blowout, review #7 / #96).
     async fn run_blocking<T, F>(&self, f: F) -> Result<T, Status>
     where
         T: Send + 'static,
-        F: FnOnce(Arc<E>, Arc<LoadedGeneration>, Duration) -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce(Arc<E>, Arc<LoadedGeneration>, Deadline) -> anyhow::Result<T> + Send + 'static,
     {
         let permit = self
             .sem
@@ -71,9 +79,10 @@ impl<E: Engine + 'static> FileSearchServer<E> {
             .map_err(|_| Status::unavailable("service shutting down"))?;
         let engine = self.engine.clone();
         let gen = self.gens.current();
-        let deadline = self.cfg.query_deadline;
+        let query_deadline = self.cfg.query_deadline;
         let out = tokio::task::spawn_blocking(move || {
             let _permit = permit; // held for the query's lifetime
+            let deadline = Deadline::starting_now(query_deadline);
             f(engine, gen, deadline)
         })
         .await
@@ -290,7 +299,8 @@ impl<E: Engine + 'static> proto::file_search_service_server::FileSearchService
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{FileHitRow, InMemoryEngine};
+    use crate::engine::{FacetBucketRow, FileHitRow, InMemoryEngine, PreviewRows};
+    use crate::query::{CountQuery, FileQuery, Filters};
     use bitmagnet_parquet::generation::{artifact, Kind, Layout};
 
     fn seed_layout(tag: &str) -> Layout {
@@ -456,5 +466,159 @@ mod tests {
             .into_inner();
         assert_eq!(h.base_version, "v1");
         assert_eq!(h.delta_version, "v1");
+    }
+
+    /// #96 — a collapse request runs two engine scans (collapse, then previews).
+    /// Both must draw from ONE shared deadline budget computed at request entry,
+    /// not a fresh full deadline each — otherwise the watchdog blows out to ~N×.
+    /// This spy records `deadline.remaining()` at each scan; the second scan's
+    /// remaining must be strictly less than the first (budget consumed, not
+    /// refreshed) and neither may exceed the configured deadline.
+    struct BudgetSpyEngine {
+        probe: Duration,
+        seen: std::sync::Mutex<Vec<(&'static str, Duration)>>,
+    }
+
+    impl Engine for BudgetSpyEngine {
+        fn search_files(
+            &self,
+            _gen: &LoadedGeneration,
+            _q: &FileQuery,
+            _deadline: Deadline,
+        ) -> anyhow::Result<Vec<FileHitRow>> {
+            Ok(vec![])
+        }
+
+        fn collapse(
+            &self,
+            _gen: &LoadedGeneration,
+            _q: &FileQuery,
+            deadline: Deadline,
+        ) -> anyhow::Result<Vec<GroupRow>> {
+            // Burn part of the shared budget before reading what's left, so the
+            // remaining at this scan is already below the full deadline.
+            std::thread::sleep(self.probe);
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("collapse", deadline.remaining()));
+            Ok(vec![GroupRow {
+                info_hash: "aa".into(),
+                matching_file_count: 1,
+                matching_total_size: 1,
+                matching_max_size: 1,
+            }])
+        }
+
+        fn preview(
+            &self,
+            _gen: &LoadedGeneration,
+            _info_hash: &str,
+            _filters: &Filters,
+            _limit: u32,
+            _deadline: Deadline,
+        ) -> anyhow::Result<Vec<FileHitRow>> {
+            Ok(vec![])
+        }
+
+        fn previews(
+            &self,
+            _gen: &LoadedGeneration,
+            _info_hashes: &[String],
+            _filters: &Filters,
+            _limit: u32,
+            deadline: Deadline,
+        ) -> anyhow::Result<PreviewRows> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("previews", deadline.remaining()));
+            Ok(PreviewRows::new())
+        }
+
+        fn count(
+            &self,
+            _gen: &LoadedGeneration,
+            _q: &CountQuery,
+            _deadline: Deadline,
+        ) -> anyhow::Result<(u64, bool)> {
+            Ok((0, false))
+        }
+
+        fn facet_ext(
+            &self,
+            _gen: &LoadedGeneration,
+            _filters: &Filters,
+            _deadline: Deadline,
+        ) -> anyhow::Result<Vec<FacetBucketRow>> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn collapse_shares_one_deadline_budget_across_scans() {
+        let probe = Duration::from_millis(80);
+        let query_deadline = Duration::from_millis(600);
+
+        let layout = seed_layout("budget");
+        let gens = Arc::new(GenerationManager::open(layout).unwrap());
+        let engine = Arc::new(BudgetSpyEngine {
+            probe,
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let s = FileSearchServer::new(
+            gens,
+            engine.clone(),
+            ServiceConfig {
+                max_concurrency: 6,
+                query_deadline,
+            },
+        );
+
+        let req = proto::SearchFilesRequest {
+            filters: Some(proto::FileFilters {
+                extensions: vec!["mkv".into()],
+                size_min: Some(1_000_000_000), // the multi-scan collapse shape
+                ..Default::default()
+            }),
+            pagination: Some(proto::FilePagination {
+                limit: 10,
+                cursor: String::new(),
+            }),
+            sort: vec![],
+            collapse_to_torrent: true,
+            preview_limit: 5,
+        };
+        s.search_files(Request::new(req)).await.unwrap();
+
+        let seen = engine.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "both collapse and previews must run");
+        assert_eq!(seen[0].0, "collapse");
+        assert_eq!(seen[1].0, "previews");
+
+        let collapse_rem = seen[0].1;
+        let previews_rem = seen[1].1;
+
+        // No scan ever sees more than the configured deadline.
+        assert!(
+            collapse_rem <= query_deadline,
+            "collapse remaining {collapse_rem:?} must not exceed deadline {query_deadline:?}"
+        );
+        // The budget started ONCE before the scans: collapse slept `probe` first, so
+        // its remaining is already below the full deadline (a per-scan fresh deadline
+        // would have shown ~the full deadline here).
+        assert!(
+            collapse_rem <= query_deadline - probe + Duration::from_millis(60),
+            "collapse remaining {collapse_rem:?} should reflect the elapsed probe \
+             {probe:?} (shared budget, not a fresh deadline)"
+        );
+        // previews runs AFTER collapse and draws from the SAME shrinking budget, so
+        // its remaining is strictly less — proving one shared budget. The two scans'
+        // budgets therefore sum to ≤ the deadline (each is the leftover of the last).
+        assert!(
+            previews_rem < collapse_rem,
+            "previews remaining {previews_rem:?} must be less than collapse remaining \
+             {collapse_rem:?} (the budget is consumed across scans, not refreshed)"
+        );
     }
 }

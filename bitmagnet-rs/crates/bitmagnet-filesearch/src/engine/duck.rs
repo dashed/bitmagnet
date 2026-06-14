@@ -30,7 +30,9 @@ use anyhow::{anyhow, Context, Result};
 use duckdb::types::Value;
 use duckdb::{params_from_iter, Connection};
 
-use crate::engine::{Engine, EngineError, FacetBucketRow, FileHitRow, GroupRow, PreviewRows};
+use crate::engine::{
+    Deadline, Engine, EngineError, FacetBucketRow, FileHitRow, GroupRow, PreviewRows,
+};
 use crate::generation::LoadedGeneration;
 use crate::query::{CountQuery, FileQuery, Filters};
 use crate::sql::{self, Param, SafeQuery};
@@ -107,16 +109,21 @@ impl DuckEngine {
         }
     }
 
-    /// Run `f` with a pooled connection and a hard caller deadline.
+    /// Run `f` with a pooled connection under the request's SHARED deadline. Each
+    /// call arms its `recv_timeout` with the budget REMAINING at this instant
+    /// (`deadline.remaining()`), not a fresh full deadline — so a request that runs
+    /// several scans (e.g. a `size_min` collapse: groups + aggregates + previews)
+    /// shares ONE budget and cannot blow the watchdog out to ~N× (review #7 / #96).
+    /// An already-exhausted budget yields a zero remaining → immediate timeout.
     fn with_conn<T>(
         &self,
-        deadline: Duration,
+        deadline: Deadline,
         f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
     ) -> Result<(T, bool)>
     where
         T: Send + 'static,
     {
-        debug_assert!(!deadline.is_zero(), "query deadline must be non-zero");
+        let remaining = deadline.remaining();
         let conn = self.checkout()?;
         let handle = conn.interrupt_handle();
         let pool = Arc::clone(&self.pool);
@@ -143,7 +150,7 @@ impl DuckEngine {
             let _ = tx.send(result);
         });
 
-        match rx.recv_timeout(deadline) {
+        match rx.recv_timeout(remaining) {
             Ok(Ok(v)) => Ok((v, false)),
             Ok(Err(e)) => Err(e),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -184,7 +191,7 @@ impl Engine for DuckEngine {
         &self,
         gen: &LoadedGeneration,
         q: &FileQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FileHitRow>> {
         let sq = sql::build_search_files(q, &gen.paths);
         let (rows, _) = self.with_conn(deadline, move |conn| query_files(conn, &sq))?;
@@ -195,7 +202,7 @@ impl Engine for DuckEngine {
         &self,
         gen: &LoadedGeneration,
         q: &FileQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<GroupRow>> {
         match sql::rollup_plan(&q.filters) {
             // Rollup aggregates exact (ext-only / unfiltered) — the <50 ms path.
@@ -239,7 +246,7 @@ impl Engine for DuckEngine {
         info_hash: &str,
         filters: &Filters,
         limit: u32,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FileHitRow>> {
         let mut previews = self.previews(gen, &[info_hash.to_owned()], filters, limit, deadline)?;
         Ok(previews.remove(info_hash).unwrap_or_default())
@@ -251,7 +258,7 @@ impl Engine for DuckEngine {
         info_hashes: &[String],
         filters: &Filters,
         limit: u32,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<PreviewRows> {
         let sq = sql::build_previews(info_hashes, filters, limit, &gen.paths);
         let (rows, _) = self.with_conn(deadline, move |conn| query_previews(conn, &sq))?;
@@ -262,7 +269,7 @@ impl Engine for DuckEngine {
         &self,
         gen: &LoadedGeneration,
         q: &CountQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<(u64, bool)> {
         let sq = sql::build_count(q, &gen.paths);
         let (count, interrupted) =
@@ -274,7 +281,7 @@ impl Engine for DuckEngine {
         &self,
         gen: &LoadedGeneration,
         filters: &Filters,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FacetBucketRow>> {
         // Facet buckets count MATCHING FILES: the rollup form is exact only
         // when no size/path filter is in play (otherwise it would drop the
@@ -458,7 +465,7 @@ mod tests {
 
         let started = Instant::now();
         let err = engine
-            .with_conn(Duration::from_millis(20), |conn| {
+            .with_conn(Deadline::starting_now(Duration::from_millis(20)), |conn| {
                 let mut stmt =
                     conn.prepare("select count(*) from range(10000000) t1, range(1000000) t2")?;
                 Ok(stmt.execute([])?)
@@ -494,7 +501,7 @@ mod tests {
         let mgr = seed_generation("e2e");
         let gen = mgr.current();
         let engine = DuckEngine::open(DuckConfig::default()).unwrap();
-        let dl = Duration::from_secs(30);
+        let dl = Deadline::starting_now(Duration::from_secs(30));
 
         // mkv > 1GB: aa/big (2GB) + bb/ep (1.5GB)
         let filters = Filters {
@@ -556,7 +563,7 @@ mod tests {
         let mgr = seed_generation("pads");
         let gen = mgr.current();
         let engine = DuckEngine::open(DuckConfig::default()).unwrap();
-        let dl = Duration::from_secs(30);
+        let dl = Deadline::starting_now(Duration::from_secs(30));
 
         // Default: cc shows only its real file; the pad rows are invisible to
         // finds, counts and facets (rollups are built padding-free).
@@ -616,7 +623,7 @@ mod tests {
                     false,
                     50,
                 ),
-                Duration::from_secs(30),
+                Deadline::starting_now(Duration::from_secs(30)),
             )
             .unwrap();
         assert_eq!(rows.len(), 3); // all Movie/* files (big.mkv, small.mkv, s.srt)
@@ -627,7 +634,7 @@ mod tests {
         let mgr = seed_generation("route");
         let gen = mgr.current();
         let engine = DuckEngine::open(DuckConfig::default()).unwrap();
-        let dl = Duration::from_secs(30);
+        let dl = Deadline::starting_now(Duration::from_secs(30));
 
         // path filter (FactOnly): only aa has Movie/* files. The raw rollup
         // would have silently dropped the path filter and returned bb too.

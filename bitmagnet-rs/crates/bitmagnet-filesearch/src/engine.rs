@@ -13,12 +13,52 @@
 //! caller pinned for the request (an in-flight query keeps its generation even
 //! across a reload).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use crate::generation::LoadedGeneration;
 use crate::query::{CountQuery, FileQuery, Filters};
+
+/// A single shared query budget: the absolute [`Instant`] by which all of one
+/// request's engine scans must finish, together.
+///
+/// The watchdog (l2-11) bounds how long ONE request may pin a worker + pooled
+/// connection. But a single request can run several sequential scans — a
+/// `size_min` collapse does two fact/rollup scans inside [`Engine::collapse`] and
+/// then a third in [`Engine::previews`]. Passing a fresh `Duration` deadline to
+/// each scan armed every scan with the FULL budget independently, so a slow
+/// collapse page could run ~3× the intended wall-clock and defeat the watchdog
+/// (review #7 / #96).
+///
+/// `Deadline` fixes this: it is computed ONCE at request entry and shared (it is
+/// `Copy`) across every scan; each scan arms its timeout with [`Deadline::remaining`]
+/// — the time left until the shared instant — so the scans together can never
+/// exceed one budget.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline {
+    at: Instant,
+}
+
+impl Deadline {
+    /// Start a budget that expires `budget` from now. Call this ONCE per request.
+    pub fn starting_now(budget: Duration) -> Self {
+        Self {
+            at: Instant::now() + budget,
+        }
+    }
+
+    /// Build a deadline from an explicit absolute instant (mainly for tests).
+    pub fn at(at: Instant) -> Self {
+        Self { at }
+    }
+
+    /// Time left until the shared deadline; saturates at zero once elapsed, so an
+    /// exhausted budget yields an immediate timeout rather than panicking.
+    pub fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(Instant::now())
+    }
+}
 
 /// Engine-level errors that callers may want to map to transport status codes.
 #[derive(Debug, thiserror::Error)]
@@ -65,7 +105,7 @@ pub trait Engine: Send + Sync {
         &self,
         gen: &LoadedGeneration,
         q: &FileQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FileHitRow>>;
 
     /// Distinct-torrent collapse. Returns up to `limit + 1` groups.
@@ -73,7 +113,7 @@ pub trait Engine: Send + Sync {
         &self,
         gen: &LoadedGeneration,
         q: &FileQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<GroupRow>>;
 
     /// The matching files of one torrent (a group's preview), capped at `limit`.
@@ -83,7 +123,7 @@ pub trait Engine: Send + Sync {
         info_hash: &str,
         filters: &Filters,
         limit: u32,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FileHitRow>>;
 
     /// Matching-file previews for many torrents. The default keeps simple
@@ -94,7 +134,7 @@ pub trait Engine: Send + Sync {
         info_hashes: &[String],
         filters: &Filters,
         limit: u32,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<PreviewRows> {
         let mut out = PreviewRows::new();
         for info_hash in info_hashes {
@@ -112,7 +152,7 @@ pub trait Engine: Send + Sync {
         &self,
         gen: &LoadedGeneration,
         q: &CountQuery,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<(u64, bool)>;
 
     /// Per-extension facet buckets.
@@ -120,7 +160,7 @@ pub trait Engine: Send + Sync {
         &self,
         gen: &LoadedGeneration,
         filters: &Filters,
-        deadline: Duration,
+        deadline: Deadline,
     ) -> Result<Vec<FacetBucketRow>>;
 }
 
@@ -170,7 +210,7 @@ impl Engine for InMemoryEngine {
         &self,
         _gen: &LoadedGeneration,
         q: &FileQuery,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<Vec<FileHitRow>> {
         let mut rows: Vec<FileHitRow> = self.matching(&q.filters).cloned().collect();
         Self::sort_rows(&mut rows, q);
@@ -182,7 +222,7 @@ impl Engine for InMemoryEngine {
         &self,
         _gen: &LoadedGeneration,
         q: &FileQuery,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<Vec<GroupRow>> {
         use std::collections::BTreeMap;
         let mut groups: BTreeMap<String, GroupRow> = BTreeMap::new();
@@ -214,7 +254,7 @@ impl Engine for InMemoryEngine {
         info_hash: &str,
         filters: &Filters,
         limit: u32,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<Vec<FileHitRow>> {
         let mut rows: Vec<FileHitRow> = self
             .matching(filters)
@@ -232,7 +272,7 @@ impl Engine for InMemoryEngine {
         info_hashes: &[String],
         filters: &Filters,
         limit: u32,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<PreviewRows> {
         use std::collections::BTreeSet;
         let wanted: BTreeSet<&str> = info_hashes.iter().map(String::as_str).collect();
@@ -264,7 +304,7 @@ impl Engine for InMemoryEngine {
         &self,
         _gen: &LoadedGeneration,
         q: &CountQuery,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<(u64, bool)> {
         if q.collapse_to_torrent {
             use std::collections::BTreeSet;
@@ -282,7 +322,7 @@ impl Engine for InMemoryEngine {
         &self,
         _gen: &LoadedGeneration,
         filters: &Filters,
-        _deadline: Duration,
+        _deadline: Deadline,
     ) -> Result<Vec<FacetBucketRow>> {
         use std::collections::BTreeMap;
         let mut buckets: BTreeMap<Option<String>, FacetBucketRow> = BTreeMap::new();
@@ -375,7 +415,9 @@ mod tests {
             false,
             1,
         );
-        let rows = e.search_files(&gen(), &q, Duration::from_secs(1)).unwrap();
+        let rows = e
+            .search_files(&gen(), &q, Deadline::starting_now(Duration::from_secs(1)))
+            .unwrap();
         // two mkv>1GB (aa/0, bb/0); limit 1 + overfetch 1 = 2 returned, size DESC
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].info_hash, "aa");
@@ -393,7 +435,9 @@ mod tests {
             true,
             10,
         );
-        let groups = e.collapse(&gen(), &q, Duration::from_secs(1)).unwrap();
+        let groups = e
+            .collapse(&gen(), &q, Deadline::starting_now(Duration::from_secs(1)))
+            .unwrap();
         assert_eq!(groups.len(), 2); // aa (2 mkv), bb (1 mkv)
         assert_eq!(groups[0].info_hash, "aa");
         assert_eq!(groups[0].matching_file_count, 2);
@@ -404,7 +448,11 @@ mod tests {
     fn empty_ext_facet_counts_null_bucket() {
         let e = engine();
         let buckets = e
-            .facet_ext(&gen(), &Filters::default(), Duration::from_secs(1))
+            .facet_ext(
+                &gen(),
+                &Filters::default(),
+                Deadline::starting_now(Duration::from_secs(1)),
+            )
             .unwrap();
         // mkv(3), srt(1), NULL(1)
         let null = buckets.iter().find(|b| b.value.is_none()).unwrap();
@@ -430,7 +478,7 @@ mod tests {
                     filters: filters.clone(),
                     collapse_to_torrent: false,
                 },
-                Duration::from_secs(1),
+                Deadline::starting_now(Duration::from_secs(1)),
             )
             .unwrap();
         assert_eq!(files, 3);
@@ -441,7 +489,7 @@ mod tests {
                     filters,
                     collapse_to_torrent: true,
                 },
-                Duration::from_secs(1),
+                Deadline::starting_now(Duration::from_secs(1)),
             )
             .unwrap();
         assert_eq!(torrents, 2);
@@ -459,7 +507,7 @@ mod tests {
                     ..Default::default()
                 },
                 5,
-                Duration::from_secs(1),
+                Deadline::starting_now(Duration::from_secs(1)),
             )
             .unwrap();
         assert_eq!(prev.len(), 2);
@@ -479,7 +527,7 @@ mod tests {
                     ..Default::default()
                 },
                 1,
-                Duration::from_secs(1),
+                Deadline::starting_now(Duration::from_secs(1)),
             )
             .unwrap();
         assert_eq!(previews["aa"].len(), 1);
