@@ -195,7 +195,12 @@ func (t TorrentContentQuery) Search(
 		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
 	}
 
-	options = append(options, search.TorrentContentFullOrderBy(fullOrderBy).Option())
+	// FIND-2 (c5717827): on the PostgreSQL fallback path, rewrite a lone-relevance
+	// web-UI default to seeders DESC (flag-gated, default off). The L3 route above
+	// is the primary relevance-latency mitigation; this guards the PG path taken
+	// when L3 is disabled/ineligible/not-served.
+	orderBy := find2PopularitySortDefault(fullOrderBy, hasQueryString)
+	options = append(options, search.TorrentContentFullOrderBy(orderBy).Option())
 
 	result, resultErr := t.TorrentContentSearch.TorrentContent(ctx, options...)
 	if resultErr != nil {
@@ -283,6 +288,40 @@ func searchPageOffset(s q.SearchParams) uint {
 	}
 
 	return offset
+}
+
+// find2PopularitySortDefault implements the FIND-2 mitigation (flag-gated,
+// default OFF). The web UI sends `relevance` as the sole order for every typed
+// query; `relevance` is ts_rank_cd over the whole match-set, which is a ~49s
+// wall on broad common terms (e.g. "x264" → millions of matches). When the
+// PopularitySortDefault flag is ON and the request is exactly that web-UI
+// default — a single `relevance` clause together with a query string — we
+// rewrite the order to `seeders DESC` (which already carries an info_hash
+// tiebreak) and drop ts_rank_cd from the sort entirely. True relevance stays
+// opt-in: any order that names a non-relevance field, or relevance alongside an
+// explicit extra field, is passed through untouched, as is any query without a
+// search string. See dv4-go-integration-notes.md for the UI-side alternative.
+func find2PopularitySortDefault(
+	orderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
+	hasQueryString bool,
+) maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection] {
+	if !search.FeatureFlagsValue().PopularitySortDefault || !hasQueryString {
+		return orderBy
+	}
+
+	// Only rewrite the exact web-UI default: a lone `relevance` clause.
+	if orderBy.Len() != 1 {
+		return orderBy
+	}
+
+	if !orderBy.Has(search.TorrentContentOrderByRelevance) {
+		return orderBy
+	}
+
+	rewritten := maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection]()
+	rewritten.Set(search.TorrentContentOrderBySeeders, search.OrderDirectionDescending)
+
+	return rewritten
 }
 
 func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {

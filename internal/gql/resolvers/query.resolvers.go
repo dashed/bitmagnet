@@ -108,7 +108,11 @@ func (r *queryResolver) TorrentContent(ctx context.Context) (gqlmodel.TorrentCon
 
 // Files is the resolver for the files field.
 func (r *torrentQueryResolver) Files(ctx context.Context, obj *gqlmodel.TorrentQuery, input gqlmodel.TorrentFilesQueryInput) (query.GenericResult[model.TorrentFile], error) {
+	// Construct with the SAME deps as queryResolver.Torrent: the legacy path
+	// only used Search (so a Search-only construction never mattered), but the
+	// G2 blob path (filesFromBlob) needs Dao — leaving it nil panics.
 	return gqlmodel.TorrentQuery{
+		Dao:    r.Dao,
 		Search: r.Search,
 	}.Files(ctx, input)
 }

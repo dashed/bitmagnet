@@ -12,6 +12,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/fx"
@@ -20,11 +21,14 @@ import (
 
 const (
 	kvKeyStatus     = "blob_migration:status"
-	kvKeyMigrated   = "blob_migration:migrated_count"
-	kvKeyCursor     = "blob_migration:cursor"
 	kvKeyTotal      = "blob_migration:total_count"
 	kvKeyStartedAt  = "blob_migration:started_at"
 	kvKeyVerifiedAt = "blob_migration:verified_at"
+	// Per-range checkpoint, done-flag, and migrated-counter key prefixes (suffixed with the range id).
+	// migrated is per-range (summed for status) to avoid single-row contention at high concurrency.
+	kvKeyCursorPrefix   = "blob_migration:cursor:"
+	kvKeyRangePrefix    = "blob_migration:range:"
+	kvKeyMigratedPrefix = "blob_migration:migrated:"
 
 	statusRunning   = "running"
 	statusPaused    = "paused"
@@ -62,16 +66,17 @@ func New(p Params) (Result, error) {
 func (p Params) startCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "start",
-		Usage: "Start the blob migration",
+		Usage: "Start the blob migration (parallel info_hash-range workers)",
 		Flags: []cli.Flag{
 			&cli.IntFlag{
-				Name:  "batch-size",
-				Value: int(p.Config.BatchSize),
-				Usage: "number of torrents per migration batch",
+				Name:    "chunk-size",
+				Aliases: []string{"batch-size"},
+				Value:   int(p.Config.ChunkSize),
+				Usage:   "torrents (distinct info_hashes) processed per chunk",
 			},
 			&cli.BoolFlag{
 				Name:  "resume",
-				Usage: "resume from the last checkpoint instead of starting fresh",
+				Usage: "resume from per-range checkpoints instead of starting fresh",
 			},
 		},
 		Action: func(ctx *cli.Context) error {
@@ -87,60 +92,70 @@ func (p Params) startCmd() *cli.Command {
 				)
 			}
 
-			var cursor string
-			if ctx.Bool("resume") {
-				cursor, _ = getKV(ctx, d, kvKeyCursor)
-				if cursor == "" {
-					_, _ = fmt.Fprintln(
-						ctx.App.Writer,
-						"No checkpoint found, starting from the beginning.",
-					)
-				} else {
-					_, _ = fmt.Fprintf(ctx.App.Writer, "Resuming from cursor: %s\n", cursor)
-				}
-			}
+			resume := ctx.Bool("resume")
 
-			var totalCount int64
-			if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
-				Table("torrent_files").
-				Select("COUNT(DISTINCT info_hash)").
-				Scan(&totalCount).Error; err != nil {
-				return fmt.Errorf("counting torrents: %w", err)
+			chunkSize := ctx.Int("chunk-size")
+			if chunkSize <= 0 {
+				chunkSize = int(p.Config.ChunkSize)
 			}
 
 			now := time.Now()
-			if err := upsertKV(ctx, d, kvKeyStatus, statusRunning, now); err != nil {
-				return err
-			}
-			if err := upsertKV(ctx, d, kvKeyTotal, strconv.FormatInt(totalCount, 10), now); err != nil {
-				return err
-			}
-			if !ctx.Bool("resume") {
-				if err := upsertKV(ctx, d, kvKeyStartedAt, now.Format(time.RFC3339), now); err != nil {
-					return err
+
+			if !resume {
+				// Fresh start: clear any leftover jobs + per-range checkpoints/done-flags so the new
+				// K-way seeding is the only state, then reset counters.
+				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
+					Exec("DELETE FROM queue_jobs WHERE queue = ?", queue.MessageName).Error; err != nil {
+					return fmt.Errorf("clearing old jobs: %w", err)
 				}
-				if err := upsertKV(ctx, d, kvKeyMigrated, "0", now); err != nil {
-					return err
+
+				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
+					Exec("DELETE FROM key_values WHERE key LIKE ? OR key LIKE ? OR key LIKE ?",
+						kvKeyCursorPrefix+"%", kvKeyRangePrefix+"%", kvKeyMigratedPrefix+"%").Error; err != nil {
+					return fmt.Errorf("clearing range state: %w", err)
 				}
+
+				var totalCount int64
+				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
+					Table("torrent_files").
+					Select("COUNT(DISTINCT info_hash)").
+					Scan(&totalCount).Error; err != nil {
+					return fmt.Errorf("counting torrents: %w", err)
+				}
+
+				for k, v := range map[string]string{
+					kvKeyStatus:    statusRunning,
+					kvKeyTotal:     strconv.FormatInt(totalCount, 10),
+					kvKeyStartedAt: now.Format(time.RFC3339),
+				} {
+					if err := upsertKV(ctx, d, k, v, now); err != nil {
+						return err
+					}
+				}
+			} else if err := upsertKV(ctx, d, kvKeyStatus, statusRunning, now); err != nil {
+				return err
 			}
 
-			job, err := queue.NewQueueJob(queue.MessageParams{
-				InfoHashGreaterThan: cursor,
-				BatchSize:           ctx.Int("batch-size"),
-			})
+			seeded, err := p.seedRanges(ctx, d, chunkSize, resume)
 			if err != nil {
-				return fmt.Errorf("creating queue job: %w", err)
+				return fmt.Errorf("seeding range jobs: %w", err)
 			}
 
-			if err := d.QueueJob.WithContext(ctx.Context).Create(&job); err != nil {
-				return fmt.Errorf("enqueuing job: %w", err)
+			total, _ := getKV(ctx, d, kvKeyTotal)
+			verb := "started"
+			if resume {
+				verb = "resumed"
 			}
 
 			_, _ = fmt.Fprintf(
 				ctx.App.Writer,
-				"Migration started. Total torrents with files: %d\n",
-				totalCount,
+				"Migration %s with %d parallel range workers (chunk-size %d). Total torrents with files: %s\n",
+				verb,
+				seeded,
+				chunkSize,
+				total,
 			)
+
 			return nil
 		},
 	}
@@ -179,7 +194,23 @@ func (p Params) statusCmd() *cli.Command {
 			tw.AppendHeader(table.Row{"Property", "Value"})
 			tw.AppendRow(table.Row{"Status", status})
 
-			migrated, _ := strconv.ParseInt(m[kvKeyMigrated], 10, 64)
+			// Sum the per-range migrated counters + count active/done ranges.
+			var migrated int64
+
+			rangesDone, rangesActive := 0, 0
+
+			for k, v := range m {
+				switch {
+				case strings.HasPrefix(k, kvKeyMigratedPrefix):
+					n, _ := strconv.ParseInt(v, 10, 64)
+					migrated += n
+
+					rangesActive++
+				case strings.HasPrefix(k, kvKeyRangePrefix) && v == "done":
+					rangesDone++
+				}
+			}
+
 			total, _ := strconv.ParseInt(m[kvKeyTotal], 10, 64)
 			tw.AppendRow(table.Row{"Migrated", migrated})
 			tw.AppendRow(table.Row{"Total", total})
@@ -189,9 +220,10 @@ func (p Params) statusCmd() *cli.Command {
 				tw.AppendRow(table.Row{"Progress", fmt.Sprintf("%.1f%%", pct)})
 			}
 
-			if cursor := m[kvKeyCursor]; cursor != "" {
-				tw.AppendRow(table.Row{"Last Cursor", cursor})
-			}
+			tw.AppendRow(table.Row{
+				"Ranges",
+				fmt.Sprintf("%d done / %d total", rangesDone, rangesActive+rangesDone),
+			})
 
 			if startedAt := m[kvKeyStartedAt]; startedAt != "" {
 				t, parseErr := time.Parse(time.RFC3339, startedAt)
@@ -248,12 +280,13 @@ func (p Params) pauseCmd() *cli.Command {
 func (p Params) resumeCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "resume",
-		Usage: "Resume a paused migration",
+		Usage: "Resume a paused migration from per-range checkpoints",
 		Flags: []cli.Flag{
 			&cli.IntFlag{
-				Name:  "batch-size",
-				Value: int(p.Config.BatchSize),
-				Usage: "number of torrents per migration batch",
+				Name:    "chunk-size",
+				Aliases: []string{"batch-size"},
+				Value:   int(p.Config.ChunkSize),
+				Usage:   "torrents (distinct info_hashes) processed per chunk",
 			},
 		},
 		Action: func(ctx *cli.Context) error {
@@ -267,28 +300,115 @@ func (p Params) resumeCmd() *cli.Command {
 				return fmt.Errorf("migration is not paused (current status: %s)", status)
 			}
 
-			cursor, _ := getKV(ctx, d, kvKeyCursor)
+			chunkSize := ctx.Int("chunk-size")
+			if chunkSize <= 0 {
+				chunkSize = int(p.Config.ChunkSize)
+			}
 
 			if err := upsertKV(ctx, d, kvKeyStatus, statusRunning, time.Now()); err != nil {
 				return err
 			}
 
-			job, err := queue.NewQueueJob(queue.MessageParams{
-				InfoHashGreaterThan: cursor,
-				BatchSize:           ctx.Int("batch-size"),
-			})
+			seeded, err := p.seedRanges(ctx, d, chunkSize, true)
 			if err != nil {
-				return fmt.Errorf("creating queue job: %w", err)
+				return fmt.Errorf("seeding range jobs: %w", err)
 			}
 
-			if err := d.QueueJob.WithContext(ctx.Context).Create(&job); err != nil {
-				return fmt.Errorf("enqueuing job: %w", err)
-			}
+			_, _ = fmt.Fprintf(
+				ctx.App.Writer,
+				"Migration resumed: %d range workers re-seeded from checkpoints (chunk-size %d).\n",
+				seeded,
+				chunkSize,
+			)
 
-			_, _ = fmt.Fprintf(ctx.App.Writer, "Migration resumed from cursor: %s\n", cursor)
 			return nil
 		},
 	}
+}
+
+// numRanges is K — the number of parallel info_hash-range workers (= handler Concurrency).
+func (p Params) numRanges() int {
+	k := int(p.Config.Parallelism)
+	if k < 1 {
+		k = queue.DefaultConcurrency
+	}
+
+	return k
+}
+
+// computeRanges partitions the 20-byte info_hash space into k disjoint, gap-free (lower, upper]
+// ranges by the leading byte. Bounds are hex (parsed to raw bytea by the handler). Range 0 has no
+// lower bound (covers the smallest hashes); the last range has no upper bound (covers the largest).
+func computeRanges(k int) []queue.MessageParams {
+	if k < 1 {
+		k = 1
+	}
+
+	step := 256 / k
+	if step < 1 {
+		step = 1
+	}
+
+	ranges := make([]queue.MessageParams, 0, k)
+
+	for i := range k {
+		var lower, upper string
+
+		if i > 0 {
+			var b protocol.ID
+			b[0] = byte(i * step)
+			lower = b.String()
+		}
+
+		if i < k-1 {
+			var b protocol.ID
+			b[0] = byte((i + 1) * step)
+			upper = b.String()
+		}
+
+		ranges = append(ranges, queue.MessageParams{
+			InfoHashGreaterThan: lower,
+			InfoHashLessOrEqual: upper,
+			RangeID:             i,
+			NumRanges:           k,
+		})
+	}
+
+	return ranges
+}
+
+// seedRanges enqueues one job per range. On resume it skips done ranges and starts each from its
+// per-range checkpoint cursor.
+func (p Params) seedRanges(ctx *cli.Context, d *dao.Query, chunkSize int, resume bool) (int, error) {
+	seeded := 0
+
+	for _, r := range computeRanges(p.numRanges()) {
+		r.ChunkSize = chunkSize
+
+		if resume {
+			if done, _ := getKV(ctx, d, fmt.Sprintf("%s%d", kvKeyRangePrefix, r.RangeID)); done == "done" {
+				continue
+			}
+
+			if cur, _ := getKV(ctx, d, fmt.Sprintf("%s%d", kvKeyCursorPrefix, r.RangeID)); cur != "" {
+				r.InfoHashGreaterThan = cur
+			}
+		}
+
+		job, err := queue.NewQueueJob(r)
+		if err != nil {
+			return seeded, err
+		}
+
+		if err := d.QueueJob.WithContext(ctx.Context).
+			Clauses(clause.OnConflict{DoNothing: true}).Create(&job); err != nil {
+			return seeded, err
+		}
+
+		seeded++
+	}
+
+	return seeded, nil
 }
 
 func (p Params) verifyCmd() *cli.Command {
@@ -312,20 +432,23 @@ func (p Params) verifyCmd() *cli.Command {
 				return err
 			}
 
-			var sampleSize int
+			parallelism := int(p.Config.Parallelism)
+			if parallelism < 1 {
+				parallelism = queue.DefaultConcurrency
+			}
+
+			chunkSize := int(p.Config.ChunkSize)
+			if chunkSize < 1 {
+				chunkSize = queue.DefaultChunkSize
+			}
+
+			// sampleSize 0 = full. Parallel streaming (no ORDER BY RANDOM / join / per-torrent reads).
+			sampleSize := 0
 			if ctx.Bool("full") {
-				var count int64
-				if err := d.Torrent.UnderlyingDB().WithContext(ctx.Context).
-					Table("torrents").
-					Where("files_data IS NOT NULL").
-					Count(&count).Error; err != nil {
-					return fmt.Errorf("counting migrated torrents: %w", err)
-				}
-				sampleSize = int(count)
 				_, _ = fmt.Fprintf(
 					ctx.App.Writer,
-					"Running full verification on %d torrents...\n",
-					sampleSize,
+					"Running full parallel verification (%d workers, chunk %d)...\n",
+					parallelism, chunkSize,
 				)
 			} else {
 				var count int64
@@ -335,15 +458,20 @@ func (p Params) verifyCmd() *cli.Command {
 					Count(&count).Error; err != nil {
 					return fmt.Errorf("counting migrated torrents: %w", err)
 				}
+
 				sampleSize = int(float64(count) * ctx.Float64("sample-rate"))
 				if sampleSize < 1 {
 					sampleSize = 1
 				}
-				_, _ = fmt.Fprintf(ctx.App.Writer, "Sampling %d of %d migrated torrents (%.0f%%)...\n",
-					sampleSize, count, ctx.Float64("sample-rate")*100)
+
+				_, _ = fmt.Fprintf(
+					ctx.App.Writer,
+					"Sampling %d of %d migrated torrents (%.0f%%, %d workers)...\n",
+					sampleSize, count, ctx.Float64("sample-rate")*100, parallelism,
+				)
 			}
 
-			summary, err := consistency.CheckRandom(ctx.Context, d, sampleSize)
+			summary, err := consistency.CheckAll(ctx.Context, d, parallelism, chunkSize, sampleSize)
 			if err != nil {
 				return fmt.Errorf("verification failed: %w", err)
 			}
@@ -516,6 +644,7 @@ func upsertKV(ctx *cli.Context, d *dao.Query, key, value string, now time.Time) 
 	kv := model.KeyValue{Key: key, Value: value, CreatedAt: now, UpdatedAt: now}
 
 	return d.Torrent.UnderlyingDB().WithContext(ctx.Context).
+		Table("key_values").
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),

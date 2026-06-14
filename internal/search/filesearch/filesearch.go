@@ -1,0 +1,101 @@
+// Package filesearch defines the Go-side contract the GraphQL fileSearch +
+// pathTypeahead resolvers depend on. It is a thin, transport-neutral interface
+// so the real implementation — a gRPC client for the DuckDB file-search sidecar
+// (DV-2) and the path-FTS sidecar (DV-3) — can be wired in later without
+// touching the resolver layer.
+//
+// Until that sidecar is deployed and the FileSearchEnabled feature flag is
+// flipped, the resolvers use the Disabled() client, which rejects every call
+// with ErrDisabled. All input validation/hygiene (FB-B1d) lives here so it is
+// enforced identically regardless of which client backs the interface.
+package filesearch
+
+import (
+	"context"
+	"errors"
+
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+)
+
+// ErrDisabled is returned by the Disabled() client and by any client whose
+// backing feature flag / sidecar is not enabled.
+var ErrDisabled = errors.New("file search is not enabled")
+
+// FileSearchInput is the validated input to a file-grained search. Build it with
+// NewFileSearchInput so the hygiene rules (length caps, LIKE-metachar escaping,
+// limit clamping) are always applied.
+type FileSearchInput struct {
+	// Query is the free-text / path query, already length-capped. The raw form
+	// is kept for engines that tokenise it themselves; QueryLikePattern is the
+	// escaped form for ILIKE/LIKE backends.
+	Query string
+	// QueryLikePattern is Query with %, _ and \ escaped (FB-B1d), safe to embed
+	// in a LIKE/ILIKE pattern.
+	QueryLikePattern string
+	// Extensions restricts results to these file extensions (already normalised).
+	Extensions []string
+	// MinSize / MaxSize bound the file size in bytes (0 = unset).
+	MinSize uint64
+	MaxSize uint64
+	// InfoHash, when set, scopes the search to a single torrent (the per-torrent
+	// browser path).
+	InfoHash *protocol.ID
+	// Limit / Offset paginate the result; Limit is clamped to [1, MaxLimit].
+	Limit  uint
+	Offset uint
+}
+
+// FileSearchItem is a single matched file.
+type FileSearchItem struct {
+	InfoHash  protocol.ID
+	Index     uint
+	Path      string
+	Extension string
+	Size      uint64
+}
+
+// FileSearchResult is a page of matched files.
+type FileSearchResult struct {
+	Items       []FileSearchItem
+	TotalCount  uint
+	HasNextPage bool
+}
+
+// PathTypeaheadInput is the validated input to a path typeahead. Build it with
+// NewPathTypeaheadInput.
+type PathTypeaheadInput struct {
+	// Prefix is the (length-capped, escaped) typeahead prefix.
+	Prefix string
+	// PrefixLikePattern is Prefix with LIKE metacharacters escaped.
+	PrefixLikePattern string
+	// Limit is clamped to [1, MaxTypeaheadLimit].
+	Limit uint
+}
+
+// PathTypeaheadResult is the list of suggested path completions.
+type PathTypeaheadResult struct {
+	Suggestions []string
+}
+
+// Client is the contract the resolvers depend on. Implementations: the DV-2/DV-3
+// gRPC sidecar client (real), and Disabled() (no-op).
+type Client interface {
+	FileSearch(ctx context.Context, in FileSearchInput) (FileSearchResult, error)
+	PathTypeahead(ctx context.Context, in PathTypeaheadInput) (PathTypeaheadResult, error)
+}
+
+// Disabled returns a Client that rejects every call with ErrDisabled. It is the
+// safe default used while FileSearchEnabled is OFF.
+func Disabled() Client {
+	return disabledClient{}
+}
+
+type disabledClient struct{}
+
+func (disabledClient) FileSearch(context.Context, FileSearchInput) (FileSearchResult, error) {
+	return FileSearchResult{}, ErrDisabled
+}
+
+func (disabledClient) PathTypeahead(context.Context, PathTypeaheadInput) (PathTypeaheadResult, error) {
+	return PathTypeaheadResult{}, ErrDisabled
+}

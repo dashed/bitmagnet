@@ -74,7 +74,11 @@ func DeserializeFiles(data []byte) ([]model.TorrentFile, error) {
 func ExtractUniqueExtensions(files []model.TorrentFile) []string {
 	seen := make(map[string]struct{})
 
-	var exts []string //nolint:prealloc // preserves nil return for empty input
+	// Non-nil so it serializes to JSON '[]' (not SQL NULL) for files with no extractable
+	// extension: torrents.file_extensions and torrent_file_summary.extensions are JSONB NOT NULL,
+	// and the GORM json serializer writes a nil slice as NULL -> constraint violation (which broke
+	// the dual-write + backfill on extension-less torrents).
+	exts := []string{}
 
 	for _, f := range files {
 		ext := model.FileExtensionFromPath(f.Path)

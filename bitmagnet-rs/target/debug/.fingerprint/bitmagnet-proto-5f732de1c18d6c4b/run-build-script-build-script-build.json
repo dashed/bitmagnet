@@ -1,0 +1,1 @@
+{"rustc":2179919275645516985,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[10879686535644872221,"build_script_build",false,10788486744109003378]],"local":[{"RerunIfChanged":{"output":"debug/build/bitmagnet-proto-5f732de1c18d6c4b/output","paths":["../../proto"]}}],"rustflags":[],"config":0,"compile_kind":0}
