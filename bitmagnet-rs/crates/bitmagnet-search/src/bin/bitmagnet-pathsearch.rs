@@ -625,4 +625,99 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// End-to-end against a live PostgreSQL: the follow loop's watermark-FILE
+    /// hand-off ACROSS TWO TICKS. `spawn_follow_loop` seeds a lagged watermark
+    /// file on startup, then after every successful `follow_window` publishes
+    /// `stats.until` back to the file so the NEXT tick carves `[that, new_until]`
+    /// — the carve origin moves strictly forward and a tick never re-carves from
+    /// the old origin. This drives the full read -> window -> write -> re-read ->
+    /// next-window loop that `follow_window_processes_a_recent_window` omits (it
+    /// runs one window and never touches the file), and guards the exact
+    /// "ticks must advance the origin" regression class that bit L2 (l2-7→l2-8).
+    /// Read-only against PG; writes only a throwaway index + watermark file.
+    /// Requires the `deleted_torrents` audit table. Ignored by default:
+    ///
+    /// ```sh
+    /// BITMAGNET_POSTGRES_DSN=postgres://postgres@localhost/bitmagnet \
+    ///   cargo test -p bitmagnet-search --bin bitmagnet-pathsearch -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a live PostgreSQL with the deleted_torrents audit table (set BITMAGNET_POSTGRES_DSN)"]
+    async fn follow_watermark_file_advances_monotonically_across_ticks() {
+        use super::follow_window;
+        use bitmagnet_db::{connect, DbConfig};
+        use bitmagnet_search::pathsearch::watermark::{read_watermark, write_watermark};
+
+        let cfg = DbConfig::from_env().expect("postgres config from env");
+        let pool = connect(&cfg).await.expect("connect to postgres");
+
+        let dir = std::env::temp_dir().join(format!(
+            "bitmagnet-pathsearch-followwm-it-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create index dir");
+        let server = PathSearchServer::open(&dir, 256 * 1024 * 1024, 1).expect("open server");
+        let watermark_file = dir.join("watermark");
+
+        // Two non-overlapping windows derived from ONE clock read, so the second
+        // window's upper bound is deterministically greater than the first's.
+        let now = current_epoch();
+        let origin = now - 2 * 3600; // seeded lagged start (2h ago)
+        let until1 = now - 3600; // first tick upper bound (1h ago)
+        let until2 = now - 30; // second tick upper bound (carve-lag boundary)
+
+        // Startup, mirroring spawn_follow_loop: an absent file reads as None, so
+        // the loop seeds a lagged origin and publishes it.
+        assert_eq!(read_watermark(&watermark_file), None);
+        write_watermark(&watermark_file, origin).expect("seed origin watermark");
+        assert_eq!(read_watermark(&watermark_file), Some(origin));
+
+        // TICK 1: carve [persisted origin, until1] against live PG, then publish
+        // the new upper bound exactly as the follow loop's success arm does.
+        let since1 = read_watermark(&watermark_file).expect("origin present");
+        assert_eq!(since1, origin, "first tick carves from the seeded origin");
+        let stats1 = follow_window(&pool, &server, since1, until1, 1000, 100_000)
+            .await
+            .expect("first follow window completes");
+        assert_eq!(stats1.since, origin);
+        assert_eq!(stats1.until, until1);
+        write_watermark(&watermark_file, stats1.until).expect("advance watermark after tick 1");
+        assert_eq!(
+            read_watermark(&watermark_file),
+            Some(until1),
+            "the persisted watermark advanced to the first window's upper bound"
+        );
+
+        // TICK 2: MUST resume from the ADVANCED origin (until1), never re-carve
+        // from the old origin. This is the l2-7→l2-8 guard.
+        let since2 = read_watermark(&watermark_file).expect("advanced origin present");
+        assert_eq!(
+            since2, until1,
+            "second tick resumes from the advanced origin, not the original seed"
+        );
+        assert_ne!(
+            since2, origin,
+            "a tick must never re-carve from the old origin"
+        );
+        let stats2 = follow_window(&pool, &server, since2, until2, 1000, 100_000)
+            .await
+            .expect("second follow window completes");
+        assert_eq!(
+            stats2.since, until1,
+            "the second window's lower bound is the first window's upper bound"
+        );
+        assert_eq!(stats2.until, until2);
+        write_watermark(&watermark_file, stats2.until).expect("advance watermark after tick 2");
+        assert_eq!(read_watermark(&watermark_file), Some(until2));
+
+        // Strict forward progress of the persisted origin across both ticks.
+        assert!(
+            origin < until1 && until1 < until2,
+            "the persisted watermark advances strictly forward, never backward or in place"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

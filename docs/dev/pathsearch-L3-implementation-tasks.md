@@ -38,12 +38,22 @@ shape is the keyed per-torrent path-bag index, not the retired per-file index.
   lock-in. Matches the `SearchService` precedent. The `PathSearchHealth` response
   is already path-specific and uniquely named, avoiding the single
   `bitmagnet.v1`-module name collision. Reversible; not a product fork.
-- [ ] Add a gRPC smoke test for `PathSearchServiceClient` over TCP, mirroring
-  the existing `SearchService` smoke test.
-- [ ] Add a live-Postgres ignored test/smoke for
-  `bitmagnet-pathsearch-backfill --limit`.
-- [ ] Add a follow-loop smoke against live PG or a small fixture DB to prove
+- [x] Add a gRPC smoke test for `PathSearchServiceClient` over TCP, mirroring
+  the existing `SearchService` smoke test. *(Implemented in `e0d37b43`:
+  `tests/pathsearch_smoke.rs` — boots `PathSearchServer` on an ephemeral port,
+  exercises `HealthCheck`+`PathCandidates`.)*
+- [x] Add a live-Postgres ignored test/smoke for
+  `bitmagnet-pathsearch-backfill --limit`. *(Implemented in `e0d37b43`:
+  `#[ignore]` `capped_backfill_indexes_path_bag_documents` — asserts docs>0 and
+  the partial `--limit` run seeds no watermark.)*
+- [x] Add a follow-loop smoke against live PG or a small fixture DB to prove
   watermark advancement, changed upserts, and deleted-torrent tombstones.
+  *(Implemented in `e0d37b43`: `#[ignore]` `follow_window_processes_a_recent_window`
+  plus deterministic in-RAM `apply_changed_row_*` / `live_tombstones_*` units for
+  supersession + tombstones. Extended on `feat/l3-pathsearch-v3` with `#[ignore]`
+  `follow_watermark_file_advances_monotonically_across_ticks` — an end-to-end
+  watermark-FILE round-trip proving the carve origin advances across two ticks
+  and never re-carves from the old origin, guarding the L2 l2-7→l2-8 class.)*
 - [x] **DECIDED + FROZEN (A2, 2026-06-13): seeders stay backend-hydrated; the
   L3 index indexes `seeders = 0`.** Rationale: L3 is a candidate engine that
   oversamples and hands `info_hash` to the backend, which already holds fresh

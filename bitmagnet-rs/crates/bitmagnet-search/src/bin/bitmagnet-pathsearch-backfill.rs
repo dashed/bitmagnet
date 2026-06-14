@@ -293,4 +293,75 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// End-to-end against a live PostgreSQL: a `--limit` backfill is BOUNDED by
+    /// the limit and IDEMPOTENT — re-running it over the same keyset prefix
+    /// upserts by `info_hash` rather than duplicating, so the doc count is stable
+    /// and a partial run never seeds the follow watermark. Complements
+    /// `capped_backfill_indexes_path_bag_documents` (which proves docs>0 +
+    /// no-watermark) with the bound + idempotency invariants. Ignored by default:
+    ///
+    /// ```sh
+    /// BITMAGNET_POSTGRES_DSN=postgres://postgres@localhost/bitmagnet \
+    ///   cargo test -p bitmagnet-search --bin bitmagnet-pathsearch-backfill -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a live PostgreSQL (set BITMAGNET_POSTGRES_DSN)"]
+    async fn capped_backfill_is_bounded_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "bitmagnet-pathsearch-backfill-idem-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let watermark = dir.join("watermark");
+
+        let args = || Args {
+            index_path: dir.clone(),
+            postgres_dsn: String::new(), // BITMAGNET_POSTGRES_* from the environment
+            batch_size: 100,
+            limit: Some(300),
+            commit_interval: 100,
+            after_info_hash: None,
+            writer_heap_mb: 256,
+            writer_threads: 1,
+            watermark_file: watermark.clone(),
+        };
+
+        run(args()).await.expect("first capped backfill run");
+        let first = {
+            let index = open_or_create(&dir).expect("reopen index");
+            let reader = reader(&index).expect("build reader");
+            reader.reload().unwrap();
+            reader.searcher().num_docs()
+        };
+        assert!(
+            first > 0,
+            "a capped backfill of a populated database indexes some path-bag documents"
+        );
+        assert!(first <= 300, "--limit must bound the indexed doc count");
+        assert!(
+            !watermark.exists(),
+            "a partial (--limit) backfill must not seed the follow watermark"
+        );
+
+        // Re-run the same capped backfill over the same dir. Documents are keyed
+        // by info_hash and upserted (delete-then-add), so the count must not grow.
+        run(args()).await.expect("second capped backfill run");
+        let second = {
+            let index = open_or_create(&dir).expect("reopen index");
+            let reader = reader(&index).expect("build reader");
+            reader.reload().unwrap();
+            reader.searcher().num_docs()
+        };
+        assert_eq!(
+            second, first,
+            "re-running a capped backfill must be idempotent (upsert by info_hash, no duplicates)"
+        );
+        assert!(
+            !watermark.exists(),
+            "re-running a partial backfill still seeds no watermark"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
