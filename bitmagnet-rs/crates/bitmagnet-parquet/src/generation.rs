@@ -56,6 +56,19 @@ pub struct Layout {
     root: PathBuf,
 }
 
+/// Outcome of pruning one generation kind (base or delta).
+#[derive(Debug, Clone)]
+pub struct PruneReport {
+    pub kind: Kind,
+    /// How many version dirs were retained (current + newest-N + unparseable).
+    pub kept: usize,
+    /// The version dirs deleted (or, with `dry_run`, that WOULD be deleted).
+    pub deleted: Vec<PathBuf>,
+    /// Bytes reclaimed (or that would be reclaimed) across `deleted`.
+    pub reclaimed_bytes: u64,
+    pub dry_run: bool,
+}
+
 impl Layout {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -215,6 +228,133 @@ impl Layout {
         fs::rename(&tmp, path)?;
         Ok(())
     }
+
+    // ---- pruning (generation GC) ----
+    //
+    // Keep `current` + the newest-N versions per kind; delete the rest. Old
+    // generations are immutable, so deleting a non-current, non-newest-N dir is
+    // safe once no reader still holds it (reader-hold ≤ the sidecar reload
+    // interval + the per-query deadline). The selection REFUSES to delete a
+    // `current` target even if it falls outside keep-N, and `prune_kind`
+    // re-resolves `current` immediately before each unlink (TOCTOU guard
+    // against a concurrent delta tick swapping the symlink mid-prune).
+
+    /// List the `v*` version directories under `<kind>/` (immediate child dirs
+    /// whose name starts with `v`). Ignores the `current`/`current.txt` pointers
+    /// and any scratch (`.current.tmp`, …). Missing kind dir → empty.
+    pub fn list_version_dirs(&self, kind: Kind) -> Result<Vec<PathBuf>> {
+        let dir = self.kind_dir(kind);
+        let mut out = Vec::new();
+        let rd = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in rd {
+            let entry = entry?;
+            let is_v = entry
+                .file_name()
+                .to_str()
+                .map(|n| n.starts_with('v'))
+                .unwrap_or(false);
+            // is_dir() follows the symlink, so the `current` pointer (name does
+            // not start with `v`) is excluded by the name check above anyway.
+            if is_v && entry.path().is_dir() {
+                out.push(entry.path());
+            }
+        }
+        Ok(out)
+    }
+
+    /// PURE partition of `dirs` into `(keep, delete)`: keep `current` (ALWAYS,
+    /// even outside keep-N) plus the newest-`keep` by parsed version. Names that
+    /// do not parse as `v<epoch>[-empty]` are kept (never delete something we do
+    /// not understand). Newest = highest epoch; for an equal epoch the `-empty`
+    /// reset delta sorts AFTER the plain dir (compaction publishes it last).
+    pub fn select_prunable(
+        dirs: &[PathBuf],
+        current: Option<&Path>,
+        keep: usize,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let current_name = current.and_then(Path::file_name);
+        let mut keep_set: Vec<PathBuf> = Vec::new();
+        let mut parseable: Vec<(&PathBuf, (i64, u8))> = Vec::new();
+        for d in dirs {
+            match d
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(parse_version_key)
+            {
+                Some(k) => parseable.push((d, k)),
+                None => keep_set.push(d.clone()), // unparseable → always keep
+            }
+        }
+        // Newest first.
+        parseable.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut delete_set: Vec<PathBuf> = Vec::new();
+        for (i, (d, _)) in parseable.iter().enumerate() {
+            let is_current = current_name.is_some() && d.file_name() == current_name;
+            if i < keep || is_current {
+                keep_set.push((*d).clone());
+            } else {
+                delete_set.push((*d).clone());
+            }
+        }
+        (keep_set, delete_set)
+    }
+
+    /// Prune one kind: keep `current` + newest-`keep`, delete the rest. With
+    /// `dry_run`, computes + measures the delete set but unlinks nothing.
+    pub fn prune_kind(&self, kind: Kind, keep: usize, dry_run: bool) -> Result<PruneReport> {
+        let current = self.resolve_current(kind);
+        let dirs = self.list_version_dirs(kind)?;
+        let (keep_set, delete_set) = Self::select_prunable(&dirs, current.as_deref(), keep);
+        let mut report = PruneReport {
+            kind,
+            kept: keep_set.len(),
+            deleted: Vec::new(),
+            reclaimed_bytes: 0,
+            dry_run,
+        };
+        for d in delete_set {
+            let bytes = dir_size(&d).unwrap_or(0);
+            if dry_run {
+                report.reclaimed_bytes += bytes;
+                report.deleted.push(d);
+                continue;
+            }
+            // TOCTOU guard: never unlink a dir that became `current` since the
+            // listing (a delta tick may have swapped the symlink in between).
+            let live = self.resolve_current(kind);
+            if live.as_deref().and_then(Path::file_name) == d.file_name() {
+                continue;
+            }
+            match fs::remove_dir_all(&d) {
+                Ok(()) => {}
+                // Already gone — a concurrent prune run (the standalone */15 cron
+                // racing the compaction job's inline prune) won the race. That is
+                // success, not an error: keep going.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("removing {}", d.display())),
+            }
+            report.reclaimed_bytes += bytes;
+            report.deleted.push(d);
+        }
+        Ok(report)
+    }
+
+    /// Prune both kinds (base keeps `keep_base`, delta keeps `keep_delta`).
+    pub fn prune(
+        &self,
+        keep_base: usize,
+        keep_delta: usize,
+        dry_run: bool,
+    ) -> Result<Vec<PruneReport>> {
+        Ok(vec![
+            self.prune_kind(Kind::Base, keep_base, dry_run)?,
+            self.prune_kind(Kind::Delta, keep_delta, dry_run)?,
+        ])
+    }
 }
 
 /// Best-effort `fsync` of a directory (POSIX durability of renames within it).
@@ -226,6 +366,35 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     }
     let _ = dir;
     Ok(())
+}
+
+/// Parse a `v<epoch>` (optionally `-empty`) version dir name into a sort key
+/// `(epoch, empty_rank)`. The `-empty` reset delta (published last by
+/// compaction) ranks AFTER the plain dir of the same epoch. Returns `None` for
+/// anything that is not `v<integer>[-empty]` — callers keep such dirs.
+fn parse_version_key(name: &str) -> Option<(i64, u8)> {
+    let rest = name.strip_prefix('v')?;
+    let (digits, empty_rank) = match rest.strip_suffix("-empty") {
+        Some(d) => (d, 1u8),
+        None => (rest, 0u8),
+    };
+    let epoch: i64 = digits.parse().ok()?;
+    Some((epoch, empty_rank))
+}
+
+/// Recursively sum file sizes under `path` (best-effort; a vanished entry → 0).
+fn dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let md = entry.metadata()?;
+        if md.is_dir() {
+            total += dir_size(&entry.path()).unwrap_or(0);
+        } else {
+            total += md.len();
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -292,5 +461,144 @@ mod tests {
         assert_eq!(l.read_watermark(), 0);
         l.write_watermark(1_700_000_000).unwrap();
         assert_eq!(l.read_watermark(), 1_700_000_000);
+    }
+
+    // ---- pruning ----
+
+    fn names(v: &[PathBuf]) -> Vec<String> {
+        let mut s: Vec<String> = v
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        s.sort();
+        s
+    }
+
+    #[test]
+    fn parse_version_key_handles_plain_and_empty() {
+        assert_eq!(parse_version_key("v100"), Some((100, 0)));
+        assert_eq!(parse_version_key("v100-empty"), Some((100, 1)));
+        // The `-empty` reset delta ranks AFTER the plain dir of the same epoch,
+        // and a newer epoch outranks an older `-empty`.
+        assert!(parse_version_key("v100-empty") > parse_version_key("v100"));
+        assert!(parse_version_key("v200") > parse_version_key("v100-empty"));
+        // Non-numeric / pointer names do not parse (callers keep them).
+        assert_eq!(parse_version_key("vmanual"), None);
+        assert_eq!(parse_version_key("current"), None);
+        assert_eq!(parse_version_key("v"), None);
+    }
+
+    #[test]
+    fn select_prunable_keeps_current_and_newest_n() {
+        let dirs: Vec<PathBuf> = ["v100", "v200", "v300", "v400"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let current = PathBuf::from("v100");
+        let (keep, del) = Layout::select_prunable(&dirs, Some(&current), 2);
+        // newest-2 = {v400, v300}; current = v100 → kept; delete = v200.
+        assert_eq!(names(&keep), vec!["v100", "v300", "v400"]);
+        assert_eq!(names(&del), vec!["v200"]);
+    }
+
+    #[test]
+    fn select_prunable_keeps_current_outside_keep_n() {
+        // current is the OLDEST; keep-N would exclude it, but it MUST survive.
+        let dirs: Vec<PathBuf> = ["v100", "v200", "v300"].iter().map(PathBuf::from).collect();
+        let current = PathBuf::from("v100");
+        let (keep, del) = Layout::select_prunable(&dirs, Some(&current), 1);
+        assert_eq!(names(&keep), vec!["v100", "v300"]); // newest-1 = v300 + current
+        assert_eq!(names(&del), vec!["v200"]);
+    }
+
+    #[test]
+    fn select_prunable_keeps_unparseable() {
+        let dirs: Vec<PathBuf> = ["v100", "v200", "vmanual"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let (keep, del) = Layout::select_prunable(&dirs, None, 1);
+        // vmanual unparseable → kept; newest-1 = v200; delete v100.
+        assert_eq!(names(&keep), vec!["v200", "vmanual"]);
+        assert_eq!(names(&del), vec!["v100"]);
+    }
+
+    #[test]
+    fn prune_kind_refuses_current_and_keeps_newest_n() {
+        let l = Layout::new(tmp("prune"));
+        l.ensure_dirs().unwrap();
+        for v in ["100", "200", "300"] {
+            let d = l.new_version_dir(Kind::Base, v).unwrap();
+            fs::write(d.join(artifact::FACT), b"x").unwrap();
+        }
+        // current is the OLDEST (v100) — keep-1 would exclude it.
+        l.publish(Kind::Base, &l.kind_dir(Kind::Base).join("v100"))
+            .unwrap();
+        let report = l.prune_kind(Kind::Base, 1, false).unwrap();
+        assert!(l.kind_dir(Kind::Base).join("v100").is_dir()); // current — kept
+        assert!(l.kind_dir(Kind::Base).join("v300").is_dir()); // newest-1 — kept
+        assert!(!l.kind_dir(Kind::Base).join("v200").exists()); // pruned
+        assert_eq!(report.deleted.len(), 1);
+        assert!(report.reclaimed_bytes >= 1);
+        // current pointer still resolves after the prune.
+        assert!(l.resolve_current(Kind::Base).unwrap().ends_with("v100"));
+    }
+
+    #[test]
+    fn prune_dry_run_deletes_nothing() {
+        let l = Layout::new(tmp("prunedry"));
+        l.ensure_dirs().unwrap();
+        for v in ["100", "200", "300"] {
+            let d = l.new_version_dir(Kind::Base, v).unwrap();
+            fs::write(d.join(artifact::FACT), b"xyz").unwrap();
+        }
+        l.publish(Kind::Base, &l.kind_dir(Kind::Base).join("v300"))
+            .unwrap();
+        let report = l.prune_kind(Kind::Base, 1, true).unwrap();
+        // Dry-run: v100 + v200 reported, but NOTHING removed.
+        assert!(l.kind_dir(Kind::Base).join("v100").is_dir());
+        assert!(l.kind_dir(Kind::Base).join("v200").is_dir());
+        assert!(report.dry_run);
+        assert_eq!(report.deleted.len(), 2);
+        assert!(report.reclaimed_bytes >= 3);
+    }
+
+    #[test]
+    fn prune_kind_second_run_is_noop() {
+        // Repeated prunes (the */15 standalone cron + the daily compact's inline
+        // prune) must be idempotent: once the old dirs are gone, a re-run finds
+        // nothing to delete and does not error.
+        let l = Layout::new(tmp("pruneidem"));
+        l.ensure_dirs().unwrap();
+        for v in ["100", "200", "300"] {
+            let d = l.new_version_dir(Kind::Base, v).unwrap();
+            fs::write(d.join(artifact::FACT), b"x").unwrap();
+        }
+        l.publish(Kind::Base, &l.kind_dir(Kind::Base).join("v300"))
+            .unwrap();
+        let first = l.prune_kind(Kind::Base, 1, false).unwrap();
+        assert_eq!(first.deleted.len(), 2); // v100 + v200
+        let second = l.prune_kind(Kind::Base, 1, false).unwrap();
+        assert_eq!(second.deleted.len(), 0); // nothing left to prune
+        assert!(l.kind_dir(Kind::Base).join("v300").is_dir());
+    }
+
+    #[test]
+    fn prune_kind_handles_empty_delta_name() {
+        let l = Layout::new(tmp("pruneempty"));
+        l.ensure_dirs().unwrap();
+        // A plain tick, a compaction `-empty` reset, then another tick.
+        for v in ["100", "200-empty", "300"] {
+            let d = l.new_version_dir(Kind::Delta, v).unwrap();
+            fs::write(d.join(artifact::FACT), b"x").unwrap();
+        }
+        // current = the empty reset delta.
+        l.publish(Kind::Delta, &l.kind_dir(Kind::Delta).join("v200-empty"))
+            .unwrap();
+        let report = l.prune_kind(Kind::Delta, 1, false).unwrap();
+        assert!(l.kind_dir(Kind::Delta).join("v300").is_dir()); // newest-1 (epoch 300)
+        assert!(l.kind_dir(Kind::Delta).join("v200-empty").is_dir()); // current — kept
+        assert!(!l.kind_dir(Kind::Delta).join("v100").exists()); // pruned
+        assert_eq!(report.deleted.len(), 1);
     }
 }
