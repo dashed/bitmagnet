@@ -140,8 +140,10 @@ func TestComposer_RouteDeadline_MultiChunk_ServesAccumulatedPrefix(t *testing.T)
 			item(1, tf("inception/a.mkv", "mkv", 1)),
 			item(2, tf("inception/b.mkv", "mkv", 2)),
 		}},
-		// calls: 1=agg, 2=chunk0 (id1), 3=chunk1 (id2, blocks past deadline).
-		blockFromCall: 3,
+		// gate7-8 call order (agg moved to AFTER refine): 1=chunk0 (id1), 2=chunk1
+		// (id2, blocks past deadline → capDeadline with refined=[id1]), 3=refined-agg
+		// (ctx already past deadline → fails fast → empty facets). Block from call 2.
+		blockFromCall: 2,
 	}
 
 	// MaxChunkTorrents=1 forces one torrent per chunk → 2 chunks (multi-chunk path).
@@ -169,7 +171,7 @@ func TestComposer_RouteDeadline_MultiChunk_ServesAccumulatedPrefix(t *testing.T)
 	}
 
 	if pg.callCount != 3 {
-		t.Fatalf("expected 3 PG calls (agg + 2 chunks), got %d", pg.callCount)
+		t.Fatalf("expected 3 PG calls (2 chunks + refined-agg fast-fail), got %d", pg.callCount)
 	}
 }
 
@@ -329,7 +331,7 @@ func TestComposer_ConcurrencyLimiter_ReleasesSlotOnDeadlineAndError(t *testing.T
 	mD := NewMetrics()
 	pgD := &boundPG{
 		realResult:    search.TorrentContentResult{Items: []search.TorrentContentResultItem{item(1, tf("inception/a.mkv", "mkv", 1)), item(2, tf("inception/b.mkv", "mkv", 2))}},
-		blockFromCall: 1, // block the agg query immediately → deadline before any refine
+		blockFromCall: 1, // block the first chunk decode → deadline before any refine (refined empty → no refined-agg query)
 	}
 	cD := newBoundComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1, 2)}}, pgD, mD,
 		50*time.Millisecond, 0, 1, 1)

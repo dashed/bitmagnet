@@ -621,6 +621,20 @@ func restrictToSet(
 	return out
 }
 
+// infoHashesOf extracts the info_hashes of result items, preserving order. Used to
+// (re)compute facets over the REFINED set (gate7-8): the aggregation must reflect
+// what the route actually serves (post exact-refine), not the pre-refine candidate
+// set. The slice may be empty, in which case the caller must NOT build an IN()
+// query from it (an empty id set) — it serves empty facets instead.
+func infoHashesOf(items []search.TorrentContentResultItem) []protocol.ID {
+	ids := make([]protocol.ID, len(items))
+	for i := range items {
+		ids[i] = items[i].Torrent.InfoHash
+	}
+
+	return ids
+}
+
 // chunkRows queries one chunk's rows (decoding only that chunk's blobs), restores
 // L3 recall order within the chunk, and restricts to the chunk id set. The
 // returned items (and their decoded files) go out of scope at the call site after
@@ -902,15 +916,20 @@ func (c *Composer) TorrentContent(
 
 	if len(chunks) == 1 {
 		// COMMON fast path: the whole kept set fits one chunk (the normal case:
-		// ≤2000 candidates × ~52 files ≈ 104k ≪ 300k budget). One combined query
-		// decodes the chunk AND computes facets — byte-identical to pre-gate7-4, no
-		// extra aggregation round-trip. The retained budget never trips here (a
-		// single chunk's matched files ≤ chunk file budget ≤ retained budget).
+		// ≤2000 candidates × ~52 files ≈ 104k ≪ 300k budget). One query decodes the
+		// chunk and the Go exact-refine drops false positives. The retained budget
+		// never trips here (a single chunk's matched files ≤ chunk file budget ≤
+		// retained budget).
+		//
+		// gate7-8: use the hydrator-only refineOptions() (NOT opts.Combined) — its
+		// side-effect facets would be over the CANDIDATE set, but facets are now
+		// computed once over the REFINED set after refine (see below), so we want
+		// only the decode here.
 		//
 		// gate7-6: the cheap fast path does NOT acquire a concurrency slot, so a
 		// saturated limiter never blocks/sheds a normal/selective query — only the
 		// expensive multi-chunk path below contends for slots.
-		items, chunkAggs, qErr := c.chunkRows(ctx, opts.Combined, chunks[0])
+		items, _, qErr := c.chunkRows(ctx, opts.refineOptions(), chunks[0])
 		if qErr != nil {
 			// A deadline mid-query is NOT a hard error: serve the (empty here)
 			// deadline-capped prefix rather than the broad-FTS PG fallback wall.
@@ -928,8 +947,6 @@ func (c *Composer) TorrentContent(
 			if !ok {
 				return c.refineFailLoud(f)
 			}
-
-			aggs = chunkAggs
 		}
 	} else {
 		// Multi-chunk (the pathological 14-16s whole-dir path): bound concurrency.
@@ -950,62 +967,49 @@ func (c *Composer) TorrentContent(
 		}
 		defer c.sem.Release(1)
 
-		// Compute facets ONCE over the full kept set with the torrent (blob) hydrator
-		// DROPPED — files_data is selected only by that hydrator, so this aggregation
-		// pass does ZERO blob decode. Then refine each chunk in L3 order, letting each
-		// chunk's decoded files fall out of scope before the next chunk is fetched
-		// (peak TRANSIENT decode ≈ one file budget), and accumulate matches under the
-		// RETAINED-file budget so peak RETAINED files is bounded too — independent of
-		// how many candidates match.
-		aggRes, qErr := c.candidateRows(ctx, opts.Agg, keptIDs)
-		if qErr != nil {
+		// Refine each chunk in L3 order, letting each chunk's decoded files fall out of
+		// scope before the next chunk is fetched (peak TRANSIENT decode ≈ one file
+		// budget), and accumulate matches under the RETAINED-file budget so peak
+		// RETAINED files is bounded too — independent of how many candidates match.
+		// gate7-8: facets are NOT computed here over the candidate set; they are
+		// computed ONCE over the REFINED set after refine (see below), so this path no
+		// longer runs the upfront decode-free candidate aggregation.
+		for _, chunk := range chunks {
+			// Checkpoint (a): stop before fetching the next chunk when the route
+			// deadline has fired; serve the accumulated prefix.
 			if isRouteDeadline(ctx) {
 				capRsn = capDeadline
-			} else {
-				c.metrics.IncRoute(RouteError)
 
-				return search.TorrentContentResult{}, false, qErr
+				break
 			}
-		} else {
-			aggs = aggRes.Aggregations
 
-			for _, chunk := range chunks {
-				// Checkpoint (a): stop before fetching the next chunk when the route
-				// deadline has fired; serve the accumulated prefix.
+			items, _, cErr := c.chunkRows(ctx, opts.refineOptions(), chunk)
+			if cErr != nil {
+				// Checkpoint (b): a deadline mid-chunk-query is a deadline-cap, not a
+				// RouteError → serve the prefix, not the PG wall.
 				if isRouteDeadline(ctx) {
 					capRsn = capDeadline
 
 					break
 				}
 
-				items, _, cErr := c.chunkRows(ctx, opts.refineOptions(), chunk)
-				if cErr != nil {
-					// Checkpoint (b): a deadline mid-chunk-query is a deadline-cap, not a
-					// RouteError → serve the prefix, not the PG wall.
-					if isRouteDeadline(ctx) {
-						capRsn = capDeadline
+				c.metrics.IncRoute(RouteError)
 
-						break
-					}
+				return search.TorrentContentResult{}, false, cErr
+			}
 
-					c.metrics.IncRoute(RouteError)
+			var ok bool
 
-					return search.TorrentContentResult{}, false, cErr
-				}
+			refined, retained, capRsn, ok = c.refineMatches(ctx, items, pred, refined, retained)
+			if !ok {
+				return c.refineFailLoud(f)
+			}
 
-				var ok bool
-
-				refined, retained, capRsn, ok = c.refineMatches(ctx, items, pred, refined, retained)
-				if !ok {
-					return c.refineFailLoud(f)
-				}
-
-				if capRsn != capNone {
-					// Retained-file budget reached OR the route deadline fired during
-					// refine: stop decoding further chunks and serve the accumulated
-					// TOP-RELEVANCE prefix (candidates are L3-ordered).
-					break
-				}
+			if capRsn != capNone {
+				// Retained-file budget reached OR the route deadline fired during
+				// refine: stop decoding further chunks and serve the accumulated
+				// TOP-RELEVANCE prefix (candidates are L3-ordered).
+				break
 			}
 		}
 	}
@@ -1033,6 +1037,39 @@ func (c *Composer) TorrentContent(
 		}
 	}
 
+	// gate7-8: (re)compute the facet aggregations over the REFINED result set, not
+	// the pre-refine candidate set. The sidebar must reconcile with the served items
+	// — before this, facets were aggregated over the L3 candidate set BEFORE the Go
+	// exact-refine dropped false positives, so an empty/short result could still show
+	// phantom counts (e.g. totalCount=0 yet contentType=[audiobook 2, ebook 18]).
+	// This pass is decode-free (opts.Agg drops the blob hydrator → ZERO blob decode)
+	// and runs exactly ONCE, after refine; it adds no decode and no unbounded scan.
+	// For capped results (capRetained/capDeadline) `refined` is the served prefix, so
+	// facets are over that prefix — consistent with the served items.
+	if len(refined) == 0 {
+		// No refined matches → serve EMPTY facets. Do NOT build an IN() query from an
+		// empty id set, and do NOT leak the candidate-set facets. This is the core
+		// symptom fix: zero items ⇒ zero facet counts.
+		aggs = query.Aggregations{}
+	} else {
+		aggRes, qErr := c.candidateRows(ctx, opts.Agg, infoHashesOf(refined))
+		if qErr != nil {
+			// Mirror the existing aggregation-pass error handling: a deadline
+			// mid-aggregation serves the result WITHOUT facets (empty aggs, never a
+			// 500); a real error is a RouteError → the GraphQL layer runs the PG
+			// fallback.
+			if isRouteDeadline(ctx) {
+				aggs = query.Aggregations{}
+			} else {
+				c.metrics.IncRoute(RouteError)
+
+				return search.TorrentContentResult{}, false, qErr
+			}
+		} else {
+			aggs = aggRes.Aggregations
+		}
+	}
+
 	page := paginate(refined, offset, limit)
 	c.metrics.IncRoute(RouteServed)
 
@@ -1051,10 +1088,11 @@ func (c *Composer) TorrentContent(
 		// is no next page even though offset+0 < len(refined). Base it on whether
 		// refined rows remain after the returned page. (#10)
 		HasNextPage: offset+uint(len(page)) < uint(len(refined)),
-		// Facets/aggregations PG computed for the candidate set must pass through —
-		// hand-building the result previously dropped them, blanking the UI facet
-		// sidebar on path searches. (#6) In the multi-chunk path these come from the
-		// dedicated decode-free aggregation query over the same kept id set.
+		// Facets/aggregations are computed over the REFINED result set (gate7-8), so
+		// the UI facet sidebar reconciles with the served items: empty result ⇒ empty
+		// facets, N items ⇒ per-facet counts that sum to N. (#6 first restored
+		// pass-through over the candidate set; gate7-8 moves it to the refined set via
+		// the decode-free aggregation query over the refined id set.)
 		Aggregations: aggs,
 	}, true, nil
 }

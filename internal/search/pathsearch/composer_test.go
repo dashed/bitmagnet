@@ -393,6 +393,93 @@ func TestComposer_TorrentContent_PassesThroughAggregations(t *testing.T) {
 	}
 }
 
+// gate7-8 (a) — candidates>0 but the Go exact-refine drops them ALL. The
+// candidate-set facets PG would compute are PHANTOM counts for a result that serves
+// zero items (the "lehman brothers trilogy" symptom: totalCount=0, items=[], yet
+// contentType=[audiobook 2, ebook 18]). Facets must be recomputed over the REFINED
+// (here empty) set → empty aggregations, NEVER the candidate-set phantoms.
+func TestComposer_TorrentContent_AllRefinedOut_EmptyAggregations(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1), candidate(2)}}}
+	phantom := query.Aggregations{
+		"content_type": query.AggregationGroup{Items: query.AggregationItems{
+			"audiobook": query.AggregationItem{Label: "audiobook", Count: 2},
+			"ebook":     query.AggregationItem{Label: "ebook", Count: 18},
+		}},
+	}
+	// Both candidate file paths are L3 false positives (no "inception"), so refine
+	// drops them all. The fake would return `phantom` on ANY query — the empty-refined
+	// branch must NOT issue the aggregation query (empty IN set) and must NOT leak it.
+	pg := &fakePG{result: search.TorrentContentResult{
+		Items: []search.TorrentContentResultItem{
+			item(1, tf("Independence.Day.mkv", "mkv", 1)),
+			item(2, tf("Some.Other.Movie.mkv", "mkv", 2)),
+		},
+		Aggregations: phantom,
+	}}
+
+	c := newTestComposer(l3, pg)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+
+	if res.TotalCount != 0 || len(res.Items) != 0 {
+		t.Fatalf("all candidates refined out → empty result, got TotalCount=%d items=%d", res.TotalCount, len(res.Items))
+	}
+
+	if len(res.Aggregations) != 0 {
+		t.Fatalf("empty result must carry EMPTY facets (no candidate-set phantom counts), got %+v (gate7-8)", res.Aggregations)
+	}
+}
+
+// gate7-8 (b) — when N>0 candidates survive refine, the facets are recomputed over
+// the REFINED set, so the per-facet counts reconcile with the served item count:
+// sum(facet) == N. (The fake returns the refined-set facets for the aggregation
+// pass.)
+func TestComposer_TorrentContent_RefinedAggregationsReconcile(t *testing.T) {
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1), candidate(2), candidate(3)}}}
+	refinedAggs := query.Aggregations{
+		"content_type": query.AggregationGroup{Items: query.AggregationItems{
+			"movie": query.AggregationItem{Label: "movie", Count: 2},
+			"tv":    query.AggregationItem{Label: "tv", Count: 1},
+		}},
+	}
+	pg := &fakePG{result: search.TorrentContentResult{
+		Items: []search.TorrentContentResultItem{
+			item(1, tf("Inception.A.mkv", "mkv", 1)),
+			item(2, tf("Inception.B.mkv", "mkv", 2)),
+			item(3, tf("Inception.C.mkv", "mkv", 3)),
+		},
+		Aggregations: refinedAggs,
+	}}
+
+	c := newTestComposer(l3, pg)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+
+	if res.TotalCount != 3 {
+		t.Fatalf("expected TotalCount=3, got %d", res.TotalCount)
+	}
+
+	grp, ok := res.Aggregations["content_type"]
+	if !ok {
+		t.Fatalf("content_type facet must be present, got %+v", res.Aggregations)
+	}
+
+	var sum uint
+	for _, it := range grp.Items {
+		sum += it.Count
+	}
+
+	if sum != uint(res.TotalCount) {
+		t.Fatalf("facet counts must reconcile with items: sum(content_type)=%d, want N=%d (gate7-8)", sum, res.TotalCount)
+	}
+}
+
 // #98 (relevance-order) — L3 returns candidate ids in recall (path-relevance)
 // order; the PG IN(...) requery returns PG-natural order. The served page MUST be
 // in L3 id order, not PG order. Pre-fix the composer served pgResult.Items in PG

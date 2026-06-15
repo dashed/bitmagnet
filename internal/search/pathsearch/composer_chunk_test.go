@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -126,8 +127,11 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 		t.Fatalf("reference: served=%v err=%v", refServed, refErr)
 	}
 
-	if refPG.callCount != 1 {
-		t.Fatalf("reference (single chunk) must make exactly ONE PG query (fast path), got %d", refPG.callCount)
+	// gate7-8: the single-chunk fast path makes TWO PG queries — one chunk decode
+	// (hydrator-only refineOptions, no facets) + one decode-free aggregation over the
+	// REFINED set. Pre-gate7-8 it was a single combined decode+facet query.
+	if refPG.callCount != 2 {
+		t.Fatalf("reference (single chunk) must make 2 PG queries (chunk decode + refined-agg), got %d", refPG.callCount)
 	}
 
 	// Chunked: budget 6 with a per-torrent cap of 100 → splits the L3-ordered set
@@ -141,9 +145,11 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 		t.Fatalf("chunked: served=%v err=%v", chunkServed, chunkErr)
 	}
 
-	// 1 aggregation query + 3 chunk queries.
+	// gate7-8: 3 chunk decode queries + 1 decode-free aggregation over the REFINED
+	// set = 4 (the aggregation moved from BEFORE the chunk loop, over the candidate
+	// set, to AFTER refine, over the refined set; the count is unchanged).
 	if chunkPG.callCount != 4 {
-		t.Fatalf("chunked path must make 1 agg + 3 chunk PG queries = 4, got %d", chunkPG.callCount)
+		t.Fatalf("chunked path must make 3 chunk + 1 refined-agg PG queries = 4, got %d", chunkPG.callCount)
 	}
 
 	// Identical results: order, TotalCount, HasNextPage, and item identity.
@@ -525,8 +531,10 @@ func TestComposer_RetainedBudget_SelectiveStaysExact(t *testing.T) {
 		t.Fatalf("selective query must NOT trip the retained cap, got refine_retained_capped_total=%v", got)
 	}
 
-	if pg.callCount != 1 {
-		t.Fatalf("selective query must take the single-query fast path, got callCount=%d", pg.callCount)
+	// gate7-8: the single-chunk fast path = 1 chunk decode + 1 decode-free refined
+	// aggregation = 2 PG queries (was 1 combined query pre-gate7-8).
+	if pg.callCount != 2 {
+		t.Fatalf("selective single-chunk query must make 2 PG queries (decode + refined-agg), got callCount=%d", pg.callCount)
 	}
 }
 
@@ -660,9 +668,76 @@ func TestComposer_HighFanout_PerChunkBoundedAndCapsGracefully(t *testing.T) {
 		}
 	}
 
-	// The loop must STOP early at the cap (not query all 40 chunks): 1 agg + 3 chunk
-	// queries (chunks [1,2],[3,4],[5,6]; cap trips on chunk 3's first item).
+	// The loop must STOP early at the cap (not query all 40 chunks): 3 chunk queries
+	// (chunks [1,2],[3,4],[5,6]; cap trips on chunk 3's first item) + 1 decode-free
+	// aggregation over the REFINED prefix (gate7-8) = 4.
 	if pg.callCount != 4 {
-		t.Fatalf("capped high-fanout must stop early: want 1 agg + 3 chunk queries = 4, got %d", pg.callCount)
+		t.Fatalf("capped high-fanout must stop early: want 3 chunk + 1 refined-agg queries = 4, got %d", pg.callCount)
+	}
+}
+
+// gate7-8 (c) — a RETAINED-cap'd query serves a top-relevance PREFIX; its facets
+// must be computed over THAT served prefix (the refined set), not the full candidate
+// set, so the sidebar reconciles with the capped items (sum(facet) == served count)
+// and is NOT blanked.
+func TestComposer_TorrentContent_CappedResult_FacetsOverServedPrefix(t *testing.T) {
+	m := NewMetrics()
+
+	const (
+		n          = 80
+		filesEach  = 5
+		capFiles   = 10
+		chunkBudg  = 10
+		retainBudg = 20 // caps after 4 matched torrents (4×5 = 20 files = budget)
+	)
+
+	bs := make([]byte, n)
+	items := make([]search.TorrentContentResultItem, n)
+	counts := make(map[protocol.ID]int, n)
+
+	for i := 0; i < n; i++ {
+		b := byte(i + 1)
+		bs[i] = b
+		items[i] = itemFiles(b, filesEach)
+		counts[ih(b)] = filesEach
+	}
+
+	// The refined-agg pass (over the 4-item served prefix) returns these facets.
+	prefixAggs := query.Aggregations{
+		"content_type": query.AggregationGroup{Items: query.AggregationItems{
+			"movie": query.AggregationItem{Label: "movie", Count: 4},
+		}},
+	}
+	pg := &fakePG{
+		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...), Aggregations: prefixAggs},
+		fileCounts: counts,
+	}
+	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(bs...)}}, pg, m, capFiles, chunkBudg, retainBudg)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("capped query must serve, got served=%v err=%v", served, err)
+	}
+
+	if got := testutil.ToFloat64(m.retainedCapped); got != 1 {
+		t.Fatalf("retained cap must FIRE, got refine_retained_capped_total=%v", got)
+	}
+
+	if res.TotalCount != 4 {
+		t.Fatalf("capped result serves the 4-item top-relevance prefix → TotalCount=4, got %d", res.TotalCount)
+	}
+
+	grp, ok := res.Aggregations["content_type"]
+	if !ok || len(grp.Items) == 0 {
+		t.Fatalf("capped result must carry facets over the served prefix (not blanked), got %+v (gate7-8)", res.Aggregations)
+	}
+
+	var sum uint
+	for _, it := range grp.Items {
+		sum += it.Count
+	}
+
+	if sum != uint(res.TotalCount) {
+		t.Fatalf("capped-prefix facets must reconcile with served items: sum=%d want %d (gate7-8)", sum, res.TotalCount)
 	}
 }
