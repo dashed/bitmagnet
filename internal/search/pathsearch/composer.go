@@ -194,9 +194,29 @@ func (c *Composer) CollapseEnabled() bool {
 	return c != nil && c.cfg.CollapseEnabled
 }
 
-// candidateBudget sizes the candidate set to fetch/decode for a page window. It
-// must cover offset+limit AFTER refine drops, hence the oversample multiplier,
-// bounded by the hard MaxCandidates cap.
+// DefaultMaxCandidates is the hard candidate-budget ceiling enforced when the
+// configured MaxCandidates is 0 (unset / zero-valued ComposerConfig). It exists
+// so a missing or zero config can NEVER yield an unbounded blob-decode budget:
+// the L3 route's per-request memory is ALWAYS bounded. Previously a 0 meant "no
+// cap", which (combined with an unclamped user limit) is the gate-7 Finding B
+// OOM/DoS — a single large request could decode an unbounded candidate set.
+const DefaultMaxCandidates uint = 2000
+
+// candidateBudget sizes the COUNT of candidate torrents to fetch and blob-decode
+// for a page window. It must cover offset+limit AFTER refine drops, hence the
+// oversample multiplier, bounded by the hard MaxCandidates cap.
+//
+// This is a candidate-COUNT bound, not a per-torrent BYTE bound (see the residual
+// note in candidates()). It is the number candidates() TRUNCATES the sidecar
+// response to before decoding — necessary because the sidecar treats the request
+// Limit as a floor and adds its own oversample, so the cap is only actually
+// honored by that truncation (gate-7 Finding B).
+//
+// The returned value is always bounded: a 0/unset MaxCandidates falls back to
+// DefaultMaxCandidates rather than meaning "no cap", and the multiplication is
+// overflow-guarded, so no input (a huge user limit, a deep offset, or a
+// misconfigured/zero cap) can size an arbitrarily large decode set. The
+// 0→default + overflow guards are defense-in-depth on top of the truncation.
 func (c *Composer) candidateBudget(limit, offset uint) uint {
 	need := offset + limit
 	if need == 0 {
@@ -207,9 +227,19 @@ func (c *Composer) candidateBudget(limit, offset uint) uint {
 		need = 1
 	}
 
+	// The cap is ALWAYS applied; a 0/unset config is treated as the safe default,
+	// never as "unbounded".
+	maxCands := c.cfg.MaxCandidates
+	if maxCands == 0 {
+		maxCands = DefaultMaxCandidates
+	}
+
+	// OversampleFactor is normalized to >= 1 in NewComposer, so budget >= need
+	// absent overflow; budget < need is therefore an unsigned-overflow sentinel
+	// (a hostile offset+limit), which we clamp straight to the cap.
 	budget := need * c.cfg.OversampleFactor
-	if c.cfg.MaxCandidates > 0 && budget > c.cfg.MaxCandidates {
-		budget = c.cfg.MaxCandidates
+	if budget < need || budget > maxCands {
+		budget = maxCands
 	}
 
 	return budget
@@ -223,18 +253,42 @@ func (c *Composer) candidates(
 	limit, offset uint,
 	sorts []*pb.SortBy,
 ) ([]protocol.ID, error) {
+	budget := c.candidateBudget(limit, offset)
+
 	resp, err := c.l3.PathCandidates(ctx, &pb.PathCandidatesRequest{
 		Query: f.Query,
-		Limit: uint32(c.candidateBudget(limit, offset)),
+		Limit: uint32(budget),
 		Sort:  sorts,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]protocol.ID, 0, len(resp.GetCandidates()))
+	// Hard-truncate the candidate set to `budget` BEFORE the PG IN(...) requery and
+	// the per-torrent blob decode. The sidecar treats Limit as a FLOOR, not a cap:
+	// it adds its own oversample (bitmagnet-rs pathsearch candidate_limit =
+	// min(limit + DEFAULT_OVERSAMPLE(200), MAX_CANDIDATES(5000))) and returns up to
+	// ~budget+200 candidates in relevance order. Decoding all of them is the gate-7
+	// Finding B blow-up: a budget=2000 request received ~2200 candidates and
+	// blob-decoded all of them, OOMing the 2Gi canary (exit 137). The budget was
+	// bounded-but-large, NOT unbounded. Truncating to the top-`budget` keeps the
+	// MOST RELEVANT set (the sidecar orders by relevance), so it is exactly the
+	// MaxCandidates contract with ZERO recall-within-budget loss, and it makes the
+	// ACTUAL decode count == the asserted budget (≤ MaxCandidates). This also bounds
+	// the deep-offset worst case (candidateBudget(200,100000)=2000 → decode ≤2000).
+	// NOTE: this caps the candidate COUNT, not per-torrent BYTES — a single
+	// huge-fileset torrent (p99=743, max 88,561 files) can still spike memory on
+	// decode despite the count cap; that per-torrent byte bound is the known T10
+	// residual (deferred: a files-per-torrent truncate would silently drop matches,
+	// violating the route's fail-loud refine invariant).
+	cands := resp.GetCandidates()
+	if uint(len(cands)) > budget {
+		cands = cands[:budget]
+	}
 
-	for _, cand := range resp.GetCandidates() {
+	out := make([]protocol.ID, 0, len(cands))
+
+	for _, cand := range cands {
 		id, idErr := protocol.NewIDFromByteSlice(cand.GetInfoHash())
 		if idErr != nil {
 			// A malformed candidate hash is an L3 bug, not a fatal request error;

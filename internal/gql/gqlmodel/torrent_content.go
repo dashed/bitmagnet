@@ -182,7 +182,7 @@ func (t TorrentContentQuery) Search(
 			ctx,
 			pathSearchFilters(input),
 			torrentContentBaseOptions(input, fullOrderBy),
-			searchPageLimit(input.SearchParams),
+			pathSearchPageLimit(input.SearchParams),
 			searchPageOffset(input.SearchParams),
 			nil, // L3 sort is recall-selection only; PG applies the real order below
 		)
@@ -325,6 +325,15 @@ func pathsearchOrderEligible(orderBy []gen.TorrentContentOrderByInput) bool {
 	return true
 }
 
+// maxPathSearchLimit hard-clamps the per-request page size on the L3 route. The
+// L3 route blob-decodes up to limit×OversampleFactor candidate torrents per
+// request (further bounded by the composer's MaxCandidates cap); an unclamped,
+// attacker-controlled GraphQL `limit` must NOT size that decode budget. Clamping
+// the effective page size here is defense-in-depth alongside the composer cap
+// (gate-7 Finding B OOM/DoS). Normal UI paging (limit 10–50) is far below this,
+// so legitimate clients are unaffected; only abusive page sizes are capped.
+const maxPathSearchLimit uint = 200
+
 // searchPageLimit / searchPageOffset replicate q.SearchParams.Option's page-window
 // arithmetic so the composer can paginate in Go (the L3 route does not push the
 // page window into PostgreSQL). An omitted limit resolves to defaultPageSize, the
@@ -335,6 +344,20 @@ func searchPageLimit(s q.SearchParams) uint {
 	}
 
 	return defaultPageSize
+}
+
+// pathSearchPageLimit is searchPageLimit clamped to maxPathSearchLimit for the L3
+// route ONLY. It bounds both the candidate-decode budget and the served page so a
+// hostile `limit` can never size the per-request blob decode (gate-7 Finding B).
+// The PostgreSQL path keeps using the unclamped searchPageLimit, so its behavior
+// is byte-identical to before.
+func pathSearchPageLimit(s q.SearchParams) uint {
+	limit := searchPageLimit(s)
+	if limit > maxPathSearchLimit {
+		return maxPathSearchLimit
+	}
+
+	return limit
 }
 
 func searchPageOffset(s q.SearchParams) uint {

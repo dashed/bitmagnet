@@ -99,6 +99,37 @@ func TestSearchPageLimit_OmittedUsesDefault(t *testing.T) {
 	}
 }
 
+// Finding B (gate-7): the L3 route clamps the user-controlled page size to
+// maxPathSearchLimit so a hostile `limit` can never size the per-request
+// candidate blob-decode budget. Normal paging is unaffected; the PostgreSQL path
+// (searchPageLimit) stays unclamped.
+func TestPathSearchPageLimit_ClampsHostileLimit(t *testing.T) {
+	// A huge attacker-controlled limit is clamped to the route maximum.
+	if got := pathSearchPageLimit(q.SearchParams{Limit: model.NewNullUint(1_000_000)}); got != maxPathSearchLimit {
+		t.Fatalf("hostile limit must clamp to maxPathSearchLimit=%d, got %d", maxPathSearchLimit, got)
+	}
+
+	// The exact Finding B repro (limit=3000) is clamped below the 2150 it served.
+	if got := pathSearchPageLimit(q.SearchParams{Limit: model.NewNullUint(3000)}); got != maxPathSearchLimit {
+		t.Fatalf("limit=3000 must clamp to maxPathSearchLimit=%d, got %d", maxPathSearchLimit, got)
+	}
+
+	// Normal UI paging is preserved unchanged.
+	if got := pathSearchPageLimit(q.SearchParams{Limit: model.NewNullUint(50)}); got != 50 {
+		t.Fatalf("in-range limit must be preserved, got %d", got)
+	}
+
+	// An omitted limit still resolves to the shared default (not the clamp).
+	if got := pathSearchPageLimit(q.SearchParams{}); got != defaultPageSize {
+		t.Fatalf("omitted limit must resolve to defaultPageSize=%d, got %d", defaultPageSize, got)
+	}
+
+	if maxPathSearchLimit > pathsearch.DefaultMaxCandidates {
+		t.Fatalf("maxPathSearchLimit(%d) should not exceed the candidate cap (%d)",
+			maxPathSearchLimit, pathsearch.DefaultMaxCandidates)
+	}
+}
+
 // P0-2 (unit): the route order-eligibility predicate. Empty order (the webui
 // default for a query == relevance) and an explicit relevance sort are eligible;
 // any structured field is not.

@@ -197,6 +197,75 @@ func TestComposer_CandidateBudget(t *testing.T) {
 	}
 }
 
+// TestComposer_CandidateBudget_HardBounded asserts the candidate-budget COUNT is
+// always bounded — a hostile/huge user limit, a deep offset, an unsigned
+// overflow, and even a 0/unset MaxCandidates can never size an arbitrarily large
+// budget. This is the REQUEST/decode-count bound; the truncation that makes the
+// ACTUAL decode count obey it (the sidecar adds +200 oversample on top of Limit)
+// is covered by TestComposer_Candidates_TruncatesToBudget.
+func TestComposer_CandidateBudget_HardBounded(t *testing.T) {
+	// A configured cap is honored no matter how large the requested window is.
+	capped := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000}, nil)
+	for _, tc := range []struct{ limit, offset uint }{
+		{3000, 0},          // the exact Finding B repro (limit=3000 served 2150)
+		{1 << 20, 0},       // absurd page size
+		{50, 1 << 20},      // deep offset
+		{1 << 40, 1 << 40}, // forces uint overflow in need*OversampleFactor
+	} {
+		if got := capped.candidateBudget(tc.limit, tc.offset); got > 2000 {
+			t.Errorf("budget(limit=%d,offset=%d) = %d, want <= MaxCandidates(2000)", tc.limit, tc.offset, got)
+		}
+	}
+
+	// MaxCandidates == 0 must NOT mean "unbounded" — it falls back to the hard
+	// DefaultMaxCandidates so a misconfigured/zero cap is still memory-safe.
+	zeroCap := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 0}, nil)
+	if got := zeroCap.candidateBudget(1<<20, 0); got != DefaultMaxCandidates {
+		t.Errorf("budget with MaxCandidates=0 = %d, want DefaultMaxCandidates(%d) — 0 must not be unbounded", got, DefaultMaxCandidates)
+	}
+}
+
+// TestComposer_Candidates_TruncatesToBudget is the gate-7 Finding B regression:
+// the sidecar treats the request Limit as a FLOOR and returns budget+oversample
+// candidates (live: ~budget+200), so the composer MUST truncate to budget before
+// the PG requery + blob decode, or it decodes the full over-large set and OOMs.
+// Asserts the ACTUAL decoded candidate count == budget, and the request Limit
+// sent to the sidecar == budget.
+func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
+	const (
+		oversample uint = 4
+		maxCands   uint = 1000
+		limit      uint = 300 // need=300, 300*4=1200 -> capped to maxCands(1000)
+	)
+	wantBudget := maxCands // 1200 capped to 1000
+
+	// Sidecar mirrors bitmagnet-rs: returns Limit + DEFAULT_OVERSAMPLE(200).
+	const sidecarOversample = 200
+	cands := make([]*pb.PathCandidate, 0, int(wantBudget)+sidecarOversample)
+	for i := 0; i < int(wantBudget)+sidecarOversample; i++ {
+		cands = append(cands, candidate(byte(i%256)))
+	}
+
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands, CandidateTotal: uint64(len(cands))}}
+	c := NewComposer(l3, nil, ComposerConfig{OversampleFactor: oversample, MaxCandidates: maxCands}, nil)
+
+	ids, err := c.candidates(context.Background(), Filters{Query: "matrix"}, limit, 0, nil)
+	if err != nil {
+		t.Fatalf("candidates: %v", err)
+	}
+
+	if uint(l3.gotLimit) != wantBudget {
+		t.Errorf("sidecar request Limit = %d, want budget %d", l3.gotLimit, wantBudget)
+	}
+
+	// The decoded set MUST be truncated to budget even though the sidecar returned
+	// budget+200. (Distinct info_hashes; the helper cycles bytes so we compare the
+	// returned slice length to the truncation bound, which is what gets decoded.)
+	if uint(len(ids)) > wantBudget {
+		t.Errorf("decoded candidate count = %d, want <= budget %d (sidecar +200 not truncated → OOM)", len(ids), wantBudget)
+	}
+}
+
 func TestComposer_BudgetSentToL3(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{}}
 	c := newTestComposer(l3, &fakePG{})
