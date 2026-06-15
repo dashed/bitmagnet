@@ -108,6 +108,27 @@ type Config struct {
 	// downstream bound that holds regardless of match rate (~200B/retained file ⇒
 	// ~200MB). 0 → composer default (1M).
 	PathsearchRetainedFileBudget uint
+	// PathsearchRouteTimeout bounds the WHOLE L3 route end-to-end — candidates +
+	// FileCounts + every chunk decode + the Go exact-refine
+	// (SEARCH_PATHSEARCH_ROUTE_TIMEOUT) — NOT just the sidecar RPC (that is the
+	// distinct PathsearchTimeout, which nests under this). On deadline the route
+	// serves the accumulated top-relevance prefix as a deadline-capped estimate,
+	// never the resolver's broad-FTS PG fallback. It closes the pathological
+	// whole-dir latency tail (apple2_flop ran 14-16s unbounded). 0 → composer
+	// default (8s) (gate7-6).
+	PathsearchRouteTimeout time.Duration
+	// PathsearchMaxConcurrentRefines bounds how many EXPENSIVE multi-chunk refines
+	// run concurrently across both routes (one shared semaphore)
+	// (SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES). The cheap single-chunk fast path
+	// never acquires a slot, so a saturated limiter never blocks/sheds a
+	// normal/selective query. 0 → composer default (runtime.NumCPU()) (gate7-6).
+	PathsearchMaxConcurrentRefines int
+	// PathsearchSlotWait bounds how long a multi-chunk refine waits for a
+	// concurrency slot before SHEDDING (serving an empty fail-loud estimate)
+	// (SEARCH_PATHSEARCH_SLOT_WAIT). 0 (default) waits up to the route deadline for
+	// a slot (queue rather than shed eagerly); a small positive value sheds fast
+	// under a burst (gate7-6).
+	PathsearchSlotWait time.Duration
 }
 
 // NewDefaultConfig returns the safe, disabled-by-default search config.
@@ -143,6 +164,13 @@ func NewDefaultConfig() Config {
 		PathsearchRefineFileBudget:   300_000,
 		PathsearchMaxChunkTorrents:   1024,
 		PathsearchRetainedFileBudget: 1_000_000,
+
+		// gate7-6 CPU/latency bound: bound the whole route (8s, distinct from the 5s
+		// sidecar RPC timeout) + the multi-chunk refine concurrency (0 = NumCPU) +
+		// the slot-wait (0 = queue up to the route deadline rather than shed eagerly).
+		PathsearchRouteTimeout:         8 * time.Second,
+		PathsearchMaxConcurrentRefines: 0,
+		PathsearchSlotWait:             0,
 	}
 }
 
@@ -157,15 +185,18 @@ func (c Config) pathsearchConfig() pathsearch.Config {
 // composerConfig maps the section to the L3 exact-refine composer config.
 func (c Config) composerConfig() pathsearch.ComposerConfig {
 	return pathsearch.ComposerConfig{
-		MinQueryLength:     c.PathsearchMinQueryLength,
-		OversampleFactor:   c.PathsearchOversample,
-		MaxCandidates:      c.PathsearchMaxCandidates,
-		TypeaheadEnabled:   c.PathTypeaheadEnabled,
-		CollapseEnabled:    c.PathCollapseEnabled,
-		MaxRefineFiles:     c.PathsearchMaxRefineFiles,
-		RefineFileBudget:   c.PathsearchRefineFileBudget,
-		MaxChunkTorrents:   c.PathsearchMaxChunkTorrents,
-		RetainedFileBudget: c.PathsearchRetainedFileBudget,
+		MinQueryLength:       c.PathsearchMinQueryLength,
+		OversampleFactor:     c.PathsearchOversample,
+		MaxCandidates:        c.PathsearchMaxCandidates,
+		TypeaheadEnabled:     c.PathTypeaheadEnabled,
+		CollapseEnabled:      c.PathCollapseEnabled,
+		MaxRefineFiles:       c.PathsearchMaxRefineFiles,
+		RefineFileBudget:     c.PathsearchRefineFileBudget,
+		MaxChunkTorrents:     c.PathsearchMaxChunkTorrents,
+		RetainedFileBudget:   c.PathsearchRetainedFileBudget,
+		RouteTimeout:         c.PathsearchRouteTimeout,
+		MaxConcurrentRefines: c.PathsearchMaxConcurrentRefines,
+		SlotWait:             c.PathsearchSlotWait,
 	}
 }
 

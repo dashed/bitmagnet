@@ -2,14 +2,18 @@ package pathsearch
 
 import (
 	"context"
+	"errors"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 )
 
 // candidateSource is the slice of the L3 client the Composer depends on so tests
@@ -77,6 +81,24 @@ type ComposerConfig struct {
 	// (the chunk budget bounds only the transient decode). 0 falls back to
 	// DefaultRetainedFileBudget.
 	RetainedFileBudget uint
+	// RouteTimeout bounds the WHOLE L3 route (candidates + FileCounts + every chunk
+	// decode + the Go exact-refine), not just the sidecar RPC (the client owns its
+	// own RPC timeout, which nests under this). When it fires mid-route the composer
+	// serves the accumulated top-relevance prefix as a deadline-capped estimate
+	// (served=true) rather than letting an error bubble into the resolver's broad-FTS
+	// PG fallback wall. 0 falls back to DefaultRouteTimeout (gate7-6). It is a
+	// distinct knob from the sidecar PathsearchTimeout (the 5s RPC bound).
+	RouteTimeout time.Duration
+	// MaxConcurrentRefines bounds how many EXPENSIVE multi-chunk refines run at once
+	// across BOTH routes (one shared semaphore). The cheap single-chunk fast path
+	// never acquires a slot, so a saturated limiter never blocks/sheds a
+	// normal/selective query. 0 falls back to runtime.NumCPU() (gate7-6).
+	MaxConcurrentRefines int
+	// SlotWait bounds how long a multi-chunk refine waits for a concurrency slot
+	// before SHEDDING (serving an empty fail-loud estimate). 0 means wait up to the
+	// route deadline for a slot (queue rather than shed eagerly); a small positive
+	// value sheds fast under a burst (gate7-6).
+	SlotWait time.Duration
 }
 
 // Filters carries the typed exact-refine ingredients the call site extracts from
@@ -163,6 +185,12 @@ type Composer struct {
 	refineFileBudget   int
 	maxChunkTorrents   int
 	retainedFileBudget int
+	// gate7-6 CPU/latency bound, resolved from ComposerConfig in NewComposer.
+	// routeTimeout bounds the whole route; sem (shared across both routes) bounds
+	// concurrent EXPENSIVE multi-chunk refines; slotWait bounds the slot wait.
+	routeTimeout time.Duration
+	sem          *semaphore.Weighted
+	slotWait     time.Duration
 }
 
 // Byte-bound defaults (gate7-4). A candidate's authoritative file_count gates
@@ -208,6 +236,15 @@ const (
 	DefaultRetainedFileBudget uint = 1_000_000
 )
 
+// DefaultRouteTimeout bounds the WHOLE L3 route when ComposerConfig.RouteTimeout
+// is unset (gate7-6). It is deliberately NOT a reuse of the 5s sidecar RPC timeout
+// (PathsearchTimeout): that bounds only the candidate RPC, while this bounds the
+// route end-to-end (candidates + FileCounts + every chunk decode + the Go refine),
+// closing the pathological-whole-dir latency tail (apple2_flop ran 14-16s
+// unbounded). When it fires the route serves the accumulated top-relevance prefix,
+// never the resolver's broad-FTS PG fallback (~49s).
+const DefaultRouteTimeout = 8 * time.Second
+
 // NewComposer builds a Composer. It is only constructed when the feature is
 // enabled (see searchfx); the zero/nil *Composer is the safe disabled state.
 func NewComposer(
@@ -237,6 +274,17 @@ func NewComposer(
 		cfg.RetainedFileBudget = DefaultRetainedFileBudget
 	}
 
+	if cfg.RouteTimeout <= 0 {
+		cfg.RouteTimeout = DefaultRouteTimeout
+	}
+
+	// 0 (or a hostile negative) → one slot per CPU. NumCPU is always >= 1, so the
+	// semaphore is always constructed with a positive weight.
+	maxConcurrent := cfg.MaxConcurrentRefines
+	if maxConcurrent <= 0 {
+		maxConcurrent = runtime.NumCPU()
+	}
+
 	c := &Composer{
 		l3:                 l3,
 		pg:                 pg,
@@ -246,6 +294,9 @@ func NewComposer(
 		refineFileBudget:   int(cfg.RefineFileBudget),
 		maxChunkTorrents:   int(cfg.MaxChunkTorrents),
 		retainedFileBudget: int(cfg.RetainedFileBudget),
+		routeTimeout:       cfg.RouteTimeout,
+		sem:                semaphore.NewWeighted(int64(maxConcurrent)),
+		slotWait:           cfg.SlotWait,
 	}
 
 	for _, opt := range opts {
@@ -590,6 +641,54 @@ func (c *Composer) chunkRows(
 	return restrictToSet(res.Items, chunk), res.Aggregations, nil
 }
 
+// refineCap classifies WHY a refine stopped early before consuming every
+// candidate (gate7-6). All non-none reasons still SERVE the accumulated
+// top-relevance prefix (served=true, TotalCountIsEstimate=true); they differ only
+// in which fail-loud metric fires.
+type refineCap int
+
+const (
+	// capNone: the refine consumed its input without hitting a bound.
+	capNone refineCap = iota
+	// capRetained: the cumulative RetainedFileBudget was reached (gate7-4) — serve
+	// the memory-capped prefix.
+	capRetained
+	// capDeadline: the route deadline fired mid-refine (gate7-6) — serve the
+	// deadline-capped prefix instead of the broad-FTS PG fallback wall.
+	capDeadline
+)
+
+// isRouteDeadline reports whether ctx is done specifically because a DEADLINE
+// fired (our route timeout or an earlier parent deadline) — the signal to serve
+// the accumulated prefix rather than fail-loud to PG. A parent CANCEL
+// (ctx.Err()==context.Canceled) is deliberately NOT a route-deadline: the parent
+// ctx is dead, so the resolver's PG fallback would error immediately (no wall),
+// and the route returns served=false as before. This tests ctx.Err() (the
+// authoritative reason we are out of time), not the wrapped gorm/pgx error.
+func isRouteDeadline(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+// acquireRefineSlot acquires one concurrency slot for an EXPENSIVE multi-chunk
+// refine (gate7-6). With slotWait>0 it waits at most that long before shedding;
+// with slotWait==0 it waits up to the route deadline (acqCtx==ctx) so a moderate
+// burst queues rather than sheds eagerly. It returns false (SHED) when no slot
+// becomes available in time. Only the caller's multi-chunk branch invokes it, so
+// the single-chunk fast path is never blocked or shed. On success the caller MUST
+// `defer c.sem.Release(1)`.
+func (c *Composer) acquireRefineSlot(ctx context.Context) bool {
+	acqCtx := ctx
+
+	if c.slotWait > 0 {
+		var cancel context.CancelFunc
+
+		acqCtx, cancel = context.WithTimeout(ctx, c.slotWait)
+		defer cancel()
+	}
+
+	return c.sem.Acquire(acqCtx, 1) == nil
+}
+
 // refineMatches exact-refines a chunk's ordered items and APPENDS the real
 // matches to the running `refined` accumulator while enforcing the cumulative
 // RETAINED-file budget (gate7-4 byte-bound, the robust bound). It does three
@@ -614,21 +713,36 @@ func (c *Composer) chunkRows(
 //
 // Selective queries (small match sets ≪ budget) never trip the cap, so they are
 // byte-identical to before.
+//
+// gate7-6: ctx is threaded in so the per-item loop can cooperatively honor the
+// route deadline (checkpoint c — bounds the Go match CPU on a huge chunk). When
+// the route deadline has fired it returns capDeadline with ok=true so the caller
+// serves the accumulated prefix (NOT a fail-loud fallback). The deadline-vs-cancel
+// discriminator is ctx.Err()==DeadlineExceeded; a parent Cancel (ctx.Err()==
+// Canceled) is NOT a deadline-cap — it leaves the loop normally and the caller's
+// next checkpoint surfaces it.
 func (c *Composer) refineMatches(
+	ctx context.Context,
 	items []search.TorrentContentResultItem,
 	pred refinePredicate,
 	refined []search.TorrentContentResultItem,
 	retained int,
-) (out []search.TorrentContentResultItem, newRetained int, capped, ok bool) {
+) (out []search.TorrentContentResultItem, newRetained int, capRsn refineCap, ok bool) {
 	out = refined
 	newRetained = retained
 
 	for i := range items {
+		// Checkpoint (c): cooperatively stop the per-item CPU when the route deadline
+		// has fired, serving the accumulated top-relevance prefix.
+		if isRouteDeadline(ctx) {
+			return out, newRetained, capDeadline, true
+		}
+
 		it := items[i]
 
 		files, fok := filesForRefine(it.Torrent, pred)
 		if !fok {
-			return out, newRetained, false, false
+			return out, newRetained, capNone, false
 		}
 
 		if len(files) > c.maxRefineFiles {
@@ -649,7 +763,7 @@ func (c *Composer) refineMatches(
 		// Stop before exceeding the retained budget — but always keep at least one
 		// match (a single torrent's files ≤ cap ≤ budget, so this never stalls).
 		if len(out) > 0 && newRetained+len(files) > c.retainedFileBudget {
-			return out, newRetained, true, true
+			return out, newRetained, capRetained, true
 		}
 
 		it.Torrent.FilesData = nil // free the raw blob; decoded Files are retained
@@ -657,7 +771,7 @@ func (c *Composer) refineMatches(
 		newRetained += len(files)
 	}
 
-	return out, newRetained, false, true
+	return out, newRetained, capNone, true
 }
 
 // orderItemsByIDs re-sorts the PostgreSQL candidate rows IN PLACE to match the L3
@@ -717,6 +831,14 @@ func (c *Composer) TorrentContent(
 		return search.TorrentContentResult{}, false, nil
 	}
 
+	// gate7-6 route deadline: bound the WHOLE route (candidates + FileCounts + every
+	// chunk decode + the Go refine), not just the sidecar RPC. candidates()'s nested
+	// 5s RPC timeout still nests under this (Go honors the earliest deadline). When
+	// it fires the route serves the accumulated top-relevance prefix as a
+	// deadline-capped estimate, NEVER the resolver's broad-FTS PG fallback.
+	ctx, cancel := context.WithTimeout(ctx, c.routeTimeout)
+	defer cancel()
+
 	ids, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
 		c.metrics.IncRoute(RouteError)
@@ -774,7 +896,7 @@ func (c *Composer) TorrentContent(
 	var (
 		refined  []search.TorrentContentResultItem
 		retained int
-		capped   bool
+		capRsn   refineCap
 		aggs     query.Aggregations
 	)
 
@@ -784,70 +906,130 @@ func (c *Composer) TorrentContent(
 		// decodes the chunk AND computes facets — byte-identical to pre-gate7-4, no
 		// extra aggregation round-trip. The retained budget never trips here (a
 		// single chunk's matched files ≤ chunk file budget ≤ retained budget).
+		//
+		// gate7-6: the cheap fast path does NOT acquire a concurrency slot, so a
+		// saturated limiter never blocks/sheds a normal/selective query — only the
+		// expensive multi-chunk path below contends for slots.
 		items, chunkAggs, qErr := c.chunkRows(ctx, opts.Combined, chunks[0])
 		if qErr != nil {
-			c.metrics.IncRoute(RouteError)
-
-			return search.TorrentContentResult{}, false, qErr
-		}
-
-		var ok bool
-
-		refined, retained, capped, ok = c.refineMatches(items, pred, nil, 0)
-		if !ok {
-			return c.refineFailLoud(f)
-		}
-
-		aggs = chunkAggs
-	} else {
-		// Multi-chunk: compute facets ONCE over the full kept set with the torrent
-		// (blob) hydrator DROPPED — files_data is selected only by that hydrator, so
-		// this aggregation pass does ZERO blob decode. Then refine each chunk in L3
-		// order, letting each chunk's decoded files fall out of scope before the next
-		// chunk is fetched (peak TRANSIENT decode ≈ one file budget), and accumulate
-		// matches under the RETAINED-file budget so peak RETAINED files is bounded
-		// too — independent of how many candidates match.
-		aggRes, qErr := c.candidateRows(ctx, opts.Agg, keptIDs)
-		if qErr != nil {
-			c.metrics.IncRoute(RouteError)
-
-			return search.TorrentContentResult{}, false, qErr
-		}
-
-		aggs = aggRes.Aggregations
-
-		for _, chunk := range chunks {
-			items, _, cErr := c.chunkRows(ctx, opts.refineOptions(), chunk)
-			if cErr != nil {
+			// A deadline mid-query is NOT a hard error: serve the (empty here)
+			// deadline-capped prefix rather than the broad-FTS PG fallback wall.
+			if isRouteDeadline(ctx) {
+				capRsn = capDeadline
+			} else {
 				c.metrics.IncRoute(RouteError)
 
-				return search.TorrentContentResult{}, false, cErr
+				return search.TorrentContentResult{}, false, qErr
 			}
-
+		} else {
 			var ok bool
 
-			refined, retained, capped, ok = c.refineMatches(items, pred, refined, retained)
+			refined, retained, capRsn, ok = c.refineMatches(ctx, items, pred, nil, 0)
 			if !ok {
 				return c.refineFailLoud(f)
 			}
 
-			if capped {
-				// Retained-file budget reached: stop decoding further chunks and serve
-				// the accumulated TOP-RELEVANCE prefix (candidates are L3-ordered).
-				break
+			aggs = chunkAggs
+		}
+	} else {
+		// Multi-chunk (the pathological 14-16s whole-dir path): bound concurrency.
+		// gate7-6 — acquire ONE shared slot before the expensive work; if none is
+		// available in time, SHED fail-loud (serve an empty estimate, NEVER a PG
+		// broad-FTS fallback).
+		if !c.acquireRefineSlot(ctx) {
+			c.metrics.IncRefineShed()
+
+			if c.logger != nil {
+				c.logger.Warnw("pathsearch: refine concurrency slot unavailable; shedding (serving empty estimate)",
+					"query", f.Query, "slot_wait", c.slotWait)
+			}
+
+			c.metrics.IncRoute(RouteServed)
+
+			return search.TorrentContentResult{TotalCountIsEstimate: true}, true, nil
+		}
+		defer c.sem.Release(1)
+
+		// Compute facets ONCE over the full kept set with the torrent (blob) hydrator
+		// DROPPED — files_data is selected only by that hydrator, so this aggregation
+		// pass does ZERO blob decode. Then refine each chunk in L3 order, letting each
+		// chunk's decoded files fall out of scope before the next chunk is fetched
+		// (peak TRANSIENT decode ≈ one file budget), and accumulate matches under the
+		// RETAINED-file budget so peak RETAINED files is bounded too — independent of
+		// how many candidates match.
+		aggRes, qErr := c.candidateRows(ctx, opts.Agg, keptIDs)
+		if qErr != nil {
+			if isRouteDeadline(ctx) {
+				capRsn = capDeadline
+			} else {
+				c.metrics.IncRoute(RouteError)
+
+				return search.TorrentContentResult{}, false, qErr
+			}
+		} else {
+			aggs = aggRes.Aggregations
+
+			for _, chunk := range chunks {
+				// Checkpoint (a): stop before fetching the next chunk when the route
+				// deadline has fired; serve the accumulated prefix.
+				if isRouteDeadline(ctx) {
+					capRsn = capDeadline
+
+					break
+				}
+
+				items, _, cErr := c.chunkRows(ctx, opts.refineOptions(), chunk)
+				if cErr != nil {
+					// Checkpoint (b): a deadline mid-chunk-query is a deadline-cap, not a
+					// RouteError → serve the prefix, not the PG wall.
+					if isRouteDeadline(ctx) {
+						capRsn = capDeadline
+
+						break
+					}
+
+					c.metrics.IncRoute(RouteError)
+
+					return search.TorrentContentResult{}, false, cErr
+				}
+
+				var ok bool
+
+				refined, retained, capRsn, ok = c.refineMatches(ctx, items, pred, refined, retained)
+				if !ok {
+					return c.refineFailLoud(f)
+				}
+
+				if capRsn != capNone {
+					// Retained-file budget reached OR the route deadline fired during
+					// refine: stop decoding further chunks and serve the accumulated
+					// TOP-RELEVANCE prefix (candidates are L3-ordered).
+					break
+				}
 			}
 		}
 	}
 
-	if capped {
-		// Memory-capped estimate. Fail-loud: counted + logged, never a silent
-		// over-allocation. The result stays TotalCountIsEstimate=true (always true
-		// on this route) and serves the top-relevance prefix.
+	switch capRsn {
+	case capRetained:
+		// Memory-capped estimate (gate7-4). Fail-loud: counted + logged, never a
+		// silent over-allocation. The result stays TotalCountIsEstimate=true (always
+		// true on this route) and serves the top-relevance prefix.
 		c.metrics.IncRefineRetainedCapped()
 
 		if c.logger != nil {
 			c.logger.Warnw("pathsearch: retained-file budget reached; serving memory-capped top-relevance result",
 				"query", f.Query, "retained_files", retained, "budget", c.retainedFileBudget, "matches", len(refined))
+		}
+	case capDeadline:
+		// Deadline-capped estimate (gate7-6). Fail-loud: counted + logged. Serves the
+		// accumulated top-relevance prefix (possibly empty) rather than the resolver's
+		// broad-FTS PG fallback wall.
+		c.metrics.IncRefineDeadlineCapped()
+
+		if c.logger != nil {
+			c.logger.Warnw("pathsearch: route deadline reached; serving deadline-capped top-relevance result",
+				"query", f.Query, "route_timeout", c.routeTimeout, "matches", len(refined))
 		}
 	}
 
@@ -920,6 +1102,11 @@ func (c *Composer) CollapsePaths(
 		return nil, false, nil
 	}
 
+	// gate7-6 route deadline — mirrors TorrentContent: bound the whole route, serve
+	// the accumulated groups on deadline rather than the broad-FTS PG fallback.
+	ctx, cancel := context.WithTimeout(ctx, c.routeTimeout)
+	defer cancel()
+
 	ids, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
 		c.metrics.IncRoute(RouteError)
@@ -964,11 +1151,50 @@ func (c *Composer) CollapsePaths(
 		return nil, true, nil
 	}
 
+	chunks := c.chunkByFileBudget(keptIDs, counts)
+
+	// gate7-6: bound concurrency on the expensive multi-chunk path only; the cheap
+	// single-chunk path bypasses the limiter (never blocked/shed). Shed fail-loud
+	// (serve the empty accumulated set), NEVER a PG broad-FTS fallback.
+	if len(chunks) > 1 {
+		if !c.acquireRefineSlot(ctx) {
+			c.metrics.IncRefineShed()
+
+			if c.logger != nil {
+				c.logger.Warnw("pathsearch: collapse refine concurrency slot unavailable; shedding (serving empty)",
+					"query", f.Query, "slot_wait", c.slotWait)
+			}
+
+			c.metrics.IncRoute(RouteServed)
+
+			return nil, true, nil
+		}
+		defer c.sem.Release(1)
+	}
+
 	index := make(map[string]int)
 
-	for _, chunk := range c.chunkByFileBudget(keptIDs, counts) {
+	deadlined := false
+
+collapse:
+	for _, chunk := range chunks {
+		// Checkpoint (a): stop before fetching the next chunk on route deadline.
+		if isRouteDeadline(ctx) {
+			deadlined = true
+
+			break
+		}
+
 		res, qErr := c.candidateRows(ctx, opts.refineOptions(), chunk)
 		if qErr != nil {
+			// Checkpoint (b): a deadline mid-query serves the accumulated groups, not
+			// the PG fallback wall.
+			if isRouteDeadline(ctx) {
+				deadlined = true
+
+				break
+			}
+
 			c.metrics.IncRoute(RouteError)
 
 			return nil, false, qErr
@@ -978,6 +1204,13 @@ func (c *Composer) CollapsePaths(
 		items := restrictToSet(res.Items, chunk)
 
 		for i := range items {
+			// Inner-loop checkpoint (c): bound the Go refine CPU on a huge chunk.
+			if isRouteDeadline(ctx) {
+				deadlined = true
+
+				break collapse
+			}
+
 			item := items[i]
 
 			files, fok := filesForRefine(item.Torrent, pred)
@@ -1020,6 +1253,17 @@ func (c *Composer) CollapsePaths(
 		}
 		// chunk's items + decoded files fall out of scope here → reclaimable before
 		// the next chunk is fetched.
+	}
+
+	if deadlined {
+		// Deadline-capped estimate (gate7-6): serve the accumulated top-relevance
+		// groups, fail-loud (counted + logged), never the PG fallback wall.
+		c.metrics.IncRefineDeadlineCapped()
+
+		if c.logger != nil {
+			c.logger.Warnw("pathsearch: collapse route deadline reached; serving deadline-capped groups",
+				"query", f.Query, "route_timeout", c.routeTimeout, "groups", len(groups))
+		}
 	}
 
 	c.metrics.IncRoute(RouteServed)

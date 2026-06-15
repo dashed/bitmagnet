@@ -47,6 +47,8 @@ type Metrics struct {
 	routes         *prometheus.CounterVec
 	refineDeclined prometheus.Counter
 	retainedCapped prometheus.Counter
+	deadlineCapped prometheus.Counter
+	refineShed     prometheus.Counter
 }
 
 // NewMetrics constructs the pathsearch metrics + their collectors. The collectors
@@ -100,6 +102,18 @@ func NewMetrics() *Metrics {
 			Subsystem: subsystemPathsearch,
 			Name:      "refine_retained_capped_total",
 			Help:      "Count of L3 path-search requests whose refined match set hit the cumulative RetainedFileBudget (gate7-4 robust byte-bound) and were served as a memory-capped top-relevance estimate instead of accumulating every matched fileset. Should be ~0 for normal/selective queries; a non-zero rate flags broad/high-match-rate queries hitting the retained bound.",
+		}),
+		deadlineCapped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemPathsearch,
+			Name:      "refine_deadline_capped_total",
+			Help:      "Count of L3 path-search requests whose route exceeded the PathsearchRouteTimeout mid-refine (gate7-6 CPU/latency bound) and were served as a deadline-capped top-relevance estimate (the accumulated L3-ordered prefix) instead of running unbounded. Crucially this is NOT a PostgreSQL fallback: the route NEVER re-runs the broad-FTS PG path on deadline. Should be ~0 for normal/selective queries; a non-zero rate flags pathological whole-dir queries hitting the route deadline.",
+		}),
+		refineShed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemPathsearch,
+			Name:      "refine_shed_total",
+			Help:      "Count of L3 path-search requests SHED because no refine concurrency slot (MaxConcurrentRefines) was available within PathsearchSlotWait/the route deadline (gate7-6 load-shedding). Only the EXPENSIVE multi-chunk path acquires a slot, so a saturated limiter never sheds a normal/selective (single-chunk) query. A shed request is served fail-loud as an empty estimate, NEVER a PostgreSQL broad-FTS fallback. A non-zero rate flags a concurrent burst of pathological whole-dir queries.",
 		}),
 	}
 }
@@ -162,6 +176,28 @@ func (m *Metrics) IncRefineRetainedCapped() {
 	m.retainedCapped.Inc()
 }
 
+// IncRefineDeadlineCapped records one request served as a deadline-capped estimate
+// because the route exceeded PathsearchRouteTimeout mid-refine (gate7-6). It is
+// the deadline analogue of IncRefineRetainedCapped: both serve the accumulated
+// top-relevance prefix, never a PG fallback. nil-safe.
+func (m *Metrics) IncRefineDeadlineCapped() {
+	if m == nil {
+		return
+	}
+
+	m.deadlineCapped.Inc()
+}
+
+// IncRefineShed records one request shed because no refine concurrency slot was
+// available (gate7-6 load-shedding). nil-safe.
+func (m *Metrics) IncRefineShed() {
+	if m == nil {
+		return
+	}
+
+	m.refineShed.Inc()
+}
+
 // Collectors returns all Prometheus collectors owned by the metrics.
 func (m *Metrics) Collectors() []prometheus.Collector {
 	if m == nil {
@@ -177,6 +213,8 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.routes,
 		m.refineDeclined,
 		m.retainedCapped,
+		m.deadlineCapped,
+		m.refineShed,
 	}
 }
 
@@ -205,6 +243,8 @@ type MetricsResult struct {
 	RouteCollector        prometheus.Collector `group:"prometheus_collectors"`
 	RefineDeclinedColl    prometheus.Collector `group:"prometheus_collectors"`
 	RetainedCappedColl    prometheus.Collector `group:"prometheus_collectors"`
+	DeadlineCappedColl    prometheus.Collector `group:"prometheus_collectors"`
+	RefineShedColl        prometheus.Collector `group:"prometheus_collectors"`
 }
 
 // NewMetricsResult is the fx provider for the pathsearch metrics. It returns the
@@ -223,5 +263,7 @@ func NewMetricsResult() MetricsResult {
 		RouteCollector:        m.routes,
 		RefineDeclinedColl:    m.refineDeclined,
 		RetainedCappedColl:    m.retainedCapped,
+		DeadlineCappedColl:    m.deadlineCapped,
+		RefineShedColl:        m.refineShed,
 	}
 }
