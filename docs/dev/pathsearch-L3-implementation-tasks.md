@@ -1,7 +1,11 @@
 # L3 pathsearch implementation tasks
 
-**Date:** 2026-06-12
-**Status:** fork-side vertical slice started. No production image/deploy yet.
+**Date:** 2026-06-12 · **updated 2026-06-15**
+**Status:** ✅ **LIVE IN PROD.** The gate-7 L3 path-search route is deployed on the user-facing
+URL via a "serve-split" read pod (homelab repo; image `gate7-9` = v13 `76201662`), parity-proven
+(recall 1.0 / precision 100%). The boxes below were authored before that deploy and are now stale —
+checked off with notes. Deploy/runbook live in the **homelab** repo
+(`docs/bitmagnet/gate7-l3-LIVE-status-and-roadmap.md` + `gate7-7-l3-serve-split-runbook.md`), not here.
 
 This task ledger follows the reconciled deploy plan in
 [`pathsearch-T4-deploy-ops.md`](./pathsearch-T4-deploy-ops.md). The active L3
@@ -63,25 +67,36 @@ shape is the keyed per-torrent path-bag index, not the retired per-file index.
   **retained** in the Tantivy schema, so future denormalization needs only a
   stream-SQL JOIN + rebuild — no proto/schema/API change. Reversible; not a
   product fork.
-- [ ] Add candidate exact-refine integration in the Go backend:
-  L3 `info_hash` candidates -> L1/L2 exact substring/structured filters.
-- [ ] Add feature flags and UI/typeahead/backend routing switches:
+- [x] Add candidate exact-refine integration in the Go backend:
+  L3 `info_hash` candidates -> L1/L2 exact substring/structured filters. *(DONE = the gate-7
+  route in `internal/search/pathsearch/composer.go` `TorrentContent`: L3 candidates → PG requery →
+  **L1 blob** decode → exact-refine (substring/ext/size) → paginate. Note: the live route refines
+  against **L1 blobs in-process**, NOT the L2 DuckDB sidecar; the L2 `fileSearch` Go consumer is a
+  separate open thread, see `dv4-go-integration-notes.md`.)*
+- [x] Add feature flags and UI/typeahead/backend routing switches:
   `SEARCH_PATHSEARCH_ENABLED`, `SEARCH_PATH_TYPEAHEAD_ENABLED`,
-  `SEARCH_PATH_COLLAPSE_L3_ENABLED`.
+  `SEARCH_PATH_COLLAPSE_L3_ENABLED`. *(DONE — set on the live read pod as
+  `SEARCH_PATHSEARCH_ENABLED` / `SEARCH_PATH_TYPEAHEAD_ENABLED` / `SEARCH_PATH_COLLAPSE_ENABLED`.)*
 
 ### Homelab / deploy
 
-- [ ] Add `bitmagnet-pathsearch` image-build target.
-- [ ] Pin pathsearch image digest in homelab inventory.
-- [ ] Add HEL1 `bitmagnet-pathsearch` role/manifests: PVC, Deployment, Service,
+> **✅ ALL DONE (2026-06-15)** — the `bitmagnet-pathsearch` sidecar is deployed/serving on HEL1
+> (`:50053`, full index, follow loop ticking), and the gate-7 Go route is live on the user URL via
+> the serve-split read pod. Lives in the **homelab** repo (roles `bitmagnet-pathsearch` +
+> `bitmagnet-l3-serve`); see `docs/bitmagnet/gate7-l3-LIVE-status-and-roadmap.md`.
+
+- [x] Add `bitmagnet-pathsearch` image-build target.
+- [x] Pin pathsearch image digest in homelab inventory.
+- [x] Add HEL1 `bitmagnet-pathsearch` role/manifests: PVC, Deployment, Service,
   Cilium policies, backfill Job, status/log targets.
-- [ ] Verify HEL1 `kubernetes.io/hostname` before creating the local-path PVC.
-- [ ] Deploy empty sidecar with backend flags off.
-- [ ] Run limited backfill smoke and compare projected size to the 14.0 GiB
+- [x] Verify HEL1 `kubernetes.io/hostname` before creating the local-path PVC.
+- [x] Deploy empty sidecar with backend flags off.
+- [x] Run limited backfill smoke and compare projected size to the 14.0 GiB
   keyed baseline.
-- [ ] Run full backfill.
-- [ ] Prove production gates: readiness, doc count, index size, freshness,
+- [x] Run full backfill.
+- [x] Prove production gates: readiness, doc count, index size, freshness,
   candidate recall, exact-refine parity, broad-query tail, and stability.
+  *(Gates 5/6/8 PASS per `l3-gate5-6-verdict.md`; exact-refine parity proven by the gate-7 run.)*
 
 ## Verification so far
 

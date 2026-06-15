@@ -13,9 +13,9 @@
 | **6 — recall** | ✅ **PASS** | 10 testable queries, **84 truth hashes (5 ASCII + 5 CJK; 5 queries with ≥10 hashes)**, **min recall = 1.000, 0 real misses**. |
 | **5 — latency** | ✅ **PASS for the realistic selective + CJK class; broad-ASCII = documented candidate-count-bound tail** | CJK clears **< 50 ms warm p50 even over the port-forward** (broad-sweep cjk3 = 32.5 ms; selective cjk_compound p50 = 38.8 ms). The realistic selective-compound class overall p50 = **46.4 ms over PF** (→ ~25–30 ms in-cluster). Only broad terms (candidate-count-bound) exceed 50 ms. |
 | **8 — stability** | ✅ **PASS** | 0 sidecar restarts; follow loop ticked with LIVE upserts during reads; reader latency undisturbed; PG clean after. |
-| 7 — exact-refine | ⏸️ deferred | The Go-integration phase (exact-refine + seeder re-rank); **not exercised** by this L3-only run. |
+| 7 — exact-refine | ✅ **DONE + LIVE (2026-06-15)** | The Go exact-refine route shipped (gate-7) and is live in prod via the serve-split (image `gate7-9`); a separate gate-7 parity proof passed (recall 1.0 / precision 100%). *(Seeder re-rank remains inert/denormalization-deferred, as designed.)* |
 
-**Bottom line:** **Gates 5 (latency — selective/CJK < 50 ms; broad = documented candidate-count tail), 6 (recall — 1.000, 0 misses across 84 hashes, ASCII+CJK), and 8 (stability) all PASS.** Gate 7 (exact-refine) is the deferred Go-integration phase and is out of scope for this L3 candidate-surface run.
+**Bottom line:** **Gates 5 (latency — selective/CJK < 50 ms; broad = documented candidate-count tail), 6 (recall — 1.000, 0 misses across 84 hashes, ASCII+CJK), and 8 (stability) all PASS.** Gate 7 (exact-refine) was out of scope for *this* L3-only run — but it has **since shipped and is live in prod** (gate-7 serve-split, image `gate7-9`, with its own parity proof passing); see the Gate 7 row above.
 
 **Environment snapshot (from HealthCheck at run start):** index **25,592,944 docs**, **17.13 GiB (18.4 GB)** on disk, `writable=true`, watermark **live** (`watermark_epoch ≈ 1.7814e9`, advancing ~15 s). Freshness bound used for truth = `watermark_epoch − 60`.
 

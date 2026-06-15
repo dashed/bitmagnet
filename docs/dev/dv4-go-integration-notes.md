@@ -1,5 +1,15 @@
 # DV-4 — Go-side integration notes (DROP-gate cutover)
 
+> ### ℹ️ 2026-06-15 — scope clarification (these items are STILL OPEN)
+> Do not confuse this with the live gate-7 L3 route. **What's LIVE in prod** is the gate-7
+> `torrentContent.search` path-search route (L3 candidates → **L1 blob** exact-refine), serve-split,
+> image `gate7-9`. The flags below — `FILE_SEARCH_ENABLED`, the `fileSearch`/`pathTypeahead` GraphQL
+> resolvers, and the `filesearch.Client` that talks to the **L2 DuckDB** sidecar — are a **separate,
+> still-OPEN** feature surface (the L2 sidecar serves data but the Go app does not consume it yet).
+> These remain OFF/unwired and are **not** required for the `torrent_files` DROP.
+> `GATE_FILE_EXTENSIONS_JSONB` and `FILE_BROWSER_FROM_BLOB` are flipped/verified in prod; the rest open.
+> Status + roadmap: homelab `docs/bitmagnet/gate7-l3-LIVE-status-and-roadmap.md`.
+
 Branch: `feat/deploy-go-integration` (jj, off `feat/file-grained-search`).
 Scope: **local Go only**. Nothing deployed. Every behaviour change is behind a
 feature flag that is **OFF by default**; the app behaves exactly as upstream

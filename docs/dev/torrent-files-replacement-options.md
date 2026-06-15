@@ -3,6 +3,17 @@
 **Date:** 2026-06-12 · **Status:** living summary. Every number below is **measured** (HEL1 restore/sidecar, FSN1 builder, or live K3s prod), not estimated.
 **This is the map.** Each option links to its authoritative deep doc; the full narrative is the [master design+results doc](./per-file-search-master-design-and-results.md); the footprint math is [`space-savings-vs-torrent-files.md`](./space-savings-vs-torrent-files.md).
 
+> ### 🟢 2026-06-15 UPDATE — the layer stack is COMPLETE; the DROP is now unblocked
+> **L1 ✅ + L2 ✅ + L3 ✅** are all deployed and proven: the gate-7 L3 path-search route is LIVE on the
+> user-facing URL (serve-split read pod, image `gate7-9`, recall 1.0 / precision 100%), exact-refining
+> against L1 blobs. So the hard rule "don't drop `torrent_files` until each replacement layer is deployed
+> **and** proven" is now SATISFIED. The DROP stays deferred only on its remaining preconditions (all OPEN):
+> the **G1 fix** (`FileExtensionFromPath` for empty crawl-path-blob extensions), the crawl-path
+> `(info_hash, file_index)` set-equality parity check, a fresh off-host backup, a proving/soak window, then
+> explicit user go. (Note: the L2 DuckDB sidecar is *not* in the live query path — L3 refines against L1
+> blobs — so the L2 `fileSearch` Go consumer being unwired does NOT block the DROP.)
+> Consolidated status + roadmap: homelab `docs/bitmagnet/gate7-l3-LIVE-status-and-roadmap.md`.
+
 ---
 
 ## The problem
