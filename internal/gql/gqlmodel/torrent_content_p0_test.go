@@ -12,6 +12,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/gql/gqlmodel/gen"
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
 	"gorm.io/driver/mysql"
@@ -43,25 +44,35 @@ func newMockDaoQuery(t *testing.T) *dao.Query {
 	return dao.Use(db)
 }
 
-// P0-1: the L3 candidate IN(...) query MUST NOT carry a page limit. Pre-fix
+// P0-1: the L3 candidate IN(...) queries MUST NOT carry a page limit. Pre-fix
 // torrentContentBaseOptions included q.DefaultOption() (Limit 10), so the
 // candidate query was capped at 10 rows regardless of the candidate budget,
 // truncating refine+paginate to <=10 torrents and emptying every page past the
 // first. Resolving the options exposes the resolved limit the old fakes ignored.
+// gate7-4 split the single set into Combined/Refine/Agg — NONE may impose a page
+// limit.
 func TestTorrentContentBaseOptions_NoPageLimit(t *testing.T) {
 	daoQuery := newMockDaoQuery(t)
 
 	input := TorrentContentSearchQueryInput{}
 	orderBy := maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection]()
 
-	resolved, err := q.ResolveOptions(daoQuery, torrentContentBaseOptions(input, orderBy)...)
-	if err != nil {
-		t.Fatalf("ResolveOptions: %v", err)
-	}
+	opts := torrentContentQueryOptions(input, orderBy)
 
-	if resolved.Limit.Valid {
-		t.Fatalf("L3 baseOptions must NOT impose a page limit, got Limit=%d; "+
-			"DefaultOption's Limit(10) would cap the candidate IN-query (P0-1)", resolved.Limit.Uint)
+	for name, set := range map[string][]q.Option{
+		"combined": opts.Combined,
+		"refine":   opts.Refine,
+		"agg":      opts.Agg,
+	} {
+		resolved, err := q.ResolveOptions(daoQuery, set...)
+		if err != nil {
+			t.Fatalf("ResolveOptions(%s): %v", name, err)
+		}
+
+		if resolved.Limit.Valid {
+			t.Fatalf("L3 %s options must NOT impose a page limit, got Limit=%d; "+
+				"DefaultOption's Limit(10) would cap the candidate IN-query (P0-1)", name, resolved.Limit.Uint)
+		}
 	}
 }
 
@@ -185,6 +196,13 @@ func (r *recordingSearch) TorrentContent(
 ) (search.TorrentContentResult, error) {
 	r.called = true
 	return search.TorrentContentResult{}, nil
+}
+
+func (r *recordingSearch) FileCounts(
+	_ context.Context,
+	_ []protocol.ID,
+) (map[protocol.ID]int, error) {
+	return map[protocol.ID]int{}, nil
 }
 
 func queryInput(query string, orderBy ...gen.TorrentContentOrderByInput) TorrentContentSearchQueryInput {

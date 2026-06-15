@@ -181,7 +181,7 @@ func (t TorrentContentQuery) Search(
 		result, served, err := t.Pathsearch.TorrentContent(
 			ctx,
 			pathSearchFilters(input),
-			torrentContentBaseOptions(input, fullOrderBy),
+			torrentContentQueryOptions(input, fullOrderBy),
 			pathSearchPageLimit(input.SearchParams),
 			searchPageOffset(input.SearchParams),
 			nil, // L3 sort is recall-selection only; PG applies the real order below
@@ -226,12 +226,23 @@ func (t TorrentContentQuery) Search(
 	return transformTorrentContentSearchResult(result)
 }
 
-// torrentContentBaseOptions builds the search options for the L3-routed query:
-// the same joins/hydration/facets/info-hash filters and user ordering as the
-// normal path, but WITHOUT pagination and WITHOUT the free-text tsquery (L3 owns
-// the path text and the composer paginates in Go after exact-refine).
+// torrentContentQueryOptions builds the THREE PostgreSQL option sets the L3
+// chunked-refine composer needs (gate7-4 byte-bound): all carry the same
+// joins/info-hash filters and user ordering as the normal path, but WITHOUT
+// pagination and WITHOUT the free-text tsquery (L3 owns the path text and the
+// composer paginates in Go after exact-refine).
 //
-// CRITICAL (P0-1): unlike the PostgreSQL path, this MUST NOT carry a page limit.
+//   - Combined: the torrent (blob) hydrator + content hydrator + facets — i.e.
+//     the SAME single-query options as before gate7-4. The composer uses it for
+//     the common single-chunk fast path, so a normal query is byte-identical to
+//     before (one query, hydrate + facets, no extra round-trip).
+//   - Refine:   hydrators but NO facets — used per chunk in the (rare) multi-chunk
+//     path so each chunk decodes only its own files without re-running facets.
+//   - Agg:      facets + aggregation budget but the torrent (blob) hydrator
+//     DROPPED — files_data is selected only by that hydrator, so the aggregation
+//     pass computes facets over the full kept set with ZERO blob decode.
+//
+// CRITICAL (P0-1): unlike the PostgreSQL path, these MUST NOT carry a page limit.
 // q.DefaultOption() sets Limit(10); pushing that into the candidate IN(...) query
 // would cap it at 10 rows regardless of the candidate budget, so refine+paginate
 // would operate over <=10 torrents and every page past the first would be empty.
@@ -239,28 +250,66 @@ func (t TorrentContentQuery) Search(
 // the IN-query returns ALL budgeted rows (no LIMIT) and the composer applies the
 // real page window in Go after exact-refine. We keep DefaultOption's aggregation
 // budget (needed for facet computation) but drop its Limit.
-func torrentContentBaseOptions(
+func torrentContentQueryOptions(
 	input TorrentContentSearchQueryInput,
 	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
-) []q.Option {
-	options := []q.Option{
+) pathsearch.QueryOptions {
+	var facet q.Option
+	if input.Facets != nil {
+		facet = torrentContentFacetsOption(*input.Facets)
+	}
+
+	var infoHashFilter q.Option
+	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
+		infoHashFilter = q.Where(search.TorrentContentInfoHashCriteria(infoHashes...))
+	}
+
+	order := search.TorrentContentFullOrderBy(fullOrderBy).Option()
+
+	// Combined: today's options exactly — hydrators + facets + agg budget + order.
+	combined := []q.Option{
 		q.WithAggregationBudget(defaultAggregationBudget),
 		search.TorrentContentCoreJoins(),
 		search.HydrateTorrentContentContent(),
 		search.HydrateTorrentContentTorrent(),
 	}
-
-	if input.Facets != nil {
-		options = append(options, torrentContentFacetsOption(*input.Facets))
+	if facet != nil {
+		combined = append(combined, facet)
 	}
 
-	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
-		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
+	if infoHashFilter != nil {
+		combined = append(combined, infoHashFilter)
 	}
 
-	options = append(options, search.TorrentContentFullOrderBy(fullOrderBy).Option())
+	combined = append(combined, order)
 
-	return options
+	// Refine: hydrators + order, NO facets / agg budget (per-chunk decode only).
+	refine := []q.Option{
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+	if infoHashFilter != nil {
+		refine = append(refine, infoHashFilter)
+	}
+
+	refine = append(refine, order)
+
+	// Agg: facets + agg budget + joins, NO torrent/content hydrator → zero decode.
+	// Ordering is irrelevant to aggregations, so it is omitted.
+	agg := []q.Option{
+		q.WithAggregationBudget(defaultAggregationBudget),
+		search.TorrentContentCoreJoins(),
+	}
+	if facet != nil {
+		agg = append(agg, facet)
+	}
+
+	if infoHashFilter != nil {
+		agg = append(agg, infoHashFilter)
+	}
+
+	return pathsearch.QueryOptions{Combined: combined, Refine: refine, Agg: agg}
 }
 
 // pathSearchFilters extracts the L3 exact-refine ingredients from the search

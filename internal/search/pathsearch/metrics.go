@@ -45,6 +45,8 @@ type Metrics struct {
 	lastSuccess    prometheus.Gauge
 	healthChecks   *prometheus.CounterVec
 	routes         *prometheus.CounterVec
+	refineDeclined prometheus.Counter
+	retainedCapped prometheus.Counter
 }
 
 // NewMetrics constructs the pathsearch metrics + their collectors. The collectors
@@ -87,6 +89,18 @@ func NewMetrics() *Metrics {
 			Name:      "route_total",
 			Help:      "Count of L3-routed queries by outcome (served|fallback|ineligible|error).",
 		}, []string{"result"}),
+		refineDeclined: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemPathsearch,
+			Name:      "refine_declined_oversized_total",
+			Help:      "Count of L3 path-search candidates EXCLUDED from exact-refine because their file_count exceeded the per-torrent sanity cap (MaxRefineFiles), either pre-decode (summary count) or post-decode (actual fileset). A fail-loud byte-bound (gate7-4): the candidate is dropped + logged rather than retained; the rest of the candidate set is still served.",
+		}),
+		retainedCapped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemPathsearch,
+			Name:      "refine_retained_capped_total",
+			Help:      "Count of L3 path-search requests whose refined match set hit the cumulative RetainedFileBudget (gate7-4 robust byte-bound) and were served as a memory-capped top-relevance estimate instead of accumulating every matched fileset. Should be ~0 for normal/selective queries; a non-zero rate flags broad/high-match-rate queries hitting the retained bound.",
+		}),
 	}
 }
 
@@ -127,6 +141,27 @@ func (m *Metrics) IncRoute(result RouteResult) {
 	m.routes.WithLabelValues(string(result)).Inc()
 }
 
+// IncRefineDeclinedOversized records one candidate excluded from exact-refine by
+// the per-torrent file-count sanity cap (gate7-4 byte-bound). nil-safe.
+func (m *Metrics) IncRefineDeclinedOversized() {
+	if m == nil {
+		return
+	}
+
+	m.refineDeclined.Inc()
+}
+
+// IncRefineRetainedCapped records one request served as a memory-capped estimate
+// because its refined match set hit the cumulative RetainedFileBudget (gate7-4).
+// nil-safe.
+func (m *Metrics) IncRefineRetainedCapped() {
+	if m == nil {
+		return
+	}
+
+	m.retainedCapped.Inc()
+}
+
 // Collectors returns all Prometheus collectors owned by the metrics.
 func (m *Metrics) Collectors() []prometheus.Collector {
 	if m == nil {
@@ -140,6 +175,8 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.lastSuccess,
 		m.healthChecks,
 		m.routes,
+		m.refineDeclined,
+		m.retainedCapped,
 	}
 }
 
@@ -166,6 +203,8 @@ type MetricsResult struct {
 	LastSuccessCollector  prometheus.Collector `group:"prometheus_collectors"`
 	HealthChecksCollector prometheus.Collector `group:"prometheus_collectors"`
 	RouteCollector        prometheus.Collector `group:"prometheus_collectors"`
+	RefineDeclinedColl    prometheus.Collector `group:"prometheus_collectors"`
+	RetainedCappedColl    prometheus.Collector `group:"prometheus_collectors"`
 }
 
 // NewMetricsResult is the fx provider for the pathsearch metrics. It returns the
@@ -182,5 +221,7 @@ func NewMetricsResult() MetricsResult {
 		LastSuccessCollector:  m.lastSuccess,
 		HealthChecksCollector: m.healthChecks,
 		RouteCollector:        m.routes,
+		RefineDeclinedColl:    m.refineDeclined,
+		RetainedCappedColl:    m.retainedCapped,
 	}
 }

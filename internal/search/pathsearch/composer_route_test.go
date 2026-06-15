@@ -43,7 +43,7 @@ func TestComposer_Route_ServedCounter(t *testing.T) {
 	}}}
 	c := newComposerWithMetrics(l3, pg, m, nil)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -62,7 +62,7 @@ func TestComposer_Route_IneligibleCounter(t *testing.T) {
 	c := newComposerWithMetrics(l3, pg, m, nil)
 
 	// Too short → ineligible, no L3 dial.
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "ab"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "ab"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || served {
 		t.Fatalf("expected not served, got served=%v err=%v", served, err)
 	}
@@ -84,7 +84,7 @@ func TestComposer_Route_ErrorCounter(t *testing.T) {
 	pg := &fakePG{}
 	c := newComposerWithMetrics(l3, pg, m, nil)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, QueryOptions{}, 10, 0, nil)
 	if err == nil || served {
 		t.Fatalf("expected error + not served, got served=%v err=%v", served, err)
 	}
@@ -104,7 +104,7 @@ func TestComposer_Route_TrustEmptyHealthy(t *testing.T) {
 	pg := &fakePG{}
 	c := newComposerWithMetrics(l3, pg, m, func() bool { return true })
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("healthy zero-candidate must serve authoritative empty, got served=%v err=%v", served, err)
 	}
@@ -129,7 +129,7 @@ func TestComposer_Route_FailClosedUnhealthy(t *testing.T) {
 	pg := &fakePG{}
 	c := newComposerWithMetrics(l3, pg, m, func() bool { return false })
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "1080p"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || served {
 		t.Fatalf("unhealthy zero-candidate must fall back (served=false), got served=%v err=%v", served, err)
 	}

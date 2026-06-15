@@ -84,6 +84,30 @@ type Config struct {
 	// during replication lag for never serving from a stale index. The follow loop
 	// normally keeps L3 fresh within seconds, so default-off is the safe choice.
 	PathsearchMaxWatermarkLag time.Duration
+	// PathsearchMaxRefineFiles is the per-torrent file-count SANITY CAP for the L3
+	// exact-refine (SEARCH_PATHSEARCH_MAX_REFINE_FILES): a candidate whose
+	// authoritative file_count exceeds this is declined (fail-loud, excluded +
+	// counted) rather than blob-decoded. Pinned == RefineFileBudget so no single
+	// torrent's decode can exceed one chunk's budget. 0 → composer default (300k).
+	PathsearchMaxRefineFiles uint
+	// PathsearchRefineFileBudget is the cumulative file-count budget per refine
+	// chunk (SEARCH_PATHSEARCH_REFINE_FILE_BUDGET): the kept candidates are decoded
+	// in chunks summing under this so peak TRANSIENT decode memory ≈ one budget
+	// (~1KB/file ⇒ ~300MB), not the whole candidate set. This is the make-or-break
+	// memory bound (the transient decode happens in the PG query before the retained
+	// cap). 0 → composer default (300k).
+	PathsearchRefineFileBudget uint
+	// PathsearchMaxChunkTorrents caps the torrents per refine chunk regardless of
+	// the file budget (SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS). 0 → composer default
+	// (1024).
+	PathsearchMaxChunkTorrents uint
+	// PathsearchRetainedFileBudget caps the cumulative decoded files RETAINED
+	// across all refined matches of one request
+	// (SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET): once exceeded, the route serves the
+	// accumulated top-relevance prefix as a memory-capped estimate. This is the
+	// downstream bound that holds regardless of match rate (~200B/retained file ⇒
+	// ~200MB). 0 → composer default (1M).
+	PathsearchRetainedFileBudget uint
 }
 
 // NewDefaultConfig returns the safe, disabled-by-default search config.
@@ -110,6 +134,15 @@ func NewDefaultConfig() Config {
 		PathsearchMaxCandidates:   2000,
 		PathsearchHealthInterval:  15 * time.Second,
 		PathsearchMaxWatermarkLag: 0, // disabled by default (see field doc)
+
+		// gate7-4 byte-bound: per-torrent sanity cap + chunk + retained budgets.
+		// MaxRefineFiles == RefineFileBudget so ONE chunk's transient decode
+		// (~1KB/file measured) can never exceed the budget → ~300k×1KB ≈ 300MB,
+		// fits a 2–3Gi pod (the 3Gi stress OOMed at the old 1.5M budget ≈ 1.5GB).
+		PathsearchMaxRefineFiles:     300_000,
+		PathsearchRefineFileBudget:   300_000,
+		PathsearchMaxChunkTorrents:   1024,
+		PathsearchRetainedFileBudget: 1_000_000,
 	}
 }
 
@@ -124,11 +157,15 @@ func (c Config) pathsearchConfig() pathsearch.Config {
 // composerConfig maps the section to the L3 exact-refine composer config.
 func (c Config) composerConfig() pathsearch.ComposerConfig {
 	return pathsearch.ComposerConfig{
-		MinQueryLength:   c.PathsearchMinQueryLength,
-		OversampleFactor: c.PathsearchOversample,
-		MaxCandidates:    c.PathsearchMaxCandidates,
-		TypeaheadEnabled: c.PathTypeaheadEnabled,
-		CollapseEnabled:  c.PathCollapseEnabled,
+		MinQueryLength:     c.PathsearchMinQueryLength,
+		OversampleFactor:   c.PathsearchOversample,
+		MaxCandidates:      c.PathsearchMaxCandidates,
+		TypeaheadEnabled:   c.PathTypeaheadEnabled,
+		CollapseEnabled:    c.PathCollapseEnabled,
+		MaxRefineFiles:     c.PathsearchMaxRefineFiles,
+		RefineFileBudget:   c.PathsearchRefineFileBudget,
+		MaxChunkTorrents:   c.PathsearchMaxChunkTorrents,
+		RetainedFileBudget: c.PathsearchRetainedFileBudget,
 	}
 }
 

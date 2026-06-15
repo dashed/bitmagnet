@@ -33,6 +33,17 @@ type fakePG struct {
 	err       error
 	gotOpts   int
 	callCount int
+	// fcErr, if set, is returned by FileCounts (to exercise the pre-decode probe
+	// error path).
+	fcErr error
+	// fileCounts, if non-nil, is the per-id count returned by FileCounts. Any
+	// requested id absent from it (or a nil map) defaults to count 1 — so the whole
+	// candidate set fits a single refine chunk (the common fast path), keeping the
+	// pre-existing tests exercising today's single-query behavior.
+	fileCounts map[protocol.ID]int
+	// strictCounts, when true, returns ONLY ids present in fileCounts (absent ids
+	// are OMITTED → "unknown", exercising the post-decode guard / cap budgeting).
+	strictCounts bool
 }
 
 func (f *fakePG) TorrentContent(_ context.Context, options ...query.Option) (search.TorrentContentResult, error) {
@@ -40,6 +51,31 @@ func (f *fakePG) TorrentContent(_ context.Context, options ...query.Option) (sea
 	f.callCount++
 
 	return f.result, f.err
+}
+
+func (f *fakePG) FileCounts(_ context.Context, ids []protocol.ID) (map[protocol.ID]int, error) {
+	if f.fcErr != nil {
+		return nil, f.fcErr
+	}
+
+	out := make(map[protocol.ID]int, len(ids))
+
+	for _, id := range ids {
+		if f.fileCounts != nil {
+			if n, ok := f.fileCounts[id]; ok {
+				out[id] = n
+				continue
+			}
+		}
+
+		if f.strictCounts {
+			continue // omit → unknown
+		}
+
+		out[id] = 1
+	}
+
+	return out, nil
 }
 
 func ih(b byte) protocol.ID {
@@ -94,7 +130,7 @@ func TestComposer_TorrentContent_RefinesAndPaginates(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 2, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served result, got served=%v err=%v", served, err)
 	}
@@ -116,7 +152,7 @@ func TestComposer_TorrentContent_RefinesAndPaginates(t *testing.T) {
 func TestComposer_TorrentContent_IneligibleShortQueryFallsBack(t *testing.T) {
 	c := newTestComposer(&fakeL3{}, &fakePG{})
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "ab"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "ab"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || served {
 		t.Fatalf("short query must fall back (served=false), got served=%v err=%v", served, err)
 	}
@@ -125,7 +161,7 @@ func TestComposer_TorrentContent_IneligibleShortQueryFallsBack(t *testing.T) {
 func TestComposer_TorrentContent_EmptyQueryFallsBack(t *testing.T) {
 	c := newTestComposer(&fakeL3{}, &fakePG{})
 
-	_, served, _ := c.TorrentContent(context.Background(), Filters{Query: "   "}, nil, 10, 0, nil)
+	_, served, _ := c.TorrentContent(context.Background(), Filters{Query: "   "}, QueryOptions{}, 10, 0, nil)
 	if served {
 		t.Fatal("empty/whitespace query must fall back (served=false)")
 	}
@@ -137,7 +173,7 @@ func TestComposer_TorrentContent_NoCandidatesIsEstimatedEmpty(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, nil, 10, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("no candidates is a served (estimated empty) result, got served=%v err=%v", served, err)
 	}
@@ -158,12 +194,12 @@ func TestComposer_TorrentContent_FailLoudFallback(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1)}}}
 	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
 		// multi-file, no Files, no FilesData -> unrefinable
-		{TorrentContent: model.TorrentContent{InfoHash: ih(1), Torrent: model.Torrent{FilesStatus: model.FilesStatusMulti}}},
+		{TorrentContent: model.TorrentContent{InfoHash: ih(1), Torrent: model.Torrent{InfoHash: ih(1), FilesStatus: model.FilesStatusMulti}}},
 	}}}
 
 	c := newTestComposer(l3, pg)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || served {
 		t.Fatalf("unrefinable candidate must fail loud (served=false), got served=%v err=%v", served, err)
 	}
@@ -173,7 +209,7 @@ func TestComposer_TorrentContent_L3ErrorPropagates(t *testing.T) {
 	l3 := &fakeL3{err: errors.New("sidecar down")}
 	c := newTestComposer(l3, &fakePG{})
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
 	if err == nil || served {
 		t.Fatalf("L3 error must propagate (served=false, err!=nil), got served=%v err=%v", served, err)
 	}
@@ -270,7 +306,7 @@ func TestComposer_BudgetSentToL3(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{}}
 	c := newTestComposer(l3, &fakePG{})
 
-	_, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 5, nil)
+	_, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 5, nil)
 
 	// budget = (offset+limit)*factor = 15*4 = 60, under the 1000 cap.
 	if l3.gotLimit != 60 {
@@ -294,7 +330,7 @@ func TestComposer_TorrentContent_ZeroCandidates_UnhealthyFallsBack(t *testing.T)
 	c := NewComposer(l3, pg, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 1000}, nil,
 		WithHealthGate(func() bool { return false }))
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, nil, 10, 0, nil)
+	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, QueryOptions{}, 10, 0, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -318,7 +354,7 @@ func TestComposer_TorrentContent_ZeroCandidates_HealthyServesEmpty(t *testing.T)
 	c := NewComposer(l3, pg, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 1000}, nil,
 		WithHealthGate(func() bool { return true }))
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, nil, 10, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("zero candidates + healthy L3 is a served (estimated empty) result, got served=%v err=%v", served, err)
 	}
@@ -346,7 +382,7 @@ func TestComposer_TorrentContent_PassesThroughAggregations(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -377,7 +413,7 @@ func TestComposer_TorrentContent_ServesInL3RecallOrder(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 10, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -412,7 +448,7 @@ func TestComposer_TorrentContent_HasNextPage(t *testing.T) {
 	c := newTestComposer(l3, pg)
 
 	// limit==0 → paginate returns all 3 refined rows; there is NO next page.
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 0, 0, nil)
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 0, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -426,13 +462,13 @@ func TestComposer_TorrentContent_HasNextPage(t *testing.T) {
 	}
 
 	// limit==2 over 3 refined rows → a real next page.
-	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 2, 0, nil)
+	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 0, nil)
 	if !res.HasNextPage {
 		t.Fatal("limit=2 over 3 refined rows must report HasNextPage=true")
 	}
 
 	// last page (offset=2, limit=2) consumes the final row → no next page.
-	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, nil, 2, 2, nil)
+	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 2, nil)
 	if res.HasNextPage {
 		t.Fatal("final page must report HasNextPage=false")
 	}
@@ -447,7 +483,7 @@ func TestComposer_CollapsePaths(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	groups, served, err := c.CollapsePaths(context.Background(), Filters{Query: "movie"}, nil, 10, 0, nil)
+	groups, served, err := c.CollapsePaths(context.Background(), Filters{Query: "movie"}, QueryOptions{}, 10, 0, nil)
 	if err != nil || !served {
 		t.Fatalf("expected served collapse, got served=%v err=%v", served, err)
 	}
