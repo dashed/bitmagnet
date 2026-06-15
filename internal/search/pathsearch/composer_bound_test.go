@@ -18,25 +18,30 @@ import (
 func deadlineCappedCount(m *Metrics) float64 { return testutil.ToFloat64(m.deadlineCapped) }
 func shedCount(m *Metrics) float64           { return testutil.ToFloat64(m.refineShed) }
 func retainedCappedCount(m *Metrics) float64 { return testutil.ToFloat64(m.retainedCapped) }
+func aggErrorCount(m *Metrics) float64       { return testutil.ToFloat64(m.refineAggError) }
 
 // boundPG is a controllable PG fake for the gate7-6 route deadline / concurrency
 // tests. Its TorrentContent returns realResult for the first (blockFromCall-1)
 // data calls, then BLOCKS on ctx.Done() (simulating a slow chunk decode that the
 // route deadline must cut off) and returns ctx.Err(); blockFromCall<=0 never
-// blocks. A non-deadline hard error is returned via hardErr (when set, every call
-// returns it immediately — the deadline-vs-real-error branch).
+// blocks. A non-deadline hard error is returned via hardErr: when errFromCall<=0
+// every call returns it immediately (the deadline-vs-real-error branch); when
+// errFromCall>0 it is returned only from that call onward, so earlier calls
+// succeed (used by gate7-9 to make the chunk decode succeed but the TRAILING
+// refined-agg query fail with a non-deadline error).
 type boundPG struct {
 	realResult    search.TorrentContentResult
 	counts        map[protocol.ID]int
 	callCount     int
 	blockFromCall int
 	hardErr       error
+	errFromCall   int
 }
 
 func (p *boundPG) TorrentContent(ctx context.Context, _ ...query.Option) (search.TorrentContentResult, error) {
 	p.callCount++
 
-	if p.hardErr != nil {
+	if p.hardErr != nil && (p.errFromCall <= 0 || p.callCount >= p.errFromCall) {
 		return search.TorrentContentResult{}, p.hardErr
 	}
 
@@ -363,4 +368,104 @@ func TestComposer_ConcurrencyLimiter_ReleasesSlotOnDeadlineAndError(t *testing.T
 	}
 
 	cE.sem.Release(1)
+}
+
+// (5) gate7-9 (N2 graceful degradation): the chunk decode + exact-refine succeed
+// and produce correct items, but the TRAILING decode-free refined-set aggregation
+// query returns a NON-deadline error. The route must SERVE the refined items
+// WITHOUT facets (empty sidebar) — NOT a 500 and NOT a RouteError/PG fallback —
+// and the failure must be observable via the new refine_agg_error_total metric.
+func TestComposer_RefinedAggError_ServesItemsWithoutFacets(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1)}}
+	pg := &boundPG{
+		realResult: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
+			item(1, tf("Inception.2010.1080p.mkv", "mkv", 1)),
+		}},
+		// Single candidate → single chunk: call 1 = chunk decode (succeeds), call 2 =
+		// refined-agg. errFromCall=2 makes ONLY the trailing agg query fail, with a
+		// non-deadline error. Generous route timeout so isRouteDeadline(ctx)==false.
+		hardErr:     errors.New("agg query transient failure"),
+		errFromCall: 2,
+	}
+
+	c := newBoundComposer(l3, pg, m, 5*time.Second, 0, 4, 0)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("a refined-agg error must SERVE items w/o facets (served=true, err=nil), got served=%v err=%v", served, err)
+	}
+
+	if len(res.Items) != 1 || res.Items[0].InfoHash != ih(1) {
+		t.Fatalf("the refined items must still be served, got %d items", len(res.Items))
+	}
+
+	if len(res.Aggregations) != 0 {
+		t.Fatalf("a degraded agg pass must serve EMPTY facets, got %+v (gate7-9)", res.Aggregations)
+	}
+
+	if got := aggErrorCount(m); got != 1 {
+		t.Fatalf("refine_agg_error_total = %v, want 1", got)
+	}
+
+	if got := routeCount(m, RouteError); got != 0 {
+		t.Fatalf("a degraded agg pass must NOT be a RouteError (no PG broad-FTS wall), got %v", got)
+	}
+
+	if got := routeCount(m, RouteServed); got != 1 {
+		t.Fatalf("route_total{served} = %v, want 1", got)
+	}
+
+	if pg.callCount != 2 {
+		t.Fatalf("expected 2 PG calls (chunk decode + refined-agg), got %d", pg.callCount)
+	}
+}
+
+// (6) gate7-9: the deadline-DURING-agg case is unchanged — when the trailing
+// refined-agg query is cut off by the route deadline, the route serves the refined
+// items WITHOUT facets but does NOT increment refine_agg_error_total (a deadline is
+// already accounted for by the deadline-cap path, not a transient agg failure).
+func TestComposer_RefinedAggDeadline_ServesItemsWithoutFacets_NoAggErrorCount(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1)}}
+	pg := &boundPG{
+		realResult: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
+			item(1, tf("Inception.2010.1080p.mkv", "mkv", 1)),
+		}},
+		// Single candidate → single chunk: call 1 = chunk decode (succeeds), call 2 =
+		// refined-agg BLOCKS past the route deadline → ctx.Err() (a deadline error).
+		blockFromCall: 2,
+	}
+
+	// Short route timeout so the agg call's block trips the deadline branch.
+	c := newBoundComposer(l3, pg, m, 50*time.Millisecond, 0, 4, 0)
+
+	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	if err != nil || !served {
+		t.Fatalf("a deadline during agg must SERVE items w/o facets, got served=%v err=%v", served, err)
+	}
+
+	if len(res.Items) != 1 || res.Items[0].InfoHash != ih(1) {
+		t.Fatalf("the refined items must still be served, got %d items", len(res.Items))
+	}
+
+	if len(res.Aggregations) != 0 {
+		t.Fatalf("a deadline during agg must serve EMPTY facets, got %+v", res.Aggregations)
+	}
+
+	if got := aggErrorCount(m); got != 0 {
+		t.Fatalf("a deadline (not a transient agg failure) must NOT increment refine_agg_error_total, got %v", got)
+	}
+
+	if got := routeCount(m, RouteError); got != 0 {
+		t.Fatalf("a deadline during agg must NOT be a RouteError, got %v", got)
+	}
+
+	if got := routeCount(m, RouteServed); got != 1 {
+		t.Fatalf("route_total{served} = %v, want 1", got)
+	}
 }

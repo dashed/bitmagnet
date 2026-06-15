@@ -95,7 +95,7 @@ func TestMetricsResult_AllCollectorsRegistered(t *testing.T) {
 
 	// The fx Result must surface every collector the facade owns, or some metric
 	// silently never reaches the registry.
-	if got := len(NewMetrics().Collectors()); got != 10 {
+	if got := len(NewMetrics().Collectors()); got != 11 {
 		t.Fatalf("Metrics owns %d collectors; update MetricsResult to surface them all", got)
 	}
 }

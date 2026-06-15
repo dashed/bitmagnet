@@ -1054,16 +1054,28 @@ func (c *Composer) TorrentContent(
 	} else {
 		aggRes, qErr := c.candidateRows(ctx, opts.Agg, infoHashesOf(refined))
 		if qErr != nil {
-			// Mirror the existing aggregation-pass error handling: a deadline
-			// mid-aggregation serves the result WITHOUT facets (empty aggs, never a
-			// 500); a real error is a RouteError → the GraphQL layer runs the PG
-			// fallback.
+			// gate7-9 (N2 graceful degradation): the decode+exact-refine ALREADY
+			// succeeded and produced correct items; only this cheap decode-free facet
+			// pass failed. A NON-deadline error here must NOT fail the user's whole
+			// search — serve the refined items WITHOUT facets (empty sidebar) rather
+			// than erroring (a 500) or counting a RouteError (which would run the
+			// resolver's broad-FTS PG wall). Both branches set empty facets and fall
+			// through to paginate+serve; they differ only in observability.
 			if isRouteDeadline(ctx) {
+				// Deadline mid-aggregation: already accounted for by the cap path
+				// (capDeadline/deadline_capped above); serve w/o facets, no extra count.
 				aggs = query.Aggregations{}
 			} else {
-				c.metrics.IncRoute(RouteError)
+				// Transient/structural agg failure: serve w/o facets, but make it
+				// observable via a dedicated metric + warn log. NOT a RouteError.
+				aggs = query.Aggregations{}
 
-				return search.TorrentContentResult{}, false, qErr
+				c.metrics.IncRefineAggError()
+
+				if c.logger != nil {
+					c.logger.Warnw("pathsearch: refined-set aggregation failed; serving items WITHOUT facets (empty sidebar)",
+						"query", f.Query, "matches", len(refined), "err", qErr)
+				}
 			}
 		} else {
 			aggs = aggRes.Aggregations

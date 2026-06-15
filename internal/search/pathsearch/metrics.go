@@ -49,6 +49,7 @@ type Metrics struct {
 	retainedCapped prometheus.Counter
 	deadlineCapped prometheus.Counter
 	refineShed     prometheus.Counter
+	refineAggError prometheus.Counter
 }
 
 // NewMetrics constructs the pathsearch metrics + their collectors. The collectors
@@ -114,6 +115,12 @@ func NewMetrics() *Metrics {
 			Subsystem: subsystemPathsearch,
 			Name:      "refine_shed_total",
 			Help:      "Count of L3 path-search requests SHED because no refine concurrency slot (MaxConcurrentRefines) was available within PathsearchSlotWait/the route deadline (gate7-6 load-shedding). Only the EXPENSIVE multi-chunk path acquires a slot, so a saturated limiter never sheds a normal/selective (single-chunk) query. A shed request is served fail-loud as an empty estimate, NEVER a PostgreSQL broad-FTS fallback. A non-zero rate flags a concurrent burst of pathological whole-dir queries.",
+		}),
+		refineAggError: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemPathsearch,
+			Name:      "refine_agg_error_total",
+			Help:      "Count of L3 path-search requests served WITHOUT facets because the decode-free refined-set aggregation query returned a NON-deadline error (gate7-9 graceful degradation). The exact-refine already produced correct items — only the cheap facet pass failed — so the route serves those items with an EMPTY facet sidebar instead of erroring (a 500) or running the resolver's broad-FTS PG wall. Items are correct; the sidebar is empty. A non-zero rate flags a transient/structural problem in the refined-set aggregation query (NOT a deadline — those are served w/o facets without incrementing this).",
 		}),
 	}
 }
@@ -198,6 +205,19 @@ func (m *Metrics) IncRefineShed() {
 	m.refineShed.Inc()
 }
 
+// IncRefineAggError records one request served WITHOUT facets because the
+// decode-free refined-set aggregation query returned a non-deadline error
+// (gate7-9 graceful degradation). The refined items are correct and served; only
+// the facet sidebar is empty. It is NOT a RouteError (no PG broad-FTS fallback)
+// and NOT a deadline-cap. nil-safe.
+func (m *Metrics) IncRefineAggError() {
+	if m == nil {
+		return
+	}
+
+	m.refineAggError.Inc()
+}
+
 // Collectors returns all Prometheus collectors owned by the metrics.
 func (m *Metrics) Collectors() []prometheus.Collector {
 	if m == nil {
@@ -215,6 +235,7 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.retainedCapped,
 		m.deadlineCapped,
 		m.refineShed,
+		m.refineAggError,
 	}
 }
 
@@ -245,6 +266,7 @@ type MetricsResult struct {
 	RetainedCappedColl    prometheus.Collector `group:"prometheus_collectors"`
 	DeadlineCappedColl    prometheus.Collector `group:"prometheus_collectors"`
 	RefineShedColl        prometheus.Collector `group:"prometheus_collectors"`
+	RefineAggErrorColl    prometheus.Collector `group:"prometheus_collectors"`
 }
 
 // NewMetricsResult is the fx provider for the pathsearch metrics. It returns the
@@ -265,5 +287,6 @@ func NewMetricsResult() MetricsResult {
 		RetainedCappedColl:    m.retainedCapped,
 		DeadlineCappedColl:    m.deadlineCapped,
 		RefineShedColl:        m.refineShed,
+		RefineAggErrorColl:    m.refineAggError,
 	}
 }
