@@ -7,7 +7,10 @@
 //!                  blob failed to decode (`--fail-on-decode-error`).
 //! * `delta`      — minute carve (`updated_at > watermark` + deleted list) →
 //!                  delta generation (fact + tombstones) → swap + watermark.
-//! * `compact`    — full rebuild + empty-delta reset.
+//! * `compact`    — full rebuild + empty-delta reset (`--fail-on-decode-error`
+//!                  mirrors `base`).
+//! * `prune`      — generation GC: keep `current` + newest-N per kind, delete
+//!                  the rest (`--keep-base`/`--keep-delta`/`--dry-run`).
 //! * `from-hex`   — OFFLINE smoke: `info_hash|count|hex` lines → a base
 //!                  generation with no database (CI / local verification).
 //! * `verify`     — STUB: agg-vs-torrent_files parity (Job A); see build notes.
@@ -101,6 +104,25 @@ enum Cmd {
         sort: SortArg,
         #[arg(long, default_value_t = 20_000)]
         page_size: i64,
+        /// Exit non-zero if any blob failed to decode (V3 gate; mirrors `base`).
+        #[arg(long, default_value_t = false)]
+        fail_on_decode_error: bool,
+    },
+    /// Generation GC: keep `current` + the newest-N versions per kind, delete
+    /// the rest. Resolves `current` via the live symlink and REFUSES to delete
+    /// it even outside keep-N; `--dry-run` lists the delete set without
+    /// unlinking. Safe to run while the delta CronJob ticks (it only ever
+    /// targets old, non-current dirs; re-checks `current` before each unlink).
+    Prune {
+        /// Keep the current base + the newest `keep_base − 1` previous bases.
+        #[arg(long, default_value_t = 2)]
+        keep_base: usize,
+        /// Keep the current delta + the newest `keep_delta − 1` previous deltas.
+        #[arg(long, default_value_t = 5)]
+        keep_delta: usize,
+        /// List what WOULD be deleted (+ reclaimed bytes) without deleting.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
     /// OFFLINE smoke: build a base generation from a `info_hash|count|hex` file.
     FromHex {
@@ -231,6 +253,7 @@ async fn main() -> Result<()> {
             version,
             sort,
             page_size,
+            fail_on_decode_error,
         } => {
             let pool = bitmagnet_db::PgPool::connect(&dsn)
                 .await
@@ -247,6 +270,39 @@ async fn main() -> Result<()> {
                 )
                     .await?;
             report("compact", &stats);
+            if fail_on_decode_error && !stats.is_clean() {
+                anyhow::bail!(
+                    "V3 FAILED: {} blob decode errors (target 0)",
+                    stats.decode.decode_errors
+                );
+            }
+        }
+        Cmd::Prune {
+            keep_base,
+            keep_delta,
+            dry_run,
+        } => {
+            let reports = layout.prune(keep_base, keep_delta, dry_run)?;
+            for r in &reports {
+                let kind = match r.kind {
+                    Kind::Base => "base",
+                    Kind::Delta => "delta",
+                };
+                println!(
+                    "prune {kind}: kept={} deleted={} reclaimed_bytes={} dry_run={}",
+                    r.kept,
+                    r.deleted.len(),
+                    r.reclaimed_bytes,
+                    r.dry_run,
+                );
+                for d in &r.deleted {
+                    println!(
+                        "  {} {}",
+                        if dry_run { "WOULD-DELETE" } else { "DELETED" },
+                        d.display()
+                    );
+                }
+            }
         }
         Cmd::FromHex {
             input,
