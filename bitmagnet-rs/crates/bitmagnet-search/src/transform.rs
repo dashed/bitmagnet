@@ -59,10 +59,15 @@ pub fn build_document(row: &TorrentForIndex, files: &[BlobFile]) -> TorrentDocum
         .filter(|f| !f.path.is_empty())
         .map(|f| f.path.clone())
         .collect();
+    // G1 defense-in-depth: derive the extension from the file PATH, not the blob's
+    // stored `e` (which is empty for pre-G1 crawl-path blobs). Mirrors
+    // bitmagnet-parquet/decode.rs and every Go consumer. This superseded Tantivy
+    // crate is NOT in the live serving path (the live L2/L3 parquet/DuckDB sidecar
+    // already path-derives), but keeping it path-derived makes it correct
+    // regardless of the blob `e` value.
     let file_extensions: Vec<String> = files
         .iter()
-        .filter(|f| !f.extension.is_empty())
-        .map(|f| f.extension.clone())
+        .filter_map(|f| file_extension_from_path(&f.path))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

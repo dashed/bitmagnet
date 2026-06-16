@@ -18,6 +18,9 @@ thiserror.workspace = true
 # Used by tests/blob_fixture.rs to decompress the Go-produced `.blob` fixtures
 # and compare the inner MessagePack byte-for-byte against the Rust serializer.
 zstd.workspace = true
+# Used by tests/file_extension_parity.rs to parse the shared Go/Rust
+# testdata/file-extension-fixtures.json (the FB-A0/G1 contract corpus).
+serde_json.workspace = true
 
 [lints]
 workspace = true
