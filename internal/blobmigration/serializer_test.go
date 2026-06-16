@@ -51,6 +51,42 @@ func TestSerializeDeserializeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSerializeFiles_DerivesExtensionFromPath_G1 proves the G1 fix: SerializeFiles
+// canonicalizes the stored `e` from the PATH, ignoring the caller's Extension — for
+// the empty-e crawl case, a stale/wrong e, an extension-less path (empty e), and a
+// multi-dot path (final token only).
+func TestSerializeFiles_DerivesExtensionFromPath_G1(t *testing.T) {
+	t.Parallel()
+
+	files := []model.TorrentFile{
+		{Index: 0, Path: "Season 1/Episode 1.mkv", Extension: model.NullString{}}, // empty e (crawl)
+		{Index: 1, Path: "clip.mp4", Extension: model.NewNullString("avi")},       // stale/wrong e
+		{Index: 2, Path: "README", Extension: model.NewNullString("bogus")},       // no real extension
+		{Index: 3, Path: "a/b/c.tar.gz", Extension: model.NullString{}},           // multi-dot -> gz
+	}
+
+	data, err := SerializeFiles(files)
+	require.NoError(t, err)
+
+	got, err := DeserializeFiles(data)
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+
+	assert.Equal(t, "mkv", got[0].Extension.String)
+	assert.Equal(t, "mp4", got[1].Extension.String)
+	assert.Equal(t, "", got[2].Extension.String)
+	assert.False(t, got[2].Extension.Valid)
+	assert.Equal(t, "gz", got[3].Extension.String)
+
+	for i := range got {
+		assert.Equal(t,
+			model.FileExtensionFromPath(got[i].Path).String,
+			got[i].Extension.String,
+			"file %d: stored e must equal path-derived extension", i,
+		)
+	}
+}
+
 func TestSerializeDeserializeEmpty(t *testing.T) {
 	t.Parallel()
 

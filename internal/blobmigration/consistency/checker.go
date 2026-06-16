@@ -119,6 +119,36 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	return result
 }
 
+// compareStrictE asserts the G1 canonicalization invariant on a single blob: the
+// RAW stored `e` of every file must equal model.FileExtensionFromPath(path). It
+// needs only the blob (no torrent_files), so it remains valid after the DROP. A
+// crawl-path blob written before the G1 serializer fix (empty `e` on a file whose
+// path yields a non-empty extension) is flagged here; a fully-canonical blob passes.
+func compareStrictE(blobFiles []model.TorrentFile) CheckResult {
+	result := CheckResult{
+		BlobFiles: len(blobFiles),
+		RowFiles:  len(blobFiles),
+	}
+
+	for i := range blobFiles {
+		b := blobFiles[i]
+
+		want := model.FileExtensionFromPath(b.Path)
+		if b.Extension.String != want.String {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: int(b.Index),
+				Field:     "extension_raw",
+				Expected:  want.String,
+				Got:       b.Extension.String,
+			})
+		}
+	}
+
+	result.Match = len(result.Mismatches) == 0
+
+	return result
+}
+
 type blobRow struct {
 	InfoHash  protocol.ID
 	FilesData []byte
@@ -253,6 +283,25 @@ func verifyRanges(k int) []verifyRange {
 // sampleSize<=0 verifies everything; sampleSize>0 caps the total checked (~sampleSize/k contiguous per
 // range, ~uniform since info_hash is random).
 func CheckAll(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleSize int) (Summary, error) {
+	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, false)
+}
+
+// CheckAllStrictE is the G1 strict-`e` gate. It asserts the RAW stored blob `e`
+// equals the path-derived extension (model.FileExtensionFromPath(path)) for every
+// file in every blob — i.e. that the backfill canonicalized `e` and the crawler is
+// no longer writing empty `e`. Unlike CheckAll it reads ONLY files_data (no
+// torrent_files read/join), so it is torrent_files-INDEPENDENT and stays valid
+// after the DROP. 0 mismatches + 0 errors == the G1 gate is green.
+func CheckAllStrictE(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleSize int) (Summary, error) {
+	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, true)
+}
+
+func checkAllImpl(
+	ctx context.Context,
+	q *dao.Query,
+	parallelism, chunkSize, sampleSize int,
+	strictE bool,
+) (Summary, error) {
 	if parallelism < 1 {
 		parallelism = 1
 	}
@@ -279,7 +328,7 @@ func CheckAll(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleS
 		go func(rg verifyRange) {
 			defer wg.Done()
 
-			local, err := checkRange(ctx, q, rg, chunkSize, perRangeLimit)
+			local, err := checkRange(ctx, q, rg, chunkSize, perRangeLimit, strictE)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -301,7 +350,7 @@ func CheckAll(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleS
 	return total, firstErr
 }
 
-func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, limit int) (Summary, error) {
+func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, limit int, strictE bool) (Summary, error) {
 	var s Summary
 
 	db := q.Torrent.UnderlyingDB().WithContext(ctx)
@@ -341,9 +390,18 @@ func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, li
 
 		maxHash := blobs[len(blobs)-1].InfoHash
 
-		filesByHash, err := groupedFiles(ctx, q, cursor, hasCursor, maxHash)
-		if err != nil {
-			return s, err
+		// strict-e is blob-only (asserts raw `e` == path-derived); it does NOT read
+		// torrent_files, so it stays valid after the DROP. The default check still
+		// cross-references torrent_files for path/size/count.
+		var filesByHash map[protocol.ID][]model.TorrentFile
+
+		if !strictE {
+			var err error
+
+			filesByHash, err = groupedFiles(ctx, q, cursor, hasCursor, maxHash)
+			if err != nil {
+				return s, err
+			}
 		}
 
 		for _, b := range blobs {
@@ -355,7 +413,13 @@ func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, li
 				continue
 			}
 
-			res := CompareFiles(blobFiles, filesByHash[b.InfoHash])
+			var res CheckResult
+			if strictE {
+				res = compareStrictE(blobFiles)
+			} else {
+				res = CompareFiles(blobFiles, filesByHash[b.InfoHash])
+			}
+
 			res.InfoHash = b.InfoHash
 
 			if res.Match {

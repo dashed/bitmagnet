@@ -29,9 +29,19 @@ func SerializeFiles(files []model.TorrentFile) ([]byte, error) {
 	compact := make([]compactFile, len(files))
 	for i, f := range files {
 		compact[i] = compactFile{
-			Index:     int(f.Index),
-			Path:      f.Path,
-			Extension: f.Extension.String,
+			Index: int(f.Index),
+			Path:  f.Path,
+			// G1: canonicalize the stored `e` from the PATH, ignoring the caller's
+			// f.Extension. The crawler dual-write (dhtcrawler/persist.go) builds
+			// TorrentFiles with no Extension, which previously persisted an empty
+			// `e`; once torrent_files is DROPped the blob is the source of truth, so
+			// `e` must equal model.FileExtensionFromPath(path) everywhere. This is a
+			// no-op for the blob-migration backfill caller, whose f.Extension already
+			// comes from torrent_files.extension — itself the generated column
+			// substring(lower(path) from '[^/.]\.([a-z0-9]+)$'), byte-identical to
+			// FileExtensionFromPath. ExtractUniqueExtensions (below) already derives
+			// from the path; this makes SerializeFiles consistent with it.
+			Extension: model.FileExtensionFromPath(f.Path).String,
 			Size:      f.Size,
 		}
 	}

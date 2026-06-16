@@ -40,3 +40,10 @@ testem.log
 # System files
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts — never commit target/ (these rode in from the go-flags-2
+# base be35ce5b, ~5.2GB/71k files; the Go ci.Dockerfile uses none of them and the
+# bloated git-archive context broke the FSN1 unarchive).
+bitmagnet-rs/target/
+bench/*/target/
+bench-file-index/target/
