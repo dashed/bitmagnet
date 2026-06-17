@@ -118,6 +118,78 @@ func TestCheckAll_AllMatch(t *testing.T) {
 	assert.Equal(t, 0, summary.Errors)
 }
 
+// TestCheckAll_FullAllowsLegacyDuplicatePathCollapse verifies the D1 cleanup gate semantics:
+// the stock full verifier accepts only the legacy torrent_files (info_hash,path) collapse.
+func TestCheckAll_FullAllowsLegacyDuplicatePathCollapse(t *testing.T) {
+	db := setupIntegrationDB(t)
+
+	seedMigratedTorrent(t, db, hashFromBytes(0x10), []string{" ", " ", "video.mkv", " "})
+
+	summary, err := CheckAll(context.Background(), dao.Use(db), 2, 2, 0 /*full*/)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, summary.TotalChecked)
+	assert.Equal(t, 1, summary.Matches)
+	assert.Equal(t, 0, summary.Mismatches)
+	assert.Equal(t, 0, summary.Errors)
+	assert.Equal(t, 1, summary.LegacyDuplicatePathTorrents)
+	assert.Equal(t, 2, summary.LegacyDuplicatePathFiles)
+}
+
+// TestCheckAll_SampleKeepsStrictComparator documents that sampled verification remains a
+// diagnostic path and does not apply the D1 duplicate-path exception.
+func TestCheckAll_SampleKeepsStrictComparator(t *testing.T) {
+	db := setupIntegrationDB(t)
+
+	seedMigratedTorrent(t, db, hashFromBytes(0x20), []string{" ", " ", "video.mkv"})
+
+	summary, err := CheckAll(context.Background(), dao.Use(db), 1, 2, 1 /*sample*/)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, summary.TotalChecked)
+	assert.Equal(t, 0, summary.Matches)
+	assert.Equal(t, 1, summary.Mismatches)
+	assert.Equal(t, 0, summary.Errors)
+}
+
+func TestCheckAllFileIndexSetReportsRowOnlyRowsWithinChunkAndTail(t *testing.T) {
+	db := setupIntegrationDB(t)
+
+	blobOne := hashFromBytes(0x10)
+	rowOnlyInChunk := hashFromBytes(0x20)
+	blobTwo := hashFromBytes(0x30)
+	rowOnlyTail := hashFromBytes(0x40)
+
+	seedMigratedTorrent(t, db, blobOne, []string{"a.mkv"})
+	seedMigratedTorrent(t, db, rowOnlyInChunk, []string{"row-only-chunk.mkv"})
+	require.NoError(t, db.Table("torrents").Where("info_hash = ?", rowOnlyInChunk).Update("files_data", nil).Error)
+	seedMigratedTorrent(t, db, blobTwo, []string{"b.mkv"})
+	seedMigratedTorrent(t, db, rowOnlyTail, []string{"row-only-tail.mkv"})
+	require.NoError(t, db.Table("torrents").Where("info_hash = ?", rowOnlyTail).Update("files_data", nil).Error)
+
+	summary, err := CheckAllFileIndexSet(context.Background(), dao.Use(db), 1, 2)
+	require.NoError(t, err)
+
+	assert.Equal(t, 4, summary.TotalChecked)
+	assert.Equal(t, 2, summary.Matches)
+	assert.Equal(t, 2, summary.Mismatches)
+	assert.Equal(t, 0, summary.Errors)
+
+	details := make(map[protocol.ID]CheckResult)
+	for _, detail := range summary.MismatchDetails {
+		details[detail.InfoHash] = detail
+	}
+
+	for _, infoHash := range []protocol.ID{rowOnlyInChunk, rowOnlyTail} {
+		detail, ok := details[infoHash]
+		require.True(t, ok, "expected row-only mismatch for %s", infoHash)
+		assert.Equal(t, 0, detail.BlobFiles)
+		assert.Greater(t, detail.RowFiles, 0)
+		require.NotEmpty(t, detail.Mismatches)
+		assert.Equal(t, "missing_in_blob", detail.Mismatches[0].Field)
+	}
+}
+
 // TestCheckAll_DetectsMismatch corrupts one torrent's blob (re-serialize a DIFFERENT file set) and
 // asserts CheckAll flags exactly that one.
 func TestCheckAll_DetectsMismatch(t *testing.T) {

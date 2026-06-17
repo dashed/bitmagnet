@@ -33,6 +33,18 @@ func TestCheckCleanupGates(t *testing.T) {
 		assertGateFailed(t, gates, "No verification timestamp")
 	})
 
+	t.Run("refuses with file index proof but no stock verification", func(t *testing.T) {
+		t.Parallel()
+
+		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+		gates, ok := runGateCheck(t, map[string]string{
+			kvKeyStatus:                         statusCompleted,
+			"blob_migration:file_index_checked": recent,
+		}, true)
+		assert.False(t, ok)
+		assertGateFailed(t, gates, "No verification timestamp")
+	})
+
 	t.Run("refuses with stale verification", func(t *testing.T) {
 		t.Parallel()
 
@@ -55,6 +67,19 @@ func TestCheckCleanupGates(t *testing.T) {
 		}, false)
 		assert.False(t, ok)
 		assertGateFailed(t, gates, "--confirm flag required")
+	})
+
+	t.Run("accepts recent stock verification", func(t *testing.T) {
+		t.Parallel()
+
+		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+		gates, ok := runGateCheck(t, map[string]string{
+			kvKeyStatus:     statusCompleted,
+			kvKeyVerifiedAt: recent,
+		}, true)
+		assert.True(t, ok)
+		assertGatePassed(t, gates, "Verification passed at")
+		assertGatePassed(t, gates, "--confirm flag provided")
 	})
 }
 
@@ -196,6 +221,18 @@ func assertGateFailed(t *testing.T, gates []gate, substring string) {
 	}
 
 	t.Errorf("expected a failed gate containing %q, got gates: %+v", substring, gates)
+}
+
+func assertGatePassed(t *testing.T, gates []gate, substring string) {
+	t.Helper()
+
+	for _, g := range gates {
+		if g.passed && contains(g.description, substring) {
+			return
+		}
+	}
+
+	t.Errorf("expected a passed gate containing %q, got gates: %+v", substring, gates)
 }
 
 func assertStatusCheck(got, want string) error {

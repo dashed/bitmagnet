@@ -432,6 +432,11 @@ func (p Params) verifyCmd() *cli.Command {
 				Usage: "G1 gate: assert the RAW stored blob `e` == path-derived extension " +
 					"(model.FileExtensionFromPath); reads only files_data, torrent_files-independent",
 			},
+			&cli.BoolFlag{
+				Name: "file-index-set",
+				Usage: "read-only crawl-path gate: compare torrent_files to the legacy duplicate-path " +
+					"projection of decoded files_data; requires --full",
+			},
 		},
 		Action: func(ctx *cli.Context) error {
 			d, err := p.Dao.Get()
@@ -450,6 +455,14 @@ func (p Params) verifyCmd() *cli.Command {
 			}
 
 			strictE := ctx.Bool("strict-e")
+			fileIndexSet := ctx.Bool("file-index-set")
+			if strictE && fileIndexSet {
+				return fmt.Errorf("--strict-e and --file-index-set are mutually exclusive")
+			}
+
+			if fileIndexSet && !ctx.Bool("full") {
+				return fmt.Errorf("--file-index-set requires --full; sampled checks cannot prove set equality")
+			}
 
 			// sampleSize 0 = full. Parallel streaming (no ORDER BY RANDOM / join / per-torrent reads).
 			sampleSize := 0
@@ -490,7 +503,26 @@ func (p Params) verifyCmd() *cli.Command {
 				)
 			}
 
-			summary, err := check(ctx.Context, d, parallelism, chunkSize, sampleSize)
+			var summary consistency.Summary
+			if fileIndexSet {
+				_, _ = fmt.Fprintln(
+					ctx.App.Writer,
+					"file-index-set mode: read-only full parity for (info_hash, file_index), "+
+						"modulo legacy duplicate-path collapse.",
+				)
+
+				summary, err = consistency.CheckAllFileIndexSet(ctx.Context, d, parallelism, chunkSize)
+			} else {
+				if ctx.Bool("full") && !strictE {
+					_, _ = fmt.Fprintln(
+						ctx.App.Writer,
+						"full mode: allowing only legacy duplicate-path collapse under "+
+							"PRIMARY KEY (info_hash, path).",
+					)
+				}
+
+				summary, err = check(ctx.Context, d, parallelism, chunkSize, sampleSize)
+			}
 			if err != nil {
 				return fmt.Errorf("verification failed: %w", err)
 			}
@@ -502,6 +534,10 @@ func (p Params) verifyCmd() *cli.Command {
 			tw.AppendRow(table.Row{"Matches", summary.Matches})
 			tw.AppendRow(table.Row{"Mismatches", summary.Mismatches})
 			tw.AppendRow(table.Row{"Errors", summary.Errors})
+			if fileIndexSet || summary.LegacyDuplicatePathTorrents > 0 || summary.LegacyDuplicatePathFiles > 0 {
+				tw.AppendRow(table.Row{"Legacy duplicate-path torrents", summary.LegacyDuplicatePathTorrents})
+				tw.AppendRow(table.Row{"Legacy duplicate-path files", summary.LegacyDuplicatePathFiles})
+			}
 			tw.Render()
 
 			if summary.Mismatches > 0 || summary.Errors > 0 {
@@ -515,6 +551,11 @@ func (p Params) verifyCmd() *cli.Command {
 					summary.Mismatches,
 					summary.Errors,
 				)
+			}
+
+			if fileIndexSet {
+				_, _ = fmt.Fprintln(ctx.App.Writer, "\nVerification PASSED (read-only; timestamp not updated).")
+				return nil
 			}
 
 			now := time.Now()

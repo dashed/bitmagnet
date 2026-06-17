@@ -395,7 +395,7 @@ func TestCleanupSafetyGates(t *testing.T) {
 
 	// Gate 3: No verification timestamp.
 	t.Run("refuses_without_verification", func(t *testing.T) {
-		status := getKV("blob_migration:verify_passed_at")
+		status := getKV("blob_migration:verified_at")
 		assert.Empty(t, status, "no verification timestamp should exist")
 	})
 
@@ -409,7 +409,7 @@ func TestCleanupSafetyGates(t *testing.T) {
 		}
 
 		upsertKV("blob_migration:status", "completed")
-		upsertKV("blob_migration:verify_passed_at", now.Format(time.RFC3339))
+		upsertKV("blob_migration:verified_at", now.Format(time.RFC3339))
 
 		// Verify all gates pass.
 		assert.Equal(t, "completed", getKV("blob_migration:status"))
@@ -421,7 +421,7 @@ func TestCleanupSafetyGates(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), unmigrated)
 
-		assert.NotEmpty(t, getKV("blob_migration:verify_passed_at"))
+		assert.NotEmpty(t, getKV("blob_migration:verified_at"))
 
 		// Perform cleanup: drop torrent_files table.
 		err = db.Exec("DROP TABLE IF EXISTS torrent_files CASCADE").Error

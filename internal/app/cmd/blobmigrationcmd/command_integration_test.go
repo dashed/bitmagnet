@@ -3,12 +3,18 @@
 package blobmigrationcmd
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
+	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 	goose "github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
@@ -16,6 +22,7 @@ import (
 	"github.com/urfave/cli/v2"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -81,4 +88,102 @@ func TestUpsertKVWritesKeyValuesTable(t *testing.T) {
 	var n int64
 	require.NoError(t, db.Table("key_values").Where("key LIKE ?", "blob_migration:%").Count(&n).Error)
 	assert.Equal(t, int64(2), n, "exactly two key_values rows; the OnConflict upsert must not duplicate")
+}
+
+func TestVerifyFullWritesVerifiedAtWithLegacyDuplicatePaths(t *testing.T) {
+	db := setupIntegrationDB(t)
+	infoHash := commandHashFromBytes(0x10)
+	seedCommandMigratedTorrent(t, db, infoHash, []string{" ", " ", "video.mkv", " "})
+
+	output, err := runVerifyCommand(t, db, "--full")
+	require.NoError(t, err, output)
+
+	assert.Contains(t, output, "Verification PASSED.")
+	assert.NotEmpty(t, getCommandKV(t, db, kvKeyVerifiedAt))
+}
+
+func TestVerifyFileIndexSetDoesNotWriteVerifiedAt(t *testing.T) {
+	db := setupIntegrationDB(t)
+	infoHash := commandHashFromBytes(0x20)
+	seedCommandMigratedTorrent(t, db, infoHash, []string{" ", " ", "video.mkv"})
+	old := "2000-01-02T03:04:05Z"
+	require.NoError(t, upsertKV(&cli.Context{Context: context.Background()}, dao.Use(db), kvKeyVerifiedAt, old, time.Now()))
+
+	output, err := runVerifyCommand(t, db, "--full", "--file-index-set")
+	require.NoError(t, err, output)
+
+	assert.Contains(t, output, "Verification PASSED (read-only; timestamp not updated).")
+	assert.Equal(t, old, getCommandKV(t, db, kvKeyVerifiedAt))
+}
+
+func runVerifyCommand(t *testing.T, db *gorm.DB, args ...string) (string, error) {
+	t.Helper()
+
+	d := dao.Use(db)
+	p := Params{
+		Config: blobmigration.Config{Parallelism: 1, ChunkSize: 2},
+		Dao: lazy.New(func() (*dao.Query, error) {
+			return d, nil
+		}),
+	}
+
+	app := cli.NewApp()
+	var out bytes.Buffer
+	app.Writer = &out
+	app.Commands = []*cli.Command{p.verifyCmd()}
+
+	runArgs := append([]string{"bitmagnet", "verify"}, args...)
+	err := app.Run(runArgs)
+
+	return out.String(), err
+}
+
+func commandHashFromBytes(b ...byte) protocol.ID {
+	var id protocol.ID
+	copy(id[:], b)
+
+	return id
+}
+
+func seedCommandMigratedTorrent(t *testing.T, db *gorm.DB, infoHash protocol.ID, paths []string) {
+	t.Helper()
+
+	now := time.Now()
+	files := make([]model.TorrentFile, len(paths))
+	for i, p := range paths {
+		files[i] = model.TorrentFile{
+			InfoHash:  infoHash,
+			Index:     uint(i),
+			Path:      p,
+			Size:      uint(1000 * (i + 1)),
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+
+	torrent := model.Torrent{
+		InfoHash:    infoHash,
+		Name:        fmt.Sprintf("t-%x", infoHash[:4]),
+		Size:        uint(len(paths) * 1000),
+		FilesStatus: model.FilesStatusMulti,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).
+		Omit("Extension", "FilesCount", "Hint", "Contents", "Sources", "Files", "Pieces", "Tags", "FilesData", "FileExts").
+		Create(&torrent).Error)
+	require.NoError(t, db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error)
+
+	blob, err := blobmigration.SerializeFiles(files)
+	require.NoError(t, err)
+	require.NoError(t, db.Table("torrents").Where("info_hash = ?", infoHash).Update("files_data", blob).Error)
+}
+
+func getCommandKV(t *testing.T, db *gorm.DB, key string) string {
+	t.Helper()
+
+	var value string
+	require.NoError(t, db.Table("key_values").Select("value").Where("key = ?", key).Scan(&value).Error)
+
+	return value
 }

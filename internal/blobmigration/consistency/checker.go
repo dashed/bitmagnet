@@ -13,11 +13,12 @@ import (
 )
 
 type CheckResult struct {
-	InfoHash   protocol.ID
-	Match      bool
-	BlobFiles  int
-	RowFiles   int
-	Mismatches []FieldMismatch
+	InfoHash                 protocol.ID
+	Match                    bool
+	BlobFiles                int
+	RowFiles                 int
+	LegacyDuplicatePathFiles int
+	Mismatches               []FieldMismatch
 }
 
 type FieldMismatch struct {
@@ -28,11 +29,13 @@ type FieldMismatch struct {
 }
 
 type Summary struct {
-	TotalChecked    int
-	Matches         int
-	Mismatches      int
-	Errors          int
-	MismatchDetails []CheckResult
+	TotalChecked                int
+	Matches                     int
+	Mismatches                  int
+	Errors                      int
+	LegacyDuplicatePathTorrents int
+	LegacyDuplicatePathFiles    int
+	MismatchDetails             []CheckResult
 }
 
 func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
@@ -112,6 +115,128 @@ func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 				Got:       bExt.String,
 			})
 		}
+	}
+
+	result.Match = len(result.Mismatches) == 0
+
+	return result
+}
+
+// CompareFileIndexSet checks the file-index set while allowing only the legacy
+// torrent_files duplicate-path collapse. Legacy torrent_files is keyed by
+// (info_hash, path), unique on (info_hash, index), and inserted with
+// ON CONFLICT DO NOTHING. A malformed torrent with duplicate paths can therefore
+// have more blob indexes than torrent_files rows, but that is not a DROP safety
+// failure when each missing blob index has the same path as a retained legacy
+// row. Arbitrary row-only/blob-only indexes and row/blob path or size
+// disagreement still fail the gate.
+func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
+	result := CheckResult{
+		BlobFiles: len(blobFiles),
+		RowFiles:  len(rowFiles),
+	}
+
+	blobIndexes := make(map[uint]int, len(blobFiles))
+	blobByIndex := make(map[uint]model.TorrentFile, len(blobFiles))
+	blobPathCounts := make(map[string]int, len(blobFiles))
+	for _, f := range blobFiles {
+		blobIndexes[f.Index]++
+		blobByIndex[f.Index] = f
+		blobPathCounts[f.Path]++
+	}
+
+	rowIndexes := make(map[uint]int, len(rowFiles))
+	rowByIndex := make(map[uint]model.TorrentFile, len(rowFiles))
+	rowPaths := make(map[string]struct{}, len(rowFiles))
+	for _, f := range rowFiles {
+		rowIndexes[f.Index]++
+		rowByIndex[f.Index] = f
+		rowPaths[f.Path] = struct{}{}
+	}
+
+	for index, count := range blobIndexes {
+		if count > 1 {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: int(index),
+				Field:     "duplicate_blob_index",
+				Expected:  "1",
+				Got:       fmt.Sprintf("%d", count),
+			})
+		}
+	}
+
+	for index, count := range rowIndexes {
+		if count > 1 {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: int(index),
+				Field:     "duplicate_row_index",
+				Expected:  "1",
+				Got:       fmt.Sprintf("%d", count),
+			})
+		}
+	}
+
+	var sortedRows []int
+	for index := range rowIndexes {
+		sortedRows = append(sortedRows, int(index))
+	}
+	sort.Ints(sortedRows)
+
+	for _, index := range sortedRows {
+		row := rowByIndex[uint(index)]
+		blob, ok := blobByIndex[uint(index)]
+		if !ok {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: index,
+				Field:     "missing_in_blob",
+				Expected:  fmt.Sprintf("%d", index),
+				Got:       "",
+			})
+			continue
+		}
+
+		if blob.Path != row.Path {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: index,
+				Field:     "path",
+				Expected:  row.Path,
+				Got:       blob.Path,
+			})
+		}
+
+		if blob.Size != row.Size {
+			result.Mismatches = append(result.Mismatches, FieldMismatch{
+				FileIndex: index,
+				Field:     "size",
+				Expected:  fmt.Sprintf("%d", row.Size),
+				Got:       fmt.Sprintf("%d", blob.Size),
+			})
+		}
+	}
+
+	var sortedBlobs []int
+	for index := range blobIndexes {
+		sortedBlobs = append(sortedBlobs, int(index))
+	}
+	sort.Ints(sortedBlobs)
+
+	for _, index := range sortedBlobs {
+		blob := blobByIndex[uint(index)]
+		if _, ok := rowIndexes[uint(index)]; ok {
+			continue
+		}
+
+		if _, ok := rowPaths[blob.Path]; ok && blobPathCounts[blob.Path] > 1 {
+			result.LegacyDuplicatePathFiles++
+			continue
+		}
+
+		result.Mismatches = append(result.Mismatches, FieldMismatch{
+			FileIndex: index,
+			Field:     "missing_in_torrent_files",
+			Expected:  "",
+			Got:       fmt.Sprintf("%d", index),
+		})
 	}
 
 	result.Match = len(result.Mismatches) == 0
@@ -211,6 +336,8 @@ func CheckBatch(ctx context.Context, q *dao.Query, infoHashes []protocol.ID) (Su
 			summary.Mismatches++
 			summary.MismatchDetails = append(summary.MismatchDetails, result)
 		}
+
+		addLegacyDuplicatePathCounts(&summary, result)
 	}
 
 	return summary, nil
@@ -280,10 +407,11 @@ func verifyRanges(k int) []verifyRange {
 // keyset-streaming workers over disjoint info_hash ranges. Unlike CheckRandom it does NO ORDER BY
 // RANDOM, NO join, and NO per-torrent point queries: each worker streams torrents (the blob comes with
 // the row) and reads each chunk's torrent_files in one bounded grouped query, comparing in memory.
-// sampleSize<=0 verifies everything; sampleSize>0 caps the total checked (~sampleSize/k contiguous per
-// range, ~uniform since info_hash is random).
+// sampleSize<=0 verifies everything with duplicate-path-aware DROP-gate semantics; sampleSize>0 caps
+// the total checked (~sampleSize/k contiguous per range, ~uniform since info_hash is random) and keeps
+// the historical strict comparator because sampled checks are diagnostics, not the D1 gate.
 func CheckAll(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleSize int) (Summary, error) {
-	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, false)
+	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, false, sampleSize <= 0)
 }
 
 // CheckAllStrictE is the G1 strict-`e` gate. It asserts the RAW stored blob `e`
@@ -293,7 +421,57 @@ func CheckAll(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleS
 // torrent_files read/join), so it is torrent_files-INDEPENDENT and stays valid
 // after the DROP. 0 mismatches + 0 errors == the G1 gate is green.
 func CheckAllStrictE(ctx context.Context, q *dao.Query, parallelism, chunkSize, sampleSize int) (Summary, error) {
-	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, true)
+	return checkAllImpl(ctx, q, parallelism, chunkSize, sampleSize, true, false)
+}
+
+// CheckAllFileIndexSet is the read-only crawl-path parity gate for retained
+// torrent_files rows against decoded L1 blobs, with only the legacy duplicate
+// path collapse allowed. It reads blobs and torrent_files in disjoint info_hash
+// ranges, uses keyset pagination, and never writes verification metadata.
+func CheckAllFileIndexSet(ctx context.Context, q *dao.Query, parallelism, chunkSize int) (Summary, error) {
+	if parallelism < 1 {
+		parallelism = 1
+	}
+
+	if chunkSize < 1 {
+		chunkSize = 2000
+	}
+
+	var (
+		mu       sync.Mutex
+		total    Summary
+		wg       sync.WaitGroup
+		firstErr error
+	)
+
+	for _, rg := range verifyRanges(parallelism) {
+		wg.Add(1)
+
+		go func(rg verifyRange) {
+			defer wg.Done()
+
+			local, err := checkRangeFileIndexSet(ctx, q, rg, chunkSize)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			total.TotalChecked += local.TotalChecked
+			total.Matches += local.Matches
+			total.Mismatches += local.Mismatches
+			total.Errors += local.Errors
+			total.LegacyDuplicatePathTorrents += local.LegacyDuplicatePathTorrents
+			total.LegacyDuplicatePathFiles += local.LegacyDuplicatePathFiles
+			total.MismatchDetails = append(total.MismatchDetails, local.MismatchDetails...)
+
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}(rg)
+	}
+
+	wg.Wait()
+
+	return total, firstErr
 }
 
 func checkAllImpl(
@@ -301,6 +479,7 @@ func checkAllImpl(
 	q *dao.Query,
 	parallelism, chunkSize, sampleSize int,
 	strictE bool,
+	duplicatePathAware bool,
 ) (Summary, error) {
 	if parallelism < 1 {
 		parallelism = 1
@@ -328,7 +507,7 @@ func checkAllImpl(
 		go func(rg verifyRange) {
 			defer wg.Done()
 
-			local, err := checkRange(ctx, q, rg, chunkSize, perRangeLimit, strictE)
+			local, err := checkRange(ctx, q, rg, chunkSize, perRangeLimit, strictE, duplicatePathAware)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -337,6 +516,8 @@ func checkAllImpl(
 			total.Matches += local.Matches
 			total.Mismatches += local.Mismatches
 			total.Errors += local.Errors
+			total.LegacyDuplicatePathTorrents += local.LegacyDuplicatePathTorrents
+			total.LegacyDuplicatePathFiles += local.LegacyDuplicatePathFiles
 			total.MismatchDetails = append(total.MismatchDetails, local.MismatchDetails...)
 
 			if err != nil && firstErr == nil {
@@ -350,7 +531,14 @@ func checkAllImpl(
 	return total, firstErr
 }
 
-func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, limit int, strictE bool) (Summary, error) {
+func checkRange(
+	ctx context.Context,
+	q *dao.Query,
+	rg verifyRange,
+	chunkSize, limit int,
+	strictE bool,
+	duplicatePathAware bool,
+) (Summary, error) {
 	var s Summary
 
 	db := q.Torrent.UnderlyingDB().WithContext(ctx)
@@ -416,6 +604,8 @@ func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, li
 			var res CheckResult
 			if strictE {
 				res = compareStrictE(blobFiles)
+			} else if duplicatePathAware {
+				res = CompareFileIndexSet(blobFiles, filesByHash[b.InfoHash])
 			} else {
 				res = CompareFiles(blobFiles, filesByHash[b.InfoHash])
 			}
@@ -431,6 +621,8 @@ func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, li
 					s.MismatchDetails = append(s.MismatchDetails, res)
 				}
 			}
+
+			addLegacyDuplicatePathCounts(&s, res)
 		}
 
 		cursor = maxHash
@@ -446,6 +638,138 @@ func checkRange(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize, li
 	}
 
 	return s, nil
+}
+
+func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize int) (Summary, error) {
+	var s Summary
+
+	db := q.Torrent.UnderlyingDB().WithContext(ctx)
+
+	cursor := rg.lower
+	hasCursor := rg.hasLower
+
+	for {
+		if ctx.Err() != nil {
+			return s, ctx.Err()
+		}
+
+		var blobs []blobRow
+
+		tq := db.Table("torrents").
+			Select("info_hash, files_data").
+			Where("files_data IS NOT NULL").
+			Order("info_hash").
+			Limit(chunkSize)
+
+		if hasCursor {
+			tq = tq.Where("info_hash > ?", cursor)
+		}
+
+		if rg.hasUpper {
+			tq = tq.Where("info_hash <= ?", rg.upper)
+		}
+
+		if err := tq.Scan(&blobs).Error; err != nil {
+			return s, fmt.Errorf("reading blob chunk: %w", err)
+		}
+
+		if len(blobs) == 0 {
+			break
+		}
+
+		maxHash := blobs[len(blobs)-1].InfoHash
+
+		filesByHash, err := groupedFileIndexes(ctx, q, cursor, hasCursor, maxHash, true)
+		if err != nil {
+			return s, err
+		}
+
+		compareFileIndexChunk(&s, blobs, filesByHash)
+
+		cursor = maxHash
+		hasCursor = true
+
+		if len(blobs) < chunkSize {
+			break
+		}
+	}
+
+	tailRows, err := groupedFileIndexes(ctx, q, cursor, hasCursor, rg.upper, rg.hasUpper)
+	if err != nil {
+		return s, err
+	}
+
+	addRowOnlyIndexMismatches(&s, tailRows)
+
+	return s, nil
+}
+
+func compareFileIndexChunk(
+	s *Summary,
+	blobs []blobRow,
+	filesByHash map[protocol.ID][]model.TorrentFile,
+) {
+	for _, b := range blobs {
+		s.TotalChecked++
+
+		blobFiles, derr := blobmigration.DeserializeFiles(b.FilesData)
+		if derr != nil {
+			s.Errors++
+			continue
+		}
+
+		res := CompareFileIndexSet(blobFiles, filesByHash[b.InfoHash])
+		res.InfoHash = b.InfoHash
+		delete(filesByHash, b.InfoHash)
+
+		if res.Match {
+			s.Matches++
+		} else {
+			s.Mismatches++
+			if len(s.MismatchDetails) < 100 {
+				s.MismatchDetails = append(s.MismatchDetails, res)
+			}
+		}
+
+		addLegacyDuplicatePathCounts(s, res)
+	}
+
+	addRowOnlyIndexMismatches(s, filesByHash)
+}
+
+func addLegacyDuplicatePathCounts(s *Summary, res CheckResult) {
+	if res.LegacyDuplicatePathFiles == 0 {
+		return
+	}
+
+	s.LegacyDuplicatePathTorrents++
+	s.LegacyDuplicatePathFiles += res.LegacyDuplicatePathFiles
+}
+
+func addRowOnlyIndexMismatches(s *Summary, filesByHash map[protocol.ID][]model.TorrentFile) {
+	if len(filesByHash) == 0 {
+		return
+	}
+
+	hashes := make([]protocol.ID, 0, len(filesByHash))
+	for h := range filesByHash {
+		hashes = append(hashes, h)
+	}
+	sort.Slice(hashes, func(i, j int) bool {
+		return string(hashes[i][:]) < string(hashes[j][:])
+	})
+
+	for _, h := range hashes {
+		rows := filesByHash[h]
+		s.TotalChecked++
+		s.Mismatches++
+
+		if len(s.MismatchDetails) < 100 {
+			res := CompareFileIndexSet(nil, rows)
+			res.InfoHash = h
+			s.MismatchDetails = append(s.MismatchDetails, res)
+		}
+	}
 }
 
 // groupedFiles reads torrent_files for info_hash in (lower, maxHash] in one ordered scan, grouped by
@@ -469,6 +793,46 @@ func groupedFiles(
 	rows, err := qq.Rows()
 	if err != nil {
 		return nil, fmt.Errorf("reading torrent_files chunk: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[protocol.ID][]model.TorrentFile)
+
+	for rows.Next() {
+		var f model.TorrentFile
+		if err := q.TorrentFile.UnderlyingDB().ScanRows(rows, &f); err != nil {
+			return nil, err
+		}
+
+		out[f.InfoHash] = append(out[f.InfoHash], f)
+	}
+
+	return out, rows.Err()
+}
+
+func groupedFileIndexes(
+	ctx context.Context,
+	q *dao.Query,
+	lower protocol.ID, hasLower bool,
+	upper protocol.ID, hasUpper bool,
+) (map[protocol.ID][]model.TorrentFile, error) {
+	qq := q.TorrentFile.UnderlyingDB().WithContext(ctx).
+		Table("torrent_files").
+		Select(`info_hash, "index", path, size`).
+		Order(`info_hash, "index"`)
+
+	if hasLower {
+		qq = qq.Where("info_hash > ?", lower)
+	}
+
+	if hasUpper {
+		qq = qq.Where("info_hash <= ?", upper)
+	}
+
+	rows, err := qq.Rows()
+	if err != nil {
+		return nil, fmt.Errorf("reading torrent_files indexes: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
