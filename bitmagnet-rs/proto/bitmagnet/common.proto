@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package bitmagnet.v1;
+
+// ContentType mirrors the Go enum `Classification.ContentType` defined in
+// `internal/protobuf/bitmagnet.proto`. The integer values MUST stay identical
+// to the Go definition: only the values travel on the wire, so this is what
+// keeps the Go services and the Rust sidecar in agreement. The verbose
+// `CONTENT_TYPE_` prefixes follow the proto3 enum convention (values share the
+// enclosing package scope) and are stripped back to `ContentType::Movie` etc.
+// by prost.
+enum ContentType {
+  CONTENT_TYPE_UNKNOWN = 0;
+  CONTENT_TYPE_MOVIE = 1;
+  CONTENT_TYPE_TV_SHOW = 2;
+  CONTENT_TYPE_MUSIC = 3;
+  CONTENT_TYPE_EBOOK = 4;
+  CONTENT_TYPE_COMIC = 5;
+  CONTENT_TYPE_AUDIOBOOK = 6;
+  CONTENT_TYPE_GAME = 7;
+  CONTENT_TYPE_SOFTWARE = 8;
+  CONTENT_TYPE_XXX = 9;
+}
+
+// FileType mirrors the Go enum `Torrent.File.FileType` defined in
+// `internal/protobuf/bitmagnet.proto`. Integer values MUST stay identical.
+enum FileType {
+  FILE_TYPE_UNKNOWN = 0;
+  FILE_TYPE_ARCHIVE = 1;
+  FILE_TYPE_AUDIO = 2;
+  FILE_TYPE_DATA = 3;
+  FILE_TYPE_DOCUMENT = 4;
+  FILE_TYPE_IMAGE = 5;
+  FILE_TYPE_SOFTWARE = 6;
+  FILE_TYPE_SUBTITLES = 7;
+  FILE_TYPE_VIDEO = 8;
+}

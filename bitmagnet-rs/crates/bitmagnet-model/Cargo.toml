@@ -1,0 +1,23 @@
+[package]
+name = "bitmagnet-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Domain models for bitmagnet (Torrent, Content, ...) and the ZSTD+MessagePack file-blob format mirroring internal/blobmigration."
+
+[dependencies]
+bitmagnet-common = { path = "../bitmagnet-common" }
+serde.workspace = true
+rmp-serde.workspace = true
+zstd.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Used by tests/blob_fixture.rs to decompress the Go-produced `.blob` fixtures
+# and compare the inner MessagePack byte-for-byte against the Rust serializer.
+zstd.workspace = true
+
+[lints]
+workspace = true
