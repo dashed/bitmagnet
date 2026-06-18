@@ -38,6 +38,22 @@ type Summary struct {
 	MismatchDetails             []CheckResult
 }
 
+func boundLabel(h protocol.ID, ok bool, fallback string) string {
+	if !ok {
+		return fallback
+	}
+
+	return h.String()
+}
+
+func rangeLabel(rg verifyRange) string {
+	return fmt.Sprintf(
+		"(%s,%s]",
+		boundLabel(rg.lower, rg.hasLower, "-inf"),
+		boundLabel(rg.upper, rg.hasUpper, "+inf"),
+	)
+}
+
 func CompareFiles(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	result := CheckResult{
 		BlobFiles: len(blobFiles),
@@ -444,13 +460,13 @@ func CheckAllFileIndexSet(ctx context.Context, q *dao.Query, parallelism, chunkS
 		firstErr error
 	)
 
-	for _, rg := range verifyRanges(parallelism) {
+	for rangeIndex, rg := range verifyRanges(parallelism) {
 		wg.Add(1)
 
-		go func(rg verifyRange) {
+		go func(rangeIndex int, rg verifyRange) {
 			defer wg.Done()
 
-			local, err := checkRangeFileIndexSet(ctx, q, rg, chunkSize)
+			local, err := checkRangeFileIndexSet(ctx, q, rangeIndex, rg, chunkSize)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -466,7 +482,7 @@ func CheckAllFileIndexSet(ctx context.Context, q *dao.Query, parallelism, chunkS
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-		}(rg)
+		}(rangeIndex, rg)
 	}
 
 	wg.Wait()
@@ -501,13 +517,13 @@ func checkAllImpl(
 		firstErr error
 	)
 
-	for _, rg := range verifyRanges(parallelism) {
+	for rangeIndex, rg := range verifyRanges(parallelism) {
 		wg.Add(1)
 
-		go func(rg verifyRange) {
+		go func(rangeIndex int, rg verifyRange) {
 			defer wg.Done()
 
-			local, err := checkRange(ctx, q, rg, chunkSize, perRangeLimit, strictE, duplicatePathAware)
+			local, err := checkRange(ctx, q, rangeIndex, rg, chunkSize, perRangeLimit, strictE, duplicatePathAware)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -523,7 +539,7 @@ func checkAllImpl(
 			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-		}(rg)
+		}(rangeIndex, rg)
 	}
 
 	wg.Wait()
@@ -534,6 +550,7 @@ func checkAllImpl(
 func checkRange(
 	ctx context.Context,
 	q *dao.Query,
+	rangeIndex int,
 	rg verifyRange,
 	chunkSize, limit int,
 	strictE bool,
@@ -569,7 +586,14 @@ func checkRange(
 		}
 
 		if err := tq.Scan(&blobs).Error; err != nil {
-			return s, fmt.Errorf("reading blob chunk: %w", err)
+			return s, fmt.Errorf(
+				"reading blob chunk range_index=%d range=%s cursor=%s chunk_size=%d: %w",
+				rangeIndex,
+				rangeLabel(rg),
+				boundLabel(cursor, hasCursor, "-inf"),
+				chunkSize,
+				err,
+			)
 		}
 
 		if len(blobs) == 0 {
@@ -588,7 +612,15 @@ func checkRange(
 
 			filesByHash, err = groupedFiles(ctx, q, cursor, hasCursor, maxHash)
 			if err != nil {
-				return s, err
+				return s, fmt.Errorf(
+					"reading grouped torrent_files range_index=%d range=%s cursor=%s max_hash=%s checked=%d: %w",
+					rangeIndex,
+					rangeLabel(rg),
+					boundLabel(cursor, hasCursor, "-inf"),
+					maxHash.String(),
+					s.TotalChecked,
+					err,
+				)
 			}
 		}
 
@@ -598,7 +630,16 @@ func checkRange(
 			blobFiles, derr := blobmigration.DeserializeFiles(b.FilesData)
 			if derr != nil {
 				s.Errors++
-				continue
+				return s, fmt.Errorf(
+					"deserializing files_data range_index=%d range=%s info_hash=%s cursor=%s max_hash=%s checked=%d: %w",
+					rangeIndex,
+					rangeLabel(rg),
+					b.InfoHash.String(),
+					boundLabel(cursor, hasCursor, "-inf"),
+					maxHash.String(),
+					s.TotalChecked,
+					derr,
+				)
 			}
 
 			var res CheckResult
@@ -640,7 +681,7 @@ func checkRange(
 	return s, nil
 }
 
-func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rg verifyRange, chunkSize int) (Summary, error) {
+func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rangeIndex int, rg verifyRange, chunkSize int) (Summary, error) {
 	var s Summary
 
 	db := q.Torrent.UnderlyingDB().WithContext(ctx)
@@ -670,7 +711,14 @@ func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rg verifyRange, c
 		}
 
 		if err := tq.Scan(&blobs).Error; err != nil {
-			return s, fmt.Errorf("reading blob chunk: %w", err)
+			return s, fmt.Errorf(
+				"reading file-index blob chunk range_index=%d range=%s cursor=%s chunk_size=%d: %w",
+				rangeIndex,
+				rangeLabel(rg),
+				boundLabel(cursor, hasCursor, "-inf"),
+				chunkSize,
+				err,
+			)
 		}
 
 		if len(blobs) == 0 {
@@ -681,10 +729,20 @@ func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rg verifyRange, c
 
 		filesByHash, err := groupedFileIndexes(ctx, q, cursor, hasCursor, maxHash, true)
 		if err != nil {
-			return s, err
+			return s, fmt.Errorf(
+				"reading grouped file indexes range_index=%d range=%s cursor=%s max_hash=%s checked=%d: %w",
+				rangeIndex,
+				rangeLabel(rg),
+				boundLabel(cursor, hasCursor, "-inf"),
+				maxHash.String(),
+				s.TotalChecked,
+				err,
+			)
 		}
 
-		compareFileIndexChunk(&s, blobs, filesByHash)
+		if err := compareFileIndexChunk(&s, blobs, filesByHash, rangeIndex, rg, cursor, hasCursor, maxHash); err != nil {
+			return s, err
+		}
 
 		cursor = maxHash
 		hasCursor = true
@@ -696,7 +754,15 @@ func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rg verifyRange, c
 
 	tailRows, err := groupedFileIndexes(ctx, q, cursor, hasCursor, rg.upper, rg.hasUpper)
 	if err != nil {
-		return s, err
+		return s, fmt.Errorf(
+			"reading grouped file-index tail range_index=%d range=%s cursor=%s upper=%s checked=%d: %w",
+			rangeIndex,
+			rangeLabel(rg),
+			boundLabel(cursor, hasCursor, "-inf"),
+			boundLabel(rg.upper, rg.hasUpper, "+inf"),
+			s.TotalChecked,
+			err,
+		)
 	}
 
 	addRowOnlyIndexMismatches(&s, tailRows)
@@ -708,14 +774,28 @@ func compareFileIndexChunk(
 	s *Summary,
 	blobs []blobRow,
 	filesByHash map[protocol.ID][]model.TorrentFile,
-) {
+	rangeIndex int,
+	rg verifyRange,
+	cursor protocol.ID,
+	hasCursor bool,
+	maxHash protocol.ID,
+) error {
 	for _, b := range blobs {
 		s.TotalChecked++
 
 		blobFiles, derr := blobmigration.DeserializeFiles(b.FilesData)
 		if derr != nil {
 			s.Errors++
-			continue
+			return fmt.Errorf(
+				"deserializing file-index files_data range_index=%d range=%s info_hash=%s cursor=%s max_hash=%s checked=%d: %w",
+				rangeIndex,
+				rangeLabel(rg),
+				b.InfoHash.String(),
+				boundLabel(cursor, hasCursor, "-inf"),
+				maxHash.String(),
+				s.TotalChecked,
+				derr,
+			)
 		}
 
 		res := CompareFileIndexSet(blobFiles, filesByHash[b.InfoHash])
@@ -735,6 +815,8 @@ func compareFileIndexChunk(
 	}
 
 	addRowOnlyIndexMismatches(s, filesByHash)
+
+	return nil
 }
 
 func addLegacyDuplicatePathCounts(s *Summary, res CheckResult) {
@@ -792,23 +874,52 @@ func groupedFiles(
 
 	rows, err := qq.Rows()
 	if err != nil {
-		return nil, fmt.Errorf("reading torrent_files chunk: %w", err)
+		return nil, fmt.Errorf(
+			"opening torrent_files chunk lower=%s max_hash=%s: %w",
+			boundLabel(lower, hasLower, "-inf"),
+			maxHash.String(),
+			err,
+		)
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	out := make(map[protocol.ID][]model.TorrentFile)
+	rowsRead := 0
+	var lastHash protocol.ID
+	hasLastHash := false
 
 	for rows.Next() {
 		var f model.TorrentFile
 		if err := q.TorrentFile.UnderlyingDB().ScanRows(rows, &f); err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"scanning torrent_files row lower=%s max_hash=%s rows_read=%d last_info_hash=%s: %w",
+				boundLabel(lower, hasLower, "-inf"),
+				maxHash.String(),
+				rowsRead,
+				boundLabel(lastHash, hasLastHash, "(none)"),
+				err,
+			)
 		}
 
 		out[f.InfoHash] = append(out[f.InfoHash], f)
+		lastHash = f.InfoHash
+		hasLastHash = true
+		rowsRead++
 	}
 
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterating torrent_files rows lower=%s max_hash=%s rows_read=%d last_info_hash=%s: %w",
+			boundLabel(lower, hasLower, "-inf"),
+			maxHash.String(),
+			rowsRead,
+			boundLabel(lastHash, hasLastHash, "(none)"),
+			err,
+		)
+	}
+
+	return out, nil
 }
 
 func groupedFileIndexes(
@@ -832,21 +943,50 @@ func groupedFileIndexes(
 
 	rows, err := qq.Rows()
 	if err != nil {
-		return nil, fmt.Errorf("reading torrent_files indexes: %w", err)
+		return nil, fmt.Errorf(
+			"opening torrent_files indexes lower=%s upper=%s: %w",
+			boundLabel(lower, hasLower, "-inf"),
+			boundLabel(upper, hasUpper, "+inf"),
+			err,
+		)
 	}
 
 	defer func() { _ = rows.Close() }()
 
 	out := make(map[protocol.ID][]model.TorrentFile)
+	rowsRead := 0
+	var lastHash protocol.ID
+	hasLastHash := false
 
 	for rows.Next() {
 		var f model.TorrentFile
 		if err := q.TorrentFile.UnderlyingDB().ScanRows(rows, &f); err != nil {
-			return nil, err
+			return nil, fmt.Errorf(
+				"scanning torrent_files index row lower=%s upper=%s rows_read=%d last_info_hash=%s: %w",
+				boundLabel(lower, hasLower, "-inf"),
+				boundLabel(upper, hasUpper, "+inf"),
+				rowsRead,
+				boundLabel(lastHash, hasLastHash, "(none)"),
+				err,
+			)
 		}
 
 		out[f.InfoHash] = append(out[f.InfoHash], f)
+		lastHash = f.InfoHash
+		hasLastHash = true
+		rowsRead++
 	}
 
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterating torrent_files index rows lower=%s upper=%s rows_read=%d last_info_hash=%s: %w",
+			boundLabel(lower, hasLower, "-inf"),
+			boundLabel(upper, hasUpper, "+inf"),
+			rowsRead,
+			boundLabel(lastHash, hasLastHash, "(none)"),
+			err,
+		)
+	}
+
+	return out, nil
 }

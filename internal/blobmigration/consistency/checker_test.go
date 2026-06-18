@@ -349,12 +349,13 @@ func TestCompareFileIndexChunkCountsLegacyDuplicatePaths(t *testing.T) {
 	require.NoError(t, err)
 
 	var s Summary
-	compareFileIndexChunk(&s, []blobRow{{InfoHash: infoHash, FilesData: blob}}, map[protocol.ID][]model.TorrentFile{
+	err = compareFileIndexChunk(&s, []blobRow{{InfoHash: infoHash, FilesData: blob}}, map[protocol.ID][]model.TorrentFile{
 		infoHash: {
 			{InfoHash: infoHash, Index: 0, Path: " ", Size: 10},
 			{InfoHash: infoHash, Index: 2, Path: "video.mkv", Size: 30},
 		},
-	})
+	}, 0, verifyRange{}, protocol.ID{}, false, infoHash)
+	require.NoError(t, err)
 
 	assert.Equal(t, 1, s.TotalChecked)
 	assert.Equal(t, 1, s.Matches)
@@ -376,14 +377,15 @@ func TestCompareFileIndexChunkDetectsRowOnlyTorrentInChunk(t *testing.T) {
 	require.NoError(t, err)
 
 	var s Summary
-	compareFileIndexChunk(&s, []blobRow{{InfoHash: blobHash, FilesData: blob}}, map[protocol.ID][]model.TorrentFile{
+	err = compareFileIndexChunk(&s, []blobRow{{InfoHash: blobHash, FilesData: blob}}, map[protocol.ID][]model.TorrentFile{
 		blobHash: {
 			{InfoHash: blobHash, Index: 0, Path: "video.mkv", Size: 10},
 		},
 		rowOnlyHash: {
 			{InfoHash: rowOnlyHash, Index: 0, Path: "orphan.mkv", Size: 20},
 		},
-	})
+	}, 0, verifyRange{}, protocol.ID{}, false, rowOnlyHash)
+	require.NoError(t, err)
 
 	assert.Equal(t, 2, s.TotalChecked)
 	assert.Equal(t, 1, s.Matches)
