@@ -21,6 +21,19 @@ import (
 // backing feature flag / sidecar is not enabled.
 var ErrDisabled = errors.New("file search is not enabled")
 
+var (
+	// ErrInfoHashUnsupported is returned when a caller requests a single-torrent
+	// file search. The current FileSearchService proto has no info_hash filter, so
+	// returning broader cross-corpus rows would be incorrect.
+	ErrInfoHashUnsupported = errors.New("file search info_hash filter is not supported by the sidecar")
+	// ErrOffsetUnsupported is returned when offset pagination cannot be emulated
+	// within the configured sidecar result window.
+	ErrOffsetUnsupported = errors.New("file search offset exceeds the sidecar result window")
+	// ErrPathTypeaheadUnsupported is returned by the real sidecar-backed client
+	// until the proto grows a path-typeahead RPC.
+	ErrPathTypeaheadUnsupported = errors.New("path typeahead is not supported by the sidecar")
+)
+
 // FileSearchInput is the validated input to a file-grained search. Build it with
 // NewFileSearchInput so the hygiene rules (length caps, LIKE-metachar escaping,
 // limit clamping) are always applied.

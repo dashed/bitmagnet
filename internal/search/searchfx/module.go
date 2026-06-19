@@ -15,6 +15,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/router"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/shadow"
@@ -39,6 +40,7 @@ func New() fx.Option {
 		configfx.NewConfigModule[Config]("search", NewDefaultConfig()),
 		fx.Provide(
 			newClient,
+			newFileSearchClient,
 			newPathsearchClient,
 			newComposer,
 			pathsearch.NewHealthState,
@@ -49,6 +51,26 @@ func New() fx.Option {
 		fx.Invoke(registerDocCountReporter),
 		fx.Invoke(registerPathsearchHealthReporter),
 	)
+}
+
+// newFileSearchClient builds the L2 filesearch gRPC client, or returns the
+// intentional disabled implementation when SEARCH_FILE_SEARCH_ENABLED=false.
+// GraphQL remains separately gated by SEARCH_FEATURES_FILE_SEARCH_ENABLED.
+func newFileSearchClient(lc fx.Lifecycle, cfg Config) (filesearch.Client, error) {
+	if !cfg.FileSearchEnabled {
+		return filesearch.Disabled(), nil
+	}
+
+	client, err := filesearch.NewClient(cfg.fileSearchConfig())
+	if err != nil {
+		return nil, err
+	}
+
+	lc.Append(fx.Hook{
+		OnStop: func(context.Context) error { return client.Close() },
+	})
+
+	return client, nil
 }
 
 // newPathsearchClient builds the L3 pathsearch gRPC client, or returns nil when

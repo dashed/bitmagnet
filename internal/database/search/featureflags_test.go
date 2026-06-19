@@ -1,9 +1,12 @@
 package search
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/iancoleman/strcase"
 )
 
 func TestFeatureFlagsDefaultAllOff(t *testing.T) {
@@ -32,6 +35,7 @@ func TestApplyFeatureFlags(t *testing.T) {
 	t.Cleanup(func() { SetFeatureFlags(FeatureFlags{}) })
 
 	ApplyFeatureFlags(FeatureFlagsConfig{
+		DropCompatibleReads:     true,
 		GateFileExtensionsJSONB: true,
 		PopularitySortDefault:   true,
 		FileBrowserFromBlob:     true,
@@ -40,6 +44,7 @@ func TestApplyFeatureFlags(t *testing.T) {
 
 	got := FeatureFlagsValue()
 	want := FeatureFlags{
+		DropCompatibleReads:     true,
 		GateFileExtensionsJSONB: true,
 		PopularitySortDefault:   true,
 		FileBrowserFromBlob:     true,
@@ -48,6 +53,68 @@ func TestApplyFeatureFlags(t *testing.T) {
 
 	if got != want {
 		t.Errorf("flags = %+v, want %+v", got, want)
+	}
+}
+
+func TestFeatureFlagEnvVarNames(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]string{
+		"DropCompatibleReads":     "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
+		"GateFileExtensionsJSONB": "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
+		"PopularitySortDefault":   "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
+		"FileBrowserFromBlob":     "SEARCH_FEATURES_FILE_BROWSER_FROM_BLOB",
+		"FileSearchEnabled":       "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
+	}
+
+	ct := reflect.TypeOf(FeatureFlagsConfig{})
+	for field, wantEnv := range want {
+		if _, ok := ct.FieldByName(field); !ok {
+			t.Fatalf("FeatureFlagsConfig must have field %s", field)
+		}
+
+		gotEnv := "SEARCH_FEATURES_" + strings.ToUpper(strcase.ToSnake(field))
+		if gotEnv != wantEnv {
+			t.Errorf("field %s resolves to %s, want %s", field, gotEnv, wantEnv)
+		}
+	}
+}
+
+func TestDropCompatibleReadsForcesNoLegacyReadGates(t *testing.T) {
+	t.Cleanup(func() { SetFeatureFlags(FeatureFlags{}) })
+
+	SetFeatureFlags(FeatureFlags{DropCompatibleReads: true})
+
+	got := FeatureFlagsValue()
+	if !got.UseFileExtensionsJSONB() {
+		t.Error("DropCompatibleReads should force JSONB extension filtering")
+	}
+
+	if !got.UseFileBrowserFromBlob() {
+		t.Error("DropCompatibleReads should force blob-backed file browsing")
+	}
+
+	if got.AllowTorrentFilesRepair() {
+		t.Error("DropCompatibleReads should disable torrent_files-backed repair")
+	}
+}
+
+func TestExplicitLegacyReadGatesRemainSupported(t *testing.T) {
+	flags := FeatureFlags{
+		GateFileExtensionsJSONB: true,
+		FileBrowserFromBlob:     true,
+	}
+
+	if !flags.UseFileExtensionsJSONB() {
+		t.Error("GateFileExtensionsJSONB should still enable JSONB extension filtering")
+	}
+
+	if !flags.UseFileBrowserFromBlob() {
+		t.Error("FileBrowserFromBlob should still enable blob-backed file browsing")
+	}
+
+	if !flags.AllowTorrentFilesRepair() {
+		t.Error("legacy repair should remain allowed outside drop-compatible mode")
 	}
 }
 

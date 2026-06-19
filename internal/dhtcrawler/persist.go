@@ -13,6 +13,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gen"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -29,6 +30,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 			var torrentFilesToPersist []*model.TorrentFile
 
+			var torrentFileSummariesToPersist []*model.TorrentFileSummary
+
 			var torrentSourcesToPersist []*model.TorrentsTorrentSource
 
 			var torrentPiecesToPersist []*model.TorrentPieces
@@ -38,6 +41,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			hashMap := make(map[protocol.ID]infoHashWithMetaInfo, len(is))
 
 			var hashesToClassify []protocol.ID
+
+			now := time.Now()
 
 			flushHashesToClassify := func() {
 				if len(hashesToClassify) > 0 {
@@ -85,6 +90,11 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 						torrentFilesToPersist = append(torrentFilesToPersist, &fc)
 					}
 
+					if len(t.Files) > 0 {
+						summary := buildTorrentFileSummary(i.infoHash, t.Files, now)
+						torrentFileSummariesToPersist = append(torrentFileSummariesToPersist, &summary)
+					}
+
 					t.Files = nil
 					for _, s := range t.Sources {
 						sc := s
@@ -130,6 +140,12 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 						return err
 					}
 				}
+				if len(torrentFileSummariesToPersist) > 0 {
+					if err := torrentFileSummaryPersistQuery(ctx, tx).
+						CreateInBatches(torrentFileSummariesToPersist, 100).Error; err != nil {
+						return err
+					}
+				}
 				if err := tx.WithContext(ctx).TorrentsTorrentSource.Clauses(clause.OnConflict{
 					DoNothing: true,
 				}).CreateInBatches(torrentSourcesToPersist, 100); err != nil {
@@ -160,6 +176,24 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func torrentFileSummaryPersistQuery(ctx context.Context, tx *dao.Query) *gorm.DB {
+	return tx.Torrent.UnderlyingDB().WithContext(ctx).
+		Table(model.TableNameTorrentFileSummary).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "info_hash"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"file_count",
+				"total_size",
+				"largest_file_size",
+				"extensions",
+				"has_video",
+				"has_subtitle",
+				"has_audio",
+				"updated_at",
+			}),
+		})
 }
 
 func createTorrentModel(
@@ -259,6 +293,18 @@ func createTorrentModel(
 			},
 		},
 	}, nil
+}
+
+func buildTorrentFileSummary(
+	infoHash protocol.ID,
+	files []model.TorrentFile,
+	now time.Time,
+) model.TorrentFileSummary {
+	summary := blobmigration.BuildFileSummary(infoHash, files)
+	summary.CreatedAt = now
+	summary.UpdatedAt = now
+
+	return summary
 }
 
 const classifyBatchSize = 100

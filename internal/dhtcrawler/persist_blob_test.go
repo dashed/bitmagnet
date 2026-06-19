@@ -2,9 +2,11 @@ package dhtcrawler
 
 import (
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
+	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	pmetainfo "github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/stretchr/testify/assert"
@@ -115,4 +117,31 @@ func TestCreateTorrentModelOverThreshold(t *testing.T) {
 
 	assert.NotNil(t, torrent.FileExts)
 	assert.Contains(t, torrent.FileExts, "mp3")
+}
+
+func TestBuildTorrentFileSummaryForFreshCrawl(t *testing.T) {
+	t.Parallel()
+
+	var hash protocol.ID
+
+	copy(hash[:], []byte("01234567890123456789"))
+
+	now := time.Unix(1_800_000_000, 0).UTC()
+	files := []model.TorrentFile{
+		{InfoHash: hash, Index: 0, Path: "movie/video.mkv", Size: 1_000},
+		{InfoHash: hash, Index: 1, Path: "movie/subs.srt", Size: 100},
+	}
+
+	summary := buildTorrentFileSummary(hash, files, now)
+
+	assert.Equal(t, hash, summary.InfoHash)
+	assert.Equal(t, 2, summary.FileCount)
+	assert.Equal(t, int64(1_100), summary.TotalSize)
+	assert.Equal(t, int64(1_000), summary.LargestFileSize)
+	assert.Equal(t, []string{"mkv", "srt"}, summary.Extensions)
+	assert.True(t, summary.HasVideo)
+	assert.True(t, summary.HasSubtitle)
+	assert.False(t, summary.HasAudio)
+	assert.Equal(t, now, summary.CreatedAt)
+	assert.Equal(t, now, summary.UpdatedAt)
 }

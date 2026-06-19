@@ -47,11 +47,13 @@ tasks:
         --go_opt=Mbitmagnet/common.proto={{.PB}}
         --go_opt=Mbitmagnet/search.proto={{.PB}}
         --go_opt=Mbitmagnet/path_search.proto={{.PB}}
+        --go_opt=Mbitmagnet/file_search.proto={{.PB}}
         --go-grpc_out=. --go-grpc_opt=module=github.com/bitmagnet-io/bitmagnet
         --go-grpc_opt=Mbitmagnet/common.proto={{.PB}}
         --go-grpc_opt=Mbitmagnet/search.proto={{.PB}}
         --go-grpc_opt=Mbitmagnet/path_search.proto={{.PB}}
-        bitmagnet/common.proto bitmagnet/search.proto bitmagnet/path_search.proto
+        --go-grpc_opt=Mbitmagnet/file_search.proto={{.PB}}
+        bitmagnet/common.proto bitmagnet/search.proto bitmagnet/path_search.proto bitmagnet/file_search.proto
 
   gen-mockery:
     cmds:

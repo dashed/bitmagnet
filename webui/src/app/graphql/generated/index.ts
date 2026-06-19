@@ -111,6 +111,32 @@ export type FacetLogic =
   | 'and'
   | 'or';
 
+export type FileSearchInput = {
+  extensions?: InputMaybe<Array<Scalars['String']['input']>>;
+  infoHash?: InputMaybe<Scalars['Hash20']['input']>;
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  maxSize?: InputMaybe<Scalars['Int']['input']>;
+  minSize?: InputMaybe<Scalars['Int']['input']>;
+  offset?: InputMaybe<Scalars['Int']['input']>;
+  query?: InputMaybe<Scalars['String']['input']>;
+};
+
+export type FileSearchItem = {
+  __typename?: 'FileSearchItem';
+  extension: Scalars['String']['output'];
+  index: Scalars['Int']['output'];
+  infoHash: Scalars['Hash20']['output'];
+  path: Scalars['String']['output'];
+  size: Scalars['Int']['output'];
+};
+
+export type FileSearchResult = {
+  __typename?: 'FileSearchResult';
+  hasNextPage: Scalars['Boolean']['output'];
+  items: Array<FileSearchItem>;
+  totalCount: Scalars['Int']['output'];
+};
+
 export type FileType =
   | 'archive'
   | 'audio'
@@ -259,6 +285,16 @@ export type Mutation = {
   __typename?: 'Mutation';
   queue: QueueMutation;
   torrent: TorrentMutation;
+};
+
+export type PathTypeaheadInput = {
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  prefix: Scalars['String']['input'];
+};
+
+export type PathTypeaheadResult = {
+  __typename?: 'PathTypeaheadResult';
+  suggestions: Array<Scalars['String']['output']>;
 };
 
 export type Query = {
@@ -558,7 +594,19 @@ export type TorrentContentOrderByInput = {
 
 export type TorrentContentQuery = {
   __typename?: 'TorrentContentQuery';
+  fileSearch: FileSearchResult;
+  pathTypeahead: PathTypeaheadResult;
   search: TorrentContentSearchResult;
+};
+
+
+export type TorrentContentQueryFileSearchArgs = {
+  input: FileSearchInput;
+};
+
+
+export type TorrentContentQueryPathTypeaheadArgs = {
+  input: PathTypeaheadInput;
 };
 
 

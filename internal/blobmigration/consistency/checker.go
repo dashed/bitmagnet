@@ -385,6 +385,47 @@ func CheckRandom(ctx context.Context, q *dao.Query, sampleSize int) (Summary, er
 	return CheckBatch(ctx, q, hashes)
 }
 
+// CheckRandomBlobsOnly samples L1 blobs without reading torrent_files. It is the
+// live-check path for drop-compatible read mode, where torrent_files may already
+// be hidden or absent and repair must be alert-only.
+func CheckRandomBlobsOnly(ctx context.Context, q *dao.Query, sampleSize int) (Summary, error) {
+	var rows []blobRow
+
+	err := q.Torrent.UnderlyingDB().WithContext(ctx).
+		Table("torrents").
+		Select("info_hash, files_data").
+		Where("files_data IS NOT NULL").
+		Order("RANDOM()").
+		Limit(sampleSize).
+		Scan(&rows).Error
+	if err != nil {
+		return Summary{}, fmt.Errorf("sampling blob rows: %w", err)
+	}
+
+	var summary Summary
+	for _, row := range rows {
+		summary.TotalChecked++
+
+		if _, err := blobmigration.DeserializeFiles(row.FilesData); err != nil {
+			summary.Errors++
+			summary.MismatchDetails = append(summary.MismatchDetails, CheckResult{
+				InfoHash: row.InfoHash,
+				Mismatches: []FieldMismatch{{
+					FileIndex: -1,
+					Field:     "files_data",
+					Expected:  "valid blob",
+					Got:       err.Error(),
+				}},
+			})
+			continue
+		}
+
+		summary.Matches++
+	}
+
+	return summary, nil
+}
+
 // verifyRange is a disjoint info_hash range processed by one CheckAll worker.
 type verifyRange struct {
 	lower    protocol.ID

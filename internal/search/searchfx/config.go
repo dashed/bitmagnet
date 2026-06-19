@@ -3,6 +3,7 @@ package searchfx
 import (
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/router"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
@@ -36,6 +37,25 @@ type Config struct {
 	ShadowTimeout time.Duration
 	// LogDiscrepancies logs each shadow comparison the comparator flags.
 	LogDiscrepancies bool
+
+	// --- L2 DuckDB filesearch (separate from main search and L3 pathsearch) ---
+	//
+	// These gate construction of the gRPC client for the structured per-file
+	// sidecar. They do NOT expose the GraphQL product surface by themselves; the
+	// resolver still requires SEARCH_FEATURES_FILE_SEARCH_ENABLED.
+
+	// FileSearchEnabled dials the L2 filesearch sidecar
+	// (SEARCH_FILE_SEARCH_ENABLED).
+	FileSearchEnabled bool
+	// FileSearchAddress is the L2 sidecar address
+	// (SEARCH_FILE_SEARCH_ADDRESS); ClusterIP gRPC in production.
+	FileSearchAddress string
+	// FileSearchTimeout bounds each unary L2 RPC (SEARCH_FILE_SEARCH_TIMEOUT).
+	FileSearchTimeout time.Duration
+	// FileSearchMaxRows is the maximum rows the Go client requests to emulate
+	// offset pagination while the sidecar cursor is not usable
+	// (SEARCH_FILE_SEARCH_MAX_ROWS). 0 → client default (500).
+	FileSearchMaxRows uint
 
 	// --- L3 pathsearch (separate from the Tantivy main-search above) ---------
 	//
@@ -144,6 +164,12 @@ func NewDefaultConfig() Config {
 		ShadowTimeout:    5 * time.Second,
 		LogDiscrepancies: true,
 
+		// L2 filesearch — client construction defaults false (feature dark).
+		FileSearchEnabled: false,
+		FileSearchAddress: "bitmagnet-filesearch.bitmagnet.svc:50052",
+		FileSearchTimeout: 5 * time.Second,
+		FileSearchMaxRows: filesearch.DefaultMaxRows,
+
 		// L3 pathsearch — all switches default false (feature off).
 		PathsearchEnabled:         false,
 		PathTypeaheadEnabled:      false,
@@ -171,6 +197,15 @@ func NewDefaultConfig() Config {
 		PathsearchRouteTimeout:         8 * time.Second,
 		PathsearchMaxConcurrentRefines: 0,
 		PathsearchSlotWait:             0,
+	}
+}
+
+// fileSearchConfig maps the section to the L2 gRPC client config.
+func (c Config) fileSearchConfig() filesearch.Config {
+	return filesearch.Config{
+		Address: c.FileSearchAddress,
+		Timeout: c.FileSearchTimeout,
+		MaxRows: c.FileSearchMaxRows,
 	}
 }
 

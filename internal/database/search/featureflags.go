@@ -13,6 +13,13 @@ import "sync/atomic"
 // the config at startup and calls SetFeatureFlags exactly once; the criteria,
 // ordering and GraphQL layers read the live snapshot with FeatureFlagsValue().
 type FeatureFlags struct {
+	// DropCompatibleReads (D1 proof mode): when ON, all known production read
+	// paths that previously depended on torrent_files must use their L1/L2/L3
+	// replacements. It currently forces the effective values of
+	// GateFileExtensionsJSONB and FileBrowserFromBlob and also tells repair code
+	// not to clear files_data for a torrent_files-backed rebuild.
+	DropCompatibleReads bool
+
 	// GateFileExtensionsJSONB (DROP-gate flip, measured FB-A1): when ON, the
 	// multi-file branch of TorrentFileExtensionCriteria stops doing an
 	// EXISTS(torrent_files ...) sub-query and instead matches the denormalised
@@ -61,4 +68,23 @@ func FeatureFlagsValue() FeatureFlags {
 // fx calls it once at startup and tests call it to exercise both code paths.
 func SetFeatureFlags(f FeatureFlags) {
 	featureFlags.Store(&f)
+}
+
+// UseFileExtensionsJSONB is the effective gate for the multi-file extension
+// filter. DropCompatibleReads forces it on because the legacy branch queries
+// torrent_files.
+func (f FeatureFlags) UseFileExtensionsJSONB() bool {
+	return f.DropCompatibleReads || f.GateFileExtensionsJSONB
+}
+
+// UseFileBrowserFromBlob is the effective gate for TorrentQuery.Files. In
+// drop-compatible read mode the per-torrent browser must not query torrent_files.
+func (f FeatureFlags) UseFileBrowserFromBlob() bool {
+	return f.DropCompatibleReads || f.FileBrowserFromBlob
+}
+
+// AllowTorrentFilesRepair reports whether live repair may clear files_data and
+// rely on torrent_files for a later rebuild. That repair mode is pre-DROP only.
+func (f FeatureFlags) AllowTorrentFilesRepair() bool {
+	return !f.DropCompatibleReads
 }

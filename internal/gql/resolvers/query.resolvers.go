@@ -14,6 +14,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/gql/gqlmodel/gen"
 	"github.com/bitmagnet-io/bitmagnet/internal/health"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/version"
 )
 
@@ -103,7 +104,26 @@ func (r *queryResolver) TorrentContent(ctx context.Context) (gqlmodel.TorrentCon
 	return gqlmodel.TorrentContentQuery{
 		TorrentContentSearch: r.Search,
 		Pathsearch:           r.Pathsearch,
+		FileSearchClient:     r.FileSearch,
 	}, nil
+}
+
+// FileSearch is the resolver for the fileSearch field.
+func (r *torrentContentQueryResolver) FileSearch(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.FileSearchInput) (filesearch.FileSearchResult, error) {
+	if obj != nil {
+		return obj.FileSearch(ctx, input)
+	}
+
+	return gqlmodel.FileSearchQuery{Client: r.Resolver.FileSearch}.Search(ctx, input)
+}
+
+// PathTypeahead is the resolver for the pathTypeahead field.
+func (r *torrentContentQueryResolver) PathTypeahead(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.PathTypeaheadInput) (filesearch.PathTypeaheadResult, error) {
+	if obj != nil {
+		return obj.PathTypeahead(ctx, input)
+	}
+
+	return gqlmodel.FileSearchQuery{Client: r.Resolver.FileSearch}.PathTypeahead(ctx, input)
 }
 
 // Files is the resolver for the files field.
@@ -120,8 +140,14 @@ func (r *torrentQueryResolver) Files(ctx context.Context, obj *gqlmodel.TorrentQ
 // Query returns gql.QueryResolver implementation.
 func (r *Resolver) Query() gql.QueryResolver { return &queryResolver{r} }
 
+// TorrentContentQuery returns gql.TorrentContentQueryResolver implementation.
+func (r *Resolver) TorrentContentQuery() gql.TorrentContentQueryResolver {
+	return &torrentContentQueryResolver{r}
+}
+
 // TorrentQuery returns gql.TorrentQueryResolver implementation.
 func (r *Resolver) TorrentQuery() gql.TorrentQueryResolver { return &torrentQueryResolver{r} }
 
 type queryResolver struct{ *Resolver }
+type torrentContentQueryResolver struct{ *Resolver }
 type torrentQueryResolver struct{ *Resolver }

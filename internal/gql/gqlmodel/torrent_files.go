@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"sort"
 
 	q "github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -30,7 +31,7 @@ func (t TorrentQuery) Files(ctx context.Context, query TorrentFilesQueryInput) (
 	// (torrents.files_data) so it survives the torrent_files DROP. Flag-gated
 	// (default OFF) — until flipped the original `SELECT FROM torrent_files`
 	// path below runs unchanged.
-	if search.FeatureFlagsValue().FileBrowserFromBlob {
+	if search.FeatureFlagsValue().UseFileBrowserFromBlob() {
 		return t.filesFromBlob(ctx, query)
 	}
 
@@ -120,7 +121,25 @@ func (t TorrentQuery) filesFromBlob(
 	var files []model.TorrentFile
 
 	for _, tor := range torrents {
-		for _, f := range tor.Files {
+		torFiles := tor.Files
+		if len(tor.FilesData) > 0 {
+			if model.FilesDataDeserializer == nil {
+				return search.TorrentFilesResult{}, errors.New("filesFromBlob: files_data deserializer not wired")
+			}
+
+			decoded, decodeErr := model.FilesDataDeserializer(tor.FilesData)
+			if decodeErr != nil {
+				return search.TorrentFilesResult{}, fmt.Errorf(
+					"filesFromBlob: decoding files_data for %s: %w",
+					tor.InfoHash,
+					decodeErr,
+				)
+			}
+
+			torFiles = decoded
+		}
+
+		for _, f := range torFiles {
 			f.InfoHash = tor.InfoHash
 			// G1: extension is always path-derived, never the blob's stored `e`.
 			f.Extension = model.FileExtensionFromPath(f.Path)

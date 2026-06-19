@@ -11,6 +11,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/extfix"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/queue"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
+	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -812,7 +813,14 @@ func (Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool) {
 		}
 	}
 
-	// Gate 4: --confirm flag
+	// Gate 4: runtime read path is DROP-compatible.
+	if desc, ok := cleanupRuntimeReadGate(); ok {
+		pass(desc)
+	} else {
+		fail(desc)
+	}
+
+	// Gate 5: --confirm flag
 	if ctx.Bool("confirm") {
 		pass("--confirm flag provided")
 	} else {
@@ -820,6 +828,18 @@ func (Params) checkCleanupGates(ctx *cli.Context, d *dao.Query) ([]gate, bool) {
 	}
 
 	return gates, allPassed
+}
+
+func cleanupRuntimeReadGate() (string, bool) {
+	return cleanupRuntimeReadGateForFlags(search.FeatureFlagsValue())
+}
+
+func cleanupRuntimeReadGateForFlags(flags search.FeatureFlags) (string, bool) {
+	if !flags.DropCompatibleReads {
+		return "SEARCH_FEATURES_DROP_COMPATIBLE_READS is false; active runtime has not proven no-legacy-read mode", false
+	}
+
+	return "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true; blob browser, JSONB extension filter, and blob-only repair gates are forced", true
 }
 
 func getKV(ctx *cli.Context, d *dao.Query, key string) (string, error) {
