@@ -13,6 +13,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gen"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -140,20 +141,7 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 					}
 				}
 				if len(torrentFileSummariesToPersist) > 0 {
-					if err := tx.Torrent.UnderlyingDB().WithContext(ctx).
-						Clauses(clause.OnConflict{
-							Columns: []clause.Column{{Name: "info_hash"}},
-							DoUpdates: clause.AssignmentColumns([]string{
-								"file_count",
-								"total_size",
-								"largest_file_size",
-								"extensions",
-								"has_video",
-								"has_subtitle",
-								"has_audio",
-								"updated_at",
-							}),
-						}).
+					if err := torrentFileSummaryPersistQuery(ctx, tx).
 						CreateInBatches(torrentFileSummariesToPersist, 100).Error; err != nil {
 						return err
 					}
@@ -188,6 +176,24 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func torrentFileSummaryPersistQuery(ctx context.Context, tx *dao.Query) *gorm.DB {
+	return tx.Torrent.UnderlyingDB().WithContext(ctx).
+		Table(model.TableNameTorrentFileSummary).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "info_hash"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"file_count",
+				"total_size",
+				"largest_file_size",
+				"extensions",
+				"has_video",
+				"has_subtitle",
+				"has_audio",
+				"updated_at",
+			}),
+		})
 }
 
 func createTorrentModel(
