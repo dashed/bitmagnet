@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,19 +58,7 @@ func TestCheckCleanupGates(t *testing.T) {
 		assertGateFailed(t, gates, "Verification is stale")
 	})
 
-	t.Run("refuses without confirm flag", func(t *testing.T) {
-		t.Parallel()
-
-		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
-		gates, ok := runGateCheck(t, map[string]string{
-			kvKeyStatus:     statusCompleted,
-			kvKeyVerifiedAt: recent,
-		}, false)
-		assert.False(t, ok)
-		assertGateFailed(t, gates, "--confirm flag required")
-	})
-
-	t.Run("accepts recent stock verification", func(t *testing.T) {
+	t.Run("refuses without drop-compatible read mode", func(t *testing.T) {
 		t.Parallel()
 
 		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
@@ -77,10 +66,47 @@ func TestCheckCleanupGates(t *testing.T) {
 			kvKeyStatus:     statusCompleted,
 			kvKeyVerifiedAt: recent,
 		}, true)
+		assert.False(t, ok)
+		assertGateFailed(t, gates, "SEARCH_FEATURES_DROP_COMPATIBLE_READS is false")
+	})
+
+	t.Run("refuses without confirm flag", func(t *testing.T) {
+		t.Parallel()
+
+		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+		gates, ok := runGateCheck(t, map[string]string{
+			kvKeyStatus:     statusCompleted,
+			kvKeyVerifiedAt: recent,
+		}, false, true)
+		assert.False(t, ok)
+		assertGateFailed(t, gates, "--confirm flag required")
+	})
+
+	t.Run("accepts recent stock verification with drop-compatible read mode", func(t *testing.T) {
+		t.Parallel()
+
+		recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
+		gates, ok := runGateCheck(t, map[string]string{
+			kvKeyStatus:     statusCompleted,
+			kvKeyVerifiedAt: recent,
+		}, true, true)
 		assert.True(t, ok)
 		assertGatePassed(t, gates, "Verification passed at")
+		assertGatePassed(t, gates, "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true")
 		assertGatePassed(t, gates, "--confirm flag provided")
 	})
+}
+
+func TestCleanupRuntimeReadGate(t *testing.T) {
+	t.Parallel()
+
+	desc, ok := cleanupRuntimeReadGateForFlags(search.FeatureFlags{})
+	assert.False(t, ok)
+	assert.Contains(t, desc, "SEARCH_FEATURES_DROP_COMPATIBLE_READS is false")
+
+	desc, ok = cleanupRuntimeReadGateForFlags(search.FeatureFlags{DropCompatibleReads: true})
+	assert.True(t, ok)
+	assert.Contains(t, desc, "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true")
 }
 
 func TestPauseResumeLogic(t *testing.T) {
@@ -147,7 +173,7 @@ func TestGateDescriptions(t *testing.T) {
 		t.Parallel()
 
 		gates, _ := runGateCheck(t, map[string]string{}, false)
-		require.GreaterOrEqual(t, len(gates), 3)
+		require.GreaterOrEqual(t, len(gates), 4)
 
 		for _, g := range gates {
 			assert.NotEmpty(t, g.description)
@@ -157,7 +183,7 @@ func TestGateDescriptions(t *testing.T) {
 
 // runGateCheck simulates the cleanup gate checks using an in-memory key-value store.
 // It tests the pure logic of gate validation without requiring a database.
-func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate, bool) {
+func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool, dropCompatible ...bool) ([]gate, bool) {
 	t.Helper()
 
 	var gates []gate
@@ -201,7 +227,18 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool) ([]gate
 		}
 	}
 
-	// Gate 4: --confirm flag
+	// Gate 4: runtime read path is DROP-compatible.
+	flags := search.FeatureFlags{}
+	if len(dropCompatible) > 0 && dropCompatible[0] {
+		flags.DropCompatibleReads = true
+	}
+	if desc, ok := cleanupRuntimeReadGateForFlags(flags); ok {
+		pass(desc)
+	} else {
+		fail(desc)
+	}
+
+	// Gate 5: --confirm flag
 	if confirmFlag {
 		pass("--confirm flag provided")
 	} else {
