@@ -40,3 +40,18 @@ testem.log
 # System files
 .DS_Store
 Thumbs.db
+
+# PS-MB1 bench raw logs (throwaway; internal HEL1 paths) — keep local, not in repo
+docs/dev/psmb-logs/
+
+# Rust build artifacts — never commit target/ (throwaway; never part of image context)
+bitmagnet-rs/target/
+bench/*/target/
+bench-file-index/target/
+
+# PSX campaign raw logs + work scripts (throwaway; HEL1 paths/conn details)
+docs/dev/psx-logs/
+
+# CB campaign raw logs (throwaway; HEL1 conn details)
+docs/dev/cb-logs/
+bench/__pycache__/

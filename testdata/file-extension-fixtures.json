@@ -1,0 +1,96 @@
+{
+  "description": "Shared Go/Rust fixtures for the FB-A0/G1 file-extension contract. The blob's stored `e` (blob_e) is NOT authoritative: crawl-path torrents persist an empty `e`, so EVERY consumer (Go model.FileExtensionFromPath / blobmigration.ExtractUniqueExtensions, Rust file_extension_from_path / transform.rs file_extensions facet) MUST derive the extension from the file PATH and equal `expected_extension`, never trust blob_e. An empty string means 'no extension'. Both languages run these cases against their path-deriving function; they MUST agree.",
+  "cases": [
+    {
+      "name": "importer_path_e_matches",
+      "path": "Movies/Example.2024.1080p.mkv",
+      "blob_e": "mkv",
+      "expected_extension": "mkv",
+      "note": "importer path stored a populated e that already agrees with the path"
+    },
+    {
+      "name": "crawl_path_empty_e",
+      "path": "Season 1/Episode 1.mkv",
+      "blob_e": "",
+      "expected_extension": "mkv",
+      "note": "FB-A0 keystone: crawl-path blob carries empty e; consumers must still derive 'mkv' from the path"
+    },
+    {
+      "name": "uppercase_extension",
+      "path": "Movie.2024.1080p.MKV",
+      "blob_e": "",
+      "expected_extension": "mkv",
+      "note": "extension is lowercased"
+    },
+    {
+      "name": "multi_dot_tar_gz",
+      "path": "a/b/c.tar.gz",
+      "blob_e": "",
+      "expected_extension": "gz",
+      "note": "only the final extension token is taken"
+    },
+    {
+      "name": "cjk_path",
+      "path": "音楽/曲.flac",
+      "blob_e": "",
+      "expected_extension": "flac",
+      "note": "non-ASCII basename, ASCII extension"
+    },
+    {
+      "name": "no_extension",
+      "path": "README",
+      "blob_e": "",
+      "expected_extension": "",
+      "note": "no dot at all"
+    },
+    {
+      "name": "dotfile_root",
+      "path": ".gitignore",
+      "blob_e": "",
+      "expected_extension": "",
+      "note": "leading dot is not an extension separator"
+    },
+    {
+      "name": "dotfile_in_dir",
+      "path": "dir/.hidden",
+      "blob_e": "",
+      "expected_extension": "",
+      "note": "dot preceded by a path separator is not an extension"
+    },
+    {
+      "name": "trailing_dot",
+      "path": "trailerpark/foo.",
+      "blob_e": "",
+      "expected_extension": "",
+      "note": "nothing after the final dot"
+    },
+    {
+      "name": "dot_only_in_directory",
+      "path": "a.b/c",
+      "blob_e": "",
+      "expected_extension": "",
+      "note": "the only dot is in a directory component, not the final segment"
+    },
+    {
+      "name": "numeric_extension",
+      "path": "disc/track.001",
+      "blob_e": "001",
+      "expected_extension": "001",
+      "note": "digits are valid extension characters"
+    },
+    {
+      "name": "single_file_torrent_name",
+      "path": "ubuntu-24.04.iso",
+      "blob_e": "iso",
+      "expected_extension": "iso",
+      "note": "single-file torrent: extension derived from the torrent name/path"
+    },
+    {
+      "name": "stale_blob_e_wrong",
+      "path": "clip.mp4",
+      "blob_e": "avi",
+      "expected_extension": "mp4",
+      "note": "defensive: even a WRONG non-empty blob_e must be ignored in favour of the path-derived value"
+    }
+  ]
+}

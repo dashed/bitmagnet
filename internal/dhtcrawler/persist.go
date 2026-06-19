@@ -2,8 +2,10 @@ package dhtcrawler
 
 import (
 	"context"
+	"database/sql/driver"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
@@ -56,7 +58,18 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			}
 			flushHashesToClassify()
 
-			for _, i := range is {
+			// Collapse hybrid torrents discovered under BOTH their v1 and truncated-v2
+			// infohashes into a single row (first-one-wins). Only hybrids can reach this:
+			// pure-v2 re-discoveries share one truncated primary key (handled by the
+			// ON CONFLICT upsert) and v1-only torrents carry no v2 hash.
+			existingV2 := c.lookupExistingV2(ctx, is)
+
+			kept, droppedV2 := filterV2Duplicates(is, existingV2)
+			if droppedV2 > 0 {
+				c.torrentsDropped.WithLabelValues("v2_duplicate").Add(float64(droppedV2))
+			}
+
+			for _, i := range kept {
 				if _, ok := hashMap[i.infoHash]; ok {
 					continue
 				}
@@ -104,6 +117,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 						string(c.dao.Torrent.FilesStatus.ColumnName()),
 						string(c.dao.Torrent.FilesCount.ColumnName()),
 						string(c.dao.Torrent.UpdatedAt.ColumnName()),
+						"files_data",
+						"file_extensions",
 					}),
 				}).CreateInBatches(torrentsToPersist, 100); err != nil {
 					return err
@@ -149,10 +164,11 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 func createTorrentModel(
 	hash protocol.ID,
-	info metainfo.Info,
+	parsed metainfo.ParsedInfo,
 	savePieces bool,
 	saveFilesThreshold uint,
 ) (model.Torrent, error) {
+	info := parsed.Info
 	name := info.BestName()
 
 	private := false
@@ -162,26 +178,55 @@ func createTorrentModel(
 
 	var filesCount model.NullUint
 
+	var files []model.TorrentFile
+
+	// Classify single vs multi. For v1, info.IsDir() == (len(info.Files) != 0), so
+	// v1 behaviour is unchanged. For v2 (BEP 52) the file tree root is always a
+	// directory keyed by the file name, so IsDir() is true even for a single
+	// top-level file; treat "exactly one top-level file" as single so v2 / hybrid
+	// single-file torrents match v1 single-file behaviour (no file rows; the
+	// extension is indexed from the name in the Tantivy document builder).
 	filesStatus := model.FilesStatusSingle
-	if len(info.Files) > 0 {
-		filesStatus = model.FilesStatusMulti
-		filesCount = model.NewNullUint(uint(len(info.Files)))
+
+	if info.IsDir() {
+		// UpvertedFiles yields the file list for both v1 (info.Files) and v2
+		// (file tree) torrents.
+		upvertedFiles := info.UpvertedFiles()
+
+		isV2Single := info.HasV2() &&
+			len(upvertedFiles) == 1 &&
+			len(upvertedFiles[0].Path) <= 1
+
+		if !isV2Single {
+			filesStatus = model.FilesStatusMulti
+			filesCount = model.NewNullUint(uint(len(upvertedFiles)))
+			files = make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(upvertedFiles)))
+
+			for i, file := range upvertedFiles {
+				if i >= int(saveFilesThreshold) {
+					filesStatus = model.FilesStatusOverThreshold
+					break
+				}
+
+				files = append(files, model.TorrentFile{
+					InfoHash: hash,
+					Index:    uint(i),
+					Path:     file.DisplayPath(&info),
+					Size:     uint(file.Length),
+				})
+			}
+		}
 	}
 
-	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(info.Files)))
+	var filesData []byte
 
-	for i, file := range info.Files {
-		if i >= int(saveFilesThreshold) {
-			filesStatus = model.FilesStatusOverThreshold
-			break
+	var fileExts []string
+
+	if len(files) > 0 {
+		if blobData, blobErr := blobmigration.SerializeFiles(files); blobErr == nil {
+			filesData = blobData
+			fileExts = blobmigration.ExtractUniqueExtensions(files)
 		}
-
-		files = append(files, model.TorrentFile{
-			InfoHash: hash,
-			Index:    uint(i),
-			Path:     file.DisplayPath(&info),
-			Size:     uint(file.Length),
-		})
 	}
 
 	var pieces model.TorrentPieces
@@ -195,11 +240,16 @@ func createTorrentModel(
 
 	return model.Torrent{
 		InfoHash:    hash,
+		InfoHashV1:  parsed.InfoHashV1,
+		InfoHashV2:  parsed.InfoHashV2,
+		MetaVersion: model.NewNullUint16(uint16(parsed.MetaVersion)),
 		Name:        name,
 		Size:        uint(info.TotalLength()),
 		Private:     private,
 		Pieces:      pieces,
 		Files:       files,
+		FilesData:   filesData,
+		FileExts:    fileExts,
 		FilesStatus: filesStatus,
 		FilesCount:  filesCount,
 		Sources: []model.TorrentsTorrentSource{
@@ -212,6 +262,110 @@ func createTorrentModel(
 }
 
 const classifyBatchSize = 100
+
+// v2LookupChunkSize bounds the number of v2 hashes per dedup lookup query. The
+// persist batch is currently capped at 1000 (factory.go), so this is defensive
+// insurance should that cap ever be raised.
+const v2LookupChunkSize = 1000
+
+// dropV2Duplicate reports whether a discovery should be dropped as a cross-primary-key
+// v2 duplicate: a hybrid torrent already represented under a DIFFERENT primary key
+// (first-one-wins). The stored != pk check is essential — it preserves a legitimate
+// same-primary-key re-discovery (which must upsert) while dropping only true cross-PK
+// collisions.
+func dropV2Duplicate(
+	v2 protocol.InfoHashV2,
+	pk protocol.ID,
+	existing, batch map[protocol.InfoHashV2]protocol.ID,
+) bool {
+	if stored, ok := existing[v2]; ok && stored != pk {
+		return true
+	}
+
+	if stored, ok := batch[v2]; ok && stored != pk {
+		return true
+	}
+
+	return false
+}
+
+// filterV2Duplicates removes hybrid torrents discovered under a second infohash when
+// the same full v2 identity is already represented under another primary key — either
+// already in the database (existing) or earlier in this batch. It returns the kept
+// items and the number dropped.
+func filterV2Duplicates(
+	is []infoHashWithMetaInfo,
+	existing map[protocol.InfoHashV2]protocol.ID,
+) (kept []infoHashWithMetaInfo, dropped int) {
+	batch := make(map[protocol.InfoHashV2]protocol.ID)
+	kept = make([]infoHashWithMetaInfo, 0, len(is))
+
+	for _, i := range is {
+		if v2 := i.metaInfo.InfoHashV2; v2 != nil {
+			if dropV2Duplicate(*v2, i.infoHash, existing, batch) {
+				dropped++
+
+				continue
+			}
+
+			batch[*v2] = i.infoHash
+		}
+
+		kept = append(kept, i)
+	}
+
+	return kept, dropped
+}
+
+// lookupExistingV2 returns, for the full v2 hashes present in the batch, the primary
+// key of any torrent already stored under each v2 hash. On error it logs and returns
+// what it has (fail-open: dedup is skipped for the batch, never blocking persistence).
+func (c *crawler) lookupExistingV2(
+	ctx context.Context,
+	is []infoHashWithMetaInfo,
+) map[protocol.InfoHashV2]protocol.ID {
+	v2Set := make(map[protocol.InfoHashV2]struct{})
+
+	for _, i := range is {
+		if v2 := i.metaInfo.InfoHashV2; v2 != nil {
+			v2Set[*v2] = struct{}{}
+		}
+	}
+
+	existing := make(map[protocol.InfoHashV2]protocol.ID, len(v2Set))
+	if len(v2Set) == 0 {
+		return existing
+	}
+
+	values := make([]driver.Valuer, 0, len(v2Set))
+	for v2 := range v2Set {
+		values = append(values, v2)
+	}
+
+	t := c.dao.Torrent
+
+	for start := 0; start < len(values); start += v2LookupChunkSize {
+		end := min(start+v2LookupChunkSize, len(values))
+
+		rows, err := t.WithContext(ctx).
+			Select(t.InfoHash, t.InfoHashV2).
+			Where(t.InfoHashV2.In(values[start:end]...)).
+			Find()
+		if err != nil {
+			c.logger.Errorf("error looking up existing v2 infohashes: %s", err.Error())
+
+			return existing
+		}
+
+		for _, row := range rows {
+			if row.InfoHashV2 != nil {
+				existing[*row.InfoHashV2] = row.InfoHash
+			}
+		}
+	}
+
+	return existing
+}
 
 // runPersistSources waits on the persistSources channel for scraped torrents, and persists sources
 // (which includes discovery date, seeders and leechers) to the database in batches.

@@ -1,36 +1,16 @@
-version: '3'
-
 services:
-  app:
-    image: bitmagnet:test
-    container_name: bitmagnet_test
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - HTTP_PORT=3000
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=bitmagnet
-      - POSTGRES_PASSWORD=bitmagnet
-      - POSTGRES_DATABASE=bitmagnet
-    depends_on:
-      - postgres
-    command:
-      - worker
-      - run
-      - --all
-
-  postgres:
+  postgres-test:
     image: postgres:16-alpine
-    container_name: bitmagnet_postgres_test
-    restart: unless-stopped
     environment:
-      - POSTGRES_USER=bitmagnet
-      - POSTGRES_PASSWORD=bitmagnet
-      - POSTGRES_DB=bitmagnet
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
+      POSTGRES_DB: bitmagnet_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data

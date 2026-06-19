@@ -1,0 +1,44 @@
+[package]
+name = "bitmagnet-filesearch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "L2b DuckDB-on-Parquet file-search sidecar (gRPC FileSearchService) serving immutable read-only generations."
+
+[features]
+# `duckdb-engine` compiles the real embedded DuckDB engine (libduckdb `bundled`,
+# needs a C++ toolchain) — the PRODUCTION image build turns it on. It is OFF by
+# default so the workspace `cargo build`/`cargo test` gate stays fast and
+# offline; the pure SQL builder, generation manager, concurrency control and
+# service logic are all exercised against the InMemoryEngine without it.
+default = []
+duckdb-engine = ["dep:duckdb"]
+
+[dependencies]
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+bitmagnet-common = { path = "../bitmagnet-common" }
+# Generation layout + artifact names (shared L2 contract).
+bitmagnet-parquet = { path = "../bitmagnet-parquet" }
+tokio.workspace = true
+tracing.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+clap = { workspace = true, features = ["env"] }
+anyhow.workspace = true
+thiserror.workspace = true
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# Real engine only — gated by `duckdb-engine`.
+duckdb = { workspace = true, optional = true }
+
+[dev-dependencies]
+# BlobFile, for the feature-gated DuckEngine end-to-end round-trip test that
+# builds a real generation via bitmagnet-parquet and queries it.
+bitmagnet-model = { path = "../bitmagnet-model" }
+
+[lints]
+workspace = true

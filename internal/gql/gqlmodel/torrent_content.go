@@ -11,10 +11,15 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 )
 
 type TorrentContentQuery struct {
 	TorrentContentSearch search.TorrentContentSearch
+	// Pathsearch is the L3 exact-refine composer, or nil when the pathsearch
+	// feature is disabled. When nil (or its typeahead flag is off) Search takes
+	// the existing PostgreSQL path unchanged.
+	Pathsearch *pathsearch.Composer
 }
 
 type TorrentContent struct {
@@ -130,48 +135,7 @@ func (t TorrentContentQuery) Search(
 	ctx context.Context,
 	input TorrentContentSearchQueryInput,
 ) (TorrentContentSearchResult, error) {
-	options := []q.Option{
-		q.DefaultOption(),
-		search.TorrentContentCoreJoins(),
-		search.HydrateTorrentContentContent(),
-		search.HydrateTorrentContentTorrent(),
-	}
-	options = append(options, input.Option())
 	hasQueryString := input.QueryString.Valid
-
-	if input.Facets != nil {
-		options = append(options, torrentContentFacetsOption(*input.Facets))
-
-		// Handle size range filters
-		if sizeRange, ok := input.Facets.SizeRange.ValueOK(); ok {
-			sizeCriteria := search.SizeRangeCriteria{
-				Key: "torrent_contents.size",
-			}
-
-			if min, minOk := sizeRange.Min.ValueOK(); minOk {
-				minSize := int64(*min)
-				sizeCriteria.MinBytes = &minSize
-			}
-
-			if max, maxOk := sizeRange.Max.ValueOK(); maxOk {
-				maxSize := int64(*max)
-				sizeCriteria.MaxBytes = &maxSize
-			}
-
-			if sizeCriteria.MinBytes != nil || sizeCriteria.MaxBytes != nil {
-				options = append(options, q.Where(sizeCriteria))
-			}
-		}
-		
-		// Handle publishedAt filter
-		if publishedAt, ok := input.Facets.PublishedAt.ValueOK(); ok && *publishedAt != "" {
-			options = append(options, q.Where(search.TorrentContentPublishedAtCriteria(*publishedAt)))
-		}
-	}
-
-	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
-		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
-	}
 
 	fullOrderBy := maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection]()
 
@@ -193,7 +157,67 @@ func (t TorrentContentQuery) Search(
 		fullOrderBy.Set(field, direction)
 	}
 
-	options = append(options, search.TorrentContentFullOrderBy(fullOrderBy).Option())
+	// L3 path-typeahead route (flag-gated). TypeaheadEnabled() is nil-safe: with
+	// the pathsearch feature off it returns false and this branch is skipped
+	// entirely, so the PostgreSQL path below runs byte-identically to before.
+	// served=false (ineligible / fail-loud fallback) also falls through to it.
+	//
+	// pathsearchOrderEligible additionally gates the route on the requested order:
+	// L3 returns recall/score (relevance) order over a CAPPED oversample, so any
+	// explicit structured sort (seeders/size/published_at/...) must take the
+	// PostgreSQL path, which sorts over the full match set rather than the capped
+	// candidate sample (P0-2).
+	//
+	// Healthy() gates the WHOLE route on the cached L3 health signal (finding #4):
+	// when L3 is provably unhealthy (unreachable / not SERVING / empty index) the
+	// route is skipped entirely so the query goes straight to PostgreSQL — avoiding
+	// a per-query dial error + the latency of rediscovering L3 is down on every
+	// request. The composer's trustEmpty() gate remains as defense-in-depth for the
+	// race where health flips between this check and the candidate dial.
+	if t.Pathsearch.TypeaheadEnabled() && hasQueryString &&
+		t.Pathsearch.Eligible(input.QueryString.String) &&
+		pathsearchOrderEligible(input.OrderBy) &&
+		t.Pathsearch.Healthy() {
+		result, served, err := t.Pathsearch.TorrentContent(
+			ctx,
+			pathSearchFilters(input),
+			torrentContentQueryOptions(input, fullOrderBy),
+			pathSearchPageLimit(input.SearchParams),
+			searchPageOffset(input.SearchParams),
+			nil, // L3 sort is recall-selection only; PG applies the real order below
+		)
+		if err != nil {
+			return TorrentContentSearchResult{}, err
+		}
+
+		if served {
+			return transformTorrentContentSearchResult(result)
+		}
+	}
+
+	options := []q.Option{
+		q.DefaultOption(),
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+	options = append(options, input.Option())
+
+	if input.Facets != nil {
+		options = append(options, torrentContentFacetsOption(*input.Facets))
+		options = append(options, torrentContentFacetFilterOptions(*input.Facets)...)
+	}
+
+	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
+		options = append(options, q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)))
+	}
+
+	// FIND-2 (c5717827): on the PostgreSQL fallback path, rewrite a lone-relevance
+	// web-UI default to seeders DESC (flag-gated, default off). The L3 route above
+	// is the primary relevance-latency mitigation; this guards the PG path taken
+	// when L3 is disabled/ineligible/not-served.
+	orderBy := find2PopularitySortDefault(fullOrderBy, hasQueryString)
+	options = append(options, search.TorrentContentFullOrderBy(orderBy).Option())
 
 	result, resultErr := t.TorrentContentSearch.TorrentContent(ctx, options...)
 	if resultErr != nil {
@@ -201,6 +225,272 @@ func (t TorrentContentQuery) Search(
 	}
 
 	return transformTorrentContentSearchResult(result)
+}
+
+func torrentContentFacetFilterOptions(input gen.TorrentContentFacetsInput) []q.Option {
+	var options []q.Option
+
+	if sizeRange, ok := input.SizeRange.ValueOK(); ok && sizeRange != nil {
+		sizeCriteria := search.SizeRangeCriteria{
+			Key: "torrent_contents.size",
+		}
+
+		if min, minOk := sizeRange.Min.ValueOK(); minOk {
+			minSize := int64(*min)
+			sizeCriteria.MinBytes = &minSize
+		}
+
+		if max, maxOk := sizeRange.Max.ValueOK(); maxOk {
+			maxSize := int64(*max)
+			sizeCriteria.MaxBytes = &maxSize
+		}
+
+		if sizeCriteria.MinBytes != nil || sizeCriteria.MaxBytes != nil {
+			options = append(options, q.Where(sizeCriteria))
+		}
+	}
+
+	if publishedAt, ok := input.PublishedAt.ValueOK(); ok && publishedAt != nil && *publishedAt != "" {
+		options = append(options, q.Where(search.TorrentContentPublishedAtCriteria(*publishedAt)))
+	}
+
+	return options
+}
+
+// torrentContentQueryOptions builds the THREE PostgreSQL option sets the L3
+// chunked-refine composer needs (gate7-4 byte-bound): all carry the same
+// joins/info-hash filters and user ordering as the normal path, but WITHOUT
+// pagination and WITHOUT the free-text tsquery (L3 owns the path text and the
+// composer paginates in Go after exact-refine).
+//
+//   - Combined: the torrent (blob) hydrator + content hydrator + facets — i.e.
+//     the SAME single-query options as before gate7-4. The composer uses it for
+//     the common single-chunk fast path, so a normal query is byte-identical to
+//     before (one query, hydrate + facets, no extra round-trip).
+//   - Refine:   hydrators but NO facets — used per chunk in the (rare) multi-chunk
+//     path so each chunk decodes only its own files without re-running facets.
+//   - Agg:      facets + aggregation budget but the torrent (blob) hydrator
+//     DROPPED — files_data is selected only by that hydrator, so the aggregation
+//     pass computes facets over the full kept set with ZERO blob decode.
+//
+// CRITICAL (P0-1): unlike the PostgreSQL path, these MUST NOT carry a page limit.
+// q.DefaultOption() sets Limit(10); pushing that into the candidate IN(...) query
+// would cap it at 10 rows regardless of the candidate budget, so refine+paginate
+// would operate over <=10 torrents and every page past the first would be empty.
+// The candidate set is already bounded by the composer's MaxCandidates budget, so
+// the IN-query returns ALL budgeted rows (no LIMIT) and the composer applies the
+// real page window in Go after exact-refine. We keep DefaultOption's aggregation
+// budget (needed for facet computation) but drop its Limit.
+func torrentContentQueryOptions(
+	input TorrentContentSearchQueryInput,
+	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
+) pathsearch.QueryOptions {
+	var facet q.Option
+	var facetFilters []q.Option
+	if input.Facets != nil {
+		facet = torrentContentFacetsOption(*input.Facets)
+		facetFilters = torrentContentFacetFilterOptions(*input.Facets)
+	}
+
+	var infoHashFilter q.Option
+	if infoHashes, ok := input.InfoHashes.ValueOK(); ok {
+		infoHashFilter = q.Where(search.TorrentContentInfoHashCriteria(infoHashes...))
+	}
+
+	order := search.TorrentContentFullOrderBy(fullOrderBy).Option()
+
+	// Combined: today's options exactly — hydrators + facets + agg budget + order.
+	combined := []q.Option{
+		q.WithAggregationBudget(defaultAggregationBudget),
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+	if facet != nil {
+		combined = append(combined, facet)
+	}
+	combined = append(combined, facetFilters...)
+
+	if infoHashFilter != nil {
+		combined = append(combined, infoHashFilter)
+	}
+
+	combined = append(combined, order)
+
+	// Refine: hydrators + order, NO facets / agg budget (per-chunk decode only).
+	refine := []q.Option{
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+	}
+	if infoHashFilter != nil {
+		refine = append(refine, infoHashFilter)
+	}
+	refine = append(refine, facetFilters...)
+
+	refine = append(refine, order)
+
+	// Agg: facets + agg budget + joins, NO torrent/content hydrator → zero decode.
+	// Ordering is irrelevant to aggregations, so it is omitted.
+	agg := []q.Option{
+		q.WithAggregationBudget(defaultAggregationBudget),
+		search.TorrentContentCoreJoins(),
+	}
+	if facet != nil {
+		agg = append(agg, facet)
+	}
+	agg = append(agg, facetFilters...)
+
+	if infoHashFilter != nil {
+		agg = append(agg, infoHashFilter)
+	}
+
+	return pathsearch.QueryOptions{Combined: combined, Refine: refine, Agg: agg}
+}
+
+// pathSearchFilters extracts the L3 exact-refine ingredients from the search
+// input: the path free-text plus any extensions implied by a file-type facet
+// (expanded via model.FileType.Extensions()).
+func pathSearchFilters(input TorrentContentSearchQueryInput) pathsearch.Filters {
+	f := pathsearch.Filters{Query: input.QueryString.String}
+
+	if input.Facets == nil {
+		return f
+	}
+
+	ft, ok := input.Facets.TorrentFileType.ValueOK()
+	if !ok || ft == nil {
+		return f
+	}
+
+	fileTypes, ok := ft.Filter.ValueOK()
+	if !ok {
+		return f
+	}
+
+	for _, fileType := range fileTypes {
+		f.Extensions = append(f.Extensions, fileType.Extensions()...)
+	}
+
+	return f
+}
+
+// defaultPageSize mirrors q.DefaultOption's Limit(10): the page size the
+// PostgreSQL path falls back to when GraphQL `limit` is omitted. The L3 route must
+// size its candidate budget AND paginate from the SAME default — otherwise an
+// omitted limit makes searchPageLimit return 0, collapsing candidateBudget to
+// ~OversampleFactor and serving that tiny set (with paginate(limit=0) returning
+// everything) as a falsely-complete result (P0-5).
+const defaultPageSize uint = 10
+
+// defaultAggregationBudget mirrors the aggregation budget set by q.DefaultOption
+// (WithAggregationBudget(5_000)); the L3 baseOptions keep it (for facets) while
+// dropping DefaultOption's page limit (see torrentContentBaseOptions, P0-1).
+const defaultAggregationBudget float64 = 5_000
+
+// pathsearchOrderEligible reports whether the requested ordering is compatible
+// with the L3 route. L3 returns candidates in recall/score (relevance) order over
+// a CAPPED oversample, and its seeders fast-field is hardcoded 0; PostgreSQL then
+// re-sorts only that capped subset. So an explicit structured sort
+// (seeders/size/published_at/files_count/...) over the capped sample is NOT the
+// global top-N — the globally highest-ranked match may never have entered the
+// candidate budget. Such queries must take the PostgreSQL path, which sorts over
+// the full match set.
+//
+// Eligible orderings: an empty OrderBy (the webui's default for a query, which is
+// relevance) and an explicit relevance sort. Any non-relevance field is
+// ineligible. (P0-2)
+func pathsearchOrderEligible(orderBy []gen.TorrentContentOrderByInput) bool {
+	for _, ob := range orderBy {
+		if ob.Field != gen.TorrentContentOrderByFieldRelevance {
+			return false
+		}
+	}
+
+	return true
+}
+
+// maxPathSearchLimit hard-clamps the per-request page size on the L3 route. The
+// L3 route blob-decodes up to limit×OversampleFactor candidate torrents per
+// request (further bounded by the composer's MaxCandidates cap); an unclamped,
+// attacker-controlled GraphQL `limit` must NOT size that decode budget. Clamping
+// the effective page size here is defense-in-depth alongside the composer cap
+// (gate-7 Finding B OOM/DoS). Normal UI paging (limit 10–50) is far below this,
+// so legitimate clients are unaffected; only abusive page sizes are capped.
+const maxPathSearchLimit uint = 200
+
+// searchPageLimit / searchPageOffset replicate q.SearchParams.Option's page-window
+// arithmetic so the composer can paginate in Go (the L3 route does not push the
+// page window into PostgreSQL). An omitted limit resolves to defaultPageSize, the
+// same default the PostgreSQL path uses via q.DefaultOption (P0-5).
+func searchPageLimit(s q.SearchParams) uint {
+	if s.Limit.Valid {
+		return s.Limit.Uint
+	}
+
+	return defaultPageSize
+}
+
+// pathSearchPageLimit is searchPageLimit clamped to maxPathSearchLimit for the L3
+// route ONLY. It bounds both the candidate-decode budget and the served page so a
+// hostile `limit` can never size the per-request blob decode (gate-7 Finding B).
+// The PostgreSQL path keeps using the unclamped searchPageLimit, so its behavior
+// is byte-identical to before.
+func pathSearchPageLimit(s q.SearchParams) uint {
+	limit := searchPageLimit(s)
+	if limit > maxPathSearchLimit {
+		return maxPathSearchLimit
+	}
+
+	return limit
+}
+
+func searchPageOffset(s q.SearchParams) uint {
+	offset := uint(0)
+
+	if s.Limit.Valid && s.Page.Valid && s.Page.Uint > 0 {
+		offset += (s.Page.Uint - 1) * s.Limit.Uint
+	}
+
+	if s.Offset.Valid {
+		offset += s.Offset.Uint
+	}
+
+	return offset
+}
+
+// find2PopularitySortDefault implements the FIND-2 mitigation (flag-gated,
+// default OFF). The web UI sends `relevance` as the sole order for every typed
+// query; `relevance` is ts_rank_cd over the whole match-set, which is a ~49s
+// wall on broad common terms (e.g. "x264" → millions of matches). When the
+// PopularitySortDefault flag is ON and the request is exactly that web-UI
+// default — a single `relevance` clause together with a query string — we
+// rewrite the order to `seeders DESC` (which already carries an info_hash
+// tiebreak) and drop ts_rank_cd from the sort entirely. True relevance stays
+// opt-in: any order that names a non-relevance field, or relevance alongside an
+// explicit extra field, is passed through untouched, as is any query without a
+// search string. See dv4-go-integration-notes.md for the UI-side alternative.
+func find2PopularitySortDefault(
+	orderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
+	hasQueryString bool,
+) maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection] {
+	if !search.FeatureFlagsValue().PopularitySortDefault || !hasQueryString {
+		return orderBy
+	}
+
+	// Only rewrite the exact web-UI default: a lone `relevance` clause.
+	if orderBy.Len() != 1 {
+		return orderBy
+	}
+
+	if !orderBy.Has(search.TorrentContentOrderByRelevance) {
+		return orderBy
+	}
+
+	rewritten := maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection]()
+	rewritten.Set(search.TorrentContentOrderBySeeders, search.OrderDirectionDescending)
+
+	return rewritten
 }
 
 func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {

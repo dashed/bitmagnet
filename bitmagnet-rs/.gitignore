@@ -1,0 +1,8 @@
+# Rust build artifacts
+/target
+
+# Agent/harness scratch (not part of the workspace)
+/.claude/
+
+# Cargo.lock IS committed — this workspace builds binaries (the search
+# sidecar), so a locked, reproducible dependency graph is desired.

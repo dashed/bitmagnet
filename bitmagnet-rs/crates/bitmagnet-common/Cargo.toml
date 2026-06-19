@@ -1,0 +1,17 @@
+[package]
+name = "bitmagnet-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared error type, config, and tracing helpers for the bitmagnet Rust workspace."
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
