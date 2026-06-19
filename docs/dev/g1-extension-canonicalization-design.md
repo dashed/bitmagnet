@@ -32,10 +32,10 @@ compact[i] = compactFile{
 
 Two production callers feed it:
 
-| Caller | file:line | Input `f.Extension`? | Resulting `e` |
-|---|---|---|---|
-| **Live crawl dual-write** | `internal/dhtcrawler/persist.go:226` (`SerializeFiles(files)`) | **NOT set** — `persist.go:217-221` builds `TorrentFile{InfoHash,Index,Path,Size}` only | **EMPTY** ← the bug source |
-| **blobmigration backfill** | `internal/blobmigration/queue/handler.go:351` (`SerializeFiles(t.files)`) | **SET** — loader `handler.go:267` `SELECT tf.extension` (the generated column) | already correct |
+| Caller                     | file:line                                                                 | Input `f.Extension`?                                                                   | Resulting `e`              |
+| -------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------- |
+| **Live crawl dual-write**  | `internal/dhtcrawler/persist.go:226` (`SerializeFiles(files)`)            | **NOT set** — `persist.go:217-221` builds `TorrentFile{InfoHash,Index,Path,Size}` only | **EMPTY** ← the bug source |
+| **blobmigration backfill** | `internal/blobmigration/queue/handler.go:351` (`SerializeFiles(t.files)`) | **SET** — loader `handler.go:267` `SELECT tf.extension` (the generated column)         | already correct            |
 
 **Conclusion:** empty `e` is written **only by the live crawl** path; the original
 backfill already wrote correct `e` from `torrent_files.extension`. New crawls since
@@ -61,6 +61,7 @@ Extension: model.FileExtensionFromPath(f.Path).String,
 is the correct empty-`e` for extensionless files.)
 
 Why in `SerializeFiles` (not the callers):
+
 - Single site → covers crawl + backfill, can never be missed by a future caller.
 - **No-op for the backfill caller**: `torrent_files.extension` is the generated column
   `substring(lower(path) from '[^/.]\.([a-z0-9]+)$')` (`migrations/00001_init.sql:70`),
@@ -84,7 +85,7 @@ All three derivations are the same regex on the lowercased path, capture group 1
 
 **Parity finding: equivalent, no blocker.** The Go regex `$`-anchors the extension to
 the final `[a-z0-9]+` run, and `[a-z0-9]+` cannot cross a `.`, so the operative dot is
-always the *last* dot — exactly Rust's `rfind('.')`. I hand-checked the divergence-prone
+always the _last_ dot — exactly Rust's `rfind('.')`. I hand-checked the divergence-prone
 cases and all agree: `a/b/c.tar.gz`→`gz`, `a..gz`→∅, `file.mkv.`→∅, `file.mkv.@`→∅,
 `a.b/c`→∅, `.gitignore`/`dir/.hidden`→∅, `disc/track.001`→`001`, uppercase→lowercased,
 `音楽/曲.flac`→`flac`.
@@ -113,6 +114,7 @@ deliberately untouched. The write-fix **does** require rolling bitmagnet-0 (with
 new crawls keep writing empty `e` → re-break the DROP gate after any backfill).
 
 **Surgical patch design:**
+
 - The change is the **single line** at `serializer.go:34` (`Extension:` value). It
   touches no v2 code, no schema, no migration, no Go API. `serializer.go` is shared
   infra and the `compactFile` build is identical across lineages, so the same
@@ -122,7 +124,7 @@ new crawls keep writing empty `e` → re-break the DROP gate after any backfill)
 - **MUST NOT** switch bitmagnet-0 to a `gate7-*` / `l3-pathsearch-*` image — those
   activate the unproven **v2-infohash WRITE path**. The patch is **v2-neutral**:
   `persist.go` already routes v1/v2 files through `info.UpvertedFiles()`
-  (`persist.go:194`) *before* serialization; the fix is downstream of that and only
+  (`persist.go:194`) _before_ serialization; the fix is downstream of that and only
   changes how `e` is computed from an already-resolved path. No behavioral change to
   v1 or v2 ingestion, magnets, or dedup.
 
@@ -160,14 +162,16 @@ Add `bitmagnet blob-migration backfill-ext` to
 `start/status/pause/resume/verify/cleanup`). Reuse the existing **parallel
 info_hash-range workers + KV cursors** pattern (`startCmd`/`seedRanges`, KV keys
 `blob_migration:cursor:*` etc.). Differences from `start`:
+
 - **Scan source:** `torrents WHERE files_data IS NOT NULL` ordered by `info_hash`
   (NOT `torrent_files`). Ranges over the `torrents` PK.
 - **Per row:** decode → re-serialize (round-trip above) → `UPDATE torrents SET
-  files_data = ? WHERE info_hash = ?`. Does **not** touch `torrent_file_summary` or
+files_data = ? WHERE info_hash = ?`. Does **not** touch `torrent_file_summary` or
   `file_extensions` (those are already path-derived and correct).
 - **Per-batch COMMIT**, batch size tuned like the original backfill.
 
 ### Idempotency / resumability
+
 - **Skip-write when already correct:** if `new_blob == old_blob` bytes, skip the
   `UPDATE` (no WAL, no churn). Already-backfilled and extensionless-only blobs are
   thus free on re-run.
@@ -176,6 +180,7 @@ info_hash-range workers + KV cursors** pattern (`startCmd`/`seedRanges`, KV keys
 - Naturally idempotent: the round-trip is a fixed-point once `e` is canonical.
 
 ### Safety (from the original backfill's hard lessons)
+
 - **K=16 concurrency, NOT K=32** (K=32 crashed PG: liveness probe tripped under WAL
   load → unrecoverable WAL-recovery loop). Cap workers at 16.
 - PG **startupProbe** (not liveness) so WAL recovery can't be killed; `max_wal_size`
@@ -196,10 +201,10 @@ info_hash-range workers + KV cursors** pattern (`startCmd`/`seedRanges`, KV keys
 construction after the fix).
 
 **Verify by extending the consistency checker.** `CompareFiles`
-(`checker.go:104-115`) currently compares the **path-derived** ext on *both* sides
+(`checker.go:104-115`) currently compares the **path-derived** ext on _both_ sides
 (`bExt := FileExtensionFromPath(b.Path)` vs `rExt := FileExtensionFromPath(r.Path)`) and
 **deliberately ignores the raw stored `e`** (so it won't flag legit empty-`e` crawl
-blobs today). Add a **strict-`e` mode** that *additionally* asserts the **raw stored
+blobs today). Add a **strict-`e` mode** that _additionally_ asserts the **raw stored
 field**:
 
 ```go
@@ -255,7 +260,7 @@ defense-in-depth. **Flagged, not blocking.**
   Today the blob's `e` is non-canonical (empty for crawl) — acceptable only because all
   consumers re-derive from path. G1 closes the gate by (a) **stopping new empty-`e`**
   (crawler roll) and (b) **canonicalizing the existing corpus** (e-backfill), so that
-  post-DROP the blob is *self-sufficient* (e == path-derived everywhere) and the
+  post-DROP the blob is _self-sufficient_ (e == path-derived everywhere) and the
   strict-`e` 0-mismatch verify proves it. Sequencing: **roll crawler first** (stop the
   bleed), **then backfill** (heal the corpus), **then strict-`e` verify** (gate), and
   only then is the `e` precondition for DROP satisfied.
@@ -278,9 +283,10 @@ defense-in-depth. **Flagged, not blocking.**
    Tantivy is revived; not on the G1 critical path.
 
 ## Suggested task split (for #2 implement)
+
 - (a) `serializer.go:34` one-line write-fix.
 - (b) Rust fixtures-parity test loading `testdata/file-extension-fixtures.json` (dv4).
 - (c) `blob-migration backfill-ext` subcommand (range workers + KV cursor + round-trip
-  + skip-write).
+  - skip-write).
 - (d) checker `--strict-e` mode + `verifyCmd` flag.
 - (e) (optional) `transform.rs` switch to path-derived (defense-in-depth, non-live).

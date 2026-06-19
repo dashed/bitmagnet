@@ -88,7 +88,11 @@ func TestDefaultOption_ImposesLimit10(t *testing.T) {
 	}
 
 	if !resolved.Limit.Valid || resolved.Limit.Uint != 10 {
-		t.Fatalf("DefaultOption must set Limit(10), got valid=%v uint=%d", resolved.Limit.Valid, resolved.Limit.Uint)
+		t.Fatalf(
+			"DefaultOption must set Limit(10), got valid=%v uint=%d",
+			resolved.Limit.Valid,
+			resolved.Limit.Uint,
+		)
 	}
 }
 
@@ -198,7 +202,7 @@ func (r *recordingSearch) TorrentContent(
 	return search.TorrentContentResult{}, nil
 }
 
-func (r *recordingSearch) FileCounts(
+func (*recordingSearch) FileCounts(
 	_ context.Context,
 	_ []protocol.ID,
 ) (map[protocol.ID]int, error) {

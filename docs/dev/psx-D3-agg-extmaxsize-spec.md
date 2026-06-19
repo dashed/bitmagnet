@@ -2,20 +2,21 @@
 
 **Owner:** `psx-d3-agg` (team `bitmagnet-bench`)
 **Date:** 2026-06-09
-**Status:** SPEC (DESIGN-ONLY — no execution; read-only against the HEL1 bench restore is what this *prescribes*, but nothing here was run. "Do not drop `torrent_files` until each replacement layer is proven in prod" remains in force.)
+**Status:** SPEC (DESIGN-ONLY — no execution; read-only against the HEL1 bench restore is what this _prescribes_, but nothing here was run. "Do not drop `torrent_files` until each replacement layer is proven in prod" remains in force.)
 **Parents / supersedes-context:**
+
 - [`L2-P0-agg-torrent-ext-and-checker-spec.md`](./L2-P0-agg-torrent-ext-and-checker-spec.md) — the original agg spec (now 🛑 SUPERSEDED for the DROP gate).
-- [`fba1-jsonb-dropgate-results.md`](./fba1-jsonb-dropgate-results.md) — **FB-A1 MEASURED**: `torrents.file_extensions` JSONB wins the plain-ext gate (+119 MB vs agg's +9.5 GB), so agg is **dropped from the DROP gate** and **retained ONLY** as a future option for `ext ∧ max_size` (JSONB carries no size). *This doc finalizes that residual option.*
+- [`fba1-jsonb-dropgate-results.md`](./fba1-jsonb-dropgate-results.md) — **FB-A1 MEASURED**: `torrents.file_extensions` JSONB wins the plain-ext gate (+119 MB vs agg's +9.5 GB), so agg is **dropped from the DROP gate** and **retained ONLY** as a future option for `ext ∧ max_size` (JSONB carries no size). _This doc finalizes that residual option._
 - [`arch-c-parity-and-optimization-results.md`](./arch-c-parity-and-optimization-results.md) — **ARCH-C MEASURED** the DuckDB-Parquet equivalent of this exact query (see §4).
-- [`run3-pg-sizing-bench.sql`](./run3-pg-sizing-bench.sql) — RUN-3 partial sizing (this doc tightens it to the *correct* index for the size predicate).
+- [`run3-pg-sizing-bench.sql`](./run3-pg-sizing-bench.sql) — RUN-3 partial sizing (this doc tightens it to the _correct_ index for the size predicate).
 
 ---
 
 ## 0. The one question this spec closes
 
 > Is a PG `agg_torrent_ext` rollup **worth its disk** to serve the torrent-grain
-> **ext ∧ max_size** query — *"torrents that have at least one file of extension X
-> whose largest file of that ext exceeds N bytes"* (e.g. **"torrents with an `.mkv` > 1 GB"**) —
+> **ext ∧ max_size** query — _"torrents that have at least one file of extension X
+> whose largest file of that ext exceeds N bytes"_ (e.g. **"torrents with an `.mkv` > 1 GB"**) —
 > or should that query be served from the **DuckDB-Parquet tier**, which already
 > carries per-file size at **zero new PG disk**?
 
@@ -33,7 +34,7 @@ needs a strong, query-shape-specific justification to survive. The bar is high.
 
 ---
 
-## 1. Why JSONB cannot serve it (and what *can*)
+## 1. Why JSONB cannot serve it (and what _can_)
 
 `torrents.file_extensions` is a presence set — `["mkv","srt","nfo",…]` — dual-written
 in the crawler upsert (`persist.go:115-121`), GIN-indexed (`jsonb_path_ops`), +119 MB.
@@ -41,13 +42,13 @@ in the crawler upsert (`persist.go:115-121`), GIN-indexed (`jsonb_path_ops`), +1
 size**, so it cannot answer "…with an mkv **> 1 GB**". That single gap is the entire
 reason agg might still earn its place.
 
-Three backends *can* answer ext∧max_size. The experiment pits them head-to-head:
+Three backends _can_ answer ext∧max_size. The experiment pits them head-to-head:
 
-| id | backend | source of per-file size | new PG disk | composes into main PG search? |
-|----|---------|--------------------------|-------------|-------------------------------|
-| **A** | `EXISTS torrent_files … size > N` | the table **being dropped** | 0 (but it's the 261 GB we're removing) | ✅ native (baseline / source-of-truth for parity) |
-| **B** | `EXISTS agg_torrent_ext … max_size > N` | rollup `max(size)` per (torrent,ext) | **+3–10 GB** (the variable under test) | ✅ native correlated EXISTS, bytea-keyed |
-| **D** | DuckDB-Parquet (`files_slim`/agg Parquet) | per-file `size` column (already there) | **0** | ❌ cross-engine — must hand an `info_hash` set back to PG |
+| id    | backend                                   | source of per-file size                | new PG disk                            | composes into main PG search?                             |
+| ----- | ----------------------------------------- | -------------------------------------- | -------------------------------------- | --------------------------------------------------------- |
+| **A** | `EXISTS torrent_files … size > N`         | the table **being dropped**            | 0 (but it's the 261 GB we're removing) | ✅ native (baseline / source-of-truth for parity)         |
+| **B** | `EXISTS agg_torrent_ext … max_size > N`   | rollup `max(size)` per (torrent,ext)   | **+3–10 GB** (the variable under test) | ✅ native correlated EXISTS, bytea-keyed                  |
+| **D** | DuckDB-Parquet (`files_slim`/agg Parquet) | per-file `size` column (already there) | **0**                                  | ❌ cross-engine — must hand an `info_hash` set back to PG |
 
 A is the **baseline** (parity truth) but is structurally disqualified — it reads the
 table the DROP removes. The real contest is **B (agg, +disk) vs D (DuckDB, +0)**.
@@ -82,20 +83,20 @@ Two **directions** the planner can take this, and **both must be measured** beca
 they exercise different indexes and decide the minimal shape:
 
 - **Direction-1 (probe / text-first):** the outer query is already selective (a text
-  query + content_type narrowed `torrents` to a few-k rows); the EXISTS is a
+  query + content*type narrowed `torrents` to a few-k rows); the EXISTS is a
   per-torrent **PK probe** `(info_hash, extension)` → fetch `max_size` → compare.
-  *No secondary index needed.* This is the dominant **UI** path (filter composed
+  \_No secondary index needed.* This is the dominant **UI** path (filter composed
   with a search box).
-- **Direction-2 (semi-join / filter-first):** no text query — ext∧size *is* the
+- **Direction-2 (semi-join / filter-first):** no text query — ext∧size _is_ the
   selective predicate and must **drive** the scan: range `extension=$ext AND
-  max_size>$N` → emit `info_hash`s → semi-join `torrents`. *Needs a
-  `(extension, max_size)` covering index.* This is the **discovery/analytics**
+max_size>$N` → emit `info_hash`s → semi-join `torrents`. _Needs a
+  `(extension, max_size)` covering index._ This is the **discovery/analytics**
   path ("show me all torrents with a 4 GB+ iso").
 
 The original L2-P0 spec's secondary index `(extension, info_hash)` is **wrong for this
 query** — it omits `max_size`, so Direction-2 still heap-fetches every (ext) row to
 test size. FB-A1's measured +9.5 GB used that wrong index. **This experiment measures
-the *correct* `(extension, max_size) INCLUDE (info_hash)` covering index instead.**
+the _correct_ `(extension, max_size) INCLUDE (info_hash)` covering index instead.**
 
 ---
 
@@ -107,16 +108,15 @@ All built from `torrent_files` on the bench restore (full 879.5 M rows / 261 GB;
 multi-file torrents only — single-file ext stays on `torrents.extension`). Expected
 ~**54.8 M rows** (FB-A1), ~47,628 distinct extensions.
 
-| variant | key | payload | secondary index | purpose |
-|---------|-----|---------|------------------|---------|
-| **V1** natural, max-only | `(info_hash bytea, extension text)` PK | `max_size int8` | — | minimal Direction-1-only |
-| **V1+idx** natural, max-only, +covering | same | `max_size` | `(extension, max_size) INCLUDE (info_hash)` | minimal Direction-1 **and** Direction-2 → **the recommended-if-built shape** |
-| **V2** natural, +count+min | same | `max_size, min_size int8, file_count int4` | `(extension, max_size) INCLUDE (info_hash)` | cost of carrying count/min (do they earn it?) |
-| **V3** surrogate, max-only, +covering | `(torrent_id int4, ext_id int4)` PK | `max_size int8` | `(ext_id, max_size) INCLUDE (torrent_id)` + `dim_torrent`, `dim_ext` | does an int4 surrogate beat natural enough to justify a join-at-query-time? |
+| variant                                 | key                                    | payload                                    | secondary index                                                      | purpose                                                                      |
+| --------------------------------------- | -------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **V1** natural, max-only                | `(info_hash bytea, extension text)` PK | `max_size int8`                            | —                                                                    | minimal Direction-1-only                                                     |
+| **V1+idx** natural, max-only, +covering | same                                   | `max_size`                                 | `(extension, max_size) INCLUDE (info_hash)`                          | minimal Direction-1 **and** Direction-2 → **the recommended-if-built shape** |
+| **V2** natural, +count+min              | same                                   | `max_size, min_size int8, file_count int4` | `(extension, max_size) INCLUDE (info_hash)`                          | cost of carrying count/min (do they earn it?)                                |
+| **V3** surrogate, max-only, +covering   | `(torrent_id int4, ext_id int4)` PK    | `max_size int8`                            | `(ext_id, max_size) INCLUDE (torrent_id)` + `dim_torrent`, `dim_ext` | does an int4 surrogate beat natural enough to justify a join-at-query-time?  |
 
 > The build SQL is RUN-3's (`run3-pg-sizing-bench.sql` §2–3) **with two corrections**:
-> (1) the secondary index is `(extension, max_size) INCLUDE (info_hash)` — *not*
-> `(extension, info_hash)` (wrong for the size range) and *not* `(extension, mx)`
+> (1) the secondary index is `(extension, max_size) INCLUDE (info_hash)` — _not_ > `(extension, info_hash)` (wrong for the size range) and _not_ `(extension, mx)`
 > without INCLUDE (forces heap fetch for info_hash in Direction-2);
 > (2) measure each index **separately** so the ±secondary delta is explicit.
 
@@ -193,17 +193,17 @@ UNION ALL SELECT 'V3 total_GB(+dims)',
 
 ### 3.3 Predicted sizes (from FB-A1 + RUN-3 + ARCH-C; the run confirms/corrects)
 
-| variant | heap | PK | secondary `(ext,max_size)+incl` | **total** | note |
-|---------|------|----|----------------------------------|-----------|------|
-| V1 (no sec) | ~3.5 GB | ~3.0 GB | — | **~6.5 GB** | Direction-1 only |
-| **V1+idx** | ~3.5 GB | ~3.0 GB | ~3.5 GB | **~10 GB** | the if-built shape; ≈ FB-A1's 9.5 GB but with the *right* index |
-| V2 (+count+min) | ~4.4 GB | ~3.0 GB | ~3.5 GB | **~11 GB** | +count+min ≈ +0.9–1.0 GB heap for **no ext∧max_size benefit** |
-| V3 surrogate (+dims) | ~1.3 GB | ~1.3 GB | ~1.5 GB + dims ~1.0 GB | **~5 GB** | smallest, **but** needs a `dim_torrent` join at query time (§5) |
+| variant              | heap    | PK      | secondary `(ext,max_size)+incl` | **total**   | note                                                            |
+| -------------------- | ------- | ------- | ------------------------------- | ----------- | --------------------------------------------------------------- |
+| V1 (no sec)          | ~3.5 GB | ~3.0 GB | —                               | **~6.5 GB** | Direction-1 only                                                |
+| **V1+idx**           | ~3.5 GB | ~3.0 GB | ~3.5 GB                         | **~10 GB**  | the if-built shape; ≈ FB-A1's 9.5 GB but with the _right_ index |
+| V2 (+count+min)      | ~4.4 GB | ~3.0 GB | ~3.5 GB                         | **~11 GB**  | +count+min ≈ +0.9–1.0 GB heap for **no ext∧max_size benefit**   |
+| V3 surrogate (+dims) | ~1.3 GB | ~1.3 GB | ~1.5 GB + dims ~1.0 GB          | **~5 GB**   | smallest, **but** needs a `dim_torrent` join at query time (§5) |
 
 > **Reconciliation note for the run:** FB-A1 measured **+9.5 GB** for the deployed-candidate
 > shape (PK + `(extension, info_hash)` secondary, with `max_size`). RUN-3 predicted
 > "natural ~5.5–6.5 GB / surrogate ~3–3.5 GB" but that was the **no-secondary-or-wrong-secondary**
-> form. The honest number for a *usable* ext∧max_size agg (both directions) is **~10 GB
+> form. The honest number for a _usable_ ext∧max_size agg (both directions) is **~10 GB
 > natural / ~5 GB surrogate-incl-dims** — record the measured values and supersede both
 > earlier estimates here.
 
@@ -216,11 +216,11 @@ UNION ALL SELECT 'V3 total_GB(+dims)',
 The torrent-grain ext∧max_size = the **distinct-torrent collapse** workload, already
 measured on the **same 879.5 M-row restore**, 24 cores (ARCH-C §1 row 1a, §2 rows B/D/E):
 
-| DuckDB form | "mkv > 1 GB" → distinct torrents | exact COUNT | rare-ext range |
-|-------------|----------------------------------|-------------|-----------------|
-| `files_slim` **unsorted** (3.86 GB) | collapse **1331 ms** | 1024 ms | 48 ms |
-| `files_slim` **sorted (ext,size)** (10.3 GB) | collapse **132 ms** (zonemap prune) | exact count **17 ms** | **19 ms** |
-| **DuckDB `agg_torrent_ext` Parquet** rollup (v7, **1.39 GB**, 56 M rows) | collapse **5.2 ms** | — | — |
+| DuckDB form                                                              | "mkv > 1 GB" → distinct torrents    | exact COUNT           | rare-ext range |
+| ------------------------------------------------------------------------ | ----------------------------------- | --------------------- | -------------- |
+| `files_slim` **unsorted** (3.86 GB)                                      | collapse **1331 ms**                | 1024 ms               | 48 ms          |
+| `files_slim` **sorted (ext,size)** (10.3 GB)                             | collapse **132 ms** (zonemap prune) | exact count **17 ms** | **19 ms**      |
+| **DuckDB `agg_torrent_ext` Parquet** rollup (v7, **1.39 GB**, 56 M rows) | collapse **5.2 ms**                 | —                     | —              |
 
 Ground truth from ARCH-C: mkv>1 GB = **5,699,629 files / 1,723,793 distinct torrents**;
 movie ∧ mkv>1 GB (JOIN→PG) = 728,574 torrents. **DuckDB serves ext∧max_size at
@@ -234,12 +234,12 @@ Run **both directions** × a **threshold/selectivity matrix**, `EXPLAIN (ANALYZE
 cold (`drop_caches`) then 3 warm reps, single connection. Use the **same exts/thresholds**
 as FB-A1/ARCH-C for comparability:
 
-| ext | threshold | selectivity | exercises |
-|-----|-----------|-------------|-----------|
-| mkv | > 1 GB | broad (~1.7 M torrents) | Direction-2 worst case (huge result) |
-| iso | > 4 GB | medium | DVD/BD discovery |
-| vob | > 0 | rare ext | zonemap/PK prune |
-| epub | > 0 | rare-ish | small-file ext |
+| ext  | threshold | selectivity             | exercises                            |
+| ---- | --------- | ----------------------- | ------------------------------------ |
+| mkv  | > 1 GB    | broad (~1.7 M torrents) | Direction-2 worst case (huge result) |
+| iso  | > 4 GB    | medium                  | DVD/BD discovery                     |
+| vob  | > 0       | rare ext                | zonemap/PK prune                     |
+| epub | > 0       | rare-ish                | small-file ext                       |
 
 **Direction-1 (probe, text-first)** — simulate a selective outer set (the realistic UI
 path: search box already cut torrents to a few thousand). Materialize a 5 k-info_hash
@@ -278,10 +278,10 @@ prove the `INCLUDE (info_hash)` covering index is necessary.
 
 ### 4.3 Cross-engine reality for backend D (the load-bearing adversarial measurement)
 
-DuckDB serving ext∧max_size is **not** free to *compose into the main PG search* —
+DuckDB serving ext∧max*size is **not** free to \_compose into the main PG search* —
 it produces an `info_hash` set in a different engine. Two integration modes, both to be
 characterized (cardinality + handoff cost), because they decide whether D can actually
-*replace* B:
+_replace_ B:
 
 1. **Filter-first standalone (discovery):** DuckDB returns the page of info_hashes
    directly (collapse 5–132 ms) → PG hydrates 21 rows by PK (`torrent_contents` point
@@ -314,7 +314,7 @@ ext∧max_size must be a **composable correlated filter inside the text-search U
     to maintain. Natural key composes as a clean one-line EXISTS (the §2 shape). The
     disk saved (~5 GB) is not worth the query/maintenance complexity for a single filter.
 - **Indexes:** PK `(info_hash, extension)` (Direction-1 probe) **+** `(extension,
-  max_size) INCLUDE (info_hash)` (Direction-2 covering). **Not** `(extension, info_hash)`
+max_size) INCLUDE (info_hash)` (Direction-2 covering). **Not** `(extension, info_hash)`
   (FB-A1's index — wrong for the size range; §4.2 control quantifies the penalty).
 - **Hardened rollout** (per L2-P0 §3 note): create heap → COPY-seed → build indexes →
   ANALYZE; FK `REFERENCES torrents(info_hash) ON DELETE CASCADE` added `NOT VALID` then
@@ -333,8 +333,8 @@ Stack the measured facts against the agg's ~10 GB + pipeline + checker:
 2. **DuckDB already answers it at 5–132 ms, +0 PG disk.** The per-file slim Parquet (the
    per-file search tier ships it regardless) carries `size`; the optional DuckDB
    `agg_torrent_ext` **Parquet** rollup is **1.39 GB out-of-PG** and collapses in **5.2 ms**
-   (ARCH-C). Same data, same ~55 M rows — but on the side of the fence we're *adding*
-   capacity, not the side we're *shedding*.
+   (ARCH-C). Same data, same ~55 M rows — but on the side of the fence we're _adding_
+   capacity, not the side we're _shedding_.
 3. **The DROP project's whole point is shedding PG disk** (−245 GB). Re-adding ~10 GB to
    PG to serve one hypothetical query is a direct regression against the goal. A DuckDB
    Parquet rollup achieves the identical query at ~1.4 GB **outside** PG.
@@ -345,6 +345,7 @@ Stack the measured facts against the agg's ~10 GB + pipeline + checker:
    a checker for nothing.
 
 **Recommendation to the lead:**
+
 - **Keep `agg_torrent_ext` DEFERRED / unbuilt.** Mark it **retired from the active plan**;
   ext∧max_size, if/when surfaced, is served by the **DuckDB tier** (standalone discovery:
   slim Parquet sorted(ext,size) 132 ms, or the +1.4 GB out-of-PG Parquet rollup 5.2 ms).
@@ -354,7 +355,7 @@ Stack the measured facts against the agg's ~10 GB + pipeline + checker:
   lands, build the **§5.1 minimal natural-key max-only shape (~10 GB)** with the corrected
   covering index — not the surrogate, not count/min, not the `(extension, info_hash)` index.
 
-This experiment's value is to **nail the numbers** (exact agg size with the *correct*
+This experiment's value is to **nail the numbers** (exact agg size with the _correct_
 index; PG ext∧max_size latency vs the DuckDB numbers already in hand) so the retire
 decision is data-grounded rather than estimated — and so a future re-open starts from
 the right shape.
@@ -364,6 +365,7 @@ the right shape.
 ## 6. Success criteria
 
 The run is complete when it has produced, on the bench restore:
+
 1. **Exact `pg_total_relation_size`** for V1, V1+idx, V2, V3 (+dims), with the heap / PK /
    secondary broken out and bytes/row — superseding the FB-A1 (+9.5 GB, wrong index) and
    RUN-3 (+3–5 GB, no/wrong index) estimates with the **correct-index** number.
@@ -379,6 +381,7 @@ The run is complete when it has produced, on the bench restore:
    a committed UI-filter requirement).
 
 **Gate flags:**
+
 - **RETIRE-agg** (expected): Part-2 confirms DuckDB serves standalone ext∧max_size
   ≤200 ms AND no committed UI-filter requirement exists ⇒ `agg_torrent_ext` is removed
   from the plan; ext∧max_size routed to DuckDB.
@@ -410,7 +413,7 @@ The run is complete when it has produced, on the bench restore:
 - **Cold/warm:** `echo 3 > /proc/sys/vm/drop_caches` (or restart the pod) before the cold
   rep; 3 warm reps after. `\timing on`, `ON_ERROR_STOP on`.
 - **Teardown:** these tables live in the throwaway bench DB; RUN-6 (`make
-  bitmagnet-bench-pg-teardown`) drops the whole namespace + PVC. Drop `slim_*`/big interim
+bitmagnet-bench-pg-teardown`) drops the whole namespace + PVC. Drop `slim_*`/big interim
   tables immediately after measuring to bound peak disk (RUN-3 pattern).
 - **Be patient during long runs** (per working-style memory): no status-polling; report
   on completion.
@@ -419,11 +422,11 @@ The run is complete when it has produced, on the bench restore:
 
 ## 8. One-line summary for the lead
 
-Finalized: the *correct* usable agg shape for ext∧max_size is natural-key, max-only,
+Finalized: the _correct_ usable agg shape for ext∧max*size is natural-key, max-only,
 PK + `(extension, max_size) INCLUDE (info_hash)` ≈ **~10 GB** (not the +3–5 GB estimate —
-that omitted the size index; FB-A1's +9.5 GB used the *wrong* index). But the adversarial
-read says **don't build it**: ext∧max_size has no committed query, DuckDB already serves
-it at **5–132 ms with +0 PG disk** (out-of-PG 1.4 GB Parquet rollup vs +10 GB *into* the
+that omitted the size index; FB-A1's +9.5 GB used the \_wrong* index). But the adversarial
+read says **don't build it**: ext∧max*size has no committed query, DuckDB already serves
+it at **5–132 ms with +0 PG disk** (out-of-PG 1.4 GB Parquet rollup vs +10 GB \_into* the
 DB we're shrinking), and agg only wins in an uncommitted "correlated filter inside the PG
 text-search UI" scenario. **Recommend: retire `agg_torrent_ext` from the plan; route
 ext∧max_size to the DuckDB tier; re-open only on a hard UI-filter product requirement.**

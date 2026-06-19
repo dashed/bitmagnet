@@ -102,6 +102,7 @@ func (t TorrentQuery) filesFromBlob(
 	}
 
 	dao := t.Dao.Torrent.WithContext(ctx)
+
 	if len(in.InfoHashes) > 0 {
 		valuers := make([]driver.Valuer, len(in.InfoHashes))
 		for i, h := range in.InfoHashes {

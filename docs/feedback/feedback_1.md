@@ -1,4 +1,4 @@
-According to the 2026-06-08 design doc, I’d **keep the core strategy**: blob as the durable replacement, prove-before-drop, DuckDB-on-Parquet for net-new structured file search, and no default Tantivy/CJK index. The benchmarks are strong enough to justify rejecting the 873M-doc structured Tantivy path, and the doc correctly separates the actual DROP gate from net-new cross-file search.  
+According to the 2026-06-08 design doc, I’d **keep the core strategy**: blob as the durable replacement, prove-before-drop, DuckDB-on-Parquet for net-new structured file search, and no default Tantivy/CJK index. The benchmarks are strong enough to justify rejecting the 873M-doc structured Tantivy path, and the doc correctly separates the actual DROP gate from net-new cross-file search.
 
 But yes: **we can do better.** The biggest improvement is to shrink the critical path and make the correctness model harder to accidentally violate.
 
@@ -17,7 +17,7 @@ But yes: **we can do better.** The biggest improvement is to shrink the critical
 
 ## The biggest opportunity: try deleting `agg_torrent_ext` from the DROP gate
 
-The doc says the live search hot path only needs **distinct-torrent extension/file-type presence**, not file counts or per-file grouping. It also says the migration already created path-derived `file_extensions` JSONB on `torrents`, plus `torrent_file_summary.extensions`.  
+The doc says the live search hot path only needs **distinct-torrent extension/file-type presence**, not file counts or per-file grouping. It also says the migration already created path-derived `file_extensions` JSONB on `torrents`, plus `torrent_file_summary.extensions`.
 
 That means the cheapest possible DROP-gate replacement is probably:
 
@@ -48,11 +48,11 @@ WHERE ...
 
 Run it for common, rare, and broad queries: `mkv`, `mp4`, `srt`, `jpg`, `zip`, “video file type” extension lists, and the current facet loop. If it is within budget, **skip `agg_torrent_ext` for the DROP gate**. Keep `agg_torrent_ext` only if JSONB plans are unstable or if you want PG to serve `extension ∧ max_size` later.
 
-That could save ~5–6 GB, a new seed pipeline, a new drift surface, FK/index maintenance, and a whole checker class. The existing doc already says the aggregate is ~55M rows and ~5–6 GB for the max-size form, so it is worth proving the zero-new-table path first. 
+That could save ~5–6 GB, a new seed pipeline, a new drift surface, FK/index maintenance, and a whole checker class. The existing doc already says the aggregate is ~55M rows and ~5–6 GB for the max-size form, so it is worth proving the zero-new-table path first.
 
 ## Fix the source-of-truth contract before any new layer
 
-The doc correctly identifies G1: extension must be derived from the path, never from blob `e`; it also says crawl-path blobs can have empty `e`, while backfilled blobs are correct, producing split data-at-rest. 
+The doc correctly identifies G1: extension must be derived from the path, never from blob `e`; it also says crawl-path blobs can have empty `e`, while backfilled blobs are correct, producing split data-at-rest.
 
 I’d make that stricter:
 
@@ -81,7 +81,7 @@ This is a small change with a huge payoff: exporters, browser hydration, PG aggr
 
 ## The base+delta algorithm needs a tombstone file
 
-The current DuckDB view anti-joins base rows against `delta.fact.parquet` keys. That is correct only if every changed torrent has at least one row in the delta fact. 
+The current DuckDB view anti-joins base rows against `delta.fact.parquet` keys. That is correct only if every changed torrent has at least one row in the delta fact.
 
 It breaks when a torrent changes to:
 
@@ -122,9 +122,9 @@ That also makes the anti-join cheaper and clearer, because the right side is dis
 
 ## Watermarks need to cover more than `torrents.updated_at`
 
-The design says the delta job carves `torrents WHERE updated_at > :watermark` and needs an index on `torrents.updated_at`.  That is fine only for file-list changes if `updated_at` is guaranteed to advance on every relevant file/blob write.
+The design says the delta job carves `torrents WHERE updated_at > :watermark` and needs an index on `torrents.updated_at`. That is fine only for file-list changes if `updated_at` is guaranteed to advance on every relevant file/blob write.
 
-But the proposed DuckDB fact also denormalizes `content_type`, `published_at`, and `created_at`.  Those can change outside `torrents.files_data`:
+But the proposed DuckDB fact also denormalizes `content_type`, `published_at`, and `created_at`. Those can change outside `torrents.files_data`:
 
 ```text
 torrent_contents classification changes
@@ -160,7 +160,7 @@ Also set Kubernetes `concurrencyPolicy: Forbid` and use a PG advisory lock so mi
 
 ## DuckDB deployment should be immutable/read-only
 
-The doc proposes a sidecar plus separate delta/compaction CronJobs.  Current DuckDB docs say one process can read-write, while multiple processes can read the same DB only in read-only mode; write concurrency across multiple processes is a different, newer model and not what you want for this simple sidecar. ([DuckDB][2])
+The doc proposes a sidecar plus separate delta/compaction CronJobs. Current DuckDB docs say one process can read-write, while multiple processes can read the same DB only in read-only mode; write concurrency across multiple processes is a different, newer model and not what you want for this simple sidecar. ([DuckDB][2])
 
 So the production rule should be:
 
@@ -192,7 +192,7 @@ Bundle layout:
 
 ## Harden DuckDB as if SQL is code
 
-The doc already says structured filters are parameterized and path substring is bound.  Good. I’d still add explicit sandboxing because DuckDB can read/write files, access network-backed data sources, load extensions, and consume large memory/CPU; DuckDB’s own security guidance says untrusted SQL should be treated like code and isolated with sandboxing, restricted capabilities, timeouts, and input validation. ([DuckDB][3])
+The doc already says structured filters are parameterized and path substring is bound. Good. I’d still add explicit sandboxing because DuckDB can read/write files, access network-backed data sources, load extensions, and consume large memory/CPU; DuckDB’s own security guidance says untrusted SQL should be treated like code and isolated with sandboxing, restricted capabilities, timeouts, and input validation. ([DuckDB][3])
 
 Practical additions:
 
@@ -220,7 +220,7 @@ Otherwise a user searching `%` or `_` can accidentally force a broad scan.
 
 ## If `agg_torrent_ext` survives, change its rollout
 
-The proposed DDL is reasonable for a table that starts empty.  But for production seed and future rebuilds, I’d change the operational plan:
+The proposed DDL is reasonable for a table that starts empty. But for production seed and future rebuilds, I’d change the operational plan:
 
 ```text
 1. Create table without the secondary index.
@@ -261,7 +261,7 @@ Several numbers are individually plausible but look inconsistent in one document
 L2 +4–12 GB vs optimized all-in +16-ish GB
 ```
 
-The doc explains some of this implicitly: benchmark corpus came from a pre-cutover dump, while deployed state is production later/elsewhere.  But a reader will still stumble.
+The doc explains some of this implicitly: benchmark corpus came from a pre-cutover dump, while deployed state is production later/elsewhere. But a reader will still stumble.
 
 Add a “measurement provenance” table:
 
@@ -283,7 +283,7 @@ All-in L2:        +8–18 GB
 Total after L1+L2: roughly 27–37 GB
 ```
 
-That matches the later table showing blob-only ~19 GB, cheap search ~27 GB, optimized search ~35 GB. 
+That matches the later table showing blob-only ~19 GB, cheap search ~27 GB, optimized search ~35 GB.
 
 ## Revised build order
 

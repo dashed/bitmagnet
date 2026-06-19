@@ -338,7 +338,7 @@ impl Engine for InMemoryEngine {
             b.total_size = b.total_size.saturating_add(r.size);
         }
         let mut out: Vec<FacetBucketRow> = buckets.into_values().collect();
-        out.sort_by(|a, b| b.count.cmp(&a.count));
+        out.sort_by_key(|b| std::cmp::Reverse(b.count));
         Ok(out)
     }
 }

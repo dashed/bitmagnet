@@ -8,16 +8,16 @@ Scales built: **N = 1M / 10M / 50M docs**, all 11 schema variants (V1–V11), ea
 
 ## 1. SIZE — per-component bytes/doc @ 50M → extrapolated to 879.5M
 
-| variant | B/doc @50M | **→ 879.5M** | meaning |
-|---|---|---|---|
-| **V10 — FAST-only (spec "recommended")** | 28.90 | **~25.4 GB** | drop INDEXED, but still STORED `doc_id` |
-| V9 — INDEXED (spec-as-written) | 35.52 | ~31.2 GB | size+published INDEXED\|FAST |
-| **V9 − V10 = INDEXED numeric tax** | 6.62 | **~5.8 GB** | dropping with N (9.55→7.70→6.62) → my 3.6–6 GB prediction ✅ |
-| `doc_id` STORED component | 13.70 | **~12.0 GB** | 🚨 the giant; §6 guessed 1–2 GB |
-| FAST columns (V10) | 9.03 | ~7.9 GB | size ~4.0 + published ~2.9 + ext/ct fast ~2.1 ✅ matches prediction |
-| `.fieldnorm` (V10, 2 text fields) | 2.00 | ~1.8 GB | avoidable via `set_fieldnorms(false)` |
-| **V1 stored-doc_id vs V2 FAST-identity** | 16.15 vs 8.76 | **save ~6.5 GB** | identity choice = biggest single lever |
-| V11 — + path (v1.1 FTS) | 51.00 | ~44.9 GB | positions 4.7 + postings 17.4 + dicts 3.3 — the expensive axis |
+| variant                                  | B/doc @50M    | **→ 879.5M**     | meaning                                                             |
+| ---------------------------------------- | ------------- | ---------------- | ------------------------------------------------------------------- |
+| **V10 — FAST-only (spec "recommended")** | 28.90         | **~25.4 GB**     | drop INDEXED, but still STORED `doc_id`                             |
+| V9 — INDEXED (spec-as-written)           | 35.52         | ~31.2 GB         | size+published INDEXED\|FAST                                        |
+| **V9 − V10 = INDEXED numeric tax**       | 6.62          | **~5.8 GB**      | dropping with N (9.55→7.70→6.62) → my 3.6–6 GB prediction ✅        |
+| `doc_id` STORED component                | 13.70         | **~12.0 GB**     | 🚨 the giant; §6 guessed 1–2 GB                                     |
+| FAST columns (V10)                       | 9.03          | ~7.9 GB          | size ~4.0 + published ~2.9 + ext/ct fast ~2.1 ✅ matches prediction |
+| `.fieldnorm` (V10, 2 text fields)        | 2.00          | ~1.8 GB          | avoidable via `set_fieldnorms(false)`                               |
+| **V1 stored-doc_id vs V2 FAST-identity** | 16.15 vs 8.76 | **save ~6.5 GB** | identity choice = biggest single lever                              |
+| V11 — + path (v1.1 FTS)                  | 51.00         | ~44.9 GB         | positions 4.7 + postings 17.4 + dicts 3.3 — the expensive axis      |
 
 **On-disk confirmation:** the V10 directory = 1.38 GB at 50M → 24.3 GB at 879.5M ✓.
 
@@ -41,16 +41,17 @@ Scales built: **N = 1M / 10M / 50M docs**, all 11 schema variants (V1–V11), ea
 
 `SearchFiles` = `ext ∈ {…} ∧ size ≥ T`, sweeping 10 common extensions × {0, 100 MB, 1 GB}. Avg **~950k matching files/query** at 50M.
 
-| scenario | V10 (FAST-only) @50M | V9 (INDEXED) @50M |
-|---|---|---|
-| **A — file-level top-20 + exact count** | **p50 72.9ms / p95 208ms / p99 225ms** | p50 95.6ms / p95 209ms |
-| B — collapse-to-torrent (scan + dedup, worst-case) | p50 111ms / p95 **3379ms** | p50 110ms / p95 3382ms |
+| scenario                                           | V10 (FAST-only) @50M                   | V9 (INDEXED) @50M      |
+| -------------------------------------------------- | -------------------------------------- | ---------------------- |
+| **A — file-level top-20 + exact count**            | **p50 72.9ms / p95 208ms / p99 225ms** | p50 95.6ms / p95 209ms |
+| B — collapse-to-torrent (scan + dedup, worst-case) | p50 111ms / p95 **3379ms**             | p50 110ms / p95 3382ms |
 
 **Findings:**
+
 1. **Even at 50M, scenario A is already >50ms** (p50 73ms). It is **scan-bound**: a filter-only query has no selective text term, so Tantivy enumerates the entire match set (no early-termination ordering by a non-sort fast field). Latency ∝ match-set size.
 2. **At 879.5M (~17.6× the matches), broad `ext∧size` ≈ p50 ~1.3s, p95 ~3.7s.** The headline "<50ms" does **NOT** hold for the common broad query.
 3. **V9 ≈ V10** → INDEXED gives **zero** range-latency benefit (range served by `FastFieldRangeWeight` in both). Confirms dropping INDEXED is free.
-4. **The v1 file index has NO free-text field** (per-file path FTS is v1.1: +45 GB, CJK-broken). So v1 answers *only* structured filters — exactly the scan-bound case.
+4. **The v1 file index has NO free-text field** (per-file path FTS is v1.1: +45 GB, CJK-broken). So v1 answers _only_ structured filters — exactly the scan-bound case.
 
 ---
 

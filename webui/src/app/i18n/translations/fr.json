@@ -84,6 +84,22 @@
       "total_counts_by_status": "Totaux par statut"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Type de contenu",
     "file_type": "Type de fichier",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "Tous",
+    "apply": "__missing__",
     "dismiss": "Fermer",
     "error": "Erreur",
     "none": "Aucun",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "Classification",
     "clear_search": "Effacer la recherche",
+    "clear_size_filter": "__missing__",
     "copy": "Copier",
     "copy_to_clipboard": "Copier dans le presse-papiers",
     "delete": "Supprimer",
@@ -263,6 +281,8 @@
     "leechers": "Leechers",
     "magnet": "Magnet",
     "magnet_links": "Liens Magnet",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Nouveau tag",
     "order_by": "Trier par",
     "order_direction_toggle": "Inverser le sens",
@@ -281,6 +301,7 @@
     "permalink": "Permalien",
     "poster": "Affiche",
     "published": "Publié",
+    "published_date_filter": "__missing__",
     "rating": "Évaluation",
     "refresh": "Rafraîchir les résultats",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "Tout sélectionner",
     "showing_x_of_y_files": "Affichage de {{x}} sur {{y}} fichiers",
     "size": "Taille",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Source du torrent",
     "summary": "Résumé",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "Titre",
     "toggle_drawer": "Basculer le tiroir",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} votes"
   },
   "version": {

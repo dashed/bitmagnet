@@ -12,11 +12,11 @@
 
 Replace the dropped 273 GB `torrent_files` table with a **3-tier composition**, each tier as fresh as its workload needs and **none requiring a per-file search index**:
 
-| Tier | Covers | Store | Freshness | Latency |
-|---|---|---|---|---|
-| **0 — served, in-app** | per-torrent **browse**, ext filter/sort, distinct-torrent **collapse** + **facets**, one-sided counts | the **blob** (`files_data`) + a **PG `agg_torrent_ext`** rollup | **real-time** (synchronous dual-write) | <50 ms |
-| **1 — interactive per-file search** | per-file `ext∧size`, two-sided ranges, path search, exact per-file counts | **DuckDB** over a **sorted slim Parquet + native rollup tables** (~12.3 GB) | eventually-consistent, ≤ refresh cadence (~15 min–hours, rebuild is ~3–5 min) | **<150 ms** (most <35 ms) |
-| **2 — analytics / arbitrary SQL** | histograms, percentiles, GROUP BY, cross-store JOINs, dedup, quality heuristics, **future queries** | same DuckDB, on-demand | ≤ refresh cadence | 0.03–few s (heavy batch up to ~2 min) |
+| Tier                                | Covers                                                                                                | Store                                                                       | Freshness                                                                     | Latency                               |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------- |
+| **0 — served, in-app**              | per-torrent **browse**, ext filter/sort, distinct-torrent **collapse** + **facets**, one-sided counts | the **blob** (`files_data`) + a **PG `agg_torrent_ext`** rollup             | **real-time** (synchronous dual-write)                                        | <50 ms                                |
+| **1 — interactive per-file search** | per-file `ext∧size`, two-sided ranges, path search, exact per-file counts                             | **DuckDB** over a **sorted slim Parquet + native rollup tables** (~12.3 GB) | eventually-consistent, ≤ refresh cadence (~15 min–hours, rebuild is ~3–5 min) | **<150 ms** (most <35 ms)             |
+| **2 — analytics / arbitrary SQL**   | histograms, percentiles, GROUP BY, cross-store JOINs, dedup, quality heuristics, **future queries**   | same DuckDB, on-demand                                                      | ≤ refresh cadence                                                             | 0.03–few s (heavy batch up to ~2 min) |
 
 **Tier 0 alone clears the `torrent_files` DROP** (no DuckDB needed). Tier 1/2 are a **separable, deferrable** DuckDB sidecar. Total marginal disk ≈ **+5.9–12.3 GB**; the deploy footprint is **~10× smaller** than the rejected Tantivy sidecar.
 
@@ -25,10 +25,11 @@ Replace the dropped 273 GB `torrent_files` table with a **3-tier composition**, 
 ## 1. Why this, not the index (benchmark verdict)
 
 Measured on the real corpus ([results doc](./file-grained-search-benchmark-results.md)):
+
 - The 873M-doc Tantivy file index is **scan-bound ~1.3 s p50** on the common `ext∧size` filter — **no `<50 ms` win** — and costs **+14–25 GB**.
 - **Optimized DuckDB-on-Parquet beats it on its own turf:** sort-by-(ext,size) → 7–60× (collapse 1311→132 ms, count 1024→**17 ms**); native **rollup tables → <50 ms** (GROUP BY **2.3 ms**); point lookup 0.2 ms.
 - A true filter-accelerating secondary index is **not a DuckDB capability** for this scan workload (ART `CREATE INDEX` → `EXPLAIN seq_scan`, confirmed in `src/optimizer`); the gains come from **zone-map pruning + pre-aggregation**, not an index.
-- **Future-proofing:** 7 of 8 future-query classes are *just new SQL* (zero re-index, zero migration) vs a new field + 32-min re-backfill *per query type* for the index.
+- **Future-proofing:** 7 of 8 future-query classes are _just new SQL_ (zero re-index, zero migration) vs a new field + 32-min re-backfill _per query type_ for the index.
 
 The **only** thing the index uniquely offered — per-keystroke CJK-aware free-text **path** search — is the lone carve-out (DuckDB's FTS/BM25 reaches 150 ms but at +34.9 GB + CJK-token-only, i.e. the same index+tokenizer cost). Gate that on an explicit product requirement.
 
@@ -41,7 +42,7 @@ Produced by one refresh pass from the **blobs** (`files_data`; G1 = extension pa
 1. **`files` fact Parquet** — `(info_hash, file_index, path, extension, size)`, **`ORDER BY extension, size`**, `ROW_GROUP_SIZE 1_000_000`, ZSTD, **bloom OFF** (redundant once sorted). Sorting enables row-group min/max pruning (`parquet_reader.cpp:1308`). **≈10.3 GB sorted** (vs 3.86 GB unsorted — the +6.4 GB buys the 7–60× on ranges).
 2. **`torrents` dim Parquet** — the **immutable** joinable torrent columns (`info_hash, info_hash_v2, meta_version, created_at, published_at, content_type, content_id/source, video_*, languages[], genres[]`). Enables time-trends + content/video JOINs as pure SQL. **Mutable attrs (seeders/leechers) are NOT frozen here — joined live from PG.**
 3. **Native rollup tables** (in a small `.duckdb`) — `per_ext` (~1 MB) + `per_torrent_ext {max,min,count}` (~1.3 GB): collapse/facets/one-sided-counts at **<50 ms**. ≈ **+2 GB**.
-4. **PG `agg_torrent_ext`** — the *same* per-(torrent,ext) rollup kept **live in Postgres** (Tier 0) for the served collapse/facet surface.
+4. **PG `agg_torrent_ext`** — the _same_ per-(torrent,ext) rollup kept **live in Postgres** (Tier 0) for the served collapse/facet surface.
 
 **Total ≈ 12.3 GB** (recommended) or **5.9 GB** lean (unsorted fact + rollups: keeps GROUP BY/collapse/counts <35 ms, accepts ~1.2 s for two-sided/rare-find). All ≪ the 200 Gi PVC that the rejected index would have used.
 
@@ -50,9 +51,9 @@ Produced by one refresh pass from the **blobs** (`files_data`; G1 = extension pa
 ## 3. Pipeline & freshness (3 tiers — see §"freshness" detail)
 
 - **Source = the blobs** (future-proof past the `torrent_files` DROP), decoded via the existing `blob_export` logic (~0.6–0.94 µs/file → full corpus ~1–2 min @ 16 threads).
-- **Refresh = scheduled FULL REBUILD + atomic swap** (Parquet is immutable; the (ext,size) sort needs the whole set). **~3–5 min** end-to-end (decode + write/sort + emit rollups). Versioned `v<ts>/` dir + `current` symlink swap; the sidecar re-opens on swap. Cost scales with *corpus*, not crawler rate.
+- **Refresh = scheduled FULL REBUILD + atomic swap** (Parquet is immutable; the (ext,size) sort needs the whole set). **~3–5 min** end-to-end (decode + write/sort + emit rollups). Versioned `v<ts>/` dir + `current` symlink swap; the sidecar re-opens on swap. Cost scales with _corpus_, not crawler rate.
 - **Incremental base+delta (EXP-B — VALIDATED on real data):** a large sorted **base** (rebuilt on compaction) + a tiny frequent **delta** of new/changed torrents → **~minute freshness at <250 ms query cost, no full rebuild.** Measured base+delta collapse latency: base-only 141 ms → +1k 179 ms → +10k 193 ms → **+100k torrents (~hours of crawl) 230 ms** (gentle, ~linear). Delta-append is **sub-second in production** (the processor already holds the new torrents + decoded blobs). Compaction trigger ≈ 1M delta torrents → an 83 s full rebuild + atomic swap. The write seam is the post-commit point in `dhtcrawler/persist.go runPersistTorrents`.
-  - 🚨 **Supersession is TORRENT-granular, via an ANTI-JOIN — not a per-row `row_number()`.** `files_data` is upsert-with-`DoUpdates` (`persist.go:113-123`) so a re-crawl can supersede a torrent's *whole fileset*. **Correct pattern (EXP-B-proven):** exclude from the base every `info_hash` present in the delta, then `UNION ALL` the delta — i.e. `base ANTI JOIN delta ON info_hash` ∪ `delta`. A naïve `row_number() OVER (PARTITION BY info_hash)=1` is **WRONG** (it keeps one *file* per torrent → drops a multi-file torrent's other files), and a window-max over the whole set is **80× slower (19 s vs 230 ms)**. The anti-join lets the base predicate prune via zonemaps and hash-anti-joins the tiny delta. Supersession correctness confirmed (a re-crawled torrent's old fileset is replaced, not double-counted).
+  - 🚨 **Supersession is TORRENT-granular, via an ANTI-JOIN — not a per-row `row_number()`.** `files_data` is upsert-with-`DoUpdates` (`persist.go:113-123`) so a re-crawl can supersede a torrent's _whole fileset_. **Correct pattern (EXP-B-proven):** exclude from the base every `info_hash` present in the delta, then `UNION ALL` the delta — i.e. `base ANTI JOIN delta ON info_hash` ∪ `delta`. A naïve `row_number() OVER (PARTITION BY info_hash)=1` is **WRONG** (it keeps one _file_ per torrent → drops a multi-file torrent's other files), and a window-max over the whole set is **80× slower (19 s vs 230 ms)**. The anti-join lets the base predicate prune via zonemaps and hash-anti-joins the tiny delta. Supersession correctness confirmed (a re-crawled torrent's old fileset is replaced, not double-counted).
 - **Freshness contract:**
   - **Browse / file-hydrate (blob):** **real-time** — synchronous in the crawl persist tx (already exists).
   - **Collapse / facets / one-sided counts (PG `agg_torrent_ext`):** **real-time** — importer dual-writes the rollup + periodic reconcile.
@@ -63,7 +64,7 @@ Produced by one refresh pass from the **blobs** (`files_data`; G1 = extension pa
 
 ## 4. Integration (DuckDB ↔ bitmagnet)
 
-- **Runtime = DuckDB SIDECAR (Rust, `duckdb-rs`)**, *not* embedded go-duckdb. Rationale (source-grounded): `ci.Dockerfile` is **pure-Go / CGO-disabled / musl / cross-compiled** — go-duckdb needs CGO + a 50–100 MB libduckdb → breaks the build for a default-off feature. `memory_limit`/`threads` are **global per DB instance** (`config.cpp`, `settings.hpp`) → heavy scans must be **isolated in a dedicated process** (the sidecar). **Reuse the already-scaffolded `bitmagnet-search` sidecar — swap the engine Tantivy→DuckDB**, keep the proto/client/role/PVC plumbing.
+- **Runtime = DuckDB SIDECAR (Rust, `duckdb-rs`)**, _not_ embedded go-duckdb. Rationale (source-grounded): `ci.Dockerfile` is **pure-Go / CGO-disabled / musl / cross-compiled** — go-duckdb needs CGO + a 50–100 MB libduckdb → breaks the build for a default-off feature. `memory_limit`/`threads` are **global per DB instance** (`config.cpp`, `settings.hpp`) → heavy scans must be **isolated in a dedicated process** (the sidecar). **Reuse the already-scaffolded `bitmagnet-search` sidecar — swap the engine Tantivy→DuckDB**, keep the proto/client/role/PVC plumbing.
 - **GraphQL wiring:** `torrentContent.fileSearch` → a direct-serve `filesearch.Service` → DuckDB (Tier 1); `TorrentQuery.files` (per-torrent browse) → the **blob** (G2), not DuckDB. Safe **prepared-statement** SQL only (`duckdb_prepare`/`bind_*`); ORDER BY allowlist; always `LIMIT`; opt-in `totalCount`. Hydrate hits (info_hash + file_index) from PG/blob — match by `Index`, not position; backfill empty per-file timestamps from the parent.
 - **Resource safety:** `SET memory_limit/threads`, READ_ONLY, sized temp dir, a concurrency semaphore for heavy queries.
 
@@ -80,6 +81,7 @@ Produced by one refresh pass from the **blobs** (`files_data`; G1 = extension pa
 ## 6. Prerequisites (the 0-GB code fixes — Tier 0, ship first)
 
 These clear the `torrent_files` DROP and are needed regardless:
+
 - **G1** — derive file extension from path (`FileExtensionFromPath`) everywhere, never the empty crawl-path blob `e`; add `extension` to the consistency checker. (Also fixes the deployed torrent-index `file_extensions` facet.)
 - **G2** — re-point `TorrentQuery.files` at the blob (`AfterFind`-decoded `t.Files`, in-memory orderBy/paginate/totalCount).
 - **Hydration** — per-file `created_at/updated_at` from the parent `torrent.created_at`; `ORDER BY index` re-sort.
@@ -89,7 +91,7 @@ These clear the `torrent_files` DROP and are needed regardless:
 
 ## 7. Future queries (forward-compatible by construction)
 
-Bake the **dim Parquet** + the `path` column in now → **7 of 8 future-query classes are just new SQL** (season-packs, time-trends, content/video JOINs, dedup/find-by-filename, fuzzy/regex path, quality heuristics, faceting). Only **BEP-52 per-file merkle** needs new per-file *data* (a blob-format bump + one re-export). Heavy cross-torrent dedup (~800M groups, ~134 s) is a documented **batch** job, not interactive.
+Bake the **dim Parquet** + the `path` column in now → **7 of 8 future-query classes are just new SQL** (season-packs, time-trends, content/video JOINs, dedup/find-by-filename, fuzzy/regex path, quality heuristics, faceting). Only **BEP-52 per-file merkle** needs new per-file _data_ (a blob-format bump + one re-export). Heavy cross-torrent dedup (~800M groups, ~134 s) is a documented **batch** job, not interactive.
 
 ---
 

@@ -58,21 +58,21 @@ The full HEL1 orchestration (single ssh, flock+setsid+.exit, teardown) is §6.
 All citations are from the vendored crate
 `~/.cargo/registry/src/index.crates.io-*/tantivy-0.26.1/src/`.
 
-| Claim | Evidence |
-|---|---|
-| `IndexReader` is cheap to clone & share across threads | `#[derive(Clone)] pub struct IndexReader { inner: Arc<InnerIndexReader>, … }` — `reader/mod.rs:266-269` |
-| The live searcher lives behind a lock-free swap cell | `searcher: arc_swap::ArcSwap<SearcherInner>` — `reader/mod.rs:156` |
-| `searcher()` is an atomic load+clone; **call it per query** | `fn searcher(&self){ self.searcher.load().clone().into() }` — `reader/mod.rs:255-257,298`; doc: *"This method should be called every single time a search query is performed. The same searcher must be used for a given query…"* — `reader/mod.rs:290-296` |
-| `reload()` = atomic store; in-flight queries keep their generation (MVCC) | `fn reload(){ … self.searcher.store(searcher); }` — `reader/mod.rs:243-253`. Old `Arc<SearcherInner>` stays alive for threads that already `load()`ed it. |
-| GC won't delete segment files a live searcher still references | `SearcherGeneration` tracked in an `Inventory<…>` keyed by generation id; `open_segment_readers` takes `META_LOCK` while opening — `reader/mod.rs:189-213,228`. We never call `garbage_collect_files` during E2. |
-| `Searcher` is Clone + Send+Sync (Arc wrapper) | `#[derive(Clone)] pub struct Searcher { inner: Arc<SearcherInner> }` — `core/searcher.rs:68-70` |
-| N reader threads = N **independent single-threaded** searches | `search()` → `self.inner.index.search_executor()` — `core/searcher.rs:205`; default executor is `Executor::single_thread()` — `index/index.rs:392`; `SingleThread.map` runs the closure **inline on the calling thread** — `core/executor.rs:51-58`. So one query never fans out across threads; concurrency comes purely from running many queries at once. |
-| Exactly one writer (directory lock) | `IndexWriter { _directory_lock: Option<DirectoryLock>, … }` — `indexer/index_writer.rs:74`; `commit(&mut self)` — `index_writer.rs:664`. The single E2 writer holds the lock; readers are independent. |
-| Index is Clone+Send+Sync | `#[derive(Clone)] pub struct Index { directory: ManagedDirectory, …, executor: Executor, … }` — `index/index.rs:266-274` |
+| Claim                                                                     | Evidence                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `IndexReader` is cheap to clone & share across threads                    | `#[derive(Clone)] pub struct IndexReader { inner: Arc<InnerIndexReader>, … }` — `reader/mod.rs:266-269`                                                                                                                                                                                                                                                      |
+| The live searcher lives behind a lock-free swap cell                      | `searcher: arc_swap::ArcSwap<SearcherInner>` — `reader/mod.rs:156`                                                                                                                                                                                                                                                                                           |
+| `searcher()` is an atomic load+clone; **call it per query**               | `fn searcher(&self){ self.searcher.load().clone().into() }` — `reader/mod.rs:255-257,298`; doc: _"This method should be called every single time a search query is performed. The same searcher must be used for a given query…"_ — `reader/mod.rs:290-296`                                                                                                  |
+| `reload()` = atomic store; in-flight queries keep their generation (MVCC) | `fn reload(){ … self.searcher.store(searcher); }` — `reader/mod.rs:243-253`. Old `Arc<SearcherInner>` stays alive for threads that already `load()`ed it.                                                                                                                                                                                                    |
+| GC won't delete segment files a live searcher still references            | `SearcherGeneration` tracked in an `Inventory<…>` keyed by generation id; `open_segment_readers` takes `META_LOCK` while opening — `reader/mod.rs:189-213,228`. We never call `garbage_collect_files` during E2.                                                                                                                                             |
+| `Searcher` is Clone + Send+Sync (Arc wrapper)                             | `#[derive(Clone)] pub struct Searcher { inner: Arc<SearcherInner> }` — `core/searcher.rs:68-70`                                                                                                                                                                                                                                                              |
+| N reader threads = N **independent single-threaded** searches             | `search()` → `self.inner.index.search_executor()` — `core/searcher.rs:205`; default executor is `Executor::single_thread()` — `index/index.rs:392`; `SingleThread.map` runs the closure **inline on the calling thread** — `core/executor.rs:51-58`. So one query never fans out across threads; concurrency comes purely from running many queries at once. |
+| Exactly one writer (directory lock)                                       | `IndexWriter { _directory_lock: Option<DirectoryLock>, … }` — `indexer/index_writer.rs:74`; `commit(&mut self)` — `index_writer.rs:664`. The single E2 writer holds the lock; readers are independent.                                                                                                                                                       |
+| Index is Clone+Send+Sync                                                  | `#[derive(Clone)] pub struct Index { directory: ManagedDirectory, …, executor: Executor, … }` — `index/index.rs:266-274`                                                                                                                                                                                                                                     |
 
 **Conclusion.** The faithful production model — and what `loadtest` implements — is:
 **one `Index`, one `IndexReader`** (Manual reload so E2 controls visibility),
-**N reader threads** each calling `reader.searcher()` *per query*, optional **one
+**N reader threads** each calling `reader.searcher()` _per query_, optional **one
 writer** that `commit()`s then `reader.reload()`s. This is lock-free on the read
 path, MVCC-safe under concurrent writes, and uses true OS parallelism up to the
 core count. `std::thread::scope` lets reader threads borrow `&Index`/`&[QuerySpec]`
@@ -85,17 +85,17 @@ and build their own `Box<dyn Query>` (so `Query` need never be `Send`).
 **Goal:** does the index degrade gracefully as concurrent typeahead users scale to
 the core count, and do the per-client numbers hold?
 
-* `N ∈ {1, 2, 4, 8, 16, 24}` reader threads sharing one `Index`+`IndexReader`.
-* Each thread loops the query mix for a fixed wall-clock (`--duration-secs`,
+- `N ∈ {1, 2, 4, 8, 16, 24}` reader threads sharing one `Index`+`IndexReader`.
+- Each thread loops the query mix for a fixed wall-clock (`--duration-secs`,
   default 75 s after a `--warmup-secs` page-cache warm-up), doing **both**
   collectors per query:
-  * `Count` (cheap match count), and
-  * the production page collector
+  - `Count` (cheap match count), and
+  - the production page collector
     `TopDocs::with_limit(30).order_by_fast_field::<u64>("ident", Desc)` — a full
     match-set scan + top-K heap with **no early-term** (tantivy 0.26.1), so
     ordering by `ident` is a value-independent proxy for ordering by `seeders`
     (same justification `pathquery --topdocs` uses).
-* **Query mix** = `queries_realistic.tsv` (a1_broad/a2_2word/a3_dotted/a4_long/
+- **Query mix** = `queries_realistic.tsv` (a1_broad/a2_2word/a3_dotted/a4_long/
   cjk2word) **+** the `ascii3`/`cjk3` GATE rows of `ps_prefix_sweep.tsv` (the
   broadest per-keystroke firing queries). Build the merged file once:
 
@@ -103,6 +103,7 @@ the core count, and do the per-client numbers hold?
   cd bench-file-index/queries
   { cat queries_realistic.tsv; grep -E '^(ascii3|cjk3)\b' ps_prefix_sweep.tsv; } > loadtest_mix.tsv
   ```
+
   (or pass both files with `--groups ascii3,cjk3,a1_broad,a2_2word,a3_dotted,a4_long,cjk2word`.)
 
 **Output** (per N): aggregate QPS (iters/s and searches/s) + per-group
@@ -118,7 +119,7 @@ segment readers; it writes nothing.)
 ## 3. E2 — readers + ONE live writer
 
 **Goal:** reader latency while a writer commits on the same mmap; commit→searchable
-fresh-lag *under read load*; segment growth under default `LogMergePolicy`.
+fresh-lag _under read load_; segment growth under default `LogMergePolicy`.
 
 Fixed `--e2-readers` (default **24** = worst contention, compared to the E1 N=24
 row) while sweeping writer rate `--write-rates 5,20,50` torrents/s. The full
@@ -136,31 +137,32 @@ writer thread**. The writer, paced to the target rate:
 **Two write modes** (auto-selected by whether the index has an indexed `info_hash`
 key — see §4):
 
-* **E2a `append`** — runs on a `cp -r` COPY of the real `idx_pt_ngram_wf`
+- **E2a `append`** — runs on a `cp -r` COPY of the real `idx_pt_ngram_wf`
   (keyless). Readers hit the **real 13 GiB read scale**; the writer appends. This
   is the load-relevant reader-under-write + add-fresh-lag + seg-growth result.
   (Appends are bounded: 50/s × 75 s = 3,750 docs vs 17 M.)
-* **E2b `supersede`** — runs on a **keyed** ngram index (built with
+- **E2b `supersede`** — runs on a **keyed** ngram index (built with
   `recall --with-delete-key`, §4). True per-torrent `delete_term`+re-add under
   read load. EXP-E already pinned single-writer supersession at ~11 ms; E2b shows
   it holds under concurrent reads. Reader latencies here are on a smaller index,
   so trust E2a for read-scale numbers and E2b for the delete/merge mechanics.
 
 **Measured per rate:**
-* reader `Count`/`TopDocs` p50/p95/p99 (same table as E1) + the **ratio vs the E1
+
+- reader `Count`/`TopDocs` p50/p95/p99 (same table as E1) + the **ratio vs the E1
   N=`e2_readers` baseline** (printed automatically when `--mode both`);
-* writer **commit p50/p95**, **achieved vs target rate** (if commit cost exceeds
+- writer **commit p50/p95**, **achieved vs target rate** (if commit cost exceeds
   the inter-arrival interval the writer can't keep up — a real finding, surfaced
   not masked), **fresh-lag p50/p95/p99** under read load, **segment count
   min/max/first/last** (~1 Hz samples — watch for LogMergePolicy fan-out);
-* (supersede) a one-off **supersession-correctness verify**: a key written with 5
+- (supersede) a one-off **supersession-correctness verify**: a key written with 5
   files → `delete_term`+re-add 3 → reload → resolves to exactly 3 (old gen gone),
   `OK`/`MISMATCH`. This **retroactively covers the skipped per-torrent freshness
   sanity** from the EXP-D2 build.
 
 **Fresh-lag probe** (works in both modes): keyed → a per-tick **unique** sentinel
 `info_hash` (0xBB marker + tick) committed in the same batch, searched by exact
-term = visibility of *this* commit; keyless append → `searcher.num_docs() ≥`
+term = visibility of _this_ commit; keyless append → `searcher.num_docs() ≥`
 running committed target (append never deletes ⇒ num_docs is monotonic).
 
 **🚨 Artifact protection:** E2 mutates (commits append segments + merges). ALWAYS
@@ -180,10 +182,10 @@ unique. So `delete_term`-based supersession **cannot** run on the recall artifac
 Minimal, contained fix (committed in this change, default OFF → zero behavior
 change to `recall`/`pathquery`/`freshness`, size numbers stay apples-to-apples):
 
-* `schema.rs::build_recall_schema(tok, with_positions, **with_delete_key**)` adds an
+- `schema.rs::build_recall_schema(tok, with_positions, **with_delete_key**)` adds an
   indexed `info_hash` bytes field (same flags as `build_file_schema:182`);
   `RecallFields` gains `info_hash: Option<Field>`.
-* `main.rs::recall` gains `--with-delete-key`; `index_unit` adds the key when present.
+- `main.rs::recall` gains `--with-delete-key`; `index_unit` adds the key when present.
 
 Build a keyed ngram per-torrent index exactly like the production shape:
 
@@ -202,25 +204,27 @@ append; explicit `--write-op supersede` on a keyless index errors cleanly.
 ## 5. Success criteria & gate flags
 
 **E1 — graceful degradation (no collapse):**
-* per-group p95 grows **≲ linearly** to the core count; aggregate QPS rises then
+
+- per-group p95 grows **≲ linearly** to the core count; aggregate QPS rises then
   plateaus near 24 cores. **FAIL** if any group's p95 blows up super-linearly
   before N=24 (lock/allocator contention).
-* **Cross-check** the N=1 row reproduces the known single-client figures (ascii3
+- **Cross-check** the N=1 row reproduces the known single-client figures (ascii3
   `Count` p50 ~24.7 ms WithFreqs; broad-gram `TopDocs` p95 ~77–94 ms). A large
   drift means the artifact/tokenizer/ngram width doesn't match the build.
-* The GATE groups (`ascii3`, `cjk3`) p95 at N=24 should stay within ~2–3× the N=1
+- The GATE groups (`ascii3`, `cjk3`) p95 at N=24 should stay within ~2–3× the N=1
   p95 — i.e. the index still clears interactive latency under full concurrency.
 
 **E2 — reader-under-write & freshness:**
-* reader `Count` p95 at the swept rates ≤ **~2×** the E1 N=`e2_readers` baseline
+
+- reader `Count` p95 at the swept rates ≤ **~2×** the E1 N=`e2_readers` baseline
   (printed as the `→ X.XX× (gate ≲2×)` line);
-* **fresh-lag** stays **ms-class** (single/low-double-digit ms) under read load
+- **fresh-lag** stays **ms-class** (single/low-double-digit ms) under read load
   (matches EXP-E's ~2 ms FLAT and ~11 ms supersession);
-* **segment count BOUNDED** under default `LogMergePolicy` (no monotone fan-out);
-* writer **achieved ≈ target** rate, or the achieved-vs-target line documents the
+- **segment count BOUNDED** under default `LogMergePolicy` (no monotone fan-out);
+- writer **achieved ≈ target** rate, or the achieved-vs-target line documents the
   per-commit cost ceiling (a real result, e.g. local smoke hit ~12/s against a
   20/s target because each tiny-index commit fsync’d in ~80 ms);
-* **supersession verify = OK** (superseded key resolves to exactly the new fileset).
+- **supersession verify = OK** (superseded key resolves to exactly the new fileset).
 
 **Gate flags / knobs:** `--mode {e1,e2,both}`, `--levels`, `--e2-readers`,
 `--write-rates`, `--write-op {auto,append,supersede}`, `--duration-secs`,

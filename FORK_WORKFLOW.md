@@ -36,12 +36,12 @@ main (upstream)
 
 ### Branch Descriptions
 
-| Branch | Purpose | Base |
-|--------|---------|------|
-| `main` | Tracks upstream bitmagnet | upstream (author remote) |
-| `alberto/search-filters` | Torrent size filter | main |
-| `alberto/search-filters-published-at` | Published-at filter | search-filters |
-| `alberto/my-bitmagnet` | Integration branch | search-filters-published-at |
+| Branch                                | Purpose                   | Base                        |
+| ------------------------------------- | ------------------------- | --------------------------- |
+| `main`                                | Tracks upstream bitmagnet | upstream (author remote)    |
+| `alberto/search-filters`              | Torrent size filter       | main                        |
+| `alberto/search-filters-published-at` | Published-at filter       | search-filters              |
+| `alberto/my-bitmagnet`                | Integration branch        | search-filters-published-at |
 
 ### Visual DAG
 
@@ -63,10 +63,10 @@ main (upstream)
 
 ## Git Remotes
 
-| Remote | URL | Purpose |
-|--------|-----|---------|
+| Remote   | URL                                       | Purpose                       |
+| -------- | ----------------------------------------- | ----------------------------- |
 | `author` | git@github.com:bitmagnet-io/bitmagnet.git | Upstream (fetch new releases) |
-| `origin` | git@github.com:dashed/bitmagnet.git | Fork (push changes) |
+| `origin` | git@github.com:dashed/bitmagnet.git       | Fork (push changes)           |
 
 ## Jujutsu (jj) Setup
 
@@ -363,16 +363,16 @@ jj git push --tracked
 
 ## File Locations
 
-| File | Purpose |
-|------|---------|
-| `Taskfile.yml` | Build and development tasks |
-| `docker-compose.yml` | Docker development environment |
-| `Dockerfile` | Production container build |
-| `internal/` | Go backend code |
-| `webui/` | Frontend application |
-| `webui/dist/` | Built frontend (rebuild after changes) |
+| File                 | Purpose                                |
+| -------------------- | -------------------------------------- |
+| `Taskfile.yml`       | Build and development tasks            |
+| `docker-compose.yml` | Docker development environment         |
+| `Dockerfile`         | Production container build             |
+| `internal/`          | Go backend code                        |
+| `webui/`             | Frontend application                   |
+| `webui/dist/`        | Built frontend (rebuild after changes) |
 
 ---
 
-*Last updated: 2026-01-14*
-*Rebased to upstream main (2b9e8ead - July 2025)*
+_Last updated: 2026-01-14_
+_Rebased to upstream main (2b9e8ead - July 2025)_

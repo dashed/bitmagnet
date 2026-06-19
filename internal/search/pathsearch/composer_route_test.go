@@ -5,10 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func routeCount(m *Metrics, r RouteResult) float64 {

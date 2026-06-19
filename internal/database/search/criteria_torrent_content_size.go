@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"gorm.io/gorm"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
+	"gorm.io/gorm"
 )
 
 type SizeRangeCriteria struct {

@@ -543,8 +543,15 @@ func (c *Composer) declineOversized(ids []protocol.ID, counts map[protocol.ID]in
 			c.metrics.IncRefineDeclinedOversized()
 
 			if c.logger != nil {
-				c.logger.Warnw("pathsearch: declining oversized candidate; excluding from refine (still serving the rest)",
-					"info_hash", id.String(), "file_count", n, "cap", c.maxRefineFiles)
+				c.logger.Warnw(
+					"pathsearch: declining oversized candidate; excluding from refine (still serving the rest)",
+					"info_hash",
+					id.String(),
+					"file_count",
+					n,
+					"cap",
+					c.maxRefineFiles,
+				)
 			}
 
 			continue
@@ -763,8 +770,15 @@ func (c *Composer) refineMatches(
 			c.metrics.IncRefineDeclinedOversized()
 
 			if c.logger != nil {
-				c.logger.Warnw("pathsearch: declining candidate after decode; actual file count exceeds cap (still serving the rest)",
-					"info_hash", it.Torrent.InfoHash.String(), "files", len(files), "cap", c.maxRefineFiles)
+				c.logger.Warnw(
+					"pathsearch: declining candidate after decode; actual file count exceeds cap (still serving the rest)",
+					"info_hash",
+					it.Torrent.InfoHash.String(),
+					"files",
+					len(files),
+					"cap",
+					c.maxRefineFiles,
+				)
 			}
 
 			continue
@@ -1022,8 +1036,17 @@ func (c *Composer) TorrentContent(
 		c.metrics.IncRefineRetainedCapped()
 
 		if c.logger != nil {
-			c.logger.Warnw("pathsearch: retained-file budget reached; serving memory-capped top-relevance result",
-				"query", f.Query, "retained_files", retained, "budget", c.retainedFileBudget, "matches", len(refined))
+			c.logger.Warnw(
+				"pathsearch: retained-file budget reached; serving memory-capped top-relevance result",
+				"query",
+				f.Query,
+				"retained_files",
+				retained,
+				"budget",
+				c.retainedFileBudget,
+				"matches",
+				len(refined),
+			)
 		}
 	case capDeadline:
 		// Deadline-capped estimate (gate7-6). Fail-loud: counted + logged. Serves the
@@ -1032,8 +1055,15 @@ func (c *Composer) TorrentContent(
 		c.metrics.IncRefineDeadlineCapped()
 
 		if c.logger != nil {
-			c.logger.Warnw("pathsearch: route deadline reached; serving deadline-capped top-relevance result",
-				"query", f.Query, "route_timeout", c.routeTimeout, "matches", len(refined))
+			c.logger.Warnw(
+				"pathsearch: route deadline reached; serving deadline-capped top-relevance result",
+				"query",
+				f.Query,
+				"route_timeout",
+				c.routeTimeout,
+				"matches",
+				len(refined),
+			)
 		}
 	}
 
@@ -1083,6 +1113,7 @@ func (c *Composer) TorrentContent(
 	}
 
 	page := paginate(refined, offset, limit)
+
 	c.metrics.IncRoute(RouteServed)
 
 	return search.TorrentContentResult{
@@ -1211,8 +1242,13 @@ func (c *Composer) CollapsePaths(
 			c.metrics.IncRefineShed()
 
 			if c.logger != nil {
-				c.logger.Warnw("pathsearch: collapse refine concurrency slot unavailable; shedding (serving empty)",
-					"query", f.Query, "slot_wait", c.slotWait)
+				c.logger.Warnw(
+					"pathsearch: collapse refine concurrency slot unavailable; shedding (serving empty)",
+					"query",
+					f.Query,
+					"slot_wait",
+					c.slotWait,
+				)
 			}
 
 			c.metrics.IncRoute(RouteServed)

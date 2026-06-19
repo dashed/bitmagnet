@@ -108,6 +108,7 @@ func TestMatchedFiles_ReturnsOnlyMatches(t *testing.T) {
 
 	got := matchedFiles(files, p)
 	want := []model.TorrentFile{files[0], files[1]}
+
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("matchedFiles = %v, want %v", got, want)
 	}
@@ -151,6 +152,7 @@ func TestTorrentRefine_MultiFileNoFilesIsFailLoudNotSilentDrop(t *testing.T) {
 // present, filesForRefine decodes it explicitly (not leaning on AfterFind).
 func TestFilesForRefine_DecodesBlobWhenRelationUnpopulated(t *testing.T) {
 	orig := model.FilesDataDeserializer
+
 	t.Cleanup(func() { model.FilesDataDeserializer = orig })
 
 	model.FilesDataDeserializer = func(_ []byte) ([]model.TorrentFile, error) {
@@ -189,7 +191,11 @@ func TestTorrentRefine_SingleFileNameFallback(t *testing.T) {
 
 	noMatch := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Interstellar.2014.mkv", Size: 1500}
 	if matched, ok := torrentRefine(noMatch, refinePredicate{substr: "inception"}); !ok || matched {
-		t.Fatalf("single-file name without substring must be a clean non-match, got matched=%v ok=%v", matched, ok)
+		t.Fatalf(
+			"single-file name without substring must be a clean non-match, got matched=%v ok=%v",
+			matched,
+			ok,
+		)
 	}
 
 	tooSmall := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.mkv", Size: 100}
@@ -208,7 +214,9 @@ func TestTorrentRefine_SingleFileExtFilterFailsLoud(t *testing.T) {
 	tor := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.2010.1080p.mkv", Size: 1500}
 
 	if _, ok := torrentRefine(tor, refinePredicate{substr: "inception", extensions: extSet("mkv")}); ok {
-		t.Fatal("single-file name surrogate under an ext filter must fail loud (ok=false), not serve a name-derived ext match (#9)")
+		t.Fatal(
+			"single-file name surrogate under an ext filter must fail loud (ok=false), not serve a name-derived ext match (#9)",
+		)
 	}
 
 	// Same torrent without an ext filter: the surrogate is sound and is used.
@@ -313,6 +321,7 @@ func TestDistinctMatchedPaths_CollapseGrouping(t *testing.T) {
 
 	got := distinctMatchedPaths(files, p)
 	want := []string{"a/Movie.mkv", "b/movie.mkv"}
+
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("distinctMatchedPaths = %v, want %v", got, want)
 	}

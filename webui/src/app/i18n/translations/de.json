@@ -84,6 +84,22 @@
       "total_counts_by_status": "Gesamtanzahl nach Status"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Inhaltstyp",
     "file_type": "Dateityp",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "Alle",
+    "apply": "__missing__",
     "dismiss": "Verwerfen",
     "error": "Fehler",
     "none": "Keine",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "Klassifizierung",
     "clear_search": "Suche löschen",
+    "clear_size_filter": "__missing__",
     "copy": "Kopieren",
     "copy_to_clipboard": "In die Zwischenablage kopieren",
     "delete": "Löschen",
@@ -263,6 +281,8 @@
     "leechers": "Leechers",
     "magnet": "Magnet",
     "magnet_links": "Magnet-Links",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Neuer Tag",
     "order_by": "Sortieren nach",
     "order_direction_toggle": "Richtung umschalten",
@@ -281,6 +301,7 @@
     "permalink": "Permalink",
     "poster": "Poster",
     "published": "Veröffentlicht",
+    "published_date_filter": "__missing__",
     "rating": "Bewertung",
     "refresh": "Ergebnisse aktualisieren",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "Alle auswählen",
     "showing_x_of_y_files": "{{x}} von {{y}} Dateien anzeigen",
     "size": "Größe",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Torrent-Quelle",
     "summary": "Zusammenfassung",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "Titel",
     "toggle_drawer": "Schublade umschalten",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} Stimmen"
   },
   "version": {

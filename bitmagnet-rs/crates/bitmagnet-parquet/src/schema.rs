@@ -79,7 +79,14 @@ mod tests {
         let names: Vec<_> = s.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,
-            vec!["info_hash", "file_index", "path", "extension", "size", "is_padding"]
+            vec![
+                "info_hash",
+                "file_index",
+                "path",
+                "extension",
+                "size",
+                "is_padding"
+            ]
         );
         // extension is the only nullable column (G1 None => SQL NULL).
         assert!(s.field_with_name("extension").unwrap().is_nullable());

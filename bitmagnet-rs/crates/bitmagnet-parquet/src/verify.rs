@@ -57,7 +57,9 @@ pub fn compare_torrent(expected: &ExtAgg, actual: &ExtAgg) -> Option<String> {
         match actual.get(ext) {
             None => diffs.push(format!("blob-only ext '{ext}' (max {exp_max})")),
             Some(act_max) if act_max != exp_max => {
-                diffs.push(format!("ext '{ext}': blob max {exp_max} != tf max {act_max}"));
+                diffs.push(format!(
+                    "ext '{ext}': blob max {exp_max} != tf max {act_max}"
+                ));
             }
             _ => {}
         }
@@ -120,7 +122,7 @@ impl Default for VerifyOpts {
 /// Read-only on both sides.
 pub async fn run_verify(pool: &PgPool, opts: &VerifyOpts) -> Result<VerifyStats> {
     let mut stats = VerifyStats::default();
-    let mut cursor = opts.after.clone();
+    let mut cursor = opts.after;
     let mut printed = 0u64;
 
     loop {
@@ -132,7 +134,7 @@ pub async fn run_verify(pool: &PgPool, opts: &VerifyOpts) -> Result<VerifyStats>
         }
 
         // Actual side, one batched read for the whole page.
-        let keys: Vec<InfoHash> = page.iter().map(|r| r.info_hash.clone()).collect();
+        let keys: Vec<InfoHash> = page.iter().map(|r| r.info_hash).collect();
         let actual_rows = batch_torrent_files_ext_agg(pool, &keys)
             .await
             .context("reading torrent_files aggregate batch")?;
@@ -169,7 +171,7 @@ pub async fn run_verify(pool: &PgPool, opts: &VerifyOpts) -> Result<VerifyStats>
             }
         }
 
-        cursor = page.last().map(|r| r.info_hash.clone());
+        cursor = page.last().map(|r| r.info_hash);
         if stats.torrents_checked.is_multiple_of(100_000) {
             tracing::info!(
                 checked = stats.torrents_checked,

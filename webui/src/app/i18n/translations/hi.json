@@ -84,6 +84,22 @@
       "total_counts_by_status": "स्थिति द्वारा कुल गणना"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "सामग्री प्रकार",
     "file_type": "फ़ाइल प्रकार",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "सभी",
+    "apply": "__missing__",
     "dismiss": "खारिज करें",
     "error": "त्रुटि",
     "none": "कोई नहीं",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "वर्गीकरण",
     "clear_search": "खोज साफ़ करें",
+    "clear_size_filter": "__missing__",
     "copy": "कॉपी करें",
     "copy_to_clipboard": "क्लिपबोर्ड में कॉपी करें",
     "delete": "हटाएं",
@@ -263,6 +281,8 @@
     "leechers": "लीचर्स",
     "magnet": "मैग्नेट",
     "magnet_links": "मैग्नेट लिंक",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "नया टैग",
     "order_by": "क्रमबद्ध करें",
     "order_direction_toggle": "दिशा बदलें",
@@ -281,6 +301,7 @@
     "permalink": "स्थायी लिंक",
     "poster": "पोस्टर",
     "published": "प्रकाशित",
+    "published_date_filter": "__missing__",
     "rating": "रेटिंग",
     "refresh": "परिणाम ताज़ा करें",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "सभी का चयन करें",
     "showing_x_of_y_files": "{{x}} में से {{y}} फ़ाइलें दिखा रहा है",
     "size": "आकार",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "टोरेंट स्रोत",
     "summary": "सारांश",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "शीर्षक",
     "toggle_drawer": "ड्रॉअर बदलें",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} वोट"
   },
   "version": {

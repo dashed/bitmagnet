@@ -17,14 +17,14 @@ The design is **sound, unusually well-adjudicated, and code-accurate** — every
 
 ## 2. Reconciliations (cross-doc / cross-thread)
 
-- **Doc-revision lag, not contradictions.** The sibling docs critique the spec as if G1/G2/aggregate-promotion/checker-extension weren't yet incorporated; the **current core spec already folded them in** (§5.1 derives extension from path; §11.2-3 list G1/G2 as prerequisite steps; §11.7 promotes the aggregate; §13.2 softened the "hard floor"). The siblings are the *rationale* that drove the spec's current state.
+- **Doc-revision lag, not contradictions.** The sibling docs critique the spec as if G1/G2/aggregate-promotion/checker-extension weren't yet incorporated; the **current core spec already folded them in** (§5.1 derives extension from path; §11.2-3 list G1/G2 as prerequisite steps; §11.7 promotes the aggregate; §13.2 softened the "hard floor"). The siblings are the _rationale_ that drove the spec's current state.
 - **G1 severity (code-grounder vs design-critic).** Reconciled: **zero current live-query impact** — the running PG system derives extensions via `ExtractUniqueExtensions → FileExtensionFromPath` (`serializer.go:74-96`, `persist.go:228`), and the Rust Tantivy index isn't deployed. **But** the Rust `transform.rs:62-68` builds the torrent-level `file_extensions` facet from the blob's empty `e`, so the bug **manifests the moment the Phase-3 torrent index is backfilled** (crawl-path torrents → empty `file_extensions`), as well as in the file index. → fix G1 **with** the Phase-3 work, not merely before the file index.
 
 ---
 
 ## 3. Must-fixes before any file-index code
 
-- **B1 — spec-internal contradiction (display hydration).** D8 + §4.1 say `extension` is "hydrated from the blob" while the blob's per-file `e` is empty for crawl-path torrents. The *filter* field is already G1-correct (§5.1/§10), but the *display-hydration* wording must also **derive from the blob's `path`** (present), never `e`. Reconcile the spec, or an implementer following D8 literally reintroduces G1.
+- **B1 — spec-internal contradiction (display hydration).** D8 + §4.1 say `extension` is "hydrated from the blob" while the blob's per-file `e` is empty for crawl-path torrents. The _filter_ field is already G1-correct (§5.1/§10), but the _display-hydration_ wording must also **derive from the blob's `path`** (present), never `e`. Reconcile the spec, or an implementer following D8 literally reintroduces G1.
 - **G1 checker gap.** `consistency/checker.go:63-93` compares only index/path/size — **never extension** — so the empty-`e` bug is invisible to parity tests and backfill-only tests silently pass. Add an `extension` field to the checker (0 GB).
 - **C6 — retired PG path guard.** `criteria_torrent_file_extension.go`'s `EXISTS torrent_files` must be guarded so the retired PG file-search mode cannot run post-`DROP TABLE torrent_files`.
 
@@ -32,22 +32,22 @@ The design is **sound, unusually well-adjudicated, and code-accurate** — every
 
 ## 4. Strategic recommendation — SHIP THE CHEAP COMPOSITION (DECIDED BY BENCHMARK, 2026-06-07)
 
-> **UPDATE 2026-06-07 — the empirical benchmark SETTLED this; see [`file-grained-search-benchmark-results.md`](./file-grained-search-benchmark-results.md).** The original framing below ("ship cheap first, then *gate the index on a product decision*") is now superseded by **measurement**: the index's whole premise — sub-50 ms interactive per-file search — was **REFUTED** on the real 879.5M-row corpus.
+> **UPDATE 2026-06-07 — the empirical benchmark SETTLED this; see [`file-grained-search-benchmark-results.md`](./file-grained-search-benchmark-results.md).** The original framing below ("ship cheap first, then _gate the index on a product decision_") is now superseded by **measurement**: the index's whole premise — sub-50 ms interactive per-file search — was **REFUTED** on the real 879.5M-row corpus.
 
 Measured on the full corpus (real data, HEL1):
 
-| Restorer | Parity it gives | Measured |
-|---|---|---|
-| G1 + G2 + timestamp/index-sort hydration (code) | correct ext filter/sort; per-torrent browser survives the drop; timestamps | **0 GB** |
-| Per-(torrent,ext) aggregate (PG) | exact one-sided distinct-torrent counts + keyset deep paging | **+5–8 GB** (or ~5–6 GB max-only) |
-| **DuckDB-on-blobs/Parquet** | exact per-file `ext∧size` + **path-FTS via `ILIKE` (CJK-safe)** + collapse + analytics/joins | **0.015–1.3 s, +3.86 GB** (or +0 GB on-demand) |
-| ~~File-grained Tantivy index~~ | ~~the above at <50 ms~~ → **REFUTED:** scan-bound **~1.3 s p50 @879.5M** on the common broad filter, **NO latency win**, **+14–25 GB** | ❌ **rejected** |
+| Restorer                                        | Parity it gives                                                                                                                        | Measured                                       |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| G1 + G2 + timestamp/index-sort hydration (code) | correct ext filter/sort; per-torrent browser survives the drop; timestamps                                                             | **0 GB**                                       |
+| Per-(torrent,ext) aggregate (PG)                | exact one-sided distinct-torrent counts + keyset deep paging                                                                           | **+5–8 GB** (or ~5–6 GB max-only)              |
+| **DuckDB-on-blobs/Parquet**                     | exact per-file `ext∧size` + **path-FTS via `ILIKE` (CJK-safe)** + collapse + analytics/joins                                           | **0.015–1.3 s, +3.86 GB** (or +0 GB on-demand) |
+| ~~File-grained Tantivy index~~                  | ~~the above at <50 ms~~ → **REFUTED:** scan-bound **~1.3 s p50 @879.5M** on the common broad filter, **NO latency win**, **+14–25 GB** | ❌ **rejected**                                |
 
-→ **Ship the cheap composition (G1 + G2 + hydration + the aggregate + DuckDB-on-Parquet) — full stop.** The benchmark proved the 873M-doc index gives *no* latency advantage (it's scan-bound on the broad filter, just like DuckDB), costs 4–6× the disk, and lacks free-text + exact-count/joins. **Reject/defer the index**; gate it ONLY on a *later, explicit* requirement for per-keystroke free-text path search at <50 ms with realtime freshness — and re-scope it then (FAST identity not stored `doc_id`; CJK tokenizer; incremental merge).
+→ **Ship the cheap composition (G1 + G2 + hydration + the aggregate + DuckDB-on-Parquet) — full stop.** The benchmark proved the 873M-doc index gives _no_ latency advantage (it's scan-bound on the broad filter, just like DuckDB), costs 4–6× the disk, and lacks free-text + exact-count/joins. **Reject/defer the index**; gate it ONLY on a _later, explicit_ requirement for per-keystroke free-text path search at <50 ms with realtime freshness — and re-scope it then (FAST identity not stored `doc_id`; CJK tokenizer; incremental merge).
 
 The production **complete-parity architecture** built on DuckDB-on-Parquet (+ the latency-optimization work the user requested) is now being designed → **`duckdb-parquet-parity-architecture.md`** (in progress).
 
-Honest parity level = **complete functional parity via DuckDB-on-Parquet + blob-browse + the PG aggregate, with documented exceptions E1–E6** — and (per the benchmark) at *better* latency than the rejected index on every realistic query.
+Honest parity level = **complete functional parity via DuckDB-on-Parquet + blob-browse + the PG aggregate, with documented exceptions E1–E6** — and (per the benchmark) at _better_ latency than the rejected index on every realistic query.
 
 ---
 
@@ -65,7 +65,7 @@ Honest parity level = **complete functional parity via DuckDB-on-Parquet + blob-
 ## 6. Homelab deploy delta (the file index is a 2nd index on the SAME Phase-3 sidecar)
 
 - **D0 (structural, affects the Phase-3 drafts now):** the role mounts the PVC **at** `/var/lib/bitmagnet/search` (the index dir). A sibling `…/search-files` would land on ephemeral fs. **Fix: mount the PVC at the parent `/var/lib/bitmagnet`** with `search/` + `search-files/` subdirs. Cheap now (nothing deployed); forward-compatible even for Phase-3-alone.
-- Second index dir + `bitmagnet_search_file_index_enabled` gate + `BITMAGNET_SEARCH_FILE_INDEX` env; **memory limit 6→8 Gi** (two 256 MiB writer heaps + mmap); **third image COPY** (`backfill_files` bin); a **new file-backfill Job** (commit cadence counts *file* docs not torrents → ~873M docs, source = `torrents`/blob, cursor over `torrents` not `tc.id`, **G1-derived extension**); sequential single-writer backfills; a CNP + Make targets; a `bitmagnet_search_tantivy_file_doc_count` metric; a **second GO/NO-GO ceiling line** (torrent ≤74 + file ≤30 ≈ 104 GB — 200Gi PVC still suffices).
+- Second index dir + `bitmagnet_search_file_index_enabled` gate + `BITMAGNET_SEARCH_FILE_INDEX` env; **memory limit 6→8 Gi** (two 256 MiB writer heaps + mmap); **third image COPY** (`backfill_files` bin); a **new file-backfill Job** (commit cadence counts _file_ docs not torrents → ~873M docs, source = `torrents`/blob, cursor over `torrents` not `tc.id`, **G1-derived extension**); sequential single-writer backfills; a CNP + Make targets; a `bitmagnet_search_tantivy_file_doc_count` metric; a **second GO/NO-GO ceiling line** (torrent ≤74 + file ≤30 ≈ 104 GB — 200Gi PVC still suffices).
 
 ---
 

@@ -13,7 +13,7 @@ func TestTorrentContentPublishedAtCriteria(t *testing.T) {
 	// Test basic creation of criteria
 	criteria := TorrentContentPublishedAtCriteria("7d")
 	assert.NotNil(t, criteria, "Criteria should not be nil")
-	
+
 	// Also test empty string handling
 	emptyTimeFrame := TorrentContentPublishedAtCriteria("")
 	assert.NotNil(t, emptyTimeFrame)
@@ -23,18 +23,18 @@ func TestTorrentContentPublishedAtCriteria(t *testing.T) {
 func TestParseTimeFrameWithFixedTime(t *testing.T) {
 	// Define a fixed time for consistent testing: January 15, 2023 10:30:00 UTC
 	fixedTime := time.Date(2023, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	// Store the original timeNow function
 	originalTimeNow := timeNow
-	
+
 	// Replace with our fixed time function
 	timeNow = func() time.Time {
 		return fixedTime
 	}
-	
+
 	// Restore original function when we're done
 	defer func() { timeNow = originalTimeNow }()
-	
+
 	// Test cases for different time frames
 	testCases := []struct {
 		name            string
@@ -102,31 +102,32 @@ func TestParseTimeFrameWithFixedTime(t *testing.T) {
 			expectedErr: true,
 		},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			startTime, endTime, err := parseTimeFrame(tc.timeFrame)
-			
+
 			if tc.expectedErr {
 				assert.Error(t, err, "Expected error for timeFrame: %s", tc.timeFrame)
 				return
 			}
-			
+
 			assert.NoError(t, err, "Unexpected error for timeFrame: %s", tc.timeFrame)
-			
+
 			if tc.timeFrame == "" {
 				// Empty time frame returns zero times
 				assert.True(t, startTime.IsZero(), "Start time should be zero for empty time frame")
 				assert.True(t, endTime.IsZero(), "End time should be zero for empty time frame")
+
 				return
 			}
-			
+
 			// Round to seconds for consistent comparison
 			startTime = startTime.Truncate(time.Second)
 			endTime = endTime.Truncate(time.Second)
 			expectedGteTime := tc.expectedGteTime.Truncate(time.Second)
 			expectedLteTime := tc.expectedLteTime.Truncate(time.Second)
-			
+
 			assert.Equal(t, expectedGteTime, startTime,
 				"Start time does not match expected for timeFrame: %s", tc.timeFrame)
 			assert.Equal(t, expectedLteTime, endTime,
@@ -138,18 +139,18 @@ func TestParseTimeFrameWithFixedTime(t *testing.T) {
 func TestParseTimeFrame(t *testing.T) {
 	// Define a fixed time for consistent testing
 	fixedTime := time.Date(2023, 1, 15, 10, 30, 0, 0, time.UTC)
-	
+
 	// Store the original timeNow function
 	originalTimeNow := timeNow
-	
+
 	// Replace with our fixed time function
 	timeNow = func() time.Time {
 		return fixedTime
 	}
-	
+
 	// Restore original function when we're done
 	defer func() { timeNow = originalTimeNow }()
-	
+
 	// Define test cases
 	tests := []struct {
 		name           string
@@ -249,29 +250,30 @@ func TestParseTimeFrame(t *testing.T) {
 			expectNonEmpty: true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			startTime, endTime, err := parseTimeFrame(tt.timeFrame)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				return
 			}
-			
+
 			assert.NoError(t, err)
-			
+
 			if !tt.expectNonEmpty {
 				assert.True(t, startTime.IsZero())
 				assert.True(t, endTime.IsZero())
+
 				return
 			}
-			
+
 			// Verify non-zero times
 			assert.False(t, startTime.IsZero())
 			assert.False(t, endTime.IsZero())
 			assert.True(t, endTime.After(startTime) || endTime.Equal(startTime))
-			
+
 			// For special time frames, do additional validation
 			switch tt.timeFrame {
 			case "today":
@@ -324,12 +326,12 @@ func TestParseRelativeTime(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			duration, err := parseRelativeTime(tt.input)
-			
+
 			if tt.hasError {
 				assert.Error(t, err)
 				return
 			}
-			
+
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expected, duration)
 		})
@@ -338,11 +340,11 @@ func TestParseRelativeTime(t *testing.T) {
 
 func TestParseDateString(t *testing.T) {
 	tests := []struct {
-		input     string
-		year      int
-		month     time.Month
-		day       int
-		hasError  bool
+		input    string
+		year     int
+		month    time.Month
+		day      int
+		hasError bool
 	}{
 		{"2023-01-15", 2023, time.January, 15, false},
 		{"2023/01/15", 2023, time.January, 15, false},
@@ -356,12 +358,12 @@ func TestParseDateString(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			date, err := parseDateString(tt.input)
-			
+
 			if tt.hasError {
 				assert.Error(t, err)
 				return
 			}
-			
+
 			assert.NoError(t, err)
 			assert.Equal(t, tt.year, date.Year())
 			assert.Equal(t, tt.month, date.Month())

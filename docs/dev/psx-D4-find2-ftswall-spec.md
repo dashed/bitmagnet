@@ -1,27 +1,27 @@
 # FIND-2 — Main-search broad-common-term ranked FTS wall: investigation & fix-evaluation spec
 
-**Status:** DESIGN-ONLY (read-only). Nothing here was executed on HEL1. This document specifies *how* to
-reproduce and *how* to evaluate fixes via `EXPLAIN ANALYZE` on the throwaway bench restore, plus a
+**Status:** DESIGN-ONLY (read-only). Nothing here was executed on HEL1. This document specifies _how_ to
+reproduce and _how_ to evaluate fixes via `EXPLAIN ANALYZE` on the throwaway bench restore, plus a
 recommendation. Author: `psx-d4-find2` (team `bitmagnet-bench`, task #62).
 
 ---
 
 ## 0. TL;DR
 
-- **FIND-2 confirmed at the source level, not assumed.** The WebUI's *default* sort for any keyword search is
+- **FIND-2 confirmed at the source level, not assumed.** The WebUI's _default_ sort for any keyword search is
   `relevance` descending, which the Go layer compiles to `ORDER BY ts_rank_cd(torrent_contents.tsv, $q::tsquery) DESC`.
   So `ts_rank_cd` **is on the default hot path** — every keyword search a user types is ranked unless they
   explicitly pick another sort.
 - The wall is structural: `ORDER BY ts_rank_cd(...)` has **no ordering index**, so PostgreSQL must compute the
-  rank for *every* matching row before it can take the top-N. For a broad common term (`x264` ≈ 4.28M matches)
+  rank for _every_ matching row before it can take the top-N. For a broad common term (`x264` ≈ 4.28M matches)
   the GIN match is cheap (~482 ms) but ranking the whole match-set is the ~49 s single-core wall.
 - The existing CTE "stopping-point" optimisation (`query.go:812-826`) **does not cover the relevance default** —
-  it is explicitly disabled for single `query_string_rank DESC` ordering. It only bounds *non-relevance* sorts
+  it is explicitly disabled for single `query_string_rank DESC` ordering. It only bounds _non-relevance_ sorts
   (seeders / published_at / size) that are combined with a query string. So broad relevance searches have no
   early-out path today.
 - **DROP-independent:** the query touches only `torrent_contents` (+ joins to `torrents`/`content`), never
   `torrent_files`. It is a pre-existing perf issue, orthogonal to the migration/DROP work.
-- **Recommendation (preview):** *Defer* the heavyweight RUM-index fix; it costs +30-50 GB, a slow single-threaded
+- **Recommendation (preview):** _Defer_ the heavyweight RUM-index fix; it costs +30-50 GB, a slow single-threaded
   build, an extension install, a **ranking-semantics change (`ts_rank` not `ts_rank_cd`)**, and — most importantly —
   **write amplification on a write-heavy table** that already shows a super-linear tsv-update cost (FIND-1). The
   low-risk, near-term lever is product/UX: cap the ranked candidate window (extend the existing CTE strategy to the
@@ -34,18 +34,18 @@ recommendation. Author: `psx-d4-find2` (team `bitmagnet-bench`, task #62).
 
 ### 1.1 Code trace (verified against `/Users/me/aaa/github/bitmagnet`)
 
-| Step | File:line | Fact |
-|---|---|---|
-| WebUI default sort with a query | `webui/src/app/torrents/torrents-search.component.ts:292` | `field: hasQuery ? "relevance" : "published_at"` |
-| Default order object | `webui/.../torrents-search.controller.ts:526` | `defaultQueryOrderBy = { field: "relevance", descending: true }` |
-| Always sent to API | `webui/.../torrents-search.controller.ts:66` | `orderBy: [ctrl.orderBy]` — the GraphQL `orderBy` arg is **always** populated; for a typed query it is `[{relevance, desc}]` |
-| Server keeps relevance when query present | `internal/gql/gqlmodel/torrent_content.go:149-151` | relevance order is skipped only `&& !hasQueryString`; with a query it is retained |
-| Relevance → rank field | `internal/database/search/order_torrent_content.go:18-26` | `TorrentContentOrderByRelevance` → `OrderByColumn{Name: QueryStringRankField}` |
-| Rank field → SQL | `internal/database/query/query.go:613-625` | `ts_rank_cd(<table>.tsv, ?::tsquery) AS _order_0` |
-| WHERE clause | `internal/database/query/query.go:646-648` | `<table>.tsv @@ ?::tsquery` |
-| `SearchParams` also force-adds rank order | `internal/database/query/params.go:20-22` | when `QueryString.Valid` → `SearchString(...) , OrderByQueryStringRank()` |
-| Table | `internal/model/torrent_contents.gen.go:14` | `torrent_contents` |
-| tsquery builder | `internal/database/fts/tsquery.go:9` | `AppQueryToTsquery` — `x264` → tsquery `'x264'`; quotes/`.`→`<->`, `&`/`|`, `!`, trailing `*`→`:*` prefix |
+| Step                                      | File:line                                                 | Fact                                                                                                                         |
+| ----------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| WebUI default sort with a query           | `webui/src/app/torrents/torrents-search.component.ts:292` | `field: hasQuery ? "relevance" : "published_at"`                                                                             |
+| Default order object                      | `webui/.../torrents-search.controller.ts:526`             | `defaultQueryOrderBy = { field: "relevance", descending: true }`                                                             |
+| Always sent to API                        | `webui/.../torrents-search.controller.ts:66`              | `orderBy: [ctrl.orderBy]` — the GraphQL `orderBy` arg is **always** populated; for a typed query it is `[{relevance, desc}]` |
+| Server keeps relevance when query present | `internal/gql/gqlmodel/torrent_content.go:149-151`        | relevance order is skipped only `&& !hasQueryString`; with a query it is retained                                            |
+| Relevance → rank field                    | `internal/database/search/order_torrent_content.go:18-26` | `TorrentContentOrderByRelevance` → `OrderByColumn{Name: QueryStringRankField}`                                               |
+| Rank field → SQL                          | `internal/database/query/query.go:613-625`                | `ts_rank_cd(<table>.tsv, ?::tsquery) AS _order_0`                                                                            |
+| WHERE clause                              | `internal/database/query/query.go:646-648`                | `<table>.tsv @@ ?::tsquery`                                                                                                  |
+| `SearchParams` also force-adds rank order | `internal/database/query/params.go:20-22`                 | when `QueryString.Valid` → `SearchString(...) , OrderByQueryStringRank()`                                                    |
+| Table                                     | `internal/model/torrent_contents.gen.go:14`               | `torrent_contents`                                                                                                           |
+| tsquery builder                           | `internal/database/fts/tsquery.go:9`                      | `AppQueryToTsquery` — `x264` → tsquery `'x264'`; quotes/`.`→`<->`, `&`/`                                                     | `, `!`, trailing `_`→`:_` prefix |
 
 **Conclusion:** `ts_rank_cd` is unambiguously the default ranking on the keyword hot path. The lead's caution
 ("don't assume it's on the default path; the UI default may be seeders/published_at") is resolved: the UI default
@@ -90,10 +90,11 @@ reserved for query + seeders/published_at/size, where it caps work at 50k.)
 ### 1.4 Reproduction probes (run on bench, read-only)
 
 > All probes are `EXPLAIN (ANALYZE, BUFFERS, …)` or `SELECT` — read-only. Pick the term empirically; `x264` per
-> MEMORY ≈ 4.28M matches. Use a *paginated* shape (`LIMIT 30 OFFSET 0`) to mirror the UI. `simple` config means
+> MEMORY ≈ 4.28M matches. Use a _paginated_ shape (`LIMIT 30 OFFSET 0`) to mirror the UI. `simple` config means
 > the literal lexeme; verify with `to_tsquery('simple','x264')`.
 
 **P0 — corpus & term selectivity (sanity):**
+
 ```sql
 SELECT reltuples::bigint AS est_rows FROM pg_class WHERE relname = 'torrent_contents';
 SELECT count(*) FROM torrent_contents WHERE tsv @@ to_tsquery('simple','x264');   -- expect ~4.28M
@@ -103,6 +104,7 @@ FROM pg_index WHERE indrelid = 'torrent_contents'::regclass ORDER BY pg_relation
 ```
 
 **P1 — the exact served wall (relevance, paginated):**
+
 ```sql
 EXPLAIN (ANALYZE, BUFFERS, VERBOSE, SETTINGS, TIMING)
 SELECT torrent_contents.*, ts_rank_cd(torrent_contents.tsv, $q::tsquery) AS _order_0
@@ -112,11 +114,13 @@ ORDER BY _order_0 DESC
 LIMIT 30 OFFSET 0;
 -- with $q = to_tsquery('simple','x264')
 ```
+
 Expected shape: `Bitmap Heap Scan` on the GIN (recheck) feeding a `Sort` (or top-N heapsort) on `_order_0` over
 ~4.28M rows → the dominant time is the per-row `ts_rank_cd` + sort, not the GIN. Capture `Execution Time` and the
 `Sort`/`WindowAgg` node actual time.
 
-**P2 — served query *with the joins* the app actually issues** (to confirm the join isn't the dominant cost):
+**P2 — served query _with the joins_ the app actually issues** (to confirm the join isn't the dominant cost):
+
 ```sql
 EXPLAIN (ANALYZE, BUFFERS, VERBOSE)
 SELECT tc.*, ts_rank_cd(tc.tsv, $q::tsquery) AS _order_0
@@ -129,6 +133,7 @@ LIMIT 30 OFFSET 0;
 ```
 
 **P3 — isolate the three cost components** (prove "GIN cheap, rank is the wall"):
+
 ```sql
 -- (a) GIN match only, no rank, no order:
 EXPLAIN (ANALYZE, BUFFERS) SELECT count(*) FROM torrent_contents WHERE tsv @@ to_tsquery('simple','x264');
@@ -138,9 +143,11 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT count(*) FROM (
   FROM torrent_contents WHERE tsv @@ to_tsquery('simple','x264')) s WHERE s.r > -1;
 -- (c) match + rank + order + LIMIT (the wall):  -> P1 above
 ```
+
 Δ(b−a) = rank-compute cost; Δ(c−b) = sort cost. Confirms MEMORY's "GIN 482 ms, rank = the wall".
 
 **P4 — contrast: the SAME term sorted by a btree-backed column (what non-relevance sorts get):**
+
 ```sql
 EXPLAIN (ANALYZE, BUFFERS) SELECT torrent_contents.* FROM torrent_contents
 WHERE tsv @@ to_tsquery('simple','x264')
@@ -149,11 +156,12 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT torrent_contents.* FROM torrent_contents
 WHERE tsv @@ to_tsquery('simple','x264')
 ORDER BY coalesce(seeders,-1) DESC LIMIT 30;
 ```
+
 This measures the realistic cost of the "make broad-term default a popularity sort" fix (§3.3). Watch whether the
 planner picks `Index Scan … Filter (tsv @@ …)` with early termination vs `Bitmap … + Sort` (a very common term
 favours index-order-scan + filter; a rare term favours bitmap+sort — note both regimes).
 
-**Term matrix:** run P1/P3 for a *broad* term (`x264`), a *medium* term (e.g. `1080p`), and a *rare* term
+**Term matrix:** run P1/P3 for a _broad_ term (`x264`), a _medium_ term (e.g. `1080p`), and a _rare_ term
 (e.g. a specific release group), plus a 2-term AND (`x264 & 1080p`) and a phrase (`"the matrix"` → `<->`). FIND-2
 is specifically the broad single-common-term regime; the matrix proves where the cliff is.
 
@@ -171,7 +179,7 @@ so `ORDER BY tsv <=> q LIMIT n` is answered **by the index in rank order**, stop
 scan.
 
 **Prerequisite (gated, heavier):** the bench PG image does **not** ship `rum`. To evaluate you must install it
-into the *throwaway* bench Postgres only (build `make`/`pg_config` against the running PG major, then
+into the _throwaway_ bench Postgres only (build `make`/`pg_config` against the running PG major, then
 `CREATE EXTENSION rum;`). This is a non-trivial, explicitly-gated step — see §5 GATE-RUM. Do **not** touch prod.
 
 ```sql
@@ -187,7 +195,9 @@ WHERE tsv @@ to_tsquery('simple','x264')
 ORDER BY tsv <=> to_tsquery('simple','x264')
 LIMIT 30;
 ```
+
 **What to capture:**
+
 - Latency at the broad term (expected: tens-of-ms — the win).
 - **Index size** (`tc_tsv_rum`) and **build time** — the headline cost. Also test the addon-ops variant
   `rum (tsv rum_tsvector_addon_ops, published_at)` if combined rank+recency ordering is wanted.
@@ -207,19 +217,20 @@ LIMIT 30;
 EXPLAIN (ANALYZE, BUFFERS) SELECT torrent_contents.*, ts_rank(tsv, $q) AS _o
 FROM torrent_contents WHERE tsv @@ $q ORDER BY _o DESC LIMIT 30;
 ```
+
 Hypothesis: `ts_rank` is marginally cheaper per row than `ts_rank_cd` (no cover-density positions), **but it still
 requires computing the rank for every match and a full sort** — same O(match-set) wall. Expect a small constant-factor
-improvement, *not* a cliff fix. Document the delta; reject as a standalone fix. (Worth noting because `simple`
+improvement, _not_ a cliff fix. Document the delta; reject as a standalone fix. (Worth noting because `simple`
 config + no positions means `_cd` adds cost for little ranking benefit on single terms.)
 
 ### 2.3 Precomputed popularity / published_at default (no extension)
 
 Two sub-variants:
 
-**(a) Flip the broad-term default to a btree-ordered column** (published_at or coalesce(seeders,-1)). Measured by
+**(a) Flip the broad-term default to a btree-ordered column** (published*at or coalesce(seeders,-1)). Measured by
 P4 above. Pros: zero new objects, indexes already exist, early-termination for common terms. Cons: changes the
 product default ("relevance" is what users expect from a search box); rare terms still scan a lot; a query +
-ORDER BY published_at over a common term *may* still bitmap+sort (term matrix tells us). The existing CTE strategy
+ORDER BY published_at over a common term \_may* still bitmap+sort (term matrix tells us). The existing CTE strategy
 already accelerates this exact shape (≤50k), so the realistic served latency for medium terms is already bounded.
 
 **(b) Static popularity score column** (query-independent), e.g. a stored `rank_bucket` from seeders/recency, btree
@@ -235,10 +246,10 @@ relevance too, we can rank only a capped window instead of all 4.28M rows. Two d
 - **Exact-when-small (current semantics):** reuse the existing ≤50k materialise-then-count gate, but for the rank
   order. For terms with <50k matches it returns the exact ranked page fast; broad terms still fall through to the
   wall (no worse than today). Net: medium terms get faster, broad terms unchanged. Low value for FIND-2 itself.
-- **Approximate-for-broad (the real lever):** take a *bounded candidate set* — e.g. the 50k most-recent (or most-seeded)
+- **Approximate-for-broad (the real lever):** take a _bounded candidate set_ — e.g. the 50k most-recent (or most-seeded)
   matches via the `published_at`/`seeders` btree (`WHERE tsv @@ q ORDER BY published_at DESC LIMIT 50000`), then
-  `ts_rank_cd`-rank *those* and return the top-N. This early-terminates on the btree and ranks a bounded set →
-  bounded latency, at the cost of *approximate* relevance (a low-rank-but-old true match could fall outside the
+  `ts_rank_cd`-rank _those_ and return the top-N. This early-terminates on the btree and ranks a bounded set →
+  bounded latency, at the cost of _approximate_ relevance (a low-rank-but-old true match could fall outside the
   window). Probe:
   ```sql
   EXPLAIN (ANALYZE, BUFFERS)
@@ -249,7 +260,7 @@ relevance too, we can rank only a capped window instead of all 4.28M rows. Two d
   SELECT *, ts_rank_cd(tsv, to_tsquery('simple','x264')) AS _o
   FROM cand ORDER BY _o DESC LIMIT 30;
   ```
-  Capture latency + a *recall* check (how often the exact top-30 ⊂ candidate window) on the term matrix. This is
+  Capture latency + a _recall_ check (how often the exact top-30 ⊂ candidate window) on the term matrix. This is
   the best "keep relevance, no new disk, no extension, no write-amplification" option — its only cost is
   approximate ranking on broad terms (which is arguably fine, since `ts_rank_cd` over millions of equally-weighted
   `simple` single-term matches is already near-arbitrary).
@@ -265,13 +276,13 @@ the Sort still consumes the whole match-set).
 
 ## 3. Comparison matrix (fill from bench)
 
-| Option | Keeps `ts_rank_cd` relevance? | New disk | Build/migration | Write-path cost | Broad-term latency | Risk |
-|---|---|---|---|---|---|---|
-| **Baseline (today)** | yes | 0 | — | current | ~49 s (the wall) | — |
-| 2.1 RUM `<=>` | **no** (`ts_rank`) | **+30-50 GB** (~2-3× GIN) | slow single-thread build + `CREATE EXTENSION` | **high** (positional posting-list updates; FIND-1 risk) | tens of ms (the win) | high (write amp + semantics + ext) |
-| 2.2 `ts_rank` | similar | 0 | code 1-liner | unchanged | ~tens of s (constant-factor only) | low — but **not a fix** |
-| 2.3a published_at default | no (popularity) | 0 | code + UX | unchanged | fast for common terms (early-term) | medium (product default change) |
-| 2.4 bounded-candidate CTE (approx) | yes (over a window) | 0 | code | unchanged | bounded (rank 50k) | low-medium (approx recall) |
+| Option                             | Keeps `ts_rank_cd` relevance? | New disk                  | Build/migration                               | Write-path cost                                         | Broad-term latency                 | Risk                               |
+| ---------------------------------- | ----------------------------- | ------------------------- | --------------------------------------------- | ------------------------------------------------------- | ---------------------------------- | ---------------------------------- |
+| **Baseline (today)**               | yes                           | 0                         | —                                             | current                                                 | ~49 s (the wall)                   | —                                  |
+| 2.1 RUM `<=>`                      | **no** (`ts_rank`)            | **+30-50 GB** (~2-3× GIN) | slow single-thread build + `CREATE EXTENSION` | **high** (positional posting-list updates; FIND-1 risk) | tens of ms (the win)               | high (write amp + semantics + ext) |
+| 2.2 `ts_rank`                      | similar                       | 0                         | code 1-liner                                  | unchanged                                               | ~tens of s (constant-factor only)  | low — but **not a fix**            |
+| 2.3a published_at default          | no (popularity)               | 0                         | code + UX                                     | unchanged                                               | fast for common terms (early-term) | medium (product default change)    |
+| 2.4 bounded-candidate CTE (approx) | yes (over a window)           | 0                         | code                                          | unchanged                                               | bounded (rank 50k)                 | low-medium (approx recall)         |
 
 (Numbers to be filled by the bench run; latency cells are hypotheses from the code analysis + MEMORY.)
 
@@ -282,15 +293,15 @@ the Sort still consumes the whole match-set).
 1. **Do the characterisation now (cheap, read-only):** run §1.4 P0-P4 + the term matrix on the existing bench
    restore. It is a handful of `EXPLAIN ANALYZE` statements, no new objects, single connection. This produces the
    real cliff curve and confirms the join is not the dominant cost. **This is the only step worth doing
-   immediately**, because FIND-2 is pre-existing and DROP-independent — it is *not* on the critical path for the
+   immediately**, because FIND-2 is pre-existing and DROP-independent — it is _not_ on the critical path for the
    `torrent_files` migration/DROP and need not gate it.
 
-2. **Defer RUM.** It is the textbook fix and the only option that keeps interactive latency *and* relevance order,
+2. **Defer RUM.** It is the textbook fix and the only option that keeps interactive latency _and_ relevance order,
    but for this workload its costs are real and stacked: +30-50 GB on a project that is actively minimising
    footprint; a slow single-threaded build; a new shared-lib extension to bake into the PG image; a
    **ranking-semantics change** (`ts_rank`, no cover density); and — the dealbreaker — **write amplification on a
    table that is upsert-heavy and already exhibits super-linear tsv-update cost (FIND-1)**. Only pursue RUM if a
-   *confirmed* product requirement emerges for sub-second relevance-ranked results on broad common terms, and even
+   _confirmed_ product requirement emerges for sub-second relevance-ranked results on broad common terms, and even
    then gate it on the write-amplification probe (§2.1) showing the importer/dual-write path stays healthy.
 
 3. **If broad-term latency is a real user complaint, ship the code-only lever (no extension, no disk):** prefer
@@ -317,7 +328,7 @@ here blocks the migration. No production change is proposed.
   (`AllowTcpForwarding no`).
 - **DSN (bench throwaway PG, NodePort):** `postgresql://postgres:<BENCH_PW>@127.0.0.1:30654/bitmagnet`
   (reach via the tailscale host). This is the **pre-backfill restore**, isolated from prod.
-- **`setsid` launches survive client-side SSH timeouts** → a rc=124/255 "failure" can still have *landed* the
+- **`setsid` launches survive client-side SSH timeouts** → a rc=124/255 "failure" can still have _landed_ the
   command. Guard every orchestrator with a lockfile + `pgrep` before relaunch to avoid duplicate concurrent runs
   (colliding sessions tripped HEL1 sshd before). Gentle pollers only; no ControlMaster/tight loops.
 - **Read-only by default.** P0-P4 + §2.2/§2.3/§2.4 probes are pure `SELECT`/`EXPLAIN` — safe. They create no
@@ -336,9 +347,9 @@ here blocks the migration. No production change is proposed.
 ## 6. Open questions for the lead / product
 
 - Is broad-common-term relevance latency an actual user-visible complaint, or a theoretical worst case? (Most real
-  queries are multi-term/selective and already <25 ms per MEMORY/EXP-A.) This decides whether *any* fix ships.
+  queries are multi-term/selective and already <25 ms per MEMORY/EXP-A.) This decides whether _any_ fix ships.
 - Is **approximate** relevance on broad terms acceptable (§2.4)? If yes, the cheap code-only lever is enough and RUM
   is unnecessary.
 - Is `ts_rank_cd`'s cover-density even meaningful here? Config is `simple` (no positions from stemming) and most
-  walls are *single*-lexeme queries where `_cd` ≈ `ts_rank` ≈ term-frequency. If cover-density buys little, §2.2/§2.4
+  walls are _single_-lexeme queries where `_cd` ≈ `ts_rank` ≈ term-frequency. If cover-density buys little, §2.2/§2.4
   semantics shifts are cheap to accept.

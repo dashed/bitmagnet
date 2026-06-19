@@ -130,7 +130,14 @@ func TestComposer_TorrentContent_RefinesAndPaginates(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		2,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served result, got served=%v err=%v", served, err)
 	}
@@ -141,7 +148,10 @@ func TestComposer_TorrentContent_RefinesAndPaginates(t *testing.T) {
 	}
 
 	if len(res.Items) != 2 || res.Items[0].InfoHash != ih(1) || res.Items[1].InfoHash != ih(3) {
-		t.Fatalf("page must be [1,3] (false positive 2 dropped, not occupying a slot), got %d items", len(res.Items))
+		t.Fatalf(
+			"page must be [1,3] (false positive 2 dropped, not occupying a slot), got %d items",
+			len(res.Items),
+		)
 	}
 
 	if !res.HasNextPage {
@@ -173,13 +183,24 @@ func TestComposer_TorrentContent_NoCandidatesIsEstimatedEmpty(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "nomatch"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("no candidates is a served (estimated empty) result, got served=%v err=%v", served, err)
 	}
 
 	if len(res.Items) != 0 || !res.TotalCountIsEstimate {
-		t.Fatalf("expected empty estimated result, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+		t.Fatalf(
+			"expected empty estimated result, got %d items estimate=%v",
+			len(res.Items),
+			res.TotalCountIsEstimate,
+		)
 	}
 
 	if pg.callCount != 0 {
@@ -194,12 +215,24 @@ func TestComposer_TorrentContent_FailLoudFallback(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1)}}}
 	pg := &fakePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
 		// multi-file, no Files, no FilesData -> unrefinable
-		{TorrentContent: model.TorrentContent{InfoHash: ih(1), Torrent: model.Torrent{InfoHash: ih(1), FilesStatus: model.FilesStatusMulti}}},
+		{
+			TorrentContent: model.TorrentContent{
+				InfoHash: ih(1),
+				Torrent:  model.Torrent{InfoHash: ih(1), FilesStatus: model.FilesStatusMulti},
+			},
+		},
 	}}}
 
 	c := newTestComposer(l3, pg)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || served {
 		t.Fatalf("unrefinable candidate must fail loud (served=false), got served=%v err=%v", served, err)
 	}
@@ -209,7 +242,14 @@ func TestComposer_TorrentContent_L3ErrorPropagates(t *testing.T) {
 	l3 := &fakeL3{err: errors.New("sidecar down")}
 	c := newTestComposer(l3, &fakePG{})
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err == nil || served {
 		t.Fatalf("L3 error must propagate (served=false, err!=nil), got served=%v err=%v", served, err)
 	}
@@ -249,7 +289,12 @@ func TestComposer_CandidateBudget_HardBounded(t *testing.T) {
 		{1 << 40, 1 << 40}, // forces uint overflow in need*OversampleFactor
 	} {
 		if got := capped.candidateBudget(tc.limit, tc.offset); got > 2000 {
-			t.Errorf("budget(limit=%d,offset=%d) = %d, want <= MaxCandidates(2000)", tc.limit, tc.offset, got)
+			t.Errorf(
+				"budget(limit=%d,offset=%d) = %d, want <= MaxCandidates(2000)",
+				tc.limit,
+				tc.offset,
+				got,
+			)
 		}
 	}
 
@@ -257,7 +302,11 @@ func TestComposer_CandidateBudget_HardBounded(t *testing.T) {
 	// DefaultMaxCandidates so a misconfigured/zero cap is still memory-safe.
 	zeroCap := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 0}, nil)
 	if got := zeroCap.candidateBudget(1<<20, 0); got != DefaultMaxCandidates {
-		t.Errorf("budget with MaxCandidates=0 = %d, want DefaultMaxCandidates(%d) — 0 must not be unbounded", got, DefaultMaxCandidates)
+		t.Errorf(
+			"budget with MaxCandidates=0 = %d, want DefaultMaxCandidates(%d) — 0 must not be unbounded",
+			got,
+			DefaultMaxCandidates,
+		)
 	}
 }
 
@@ -273,12 +322,14 @@ func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
 		maxCands   uint = 1000
 		limit      uint = 300 // need=300, 300*4=1200 -> capped to maxCands(1000)
 	)
+
 	wantBudget := maxCands // 1200 capped to 1000
 
 	// Sidecar mirrors bitmagnet-rs: returns Limit + DEFAULT_OVERSAMPLE(200).
 	const sidecarOversample = 200
+
 	cands := make([]*pb.PathCandidate, 0, int(wantBudget)+sidecarOversample)
-	for i := 0; i < int(wantBudget)+sidecarOversample; i++ {
+	for i := range int(wantBudget) + sidecarOversample {
 		cands = append(cands, candidate(byte(i%256)))
 	}
 
@@ -298,7 +349,11 @@ func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
 	// budget+200. (Distinct info_hashes; the helper cycles bytes so we compare the
 	// returned slice length to the truncation bound, which is what gets decoded.)
 	if uint(len(ids)) > wantBudget {
-		t.Errorf("decoded candidate count = %d, want <= budget %d (sidecar +200 not truncated → OOM)", len(ids), wantBudget)
+		t.Errorf(
+			"decoded candidate count = %d, want <= budget %d (sidecar +200 not truncated → OOM)",
+			len(ids),
+			wantBudget,
+		)
 	}
 }
 
@@ -340,7 +395,9 @@ func TestComposer_TorrentContent_ZeroCandidates_UnhealthyFallsBack(t *testing.T)
 	}
 
 	if pg.callCount != 0 {
-		t.Fatal("must fall back BEFORE hitting the candidate PG query (the GraphQL layer runs the plain PG path)")
+		t.Fatal(
+			"must fall back BEFORE hitting the candidate PG query (the GraphQL layer runs the plain PG path)",
+		)
 	}
 }
 
@@ -354,13 +411,28 @@ func TestComposer_TorrentContent_ZeroCandidates_HealthyServesEmpty(t *testing.T)
 	c := NewComposer(l3, pg, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 1000}, nil,
 		WithHealthGate(func() bool { return true }))
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "nomatch"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "nomatch"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
-		t.Fatalf("zero candidates + healthy L3 is a served (estimated empty) result, got served=%v err=%v", served, err)
+		t.Fatalf(
+			"zero candidates + healthy L3 is a served (estimated empty) result, got served=%v err=%v",
+			served,
+			err,
+		)
 	}
 
 	if len(res.Items) != 0 || !res.TotalCountIsEstimate {
-		t.Fatalf("expected empty estimated result, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+		t.Fatalf(
+			"expected empty estimated result, got %d items estimate=%v",
+			len(res.Items),
+			res.TotalCountIsEstimate,
+		)
 	}
 }
 
@@ -382,7 +454,14 @@ func TestComposer_TorrentContent_PassesThroughAggregations(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -419,17 +498,31 @@ func TestComposer_TorrentContent_AllRefinedOut_EmptyAggregations(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
 
 	if res.TotalCount != 0 || len(res.Items) != 0 {
-		t.Fatalf("all candidates refined out → empty result, got TotalCount=%d items=%d", res.TotalCount, len(res.Items))
+		t.Fatalf(
+			"all candidates refined out → empty result, got TotalCount=%d items=%d",
+			res.TotalCount,
+			len(res.Items),
+		)
 	}
 
 	if len(res.Aggregations) != 0 {
-		t.Fatalf("empty result must carry EMPTY facets (no candidate-set phantom counts), got %+v (gate7-8)", res.Aggregations)
+		t.Fatalf(
+			"empty result must carry EMPTY facets (no candidate-set phantom counts), got %+v (gate7-8)",
+			res.Aggregations,
+		)
 	}
 }
 
@@ -438,7 +531,11 @@ func TestComposer_TorrentContent_AllRefinedOut_EmptyAggregations(t *testing.T) {
 // sum(facet) == N. (The fake returns the refined-set facets for the aggregation
 // pass.)
 func TestComposer_TorrentContent_RefinedAggregationsReconcile(t *testing.T) {
-	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{candidate(1), candidate(2), candidate(3)}}}
+	l3 := &fakeL3{
+		resp: &pb.PathCandidatesResponse{
+			Candidates: []*pb.PathCandidate{candidate(1), candidate(2), candidate(3)},
+		},
+	}
 	refinedAggs := query.Aggregations{
 		"content_type": query.AggregationGroup{Items: query.AggregationItems{
 			"movie": query.AggregationItem{Label: "movie", Count: 2},
@@ -456,7 +553,14 @@ func TestComposer_TorrentContent_RefinedAggregationsReconcile(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -476,7 +580,11 @@ func TestComposer_TorrentContent_RefinedAggregationsReconcile(t *testing.T) {
 	}
 
 	if sum != uint(res.TotalCount) {
-		t.Fatalf("facet counts must reconcile with items: sum(content_type)=%d, want N=%d (gate7-8)", sum, res.TotalCount)
+		t.Fatalf(
+			"facet counts must reconcile with items: sum(content_type)=%d, want N=%d (gate7-8)",
+			sum,
+			res.TotalCount,
+		)
 	}
 }
 
@@ -500,7 +608,14 @@ func TestComposer_TorrentContent_ServesInL3RecallOrder(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -512,8 +627,12 @@ func TestComposer_TorrentContent_ServesInL3RecallOrder(t *testing.T) {
 
 	for i, b := range want {
 		if res.Items[i].InfoHash != ih(b) {
-			t.Fatalf("item[%d] = %v, want recall order ih(%d); page must follow L3 recall order, not PG order (#98)",
-				i, res.Items[i].InfoHash, b)
+			t.Fatalf(
+				"item[%d] = %v, want recall order ih(%d); page must follow L3 recall order, not PG order (#98)",
+				i,
+				res.Items[i].InfoHash,
+				b,
+			)
 		}
 	}
 }
@@ -535,7 +654,14 @@ func TestComposer_TorrentContent_HasNextPage(t *testing.T) {
 	c := newTestComposer(l3, pg)
 
 	// limit==0 → paginate returns all 3 refined rows; there is NO next page.
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 0, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		0,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served, got served=%v err=%v", served, err)
 	}
@@ -570,7 +696,14 @@ func TestComposer_CollapsePaths(t *testing.T) {
 
 	c := newTestComposer(l3, pg)
 
-	groups, served, err := c.CollapsePaths(context.Background(), Filters{Query: "movie"}, QueryOptions{}, 10, 0, nil)
+	groups, served, err := c.CollapsePaths(
+		context.Background(),
+		Filters{Query: "movie"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("expected served collapse, got served=%v err=%v", served, err)
 	}

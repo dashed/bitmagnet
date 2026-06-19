@@ -18,16 +18,16 @@ pruning precondition). Cost: the fact grew **13 G → 21 G** (sorting decorrelat
 
 ## Measured through the production sidecar (warm, threads=4, live data)
 
-| shape | unsorted | sorted | note |
-|---|---|---|---|
-| `find ext∧size` (mkv>1 GB top-100) | 11.2 s | **0.75 s** | ✅ the 10 s-deadline item, fixed |
-| `find` two-sided range | 13.6 s | **2.3 s** | ✅ |
-| `find` NULL-ext bucket | 13.3 s | **3.4 s** | ✅ |
-| `count files` (flac) | 1.6 s | **0.99 s** | ✅ (raw DuckDB probe: 14 ms) |
-| `count torrents` (mkv>4 GB) | 0.57 s | **0.54 s** | rollup-served, unchanged |
-| facets | 1.3–4.3 s | **1.4–2.1 s** | rollup-served |
-| **collapse (ext-only / size)** | 3–5.7 s | **10.8–21 s** | ❌ regressed |
-| **collapse path~** | 71 s | **582 s** | ❌ badly (L3-carve-out shape) |
+| shape                              | unsorted  | sorted        | note                             |
+| ---------------------------------- | --------- | ------------- | -------------------------------- |
+| `find ext∧size` (mkv>1 GB top-100) | 11.2 s    | **0.75 s**    | ✅ the 10 s-deadline item, fixed |
+| `find` two-sided range             | 13.6 s    | **2.3 s**     | ✅                               |
+| `find` NULL-ext bucket             | 13.3 s    | **3.4 s**     | ✅                               |
+| `count files` (flac)               | 1.6 s     | **0.99 s**    | ✅ (raw DuckDB probe: 14 ms)     |
+| `count torrents` (mkv>4 GB)        | 0.57 s    | **0.54 s**    | rollup-served, unchanged         |
+| facets                             | 1.3–4.3 s | **1.4–2.1 s** | rollup-served                    |
+| **collapse (ext-only / size)**     | 3–5.7 s   | **10.8–21 s** | ❌ regressed                     |
+| **collapse path~**                 | 71 s      | **582 s**     | ❌ badly (L3-carve-out shape)    |
 
 Raw zone-map wins at the storage layer (DuckDB probes, threads=4): `count flac`
 **14 ms**, `count mkv>4G` **20 ms**, `find mkv>1g top-100` **341 ms** — the
@@ -36,11 +36,11 @@ ARCH-C numbers (`collapse 1311→132 ms`, `count 1024→17 ms` class) reproduced
 ## The regression mechanism (singular)
 
 Sorting by `(extension, size)` **destroyed `info_hash` locality**: previously the
-fact sat in info_hash-keyset order, so a per-torrent probe (`info_hash = ?`)
+fact sat in info*hash-keyset order, so a per-torrent probe (`info_hash = ?`)
 touched ~1 row group via zone-maps; now every probe scans all 882 (~0.4 s each).
 The collapse path runs **up to 50 such probes per request** — the per-group
-*preview* queries (even on the pure-rollup `collapse:flac`, which never needs the
-fact otherwise) and the exact-*hydration* queries on the `size_min` path:
+\_preview* queries (even on the pure-rollup `collapse:flac`, which never needs the
+fact otherwise) and the exact-_hydration_ queries on the `size_min` path:
 50 × ~0.4 s ≈ the observed ~20 s. `collapse:path` adds a GROUP BY over
 maximally-scattered hashes on the bigger file (582 s) — path shapes are the L3
 carve-out regardless.
@@ -51,9 +51,10 @@ the numbers within noise.
 ## Fix (`l2-10`, contained sql.rs/duck.rs/service.rs change)
 
 **Batch the probes — one scan instead of fifty:**
+
 1. Hydration: one `… WHERE info_hash IN (?,…50) AND <pred> GROUP BY info_hash`.
 2. Previews: one windowed query — `row_number() OVER (PARTITION BY info_hash
-   ORDER BY size DESC, file_index) <= preview_limit` *after* the `IN`-filter
+ORDER BY size DESC, file_index) <= preview_limit` _after_ the `IN`-filter
    cuts the scan (the window then runs over ≤50 torrents' files, so the EXP-B
    window-function caveat doesn't apply).
 
@@ -73,16 +74,16 @@ The first l2-10 delta tick completed cleanly:
 Live `v2-shadow` subset (12 pairs, `collapse:path` excluded; temporary 240s
 deadline restored to 10s afterward) confirms the batch-probe fix:
 
-| shape | equality | sidecar |
-|---|---:|---:|
-| `collapse:mkv>1g` | ✅ | **1.498 s** |
-| `collapse:flac` | ✅ | **1.744 s** |
-| `collapse:smallmkv` | ✅ | **0.401 s** |
-| `find:mkv>1g` | ✅ | 0.747 s |
-| `find:range` | ✅ | 2.204 s |
-| `find:nullext` | ✅ | 3.222 s |
-| `count:flac-files` | ✅ | 0.947 s |
-| `count:flac-torrents` | ✅ | 0.440 s |
+| shape                 | equality |     sidecar |
+| --------------------- | -------: | ----------: |
+| `collapse:mkv>1g`     |       ✅ | **1.498 s** |
+| `collapse:flac`       |       ✅ | **1.744 s** |
+| `collapse:smallmkv`   |       ✅ | **0.401 s** |
+| `find:mkv>1g`         |       ✅ |     0.747 s |
+| `find:range`          |       ✅ |     2.204 s |
+| `find:nullext`        |       ✅ |     3.222 s |
+| `count:flac-files`    |       ✅ |     0.947 s |
+| `count:flac-torrents` |       ✅ |     0.440 s |
 
 Strict live gate result: `pairs=12 mismatches=3 gate=FAIL`, for expected live
 reasons only: the known `facet:video` `avi +10` dup-path residue, plus two
@@ -92,7 +93,7 @@ run is the post-rollout parity/perf smoke.
 
 ## Watchdog bug fixed (`l2-11`, #75)
 
-The 582 s collapse ran under a **240 s** test deadline *uninterrupted* — the old
+The 582 s collapse ran under a **240 s** test deadline _uninterrupted_ — the old
 `InterruptHandle` watchdog (`duck.rs::with_conn`) was cooperative only, blocked
 the caller until DuckDB eventually returned, and returned late success/error
 through most call sites.
@@ -103,11 +104,12 @@ typed `query exceeded deadline` error mapped to gRPC `DEADLINE_EXCEEDED`, and
 keeps the connection out of the pool until DuckDB actually unwinds.
 
 Live repro/proof on HEL1:
-* `l2-10`, production 10 s deadline, `collapse:path` (`S01E01`, limit 50):
+
+- `l2-10`, production 10 s deadline, `collapse:path` (`S01E01`, limit 50):
   returned only after the long interrupt path as gRPC `Internal`
   (`query exceeded deadline: INTERRUPT Error: Interrupted!`); total shadow wall
   time was **180.66 s** including the PG comparison leg.
-* `l2-11`, same shape via direct gRPC: returned `DeadlineExceeded` /
+- `l2-11`, same shape via direct gRPC: returned `DeadlineExceeded` /
   `query exceeded deadline` in **10.35 s**; pod remained Ready and
   `HealthCheck` returned `SERVING_STATUS_SERVING`.
 
@@ -115,23 +117,23 @@ Live repro/proof on HEL1:
 
 Observed from **01:18:38Z to 01:32:51Z** on HEL1:
 
-* Deployment stayed `1/1` Available; pod
+- Deployment stayed `1/1` Available; pod
   `bitmagnet-filesearch-d57454d78-m88w2` stayed Ready/Running with **0**
   restarts; the service endpoint stayed `10.42.2.33:50052`.
-* Image/runtime digest stayed pinned to
+- Image/runtime digest stayed pinned to
   `sha256:d2effbdff6e6df49dbe051abb9df706aea1e8cd59feb7b1be1e5e3737ce3ba7b`.
-* Direct `collapse:path` (`S01E01`, limit 50) returned gRPC
+- Direct `collapse:path` (`S01E01`, limit 50) returned gRPC
   `DeadlineExceeded` / `query exceeded deadline` in **10.36-10.37 s**;
   `HealthCheck` stayed `SERVING_STATUS_SERVING`.
-* Delta freshness stayed inside SLA: refresh jobs completed every minute in
+- Delta freshness stayed inside SLA: refresh jobs completed every minute in
   **4-5 s**, reloads advanced monotonically
   (`delta v1781227141 -> v1781227921`), `decode_errors=0`, `clean=true`, final
   `delta_mark=2026-06-12T01:31:31Z`, final `delta_age_seconds=50-54`.
-* Live structured `v2-shadow` excluding path-query shapes was **9/11 exact**.
+- Live structured `v2-shadow` excluding path-query shapes was **9/11 exact**.
   The two accepted mismatches were the documented `facet:video` `avi +10`
   dup-path legacy-PK residue and moving-prod freshness drift (`facet:>1g`
   moved from `mkv -3` to `mp4 -2` after the next delta).
-* A path-query shadow leg (`find:path 1080p`) hit the documented unprunable
+- A path-query shadow leg (`find:path 1080p`) hit the documented unprunable
   path class: PG spent **144 s**, while the sidecar correctly enforced the
   10 s deadline.
 
@@ -170,11 +172,11 @@ path-substring scan and is not the primary fix for `collapse:path`.
 
 Two related shapes are intentionally **not** request-path DuckDB scans:
 
-* **Rare/exhaustive path `ILIKE` or regex:** route through L3 when the query has a
+- **Rare/exhaustive path `ILIKE` or regex:** route through L3 when the query has a
   required literal/ngram prefilter, then exact-refine candidates in blob/L2. A
   regex with no selective literal remains a batch/offline scan behind the L2
   deadline, not an interactive feature.
-* **Cross-torrent duplicate-by-`(path,size)`:** materialize it during
+- **Cross-torrent duplicate-by-`(path,size)`:** materialize it during
   compaction/offline work. Emit a duplicate rollup keyed by `(path_hash,size)`
   with exact path verification inside each bucket, `torrent_count`, and bounded
   sample `info_hash` values for hydration. Serving should read that rollup/cache;
@@ -182,10 +184,10 @@ Two related shapes are intentionally **not** request-path DuckDB scans:
 
 ## Operational notes
 
-* Live-run mismatches are fully understood: the known +10 dup-path avi residue
+- Live-run mismatches are fully understood: the known +10 dup-path avi residue
   ([runbook §5](./l2-verify-and-shadow-runbook.md)) and small crawl drift inside
   the ≤2 min freshness window — expected off-snapshot.
-* Generation housekeeping is now a real item: each compact leaves the previous
+- Generation housekeeping is now a real item: each compact leaves the previous
   ~13–21 G base behind, and the minute delta adds ~1,440 tiny dirs/day — prune
   non-current dirs after compacts (manual today; automate in `publish()`).
-* The production deadline (10 s) was restored after the measurement runs.
+- The production deadline (10 s) was restored after the measurement runs.

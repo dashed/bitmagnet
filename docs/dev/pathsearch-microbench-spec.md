@@ -2,6 +2,7 @@
 
 **Date:** 2026-06-09 · **Status:** 📋 DRAFT — code ready, **NOT run** (gated on PS-T5 G3/G5).
 **Owner question it resolves:** the two unknowns the whole L3 path-search decision turns on —
+
 - **G3 (latency):** does the per-torrent ngram index clear **<50 ms warm p50 on the broadest 3-char prefix** (the per-keystroke worst case EXP-D2 left open at the per-file granularity)?
 - **G5 (size):** is the per-torrent index **materially under the 94 GB per-file ceiling** (so it fits the HEL1 PVC and doesn't triple the footprint)?
 
@@ -15,8 +16,8 @@ Cross-refs: [`pathsearch-T3-index-design.md`](./pathsearch-T3-index-design.md) (
 
 Extends the existing `bench-file-index` crate (the EXP-D/D2/E tool) with two reviewable additions — **no new infra, no new data source**:
 
-1. **`--granularity per-file | per-torrent`** on the `recall` subcommand (`main.rs`). `per-torrent` groups consecutive `torrent_files` rows by `info_hash` (relying on the keyset scan's `ORDER BY info_hash, "index"`) and emits **one path-bag doc per torrent**: every file path added as a *separate value* of the one `path` field, so each value is tokenized independently and **no boundary grams span two files**. Identity/delete key = `info_hash` only. Truth becomes the OR over the fileset (a torrent matches a query if ANY of its paths contains it).
-2. **`--tokenizer edge-ngram`** (`schema.rs`, arm C). A custom `PerWordEdgeNgram` tokenizer: splits on non-alphanumerics, emits **per-word edge-grams (prefixes)** for ASCII words and **full sliding char-ngrams** for CJK runs (routed per code point). This is the cheaper ASCII-prefix-typeahead arm PS-T3 flagged as *unmeasured*; it sidesteps the stock-`prefix_only` "anchors at offset 0 of the whole path" trap. Recommended build width `--ngram-min 2 --ngram-max 12` (wide max = real prefix discrimination).
+1. **`--granularity per-file | per-torrent`** on the `recall` subcommand (`main.rs`). `per-torrent` groups consecutive `torrent_files` rows by `info_hash` (relying on the keyset scan's `ORDER BY info_hash, "index"`) and emits **one path-bag doc per torrent**: every file path added as a _separate value_ of the one `path` field, so each value is tokenized independently and **no boundary grams span two files**. Identity/delete key = `info_hash` only. Truth becomes the OR over the fileset (a torrent matches a query if ANY of its paths contains it).
+2. **`--tokenizer edge-ngram`** (`schema.rs`, arm C). A custom `PerWordEdgeNgram` tokenizer: splits on non-alphanumerics, emits **per-word edge-grams (prefixes)** for ASCII words and **full sliding char-ngrams** for CJK runs (routed per code point). This is the cheaper ASCII-prefix-typeahead arm PS-T3 flagged as _unmeasured_; it sidesteps the stock-`prefix_only` "anchors at offset 0 of the whole path" trap. Recommended build width `--ngram-min 2 --ngram-max 12` (wide max = real prefix discrimination).
 
 Both reuse the existing single-thread-writer + `--writer-heap-mb 2000` path (the EXP-D crash fix), the `--skip-truth` broad-sweep mode, the `report_segment_bytes` size attribution, and the `pathquery` cold/warm latency subcommand — so the numbers are directly comparable to EXP-D2.
 
@@ -26,11 +27,11 @@ Both reuse the existing single-thread-writer + `--writer-heap-mb 2000` path (the
 
 ## 2. The arms (all on the existing 879.5 M-row HEL1 restore, ~50 M-row slice)
 
-| arm | granularity | tokenizer | `--limit-docs` | answers |
-|---|---|---|---|---|
-| **A (PRIMARY)** | per-torrent | ngram(2,3) | `965000` torrents (≈ first ~50 M files) | **G3 + G5** for the recommended design |
-| **B (control)** | per-file | ngram(2,3) | `50000000` files | reproduces the EXP-D2 baseline at 50 M — anchors the comparison |
-| **C (secondary)** | per-torrent | edge-ngram(2,12) | `965000` torrents | the cheaper ASCII-prefix arm — does it beat A on size while staying <50 ms? |
+| arm               | granularity | tokenizer        | `--limit-docs`                          | answers                                                                     |
+| ----------------- | ----------- | ---------------- | --------------------------------------- | --------------------------------------------------------------------------- |
+| **A (PRIMARY)**   | per-torrent | ngram(2,3)       | `965000` torrents (≈ first ~50 M files) | **G3 + G5** for the recommended design                                      |
+| **B (control)**   | per-file    | ngram(2,3)       | `50000000` files                        | reproduces the EXP-D2 baseline at 50 M — anchors the comparison             |
+| **C (secondary)** | per-torrent | edge-ngram(2,12) | `965000` torrents                       | the cheaper ASCII-prefix arm — does it beat A on size while staying <50 ms? |
 
 `965000 ≈ 50 000 000 / 51.79` (the measured avg files/torrent), so A and B cover ~the same first ~50 M rows of the corpus and **extrapolate to the full corpus by the same ~17.6× factor** that EXP-D2 used (50 M → 879.5 M / 17 M-torrent). Report the extrapolated full-corpus index size as `measured_total_bytes × (16 992 238 / torrents_indexed)`.
 
@@ -89,7 +90,7 @@ Report a table of `(arm × charset × prefix-length) → avg hits, cold/warm p50
 - **GO-CHEAPER (arm C)** if arm C clears the same latency bar at a **smaller** index than A — then ship ASCII edge-ngram typeahead + degrade CJK to submit-time substring (PS-T5 option (b)), the most defensible cost-down.
 - **NO-GO / hold** if neither per-torrent arm clears `ascii3`/`cjk3` < 50 ms warm p50 — then min-chars=3 + debounce cannot rescue per-keystroke and the honest product answer is **search-on-submit** (DuckDB-FTS ~150 ms), not a +90 GB index. PS-T5's NO-GO-by-default stands.
 
-Whatever the result: this index is **purely additive and never gates the `torrent_files` DROP** (PS-T5 G4). The micro-bench only decides whether the *optional* L3 layer is worth building if/when a real product demand (G1) and an in-prod ILIKE-wall (G2) ever materialize.
+Whatever the result: this index is **purely additive and never gates the `torrent_files` DROP** (PS-T5 G4). The micro-bench only decides whether the _optional_ L3 layer is worth building if/when a real product demand (G1) and an in-prod ILIKE-wall (G2) ever materialize.
 
 ---
 

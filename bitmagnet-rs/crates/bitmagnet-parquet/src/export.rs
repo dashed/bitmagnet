@@ -162,7 +162,10 @@ fn sort_fact_external(dir: &Path) -> Result<()> {
 
     std::fs::rename(&sorted, &fact).context("swapping the sorted fact in")?;
     let _ = std::fs::remove_dir_all(&tmp);
-    tracing::info!(elapsed_secs = started.elapsed().as_secs(), "external sort done");
+    tracing::info!(
+        elapsed_secs = started.elapsed().as_secs(),
+        "external sort done"
+    );
     Ok(())
 }
 
@@ -198,7 +201,7 @@ pub async fn run_base(
         for row in &page {
             sinks.push_torrent(&row.info_hash.to_string(), row.files())?;
         }
-        cursor = page.last().map(|r| r.info_hash.clone());
+        cursor = page.last().map(|r| r.info_hash);
     }
 
     let stats = sinks.finish(&dir)?;
@@ -258,7 +261,7 @@ pub async fn run_delta(
         for row in &page {
             sinks.push_torrent(&row.info_hash.to_string(), row.files())?;
         }
-        cursor = page.last().map(|r| r.info_hash.clone());
+        cursor = page.last().map(|r| r.info_hash);
     }
     for ih in deleted {
         sinks.push_deleted(ih)?;
@@ -327,8 +330,11 @@ mod tests {
     fn base_sinks_produce_all_artifacts_and_count() {
         let d = dir("base");
         let mut s = Sinks::create(&d, SortMode::InMemory, false).unwrap();
-        s.push_torrent("aa", Ok(files(&[("a.mkv", 10), ("b.mkv", 20), ("c.srt", 1)])))
-            .unwrap();
+        s.push_torrent(
+            "aa",
+            Ok(files(&[("a.mkv", 10), ("b.mkv", 20), ("c.srt", 1)])),
+        )
+        .unwrap();
         s.push_torrent("bb", Ok(files(&[("d.avi", 5)]))).unwrap();
         let stats = s.finish(&d).unwrap();
         assert_eq!(stats.decode.torrents_ok, 2);
@@ -350,11 +356,8 @@ mod tests {
         let d = dir("err");
         let mut s = Sinks::create(&d, SortMode::None, false).unwrap();
         s.push_torrent("aa", Ok(files(&[("a.mkv", 1)]))).unwrap();
-        s.push_torrent(
-            "bb",
-            bitmagnet_model::deserialize_files(b"garbage").map_err(|e| e),
-        )
-        .unwrap();
+        s.push_torrent("bb", bitmagnet_model::deserialize_files(b"garbage"))
+            .unwrap();
         let stats = s.finish(&d).unwrap();
         assert_eq!(stats.decode.torrents_ok, 1);
         assert_eq!(stats.decode.decode_errors, 1);

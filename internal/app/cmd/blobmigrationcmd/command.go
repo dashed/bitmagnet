@@ -461,7 +461,9 @@ func (p Params) verifyCmd() *cli.Command {
 			}
 
 			if fileIndexSet && !ctx.Bool("full") {
-				return fmt.Errorf("--file-index-set requires --full; sampled checks cannot prove set equality")
+				return fmt.Errorf(
+					"--file-index-set requires --full; sampled checks cannot prove set equality",
+				)
 			}
 
 			// sampleSize 0 = full. Parallel streaming (no ORDER BY RANDOM / join / per-torrent reads).
@@ -534,8 +536,14 @@ func (p Params) verifyCmd() *cli.Command {
 			tw.AppendRow(table.Row{"Matches", summary.Matches})
 			tw.AppendRow(table.Row{"Mismatches", summary.Mismatches})
 			tw.AppendRow(table.Row{"Errors", summary.Errors})
-			if fileIndexSet || summary.LegacyDuplicatePathTorrents > 0 || summary.LegacyDuplicatePathFiles > 0 {
-				tw.AppendRow(table.Row{"Legacy duplicate-path torrents", summary.LegacyDuplicatePathTorrents})
+			if fileIndexSet || summary.LegacyDuplicatePathTorrents > 0 ||
+				summary.LegacyDuplicatePathFiles > 0 {
+				tw.AppendRow(
+					table.Row{
+						"Legacy duplicate-path torrents",
+						summary.LegacyDuplicatePathTorrents,
+					},
+				)
 				tw.AppendRow(table.Row{"Legacy duplicate-path files", summary.LegacyDuplicatePathFiles})
 			}
 			tw.Render()
@@ -554,7 +562,10 @@ func (p Params) verifyCmd() *cli.Command {
 			}
 
 			if fileIndexSet {
-				_, _ = fmt.Fprintln(ctx.App.Writer, "\nVerification PASSED (read-only; timestamp not updated).")
+				_, _ = fmt.Fprintln(
+					ctx.App.Writer,
+					"\nVerification PASSED (read-only; timestamp not updated).",
+				)
 				return nil
 			}
 
@@ -654,7 +665,15 @@ func (p Params) backfillExtCmd() *cli.Command {
 				}
 			}
 
-			rep, err := extfix.BackfillExtensions(ctx.Context, d, parallelism, chunkSize, limit, dryRun, progress)
+			rep, err := extfix.BackfillExtensions(
+				ctx.Context,
+				d,
+				parallelism,
+				chunkSize,
+				limit,
+				dryRun,
+				progress,
+			)
 			if err != nil {
 				return fmt.Errorf("e-backfill failed: %w", err)
 			}

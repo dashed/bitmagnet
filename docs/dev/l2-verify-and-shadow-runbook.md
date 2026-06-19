@@ -16,16 +16,16 @@ The `torrent_files` DROP needs a **proof**, not a vibe. This doc is the map of t
 (D) blob ⟺ torrent_files, forever   Go consistency LiveChecker      (already live in prod)
 ```
 
-* **(A) `verify`** proves the post-DROP per-file source (the blob) agrees with the
+- **(A) `verify`** proves the post-DROP per-file source (the blob) agrees with the
   retiring table at the per-`(torrent, extension)` aggregate grain — including G1
   (the extension is path-derived on BOTH sides: the PG generated column and the
   blob decode). L2-P0 §8 settled that divergence is structurally zero, so **any**
   mismatch is a bug, never an accepted loss.
-* **(C) `v2-shadow`** proves the whole serving stack — export → Parquet generation
+- **(C) `v2-shadow`** proves the whole serving stack — export → Parquet generation
   → DuckDB SQL → gRPC — returns exactly what the equivalent `torrent_files` SQL
   returns, shape by shape. This is the gate that catches writer/reader/SQL bugs
   (A) cannot see.
-* (B) and (D) close the loop continuously: the generation is built from the blob
+- (B) and (D) close the loop continuously: the generation is built from the blob
   by the same code `verify` exercises, and the live checker keeps blob ⟺
   `torrent_files` true while both exist.
 
@@ -101,16 +101,16 @@ every count, and the 5 086-bucket size facet. The 13th (`facet:video`) differed
 by **+10 avi files on the sidecar** — root-caused, corpus-quantified, and the
 LEGACY side is the wrong one:
 
-* `torrent_files`' **primary key is `(info_hash, path)`** (live schema:
+- `torrent_files`' **primary key is `(info_hash, path)`** (live schema:
   `torrent_files_pkey ON (info_hash, path)`), and the crawler persists file rows
   with `OnConflict{DoNothing}` — so **duplicate-path files (BEP-47 `.pad/N`
   padding, identical path at many indexes) are silently dropped**. The blob
   keeps the faithful list (matches `torrents.files_count`).
-* Corpus-wide (frozen): **18 torrents, +18 726 blob-side files (0.002 % of
+- Corpus-wide (frozen): **18 torrents, +18 726 blob-side files (0.002 % of
   882.8 M)**, 99.9 % NULL-extension `.pad` entries; one torrent holds 17 229 of
   them. Affected torrents span 2025-01 → today: long-standing upstream
   behavior, not a dual-write regression.
-* GATE A was structurally blind to it (per-(torrent, ext) presence+max survives
+- GATE A was structurally blind to it (per-(torrent, ext) presence+max survives
   dropped duplicates) — the count-grain facet pair is what caught it.
 
 > **2026-06-11 follow-up:** padding is now retained-but-filtered — see
@@ -141,21 +141,21 @@ l2-11 service behaves correctly while prod is moving.
 
 Window: **2026-06-12T01:18:38Z -> 01:32:51Z**.
 
-* Readiness stayed stable: Deployment `1/1` Available, pod
+- Readiness stayed stable: Deployment `1/1` Available, pod
   `bitmagnet-filesearch-d57454d78-m88w2` Ready/Running, **0** restarts,
   endpoint `10.42.2.33:50052`, no warning events.
-* Deadline behavior stayed hard: direct `collapse:path` (`S01E01`, limit 50)
+- Deadline behavior stayed hard: direct `collapse:path` (`S01E01`, limit 50)
   returned gRPC `DeadlineExceeded` / `query exceeded deadline` in
   **10.36-10.37 s**; HealthCheck stayed `SERVING_STATUS_SERVING`.
-* Freshness stayed healthy: refresh jobs every minute, **4-5 s** duration,
+- Freshness stayed healthy: refresh jobs every minute, **4-5 s** duration,
   `decode_errors=0`, `clean=true`, sidecar reloads every minute around
   `:15.727Z`, deltas advanced `v1781227141 -> v1781227921`, final
   `delta_mark=2026-06-12T01:31:31Z`, final `delta_age_seconds=50-54`.
-* Live structured `v2-shadow`, excluding path-query shapes, was **9/11 exact**.
+- Live structured `v2-shadow`, excluding path-query shapes, was **9/11 exact**.
   The accepted residues were the known `facet:video` `avi +10` dup-path
   superset and moving-prod freshness drift (`facet:>1g` changed from `mkv -3`
   to `mp4 -2` after the next delta).
-* Path-query shadow is intentionally deadline-guarded until L3 candidate routing
+- Path-query shadow is intentionally deadline-guarded until L3 candidate routing
   exists: `find:path 1080p` took PG **144 s** and the sidecar returned the 10 s
   deadline.
 

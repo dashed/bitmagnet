@@ -155,6 +155,7 @@ func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	blobIndexes := make(map[uint]int, len(blobFiles))
 	blobByIndex := make(map[uint]model.TorrentFile, len(blobFiles))
 	blobPathCounts := make(map[string]int, len(blobFiles))
+
 	for _, f := range blobFiles {
 		blobIndexes[f.Index]++
 		blobByIndex[f.Index] = f
@@ -164,6 +165,7 @@ func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	rowIndexes := make(map[uint]int, len(rowFiles))
 	rowByIndex := make(map[uint]model.TorrentFile, len(rowFiles))
 	rowPaths := make(map[string]struct{}, len(rowFiles))
+
 	for _, f := range rowFiles {
 		rowIndexes[f.Index]++
 		rowByIndex[f.Index] = f
@@ -196,10 +198,12 @@ func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	for index := range rowIndexes {
 		sortedRows = append(sortedRows, int(index))
 	}
+
 	sort.Ints(sortedRows)
 
 	for _, index := range sortedRows {
 		row := rowByIndex[uint(index)]
+
 		blob, ok := blobByIndex[uint(index)]
 		if !ok {
 			result.Mismatches = append(result.Mismatches, FieldMismatch{
@@ -208,6 +212,7 @@ func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 				Expected:  fmt.Sprintf("%d", index),
 				Got:       "",
 			})
+
 			continue
 		}
 
@@ -234,10 +239,12 @@ func CompareFileIndexSet(blobFiles, rowFiles []model.TorrentFile) CheckResult {
 	for index := range blobIndexes {
 		sortedBlobs = append(sortedBlobs, int(index))
 	}
+
 	sort.Ints(sortedBlobs)
 
 	for _, index := range sortedBlobs {
 		blob := blobByIndex[uint(index)]
+
 		if _, ok := rowIndexes[uint(index)]; ok {
 			continue
 		}
@@ -523,7 +530,16 @@ func checkAllImpl(
 		go func(rangeIndex int, rg verifyRange) {
 			defer wg.Done()
 
-			local, err := checkRange(ctx, q, rangeIndex, rg, chunkSize, perRangeLimit, strictE, duplicatePathAware)
+			local, err := checkRange(
+				ctx,
+				q,
+				rangeIndex,
+				rg,
+				chunkSize,
+				perRangeLimit,
+				strictE,
+				duplicatePathAware,
+			)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -630,6 +646,7 @@ func checkRange(
 			blobFiles, derr := blobmigration.DeserializeFiles(b.FilesData)
 			if derr != nil {
 				s.Errors++
+
 				return s, fmt.Errorf(
 					"deserializing files_data range_index=%d range=%s info_hash=%s cursor=%s max_hash=%s checked=%d: %w",
 					rangeIndex,
@@ -681,7 +698,13 @@ func checkRange(
 	return s, nil
 }
 
-func checkRangeFileIndexSet(ctx context.Context, q *dao.Query, rangeIndex int, rg verifyRange, chunkSize int) (Summary, error) {
+func checkRangeFileIndexSet(
+	ctx context.Context,
+	q *dao.Query,
+	rangeIndex int,
+	rg verifyRange,
+	chunkSize int,
+) (Summary, error) {
 	var s Summary
 
 	db := q.Torrent.UnderlyingDB().WithContext(ctx)
@@ -786,6 +809,7 @@ func compareFileIndexChunk(
 		blobFiles, derr := blobmigration.DeserializeFiles(b.FilesData)
 		if derr != nil {
 			s.Errors++
+
 			return fmt.Errorf(
 				"deserializing file-index files_data range_index=%d range=%s info_hash=%s cursor=%s max_hash=%s checked=%d: %w",
 				rangeIndex,
@@ -837,6 +861,7 @@ func addRowOnlyIndexMismatches(s *Summary, filesByHash map[protocol.ID][]model.T
 	for h := range filesByHash {
 		hashes = append(hashes, h)
 	}
+
 	sort.Slice(hashes, func(i, j int) bool {
 		return string(hashes[i][:]) < string(hashes[j][:])
 	})
@@ -886,7 +911,9 @@ func groupedFiles(
 
 	out := make(map[protocol.ID][]model.TorrentFile)
 	rowsRead := 0
+
 	var lastHash protocol.ID
+
 	hasLastHash := false
 
 	for rows.Next() {
@@ -955,7 +982,9 @@ func groupedFileIndexes(
 
 	out := make(map[protocol.ID][]model.TorrentFile)
 	rowsRead := 0
+
 	var lastHash protocol.ID
+
 	hasLastHash := false
 
 	for rows.Next() {

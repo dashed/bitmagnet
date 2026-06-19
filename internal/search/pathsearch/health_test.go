@@ -56,6 +56,7 @@ func TestHealthState_SetAndSnapshotRoundTrip(t *testing.T) {
 
 	// Transition back to unhealthy.
 	h.SetHealthy(false, 42, 1_700_000_000, 1_700_000_100)
+
 	if h.Healthy() {
 		t.Fatal("Healthy() should be false after SetHealthy(false, ...)")
 	}

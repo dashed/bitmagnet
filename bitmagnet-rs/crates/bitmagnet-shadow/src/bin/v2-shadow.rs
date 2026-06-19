@@ -28,7 +28,11 @@ struct Args {
     #[arg(long, env = "BITMAGNET_POSTGRES_DSN")]
     pg: String,
     /// Sidecar gRPC endpoint.
-    #[arg(long, env = "BITMAGNET_FILESEARCH_ENDPOINT", default_value = "http://127.0.0.1:50052")]
+    #[arg(
+        long,
+        env = "BITMAGNET_FILESEARCH_ENDPOINT",
+        default_value = "http://127.0.0.1:50052"
+    )]
     sidecar: String,
     /// JSON array of pair specs; omitted = the built-in suite.
     #[arg(long)]
@@ -48,8 +52,8 @@ async fn main() -> Result<()> {
 
     let suite: Vec<PairSpec> = match &args.pairs {
         Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .with_context(|| format!("reading {}", p.display()))?;
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
             serde_json::from_str(&text).context("parsing --pairs JSON")?
         }
         None => default_suite(),
@@ -62,7 +66,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("connecting to sidecar {}", args.sidecar))?;
 
-    let mut csv = String::from("run,shape,label,filter,pg_n,sidecar_n,equal,pg_ms,sidecar_ms,detail\n");
+    let mut csv =
+        String::from("run,shape,label,filter,pg_n,sidecar_n,equal,pg_ms,sidecar_ms,detail\n");
     let mut mismatches = 0u64;
     let mut total = 0u64;
 

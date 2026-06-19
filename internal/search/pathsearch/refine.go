@@ -218,6 +218,7 @@ func distinctMatchedPaths(files []model.TorrentFile, p refinePredicate) []string
 		}
 
 		seen[f.Path] = struct{}{}
+
 		out = append(out, f.Path)
 	}
 

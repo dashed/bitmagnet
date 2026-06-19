@@ -1,19 +1,19 @@
 //! `bitmagnet-parquet` — the L2 export/refresh CLI.
 //!
 //! Subcommands:
-//! * `base`       — full export → sorted fact + rollups → atomic base swap.
-//!                  This is the **V3** run: it prints the decode-error count
-//!                  (target 0 across all torrents) and exits non-zero if any
-//!                  blob failed to decode (`--fail-on-decode-error`).
-//! * `delta`      — minute carve (`updated_at > watermark` + deleted list) →
-//!                  delta generation (fact + tombstones) → swap + watermark.
-//! * `compact`    — full rebuild + empty-delta reset (`--fail-on-decode-error`
-//!                  mirrors `base`).
-//! * `prune`      — generation GC: keep `current` + newest-N per kind, delete
-//!                  the rest (`--keep-base`/`--keep-delta`/`--dry-run`).
-//! * `from-hex`   — OFFLINE smoke: `info_hash|count|hex` lines → a base
-//!                  generation with no database (CI / local verification).
-//! * `verify`     — STUB: agg-vs-torrent_files parity (Job A); see build notes.
+//! * `base` — full export → sorted fact + rollups → atomic base swap.
+//!   This is the **V3** run: it prints the decode-error count
+//!   (target 0 across all torrents) and exits non-zero if any
+//!   blob failed to decode (`--fail-on-decode-error`).
+//! * `delta` — minute carve (`updated_at > watermark` + deleted list) →
+//!   delta generation (fact + tombstones) → swap + watermark.
+//! * `compact` — full rebuild + empty-delta reset (`--fail-on-decode-error`
+//!   mirrors `base`).
+//! * `prune` — generation GC: keep `current` + newest-N per kind, delete
+//!   the rest (`--keep-base`/`--keep-delta`/`--dry-run`).
+//! * `from-hex` — OFFLINE smoke: `info_hash|count|hex` lines → a base
+//!   generation with no database (CI / local verification).
+//! * `verify` — STUB: agg-vs-torrent_files parity (Job A); see build notes.
 
 use std::path::PathBuf;
 
@@ -24,10 +24,17 @@ use bitmagnet_parquet::generation::{Kind, Layout};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "bitmagnet-parquet", about = "L2 Parquet export/refresh for bitmagnet file search")]
+#[command(
+    name = "bitmagnet-parquet",
+    about = "L2 Parquet export/refresh for bitmagnet file search"
+)]
 struct Cli {
     /// Generation root (the `{base,delta}/…` tree + watermark).
-    #[arg(long, env = "BITMAGNET_PARQUET_ROOT", default_value = "/var/lib/bitmagnet/parquet")]
+    #[arg(
+        long,
+        env = "BITMAGNET_PARQUET_ROOT",
+        default_value = "/var/lib/bitmagnet/parquet"
+    )]
     root: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
@@ -202,8 +209,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("connecting to postgres")?;
             let version = version.unwrap_or_else(|| now_epoch().to_string());
-            let stats =
-                export::run_base(&pool, &layout, &version, sort.into(), page_size).await?;
+            let stats = export::run_base(&pool, &layout, &version, sort.into(), page_size).await?;
             report("base", &stats);
             if fail_on_decode_error && !stats.is_clean() {
                 anyhow::bail!(
@@ -259,16 +265,15 @@ async fn main() -> Result<()> {
                 .await
                 .context("connecting to postgres")?;
             let version = version.unwrap_or_else(|| now_epoch().to_string());
-            let stats =
-                export::run_compaction(
-                    &pool,
-                    &layout,
-                    &version,
-                    now_epoch() - export::CARVE_LAG_SECS,
-                    sort.into(),
-                    page_size,
-                )
-                    .await?;
+            let stats = export::run_compaction(
+                &pool,
+                &layout,
+                &version,
+                now_epoch() - export::CARVE_LAG_SECS,
+                sort.into(),
+                page_size,
+            )
+            .await?;
             report("compact", &stats);
             if fail_on_decode_error && !stats.is_clean() {
                 anyhow::bail!(
@@ -381,8 +386,11 @@ fn report(job: &str, s: &export::BuildStats) {
 }
 
 fn read_deleted(path: Option<&std::path::Path>) -> Result<Vec<String>> {
-    let Some(path) = path else { return Ok(Vec::new()) };
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(text
         .lines()
         .map(str::trim)
@@ -404,7 +412,8 @@ fn run_from_hex(
     let dir = layout.new_version_dir(Kind::Base, version)?;
     let mut sinks = Sinks::create(&dir, sort, false)?;
 
-    let text = std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
+    let text =
+        std::fs::read_to_string(input).with_context(|| format!("reading {}", input.display()))?;
     for line in text.lines() {
         let mut parts = line.splitn(3, '|');
         let ih_hex = parts.next().unwrap_or_default();

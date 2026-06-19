@@ -70,6 +70,22 @@
       "total_counts_by_status": "Recompte total per estat"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Tipus de Contingut",
     "file_type": "Tipus de Fitxer",
@@ -93,6 +109,7 @@
   },
   "general": {
     "all": "Tot",
+    "apply": "__missing__",
     "dismiss": "Descarta",
     "error": "Error",
     "none": "Cap",
@@ -219,6 +236,7 @@
   "torrents": {
     "classification": "Classificació",
     "clear_search": "Esborrar la cerca",
+    "clear_size_filter": "__missing__",
     "copy": "Copiar",
     "copy_to_clipboard": "Copia al porta-retalls",
     "delete": "Esborrar",
@@ -241,6 +259,8 @@
     "leechers": "Sangoneres",
     "magnet": "Magnet",
     "magnet_links": "Enllaços magnet",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Etiqueta nova",
     "order_by": "Ordenar per",
     "order_direction_toggle": "Commuta la direcció",
@@ -259,6 +279,7 @@
     "permalink": "Enllaç permanent",
     "poster": "Pòster",
     "published": "Publicat",
+    "published_date_filter": "__missing__",
     "rating": "Valoració",
     "refresh": "Actualitza els resultats",
     "reprocess": {
@@ -273,6 +294,17 @@
     "select_all": "Seleccionar-ho tot",
     "showing_x_of_y_files": "Mostrant {{x}} de {{y}} fitxers",
     "size": "Mida",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Origen del torrent",
     "summary": "Resum",
     "tags": {
@@ -286,6 +318,7 @@
     },
     "title": "Títol",
     "toggle_drawer": "Mostra o oculta el calaix",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} vots"
   },
   "version": {

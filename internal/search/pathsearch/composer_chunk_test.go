@@ -6,13 +6,12 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // itemFiles builds a candidate with n distinct matching files (each path contains
@@ -113,16 +112,32 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 
 	newPG := func() *fakePG {
 		return &fakePG{
-			result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+			result: search.TorrentContentResult{
+				Items: append([]search.TorrentContentResultItem(nil), items...),
+			},
 			fileCounts: counts,
 		}
 	}
 
 	// Reference: a single pass (budget far above the total, no chunk cap hit).
 	refPG := newPG()
-	ref := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, refPG, NewMetrics(), 1_000, 1_000, 1024)
+	ref := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		refPG,
+		NewMetrics(),
+		1_000,
+		1_000,
+		1024,
+	)
 
-	refRes, refServed, refErr := ref.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	refRes, refServed, refErr := ref.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if refErr != nil || !refServed {
 		t.Fatalf("reference: served=%v err=%v", refServed, refErr)
 	}
@@ -131,16 +146,33 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 	// (hydrator-only refineOptions, no facets) + one decode-free aggregation over the
 	// REFINED set. Pre-gate7-8 it was a single combined decode+facet query.
 	if refPG.callCount != 2 {
-		t.Fatalf("reference (single chunk) must make 2 PG queries (chunk decode + refined-agg), got %d", refPG.callCount)
+		t.Fatalf(
+			"reference (single chunk) must make 2 PG queries (chunk decode + refined-agg), got %d",
+			refPG.callCount,
+		)
 	}
 
 	// Chunked: budget 6 with a per-torrent cap of 100 → splits the L3-ordered set
 	// into contiguous chunks each summing ≤6: [1(4),2(1)]=5,+3(4)=9>6 → [1,2],
 	// [3(4),4(1)]=5,+5(4)=9>6 → [3,4], [5(4),6(1)]=5 → [5,6]. Three chunks.
 	chunkPG := newPG()
-	chunked := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, chunkPG, NewMetrics(), 100, 6, 1024)
+	chunked := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		chunkPG,
+		NewMetrics(),
+		100,
+		6,
+		1024,
+	)
 
-	chunkRes, chunkServed, chunkErr := chunked.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	chunkRes, chunkServed, chunkErr := chunked.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if chunkErr != nil || !chunkServed {
 		t.Fatalf("chunked: served=%v err=%v", chunkServed, chunkErr)
 	}
@@ -166,6 +198,7 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 	}
 
 	wantOrder := []byte{1, 3, 4, 5, 6} // 2 dropped (false positive), rest in L3 order
+
 	for i := range chunkRes.Items {
 		if chunkRes.Items[i].Torrent.InfoHash != refRes.Items[i].Torrent.InfoHash {
 			t.Fatalf("item[%d] mismatch: chunked=%v ref=%v", i,
@@ -173,7 +206,12 @@ func TestComposer_Chunking_EqualsSinglePass(t *testing.T) {
 		}
 
 		if chunkRes.Items[i].Torrent.InfoHash != ih(wantOrder[i]) {
-			t.Fatalf("item[%d] not in L3 order: got %v want ih(%d)", i, chunkRes.Items[i].Torrent.InfoHash, wantOrder[i])
+			t.Fatalf(
+				"item[%d] not in L3 order: got %v want ih(%d)",
+				i,
+				chunkRes.Items[i].Torrent.InfoHash,
+				wantOrder[i],
+			)
 		}
 	}
 }
@@ -192,14 +230,31 @@ func TestComposer_Chunking_PaginationAcrossChunks(t *testing.T) {
 	counts := map[protocol.ID]int{ih(1): 4, ih(2): 4, ih(3): 4, ih(4): 4}
 
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts: counts,
 	}
-	// budget 6 → each torrent (4) pairs only with itself before exceeding: [1],[2],[3],[4]? 4+4=8>6 → [1],[2],[3],[4].
-	c := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, NewMetrics(), 100, 6, 1024)
+	// budget 6 → each torrent (4) pairs only with itself before exceeding: [1],[2],[3],[4]? 4+4=8>6 →
+	// [1],[2],[3],[4].
+	c := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		pg,
+		NewMetrics(),
+		100,
+		6,
+		1024,
+	)
 
 	// Page 2 (offset 2, limit 2) over the 4 refined rows → items 3,4.
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 2, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		2,
+		2,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("served=%v err=%v", served, err)
 	}
@@ -232,12 +287,21 @@ func TestComposer_SanityCap_DeclinesOversized(t *testing.T) {
 	counts := map[protocol.ID]int{ih(1): 5, ih(2): 1_000, ih(3): 5} // cap = 500
 
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts: counts,
 	}
 	c := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, m, 500, 1_500_000, 1024)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("oversized-decline must still SERVE the rest, got served=%v err=%v", served, err)
 	}
@@ -273,13 +337,24 @@ func TestComposer_SanityCap_AllOversizedServesEmpty(t *testing.T) {
 	}
 	c := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, m, 500, 1_500_000, 1024)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("all-oversized must serve estimated empty, got served=%v err=%v", served, err)
 	}
 
 	if len(res.Items) != 0 || !res.TotalCountIsEstimate {
-		t.Fatalf("expected empty estimated result, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+		t.Fatalf(
+			"expected empty estimated result, got %d items estimate=%v",
+			len(res.Items),
+			res.TotalCountIsEstimate,
+		)
 	}
 
 	if got := testutil.ToFloat64(m.refineDeclined); got != 2 {
@@ -297,9 +372,23 @@ func TestComposer_SanityCap_AllOversizedServesEmpty(t *testing.T) {
 func TestComposer_FileCountsErrorFallsBack(t *testing.T) {
 	m := NewMetrics()
 	pg := &fakePG{fcErr: errors.New("summary query failed")}
-	c := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1)}}, pg, m, 500, 1_500_000, 1024)
+	c := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1)}},
+		pg,
+		m,
+		500,
+		1_500_000,
+		1024,
+	)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err == nil || served {
 		t.Fatalf("FileCounts error must propagate (served=false, err!=nil), got served=%v err=%v", served, err)
 	}
@@ -368,7 +457,14 @@ func assertChunks(t *testing.T, got [][]protocol.ID, want [][]byte) {
 
 		for j := range want[i] {
 			if got[i][j] != ih(want[i][j]) {
-				t.Fatalf("chunk[%d][%d] = %v, want ih(%d) (%v)", i, j, got[i][j], want[i][j], chunkBytes(got))
+				t.Fatalf(
+					"chunk[%d][%d] = %v, want ih(%d) (%v)",
+					i,
+					j,
+					got[i][j],
+					want[i][j],
+					chunkBytes(got),
+				)
 			}
 		}
 	}
@@ -376,6 +472,7 @@ func assertChunks(t *testing.T, got [][]protocol.ID, want [][]byte) {
 
 func chunkBytes(chunks [][]protocol.ID) [][]byte {
 	out := make([][]byte, len(chunks))
+
 	for i, ch := range chunks {
 		bs := make([]byte, len(ch))
 		for j, id := range ch {
@@ -401,20 +498,52 @@ func TestComposer_Collapse_ChunkingEqualsSinglePass(t *testing.T) {
 
 	newPG := func() *fakePG {
 		return &fakePG{
-			result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+			result: search.TorrentContentResult{
+				Items: append([]search.TorrentContentResultItem(nil), items...),
+			},
 			fileCounts: counts,
 		}
 	}
 
-	ref := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, newPG(), NewMetrics(), 1_000, 1_000, 1024)
-	refGroups, refServed, refErr := ref.CollapsePaths(context.Background(), Filters{Query: "movie"}, QueryOptions{}, 10, 0, nil)
+	ref := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		newPG(),
+		NewMetrics(),
+		1_000,
+		1_000,
+		1024,
+	)
+
+	refGroups, refServed, refErr := ref.CollapsePaths(
+		context.Background(),
+		Filters{Query: "movie"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if refErr != nil || !refServed {
 		t.Fatalf("reference collapse: served=%v err=%v", refServed, refErr)
 	}
 
 	// budget 6 → [1],[2],[3] (each 4; 4+4=8>6).
-	chunked := newChunkComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, newPG(), NewMetrics(), 100, 6, 1024)
-	chunkGroups, chunkServed, chunkErr := chunked.CollapsePaths(context.Background(), Filters{Query: "movie"}, QueryOptions{}, 10, 0, nil)
+	chunked := newChunkComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		newPG(),
+		NewMetrics(),
+		100,
+		6,
+		1024,
+	)
+
+	chunkGroups, chunkServed, chunkErr := chunked.CollapsePaths(
+		context.Background(),
+		Filters{Query: "movie"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if chunkErr != nil || !chunkServed {
 		t.Fatalf("chunked collapse: served=%v err=%v", chunkServed, chunkErr)
 	}
@@ -425,7 +554,12 @@ func TestComposer_Collapse_ChunkingEqualsSinglePass(t *testing.T) {
 
 	for i := range refGroups {
 		if chunkGroups[i].Path != refGroups[i].Path {
-			t.Fatalf("group[%d] path mismatch: chunked=%q ref=%q", i, chunkGroups[i].Path, refGroups[i].Path)
+			t.Fatalf(
+				"group[%d] path mismatch: chunked=%q ref=%q",
+				i,
+				chunkGroups[i].Path,
+				refGroups[i].Path,
+			)
 		}
 
 		if len(chunkGroups[i].InfoHashes) != len(refGroups[i].InfoHashes) {
@@ -435,8 +569,14 @@ func TestComposer_Collapse_ChunkingEqualsSinglePass(t *testing.T) {
 
 		for j := range refGroups[i].InfoHashes {
 			if chunkGroups[i].InfoHashes[j] != refGroups[i].InfoHashes[j] {
-				t.Fatalf("group[%d] %q hash[%d] mismatch: chunked=%v ref=%v",
-					i, refGroups[i].Path, j, chunkGroups[i].InfoHashes[j], refGroups[i].InfoHashes[j])
+				t.Fatalf(
+					"group[%d] %q hash[%d] mismatch: chunked=%v ref=%v",
+					i,
+					refGroups[i].Path,
+					j,
+					chunkGroups[i].InfoHashes[j],
+					refGroups[i].InfoHashes[j],
+				)
 			}
 		}
 	}
@@ -466,14 +606,23 @@ func TestComposer_RetainedBudget_CapsHighMatchRate(t *testing.T) {
 	counts := map[protocol.ID]int{ih(1): 4, ih(2): 4, ih(3): 4, ih(4): 4, ih(5): 4}
 
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts: counts,
 	}
 	// chunkBudget 4 → one torrent per chunk (5 chunks). retainedBudget 10 → after
 	// t1(4)+t2(4)=8, adding t3 (→12) exceeds 10 → cap; serve [t1,t2].
 	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, m, 100, 4, 10)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		50,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("memory-capped result must still SERVE, got served=%v err=%v", served, err)
 	}
@@ -512,19 +661,39 @@ func TestComposer_RetainedBudget_SelectiveStaysExact(t *testing.T) {
 	counts := map[protocol.ID]int{ih(1): 2, ih(2): 2, ih(3): 2}
 
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts: counts,
 	}
 	// Generous chunk + retained budgets → single chunk, no cap.
-	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, m, 500_000, 1_500_000, 1_500_000)
+	c := newRetainedComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		pg,
+		m,
+		500_000,
+		1_500_000,
+		1_500_000,
+	)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		50,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("served=%v err=%v", served, err)
 	}
 
 	if len(res.Items) != 3 || res.TotalCount != 3 {
-		t.Fatalf("selective query must return ALL 3 matches, got %d items / TotalCount=%d", len(res.Items), res.TotalCount)
+		t.Fatalf(
+			"selective query must return ALL 3 matches, got %d items / TotalCount=%d",
+			len(res.Items),
+			res.TotalCount,
+		)
 	}
 
 	if got := testutil.ToFloat64(m.retainedCapped); got != 0 {
@@ -534,7 +703,10 @@ func TestComposer_RetainedBudget_SelectiveStaysExact(t *testing.T) {
 	// gate7-8: the single-chunk fast path = 1 chunk decode + 1 decode-free refined
 	// aggregation = 2 PG queries (was 1 combined query pre-gate7-8).
 	if pg.callCount != 2 {
-		t.Fatalf("selective single-chunk query must make 2 PG queries (decode + refined-agg), got callCount=%d", pg.callCount)
+		t.Fatalf(
+			"selective single-chunk query must make 2 PG queries (decode + refined-agg), got callCount=%d",
+			pg.callCount,
+		)
 	}
 }
 
@@ -552,14 +724,30 @@ func TestComposer_PostDecodeGuard_DeclinesUnknownOversized(t *testing.T) {
 	}
 	// strict: only 1 and 3 have known counts; 2 is omitted → unknown.
 	pg := &fakePG{
-		result:       search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts:   map[protocol.ID]int{ih(1): 1, ih(3): 1},
 		strictCounts: true,
 	}
 	// cap 3; generous chunk/retained budgets → single chunk fast path.
-	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}}, pg, m, 3, 1_500_000, 1_500_000)
+	c := newRetainedComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands}},
+		pg,
+		m,
+		3,
+		1_500_000,
+		1_500_000,
+	)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		50,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("post-decode decline must still SERVE the rest, got served=%v err=%v", served, err)
 	}
@@ -598,7 +786,7 @@ func TestComposer_HighFanout_PerChunkBoundedAndCapsGracefully(t *testing.T) {
 	items := make([]search.TorrentContentResultItem, n)
 	counts := make(map[protocol.ID]int, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		b := byte(i + 1)
 		bs[i] = b
 		items[i] = itemFiles(b, filesEach)
@@ -620,18 +808,38 @@ func TestComposer_HighFanout_PerChunkBoundedAndCapsGracefully(t *testing.T) {
 		}
 
 		if sum > chunkBudg {
-			t.Fatalf("chunk %d sums %d files > budget %d — one chunk's decode could exceed memory", ci, sum, chunkBudg)
+			t.Fatalf(
+				"chunk %d sums %d files > budget %d — one chunk's decode could exceed memory",
+				ci,
+				sum,
+				chunkBudg,
+			)
 		}
 	}
 
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...)},
+		result: search.TorrentContentResult{
+			Items: append([]search.TorrentContentResultItem(nil), items...),
+		},
 		fileCounts: counts,
 	}
-	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(bs...)}}, pg, m, capFiles, chunkBudg, retainBudg)
+	c := newRetainedComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(bs...)}},
+		pg,
+		m,
+		capFiles,
+		chunkBudg,
+		retainBudg,
+	)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
-
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		50,
+		0,
+		nil,
+	)
 	// (b) GRACEFUL: a high-fanout query must SERVE a capped result, never error/empty.
 	if err != nil {
 		t.Fatalf("high-fanout query must NOT error, got %v", err)
@@ -660,7 +868,12 @@ func TestComposer_HighFanout_PerChunkBoundedAndCapsGracefully(t *testing.T) {
 
 	for i := range res.Items {
 		if res.Items[i].Torrent.InfoHash != ih(byte(i+1)) {
-			t.Fatalf("served item %d must be the top-relevance prefix ih(%d), got %v", i, i+1, res.Items[i].Torrent.InfoHash)
+			t.Fatalf(
+				"served item %d must be the top-relevance prefix ih(%d), got %v",
+				i,
+				i+1,
+				res.Items[i].Torrent.InfoHash,
+			)
 		}
 
 		if res.Items[i].Torrent.FilesData != nil {
@@ -672,7 +885,10 @@ func TestComposer_HighFanout_PerChunkBoundedAndCapsGracefully(t *testing.T) {
 	// (chunks [1,2],[3,4],[5,6]; cap trips on chunk 3's first item) + 1 decode-free
 	// aggregation over the REFINED prefix (gate7-8) = 4.
 	if pg.callCount != 4 {
-		t.Fatalf("capped high-fanout must stop early: want 3 chunk + 1 refined-agg queries = 4, got %d", pg.callCount)
+		t.Fatalf(
+			"capped high-fanout must stop early: want 3 chunk + 1 refined-agg queries = 4, got %d",
+			pg.callCount,
+		)
 	}
 }
 
@@ -695,7 +911,7 @@ func TestComposer_TorrentContent_CappedResult_FacetsOverServedPrefix(t *testing.
 	items := make([]search.TorrentContentResultItem, n)
 	counts := make(map[protocol.ID]int, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		b := byte(i + 1)
 		bs[i] = b
 		items[i] = itemFiles(b, filesEach)
@@ -709,12 +925,29 @@ func TestComposer_TorrentContent_CappedResult_FacetsOverServedPrefix(t *testing.
 		}},
 	}
 	pg := &fakePG{
-		result:     search.TorrentContentResult{Items: append([]search.TorrentContentResultItem(nil), items...), Aggregations: prefixAggs},
+		result: search.TorrentContentResult{
+			Items:        append([]search.TorrentContentResultItem(nil), items...),
+			Aggregations: prefixAggs,
+		},
 		fileCounts: counts,
 	}
-	c := newRetainedComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(bs...)}}, pg, m, capFiles, chunkBudg, retainBudg)
+	c := newRetainedComposer(
+		&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(bs...)}},
+		pg,
+		m,
+		capFiles,
+		chunkBudg,
+		retainBudg,
+	)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 50, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		50,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("capped query must serve, got served=%v err=%v", served, err)
 	}
@@ -729,7 +962,10 @@ func TestComposer_TorrentContent_CappedResult_FacetsOverServedPrefix(t *testing.
 
 	grp, ok := res.Aggregations["content_type"]
 	if !ok || len(grp.Items) == 0 {
-		t.Fatalf("capped result must carry facets over the served prefix (not blanked), got %+v (gate7-8)", res.Aggregations)
+		t.Fatalf(
+			"capped result must carry facets over the served prefix (not blanked), got %+v (gate7-8)",
+			res.Aggregations,
+		)
 	}
 
 	var sum uint
@@ -738,6 +974,10 @@ func TestComposer_TorrentContent_CappedResult_FacetsOverServedPrefix(t *testing.
 	}
 
 	if sum != uint(res.TotalCount) {
-		t.Fatalf("capped-prefix facets must reconcile with served items: sum=%d want %d (gate7-8)", sum, res.TotalCount)
+		t.Fatalf(
+			"capped-prefix facets must reconcile with served items: sum=%d want %d (gate7-8)",
+			sum,
+			res.TotalCount,
+		)
 	}
 }

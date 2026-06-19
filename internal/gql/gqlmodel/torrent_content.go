@@ -235,13 +235,13 @@ func torrentContentFacetFilterOptions(input gen.TorrentContentFacetsInput) []q.O
 			Key: "torrent_contents.size",
 		}
 
-		if min, minOk := sizeRange.Min.ValueOK(); minOk {
-			minSize := int64(*min)
+		if minValue, minOk := sizeRange.Min.ValueOK(); minOk {
+			minSize := int64(*minValue)
 			sizeCriteria.MinBytes = &minSize
 		}
 
-		if max, maxOk := sizeRange.Max.ValueOK(); maxOk {
-			maxSize := int64(*max)
+		if maxValue, maxOk := sizeRange.Max.ValueOK(); maxOk {
+			maxSize := int64(*maxValue)
 			sizeCriteria.MaxBytes = &maxSize
 		}
 
@@ -286,7 +286,9 @@ func torrentContentQueryOptions(
 	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
 ) pathsearch.QueryOptions {
 	var facet q.Option
+
 	var facetFilters []q.Option
+
 	if input.Facets != nil {
 		facet = torrentContentFacetsOption(*input.Facets)
 		facetFilters = torrentContentFacetFilterOptions(*input.Facets)
@@ -309,6 +311,7 @@ func torrentContentQueryOptions(
 	if facet != nil {
 		combined = append(combined, facet)
 	}
+
 	combined = append(combined, facetFilters...)
 
 	if infoHashFilter != nil {
@@ -326,6 +329,7 @@ func torrentContentQueryOptions(
 	if infoHashFilter != nil {
 		refine = append(refine, infoHashFilter)
 	}
+
 	refine = append(refine, facetFilters...)
 
 	refine = append(refine, order)
@@ -339,6 +343,7 @@ func torrentContentQueryOptions(
 	if facet != nil {
 		agg = append(agg, facet)
 	}
+
 	agg = append(agg, facetFilters...)
 
 	if infoHashFilter != nil {

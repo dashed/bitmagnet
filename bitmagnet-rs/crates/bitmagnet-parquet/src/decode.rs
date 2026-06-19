@@ -161,20 +161,25 @@ mod tests {
     #[test]
     fn padding_classification_covers_both_conventions() {
         assert!(is_padding_path(".pad/2095104"));
-        assert!(is_padding_path("_____padding_file_0_if you see this file please update to BitComet"));
+        assert!(is_padding_path(
+            "_____padding_file_0_if you see this file please update to BitComet"
+        ));
         assert!(is_padding_path("dir/_____padding_file_12_"));
         assert!(!is_padding_path("Movie/video.mkv"));
         assert!(!is_padding_path("pad/notpad.txt")); // no leading dot-dir
         assert!(!is_padding_path("my_padding_file.txt")); // fewer underscores
-        // libtorrent's older pad-directory convention, incl. nested
+                                                          // libtorrent's older pad-directory convention, incl. nested
         assert!(is_padding_path(".____padding_file/0"));
         assert!(is_padding_path("show-s01/.____padding_file/3"));
-        let rows = rows_from_files("aa", &[BlobFile {
-            index: 0,
-            path: ".pad/123".to_owned(),
-            extension: String::new(),
-            size: 123,
-        }]);
+        let rows = rows_from_files(
+            "aa",
+            &[BlobFile {
+                index: 0,
+                path: ".pad/123".to_owned(),
+                extension: String::new(),
+                size: 123,
+            }],
+        );
         assert!(rows[0].is_padding);
         assert_eq!(rows[0].extension, None);
     }

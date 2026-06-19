@@ -15,7 +15,19 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "192.168.55.11", "-p", "5432", "-U", "postgres", "-d", "bitmagnet"]
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-h",
+          "192.168.55.11",
+          "-p",
+          "5432",
+          "-U",
+          "postgres",
+          "-d",
+          "bitmagnet",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -30,9 +42,9 @@ services:
       - ./config:/root/.config/bitmagnet:rw
       - ./data/bitmagnet:/root/.local/share/bitmagnet:rw
     ports:
-      - "3333:3333"  # Web UI
-      - "3334:3334/tcp"  # BitTorrent
-      - "3334:3334/udp"  # BitTorrent UDP
+      - "3333:3333" # Web UI
+      - "3334:3334/tcp" # BitTorrent
+      - "3334:3334/udp" # BitTorrent UDP
     restart: unless-stopped
     environment:
       - LOG_FILE_ROTATOR_ENABLED=true

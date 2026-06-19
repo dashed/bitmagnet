@@ -2,7 +2,7 @@
 
 Self-contained, uv-managed Python harness for the deployed **L3
 `bitmagnet-pathsearch`** gRPC sidecar. Proves **D6 gate 5 (latency)** and
-**D6 gate 6 (candidate recall)**. The harness is the *tool only* — it takes a
+**D6 gate 6 (candidate recall)**. The harness is the _tool only_ — it takes a
 target address + a ground-truth file as inputs and makes **read-only**
 `PathCandidates` / `HealthCheck` RPCs. It performs no production discovery,
 SSH, or kubectl; the gated live run is driven separately by the lead.

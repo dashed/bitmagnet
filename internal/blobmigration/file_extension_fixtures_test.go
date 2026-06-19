@@ -35,6 +35,7 @@ func repoRoot(t *testing.T) string {
 	}
 
 	dir := filepath.Dir(thisFile)
+
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir
@@ -79,7 +80,13 @@ func TestFileExtensionFromPath_SharedFixtures(t *testing.T) {
 			got := model.FileExtensionFromPath(c.Path)
 
 			if got.String != c.ExpectedExtension {
-				t.Errorf("path %q: extension = %q, want %q (%s)", c.Path, got.String, c.ExpectedExtension, c.Note)
+				t.Errorf(
+					"path %q: extension = %q, want %q (%s)",
+					c.Path,
+					got.String,
+					c.ExpectedExtension,
+					c.Note,
+				)
 			}
 
 			wantValid := c.ExpectedExtension != ""
@@ -116,7 +123,13 @@ func TestExtractUniqueExtensions_IgnoresBlobE(t *testing.T) {
 			}
 
 			if len(got) != 1 || got[0] != c.ExpectedExtension {
-				t.Errorf("path %q (blob_e=%q): ExtractUniqueExtensions = %v, want [%q]", c.Path, c.BlobE, got, c.ExpectedExtension)
+				t.Errorf(
+					"path %q (blob_e=%q): ExtractUniqueExtensions = %v, want [%q]",
+					c.Path,
+					c.BlobE,
+					got,
+					c.ExpectedExtension,
+				)
 			}
 		})
 	}

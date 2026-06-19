@@ -156,7 +156,7 @@ impl AggTorrentExt {
         }
         // Deterministic per-torrent order (extension, NULL last).
         let mut keys: Vec<&&Option<String>> = per_ext.keys().collect();
-        keys.sort_by(|a, b| opt_ext_cmp(**a, **b));
+        keys.sort_by(|a, b| opt_ext_cmp(a, b));
         for k in keys {
             let a = &per_ext[*k];
             self.info_hash.append_value(info_hash_hex);

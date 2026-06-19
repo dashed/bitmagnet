@@ -74,7 +74,7 @@ func TestSerializeFiles_DerivesExtensionFromPath_G1(t *testing.T) {
 
 	assert.Equal(t, "mkv", got[0].Extension.String)
 	assert.Equal(t, "mp4", got[1].Extension.String)
-	assert.Equal(t, "", got[2].Extension.String)
+	assert.Empty(t, got[2].Extension.String)
 	assert.False(t, got[2].Extension.Valid)
 	assert.Equal(t, "gz", got[3].Extension.String)
 

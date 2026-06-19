@@ -5,10 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"go.uber.org/zap"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"go.uber.org/zap"
 )
 
 // fakeHealthChecker scripts a sequence of HealthCheck responses for the poller.

@@ -13,11 +13,35 @@
     "membership_valid_when": "candidate_total <= 5000"
   },
   "queries": [
-    { "id": "ascii_s01e01_1080p", "q": "s01e01.1080p", "class": "recall", "lang": "ascii", "expected": "selective",
-      "truth_info_hashes": [], "truth_sample_count": null,
-      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } },
-    { "id": "cjk_bluray_disc", "q": "蓝光原盘", "class": "recall", "lang": "cjk", "expected": "selective",
-      "truth_info_hashes": [], "truth_sample_count": null,
-      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } }
+    {
+      "id": "ascii_s01e01_1080p",
+      "q": "s01e01.1080p",
+      "class": "recall",
+      "lang": "ascii",
+      "expected": "selective",
+      "truth_info_hashes": [],
+      "truth_sample_count": null,
+      "_runtime": {
+        "candidate_total": null,
+        "returned_size": null,
+        "recall": null,
+        "membership_valid": null
+      }
+    },
+    {
+      "id": "cjk_bluray_disc",
+      "q": "蓝光原盘",
+      "class": "recall",
+      "lang": "cjk",
+      "expected": "selective",
+      "truth_info_hashes": [],
+      "truth_sample_count": null,
+      "_runtime": {
+        "candidate_total": null,
+        "returned_size": null,
+        "recall": null,
+        "membership_valid": null
+      }
+    }
   ]
 }

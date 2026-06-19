@@ -84,6 +84,22 @@
       "total_counts_by_status": "Загальна кількість за статусами"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Тип контенту",
     "file_type": "Тип файлу",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "Усі",
+    "apply": "__missing__",
     "dismiss": "Закрити",
     "error": "Помилка",
     "none": "Немає",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "Класифікація",
     "clear_search": "Очистити пошук",
+    "clear_size_filter": "__missing__",
     "copy": "Копіювати",
     "copy_to_clipboard": "Копіювати в буфер обміну",
     "delete": "Видалити",
@@ -263,6 +281,8 @@
     "leechers": "Лічери",
     "magnet": "Магнет",
     "magnet_links": "Магнет-посилання",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Новий тег",
     "order_by": "Сортувати за",
     "order_direction_toggle": "Змінити напрямок",
@@ -281,6 +301,7 @@
     "permalink": "Постійне посилання",
     "poster": "Постер",
     "published": "Опубліковано",
+    "published_date_filter": "__missing__",
     "rating": "Рейтинг",
     "refresh": "Оновити результати",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "Вибрати всі",
     "showing_x_of_y_files": "Показано {{x}} з {{y}} файлів",
     "size": "Розмір",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Джерело торрента",
     "summary": "Зведення",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "Назва",
     "toggle_drawer": "Перемкнути панель",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} голосів"
   },
   "version": {

@@ -84,6 +84,22 @@
       "total_counts_by_status": "إجمالي العد حسب الحالة"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "نوع المحتوى",
     "file_type": "نوع الملف",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "الكل",
+    "apply": "__missing__",
     "dismiss": "رفض",
     "error": "خطأ",
     "none": "لا شيء",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "التصنيف",
     "clear_search": "مسح البحث",
+    "clear_size_filter": "__missing__",
     "copy": "نسخ",
     "copy_to_clipboard": "نسخ إلى الحافظة",
     "delete": "حذف",
@@ -263,6 +281,8 @@
     "leechers": "المستفيدون",
     "magnet": "مغناطيس",
     "magnet_links": "روابط مغناطيسية",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "علامة جديدة",
     "order_by": "ترتيب حسب",
     "order_direction_toggle": "تبديل الاتجاه",
@@ -281,6 +301,7 @@
     "permalink": "رابط دائم",
     "poster": "ملصق",
     "published": "منشور",
+    "published_date_filter": "__missing__",
     "rating": "التقييم",
     "refresh": "تحديث النتائج",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "تحديد الكل",
     "showing_x_of_y_files": "عرض {{x}} من {{y}} ملفات",
     "size": "الحجم",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "مصدر التورنت",
     "summary": "الملخص",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "العنوان",
     "toggle_drawer": "تبديل الدرج",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} أصوات"
   },
   "version": {

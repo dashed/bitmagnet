@@ -125,8 +125,9 @@ impl Layout {
             let _ = fs::remove_file(&tmp);
             std::os::unix::fs::symlink(target, &tmp)
                 .with_context(|| format!("symlink {} -> {:?}", tmp.display(), target))?;
-            fs::rename(&tmp, &link)
-                .with_context(|| format!("atomic rename {} -> {}", tmp.display(), link.display()))?;
+            fs::rename(&tmp, &link).with_context(|| {
+                format!("atomic rename {} -> {}", tmp.display(), link.display())
+            })?;
             fsync_dir(&self.kind_dir(kind)).ok();
         }
         #[cfg(not(unix))]
@@ -290,7 +291,7 @@ impl Layout {
             }
         }
         // Newest first.
-        parseable.sort_by(|a, b| b.1.cmp(&a.1));
+        parseable.sort_by_key(|(_, key)| std::cmp::Reverse(*key));
         let mut delete_set: Vec<PathBuf> = Vec::new();
         for (i, (d, _)) in parseable.iter().enumerate() {
             let is_current = current_name.is_some() && d.file_name() == current_name;

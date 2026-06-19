@@ -6,12 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // counterVal reads a nil-safe single counter for assertions.
@@ -104,19 +103,36 @@ func TestComposer_RouteDeadline_SingleChunk_ServesCappedNotFallback(t *testing.T
 	m := NewMetrics()
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1)}}
 	pg := &boundPG{
-		realResult:    search.TorrentContentResult{Items: []search.TorrentContentResultItem{item(1, tf("Inception.mkv", "mkv", 1))}},
+		realResult: search.TorrentContentResult{
+			Items: []search.TorrentContentResultItem{item(1, tf("Inception.mkv", "mkv", 1))},
+		},
 		blockFromCall: 1, // block the very first (combined) query
 	}
 
 	c := newBoundComposer(l3, pg, m, 50*time.Millisecond, 0, 4, 0)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
-		t.Fatalf("deadline must SERVE a capped estimate (served=true, err=nil), got served=%v err=%v", served, err)
+		t.Fatalf(
+			"deadline must SERVE a capped estimate (served=true, err=nil), got served=%v err=%v",
+			served,
+			err,
+		)
 	}
 
 	if !res.TotalCountIsEstimate || len(res.Items) != 0 {
-		t.Fatalf("deadline-capped single-chunk must be an empty estimate, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+		t.Fatalf(
+			"deadline-capped single-chunk must be an empty estimate, got %d items estimate=%v",
+			len(res.Items),
+			res.TotalCountIsEstimate,
+		)
 	}
 
 	if got := deadlineCappedCount(m); got != 1 {
@@ -154,7 +170,14 @@ func TestComposer_RouteDeadline_MultiChunk_ServesAccumulatedPrefix(t *testing.T)
 	// MaxChunkTorrents=1 forces one torrent per chunk → 2 chunks (multi-chunk path).
 	c := newBoundComposer(l3, pg, m, 100*time.Millisecond, 0, 4, 1)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("deadline must SERVE the accumulated prefix, got served=%v err=%v", served, err)
 	}
@@ -193,9 +216,20 @@ func TestComposer_RouteDeadline_NonDeadlineErrorStillFallsBack(t *testing.T) {
 	// Generous route timeout so the ctx is NOT past its deadline when the error returns.
 	c := newBoundComposer(l3, pg, m, 5*time.Second, 0, 4, 0)
 
-	_, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err == nil || served {
-		t.Fatalf("a non-deadline PG error must fall back (served=false, err!=nil), got served=%v err=%v", served, err)
+		t.Fatalf(
+			"a non-deadline PG error must fall back (served=false, err!=nil), got served=%v err=%v",
+			served,
+			err,
+		)
 	}
 
 	if got := routeCount(m, RouteError); got != 1 {
@@ -230,13 +264,24 @@ func TestComposer_ConcurrencyLimiter_ShedsMultiChunkNotSingleChunk(t *testing.T)
 		t.Fatal("precondition: should be able to take the only slot")
 	}
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("a shed request must SERVE an empty estimate (served=true), got served=%v err=%v", served, err)
 	}
 
 	if len(res.Items) != 0 || !res.TotalCountIsEstimate {
-		t.Fatalf("shed must be an empty estimate, got %d items estimate=%v", len(res.Items), res.TotalCountIsEstimate)
+		t.Fatalf(
+			"shed must be an empty estimate, got %d items estimate=%v",
+			len(res.Items),
+			res.TotalCountIsEstimate,
+		)
 	}
 
 	if got := shedCount(m); got != 1 {
@@ -267,9 +312,20 @@ func TestComposer_ConcurrencyLimiter_ShedsMultiChunkNotSingleChunk(t *testing.T)
 		slotWait:           c.slotWait,
 	}
 
-	res2, served2, err2 := c2.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res2, served2, err2 := c2.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err2 != nil || !served2 {
-		t.Fatalf("a single-chunk request must be served even while saturated, got served=%v err=%v", served2, err2)
+		t.Fatalf(
+			"a single-chunk request must be served even while saturated, got served=%v err=%v",
+			served2,
+			err2,
+		)
 	}
 
 	if len(res2.Items) != 1 {
@@ -297,7 +353,14 @@ func TestComposer_FastPath_UnaffectedByBounds(t *testing.T) {
 
 	c := newBoundComposer(l3, pg, m, 5*time.Second, 50*time.Millisecond, 1, 0)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("normal query must be served, got served=%v err=%v", served, err)
 	}
@@ -335,13 +398,25 @@ func TestComposer_ConcurrencyLimiter_ReleasesSlotOnDeadlineAndError(t *testing.T
 	// Deadline path.
 	mD := NewMetrics()
 	pgD := &boundPG{
-		realResult:    search.TorrentContentResult{Items: []search.TorrentContentResultItem{item(1, tf("inception/a.mkv", "mkv", 1)), item(2, tf("inception/b.mkv", "mkv", 2))}},
+		realResult: search.TorrentContentResult{
+			Items: []search.TorrentContentResultItem{
+				item(1, tf("inception/a.mkv", "mkv", 1)),
+				item(2, tf("inception/b.mkv", "mkv", 2)),
+			},
+		},
 		blockFromCall: 1, // block the first chunk decode → deadline before any refine (refined empty → no refined-agg query)
 	}
 	cD := newBoundComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1, 2)}}, pgD, mD,
 		50*time.Millisecond, 0, 1, 1)
 
-	_, served, err := cD.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, served, err := cD.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("deadline multi-chunk must serve, got served=%v err=%v", served, err)
 	}
@@ -358,7 +433,14 @@ func TestComposer_ConcurrencyLimiter_ReleasesSlotOnDeadlineAndError(t *testing.T
 	cE := newBoundComposer(&fakeL3{resp: &pb.PathCandidatesResponse{Candidates: candList(1, 2)}}, pgE, mE,
 		5*time.Second, 0, 1, 1)
 
-	_, servedE, errE := cE.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	_, servedE, errE := cE.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if errE == nil || servedE {
 		t.Fatalf("hard error multi-chunk must fall back (served=false), got served=%v err=%v", servedE, errE)
 	}
@@ -393,9 +475,20 @@ func TestComposer_RefinedAggError_ServesItemsWithoutFacets(t *testing.T) {
 
 	c := newBoundComposer(l3, pg, m, 5*time.Second, 0, 4, 0)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
-		t.Fatalf("a refined-agg error must SERVE items w/o facets (served=true, err=nil), got served=%v err=%v", served, err)
+		t.Fatalf(
+			"a refined-agg error must SERVE items w/o facets (served=true, err=nil), got served=%v err=%v",
+			served,
+			err,
+		)
 	}
 
 	if len(res.Items) != 1 || res.Items[0].InfoHash != ih(1) {
@@ -444,7 +537,14 @@ func TestComposer_RefinedAggDeadline_ServesItemsWithoutFacets_NoAggErrorCount(t 
 	// Short route timeout so the agg call's block trips the deadline branch.
 	c := newBoundComposer(l3, pg, m, 50*time.Millisecond, 0, 4, 0)
 
-	res, served, err := c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 10, 0, nil)
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		10,
+		0,
+		nil,
+	)
 	if err != nil || !served {
 		t.Fatalf("a deadline during agg must SERVE items w/o facets, got served=%v err=%v", served, err)
 	}
@@ -458,7 +558,10 @@ func TestComposer_RefinedAggDeadline_ServesItemsWithoutFacets_NoAggErrorCount(t 
 	}
 
 	if got := aggErrorCount(m); got != 0 {
-		t.Fatalf("a deadline (not a transient agg failure) must NOT increment refine_agg_error_total, got %v", got)
+		t.Fatalf(
+			"a deadline (not a transient agg failure) must NOT increment refine_agg_error_total, got %v",
+			got,
+		)
 	}
 
 	if got := routeCount(m, RouteError); got != 0 {

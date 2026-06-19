@@ -5,7 +5,7 @@
 **Date:** 2026-06-12
 **Status:** Historical build notes plus production follow-up. The crates, verify/shadow tooling, sorted export, delta freshness loop, l2-10 batch-probe fix, and l2-11 hard deadline fix are built; l2-11 is deployed on HEL1 and proven over a production window. Default workspace tests still avoid DuckDB; production images build the feature-gated DuckDB paths (see §2).
 
-> Implements **L2** of the prove-then-retire plan ([`L2-duckdb-parquet-search-rust-spec.md`](./L2-duckdb-parquet-search-rust-spec.md)). L2 runs *beside* the live `torrent_files` path, proves parity, and only then becomes primary; the `torrent_files` DROP stays deferred until every replacement layer is proven live (the standing sequencing constraint).
+> Implements **L2** of the prove-then-retire plan ([`L2-duckdb-parquet-search-rust-spec.md`](./L2-duckdb-parquet-search-rust-spec.md)). L2 runs _beside_ the live `torrent_files` path, proves parity, and only then becomes primary; the `torrent_files` DROP stays deferred until every replacement layer is proven live (the standing sequencing constraint).
 
 ---
 
@@ -13,12 +13,12 @@
 
 Two new workspace crates + one new proto + one new DB reader:
 
-| Artifact | What it does | State |
-|---|---|---|
-| `crates/bitmagnet-parquet` | Productionized `bench/blob_export`: blobs → sorted `(ext,size)` slim **fact** Parquet + 2 **rollup** Parquets, **minute delta** (tombstone supersession incl. deletes), **compaction**, **atomic generation swap**. Lib + `bitmagnet-parquet` CLI. | ✅ built + tested |
-| `crates/bitmagnet-filesearch` | DuckDB-on-Parquet **gRPC sidecar** (`FileSearchService`): immutable read-only generations, FB-B1d safe-SQL, CB concurrency config, per-query deadlines. Lib + `bitmagnet-filesearch` server. | ✅ logic built + tested; real DuckDB engine behind `--features duckdb-engine` |
-| `proto/bitmagnet/file_search.proto` | New `FileSearchService` (kept separate from torrent-grained `SearchService`). | ✅ wired into `bitmagnet-proto` |
-| `bitmagnet_db::stream_changed_torrents` | The delta carve reader (`updated_at > watermark`, keyset on `info_hash`). | ✅ built + tested |
+| Artifact                                | What it does                                                                                                                                                                                                                                       | State                                                                         |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `crates/bitmagnet-parquet`              | Productionized `bench/blob_export`: blobs → sorted `(ext,size)` slim **fact** Parquet + 2 **rollup** Parquets, **minute delta** (tombstone supersession incl. deletes), **compaction**, **atomic generation swap**. Lib + `bitmagnet-parquet` CLI. | ✅ built + tested                                                             |
+| `crates/bitmagnet-filesearch`           | DuckDB-on-Parquet **gRPC sidecar** (`FileSearchService`): immutable read-only generations, FB-B1d safe-SQL, CB concurrency config, per-query deadlines. Lib + `bitmagnet-filesearch` server.                                                       | ✅ logic built + tested; real DuckDB engine behind `--features duckdb-engine` |
+| `proto/bitmagnet/file_search.proto`     | New `FileSearchService` (kept separate from torrent-grained `SearchService`).                                                                                                                                                                      | ✅ wired into `bitmagnet-proto`                                               |
+| `bitmagnet_db::stream_changed_torrents` | The delta carve reader (`updated_at > watermark`, keyset on `info_hash`).                                                                                                                                                                          | ✅ built + tested                                                             |
 
 **Test counts (default build):** bitmagnet-parquet 17, bitmagnet-filesearch 11, bitmagnet-db 24 (2 DB-gated ignored), bitmagnet-proto 2 — all green. The full DuckDB end-to-end (build a real generation, query it through `DuckEngine`) runs under `--features duckdb-engine` (duck.rs `tests`).
 
@@ -45,6 +45,7 @@ Two new workspace crates + one new proto + one new DB reader:
 ### Module map
 
 `bitmagnet-parquet`:
+
 - `decode` — `FileRow`, **G1** extension-from-path (never the blob `e`), `DecodeStats` (V3 error count).
 - `schema` — Arrow schemas: fact `(info_hash, file_index, path, extension, size)`, `agg_ext`, `agg_torrent_ext`.
 - `fact` — streaming `FactWriter`; `SortMode::{None, InMemory}`; ZSTD, **row_group 1M, bloom OFF** (sorted ⇒ zone-map prunes).
@@ -54,6 +55,7 @@ Two new workspace crates + one new proto + one new DB reader:
 - `export` — `Sinks` fan-out (fact + both rollups + tombstone); `run_base` / `run_delta` / `run_compaction` async jobs.
 
 `bitmagnet-filesearch`:
+
 - `query` — validated, engine-agnostic intent (`Filters`/`Sort`/`FileQuery`/`CountQuery`); limit clamps.
 - `sql` — **FB-B1d safe SQL**: server-controlled paths/identifiers vs bound `?` params; `escape_like`; the base+delta **anti-join** `files`/`att` CTEs; rollup-served collapse/facet/count.
 - `generation` — `GenerationManager`: resolve current base+delta, `reload()` swap behind `RwLock<Arc<…>>`.
@@ -89,6 +91,7 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 ## 4. CLI surface
 
 `bitmagnet-parquet` (env `BITMAGNET_PARQUET_ROOT`, `BITMAGNET_POSTGRES_DSN`):
+
 - `base    --sort memory --fail-on-decode-error` — full export; **V3** run (prints decode-error count; non-zero exit on any error).
 - `delta   --watermark <epoch> --deleted-file <f>` — minute carve + tombstone + watermark advance + swap.
 - `compact` — full rebuild + empty-delta reset.
@@ -124,15 +127,17 @@ The `duckdb` crate with `bundled` statically compiles libduckdb (a large C++ ama
 
 ## 6. V2 — dual-read shadow harness (design)
 
-**Goal:** prove the L2b cross-file search returns the *same set* as the equivalent live `torrent_files` SQL, at acceptable latency, before anything flips primary.
+**Goal:** prove the L2b cross-file search returns the _same set_ as the equivalent live `torrent_files` SQL, at acceptable latency, before anything flips primary.
 
 **Shape (offline-first, then optional live shadow):**
+
 1. **Query pairs.** For each L2b shape (`ext∧size` paginated find, distinct-torrent collapse, size ranges/counts, per-ext facet, single-torrent hydrate, path-ILIKE), define the equivalent `torrent_files` SQL (ARCH-C already produced these pairs) and the `FileSearchService` request.
-2. **Source of truth.** Run the `torrent_files` SQL against the live PG (read-only) **and** the `FileSearchService` against the sidecar reading a generation exported from the *same* snapshot.
+2. **Source of truth.** Run the `torrent_files` SQL against the live PG (read-only) **and** the `FileSearchService` against the sidecar reading a generation exported from the _same_ snapshot.
 3. **Compare.** For each pair: assert the **info_hash set** (collapse) or **(info_hash, file_index) set** (file rows) is identical; record the latency of each side. Tolerate ordering (compare as sets), and for `total_count` allow the documented estimate path.
 4. **Window.** Run the pair-suite over a sweep of realistic filters for a sustained window; emit a `filesearch_parity_mismatch` counter + a latency histogram per shape. Require a sustained **zero-mismatch** window before considering L2b GA.
 
 **Runbook outline (gated, read-only — no prod mutation):**
+
 ```
 # on the HEL1 restore (throwaway PG) — same snapshot the generation is exported from
 bitmagnet-parquet base --dsn <restore-dsn> --root /scratch/gen --sort memory --fail-on-decode-error   # V3
@@ -141,6 +146,7 @@ v2-shadow --pg <restore-dsn> --sidecar 127.0.0.1:50052 --pairs v2_pairs.json --w
 #   each row: shape, filter, pg_set_size, sidecar_set_size, set_equal, pg_ms, sidecar_ms
 # GATE: 0 mismatches across the suite; sidecar latency within the CB envelope (<250ms structured).
 ```
+
 ~~The `v2-shadow` driver itself is **not** built here (it's a deploy-wave harness); the sidecar side it drives **is**.~~ ✅ **BUILT (2026-06-10):** the `bitmagnet-shadow` workspace crate (bin `v2-shadow`) implements exactly this — five shapes, exact comparison (ordered rows/groups, counts incl. the `estimated` flag failing the gate, facet maps), `COLLATE "C"`/hex/ILIKE-escape mirror rules, CSV + non-zero exit on mismatch, a built-in suite covering every sidecar routing class plus `--pairs` JSON. See [`l2-verify-and-shadow-runbook.md`](./l2-verify-and-shadow-runbook.md). The Go in-request shadow for L2a is moot — the JSONB gate already flipped with direct SQL parity proven.
 
 > **2026-06-12 status:** GATE A passed full corpus
@@ -155,6 +161,7 @@ v2-shadow --pg <restore-dsn> --sidecar 127.0.0.1:50052 --pairs v2_pairs.json --w
 ## 7. V3 — first production base export = the 0-errors validation
 
 The first full `bitmagnet-parquet base` over the real corpus **is** the "0 decode errors across all ~16.97 M with-blob torrents" validation. The tool makes this first-class:
+
 - `DecodeStats.decode_errors` is counted per torrent (a bad blob is counted, never fatal — the export still completes and reports).
 - `BuildStats::is_clean()` ⇔ `decode_errors == 0`.
 - `base --fail-on-decode-error` exits non-zero if any blob failed ⇒ a CI/CronJob gate.

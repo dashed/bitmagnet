@@ -84,6 +84,22 @@
       "total_counts_by_status": "Duruma Göre Toplam Sayılar"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "İçerik Türü",
     "file_type": "Dosya Türü",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "Tümü",
+    "apply": "__missing__",
     "dismiss": "Kapat",
     "error": "Hata",
     "none": "Hiçbiri",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "Sınıflandırma",
     "clear_search": "Aramayı Temizle",
+    "clear_size_filter": "__missing__",
     "copy": "Kopyala",
     "copy_to_clipboard": "Panoya Kopyala",
     "delete": "Sil",
@@ -263,6 +281,8 @@
     "leechers": "Leechers",
     "magnet": "Magnet",
     "magnet_links": "Magnet Bağlantılar",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Yeni etiket",
     "order_by": "Sıralama ölçütü",
     "order_direction_toggle": "Yönü değiştir",
@@ -281,6 +301,7 @@
     "permalink": "Kalıcı Bağlantı",
     "poster": "Poster",
     "published": "Yayınlandı",
+    "published_date_filter": "__missing__",
     "rating": "Puan",
     "refresh": "Sonuçları Yenile",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "Tümünü Seç",
     "showing_x_of_y_files": "{{y}} dosyanın {{x}} tanesi gösteriliyor",
     "size": "Boyut",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Torrent Kaynağı",
     "summary": "Özet",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "Başlık",
     "toggle_drawer": "Çekmeceyi Aç/Kapat",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} oy"
   },
   "version": {

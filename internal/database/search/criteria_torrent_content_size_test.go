@@ -78,7 +78,7 @@ func TestSizeRangeCriteria_Raw(t *testing.T) {
 		},
 		{
 			name:          "large size values",
-			minBytes:      int64Ptr(1_000_000_000), // 1GB
+			minBytes:      int64Ptr(1_000_000_000),     // 1GB
 			maxBytes:      int64Ptr(1_000_000_000_000), // 1TB
 			key:           "torrent_contents.size",
 			expectedQuery: "torrent_contents.size >= ? AND torrent_contents.size <= ?",

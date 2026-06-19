@@ -84,6 +84,22 @@
       "total_counts_by_status": "Totaal aantal per status"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Inhoudstype",
     "file_type": "Bestandstype",
@@ -109,6 +125,7 @@
   },
   "general": {
     "all": "Alle",
+    "apply": "__missing__",
     "dismiss": "Sluiten",
     "error": "Fout",
     "none": "Geen",
@@ -239,6 +256,7 @@
   "torrents": {
     "classification": "Classificatie",
     "clear_search": "Zoekopdracht wissen",
+    "clear_size_filter": "__missing__",
     "copy": "Kopiëren",
     "copy_to_clipboard": "Kopiëren naar klembord",
     "delete": "Verwijderen",
@@ -263,6 +281,8 @@
     "leechers": "Leechers",
     "magnet": "Magnet",
     "magnet_links": "Magnet-links",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Nieuwe tag",
     "order_by": "Sorteren op",
     "order_direction_toggle": "Richting omkeren",
@@ -281,6 +301,7 @@
     "permalink": "Permalink",
     "poster": "Poster",
     "published": "Gepubliceerd",
+    "published_date_filter": "__missing__",
     "rating": "Beoordeling",
     "refresh": "Vernieuw resultaten",
     "reprocess": {
@@ -295,6 +316,17 @@
     "select_all": "Alles selecteren",
     "showing_x_of_y_files": "{{x}} van {{y}} bestanden weergegeven",
     "size": "Grootte",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Torrentbron",
     "summary": "Samenvatting",
     "tags": {
@@ -308,6 +340,7 @@
     },
     "title": "Titel",
     "toggle_drawer": "Zijpaneel in-/uitschakelen",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} stemmen"
   },
   "version": {

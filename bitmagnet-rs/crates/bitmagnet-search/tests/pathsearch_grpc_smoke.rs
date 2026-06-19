@@ -90,11 +90,7 @@ async fn candidates_sort_by_seeders_over_grpc() {
     assert!(response.estimated);
 
     // Descending seeders 99 > 42 > 5 → info_hash lead bytes 2, 3, 1.
-    let order: Vec<u8> = response
-        .candidates
-        .iter()
-        .map(|c| c.info_hash[0])
-        .collect();
+    let order: Vec<u8> = response.candidates.iter().map(|c| c.info_hash[0]).collect();
     assert_eq!(order, vec![2, 3, 1]);
     // The fast-field sort value rides along on each candidate.
     assert_eq!(response.candidates[0].sort_value, 99);

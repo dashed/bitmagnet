@@ -25,12 +25,7 @@ func NewDefaultFeatureFlagsConfig() FeatureFlagsConfig {
 }
 
 func (c FeatureFlagsConfig) flags() FeatureFlags {
-	return FeatureFlags{
-		GateFileExtensionsJSONB: c.GateFileExtensionsJSONB,
-		PopularitySortDefault:   c.PopularitySortDefault,
-		FileBrowserFromBlob:     c.FileBrowserFromBlob,
-		FileSearchEnabled:       c.FileSearchEnabled,
-	}
+	return FeatureFlags(c)
 }
 
 // ApplyFeatureFlags publishes the resolved config to the package-level snapshot.

@@ -118,7 +118,9 @@ fn order_by(field: SortField, desc: bool) -> String {
     let dir = if desc { "DESC" } else { "ASC" };
     match field {
         SortField::Size => format!("ORDER BY size {dir}, info_hash ASC, \"index\" ASC"),
-        SortField::Path => format!("ORDER BY path COLLATE \"C\" {dir}, info_hash ASC, \"index\" ASC"),
+        SortField::Path => {
+            format!("ORDER BY path COLLATE \"C\" {dir}, info_hash ASC, \"index\" ASC")
+        }
         SortField::InfoHash => format!("ORDER BY info_hash {dir}, \"index\" ASC"),
     }
 }

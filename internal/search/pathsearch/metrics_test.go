@@ -85,6 +85,7 @@ func TestMetrics_SetHealth(t *testing.T) {
 	}
 
 	m.SetHealth(false, 100, 1_700_000_000, 1_700_000_050)
+
 	if got := testutil.ToFloat64(m.healthy); got != 0 {
 		t.Errorf("healthy gauge after unhealthy = %v, want 0", got)
 	}

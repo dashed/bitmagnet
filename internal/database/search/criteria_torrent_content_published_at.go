@@ -41,6 +41,7 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 
 	// Default end time is now
 	endTime := timeNow().UTC()
+
 	var startTime time.Time
 
 	// Empty string means no time filter
@@ -54,7 +55,9 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 		if err != nil {
 			return time.Time{}, time.Time{}, err
 		}
+
 		startTime = endTime.Add(-duration)
+
 		return startTime, endTime, nil
 	}
 
@@ -67,7 +70,17 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 	case "yesterday":
 		yesterday := endTime.AddDate(0, 0, -1)
 		startTime = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, time.UTC)
-		endTime = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, time.UTC)
+		endTime = time.Date(
+			yesterday.Year(),
+			yesterday.Month(),
+			yesterday.Day(),
+			23,
+			59,
+			59,
+			999999999,
+			time.UTC,
+		)
+
 		return startTime, endTime, nil
 
 	case "this week":
@@ -78,7 +91,18 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 		} else {
 			daysSinceMonday--
 		}
-		startTime = time.Date(endTime.Year(), endTime.Month(), endTime.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
+
+		startTime = time.Date(
+			endTime.Year(),
+			endTime.Month(),
+			endTime.Day()-daysSinceMonday,
+			0,
+			0,
+			0,
+			0,
+			time.UTC,
+		)
+
 		return startTime, endTime, nil
 
 	case "last week":
@@ -90,11 +114,21 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 			daysSinceMonday--
 		}
 		// Start of this week
-		thisWeekStart := time.Date(endTime.Year(), endTime.Month(), endTime.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
+		thisWeekStart := time.Date(
+			endTime.Year(),
+			endTime.Month(),
+			endTime.Day()-daysSinceMonday,
+			0,
+			0,
+			0,
+			0,
+			time.UTC,
+		)
 		// Start of last week is 7 days before start of this week
 		startTime = thisWeekStart.AddDate(0, 0, -7)
 		// End of last week is 1 second before start of this week
 		endTime = thisWeekStart.Add(-time.Second)
+
 		return startTime, endTime, nil
 
 	case "this month":
@@ -108,6 +142,7 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 		startTime = thisMonthStart.AddDate(0, -1, 0)
 		// End of last month is 1 second before start of this month
 		endTime = thisMonthStart.Add(-time.Second)
+
 		return startTime, endTime, nil
 
 	case "this year":
@@ -121,6 +156,7 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 		startTime = thisYearStart.AddDate(-1, 0, 0)
 		// End of last year is 1 second before start of this year
 		endTime = thisYearStart.Add(-time.Second)
+
 		return startTime, endTime, nil
 	}
 
@@ -128,10 +164,13 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 	if strings.Contains(timeFrame, " to ") {
 		parts := strings.Split(timeFrame, " to ")
 		if len(parts) != 2 {
-			return time.Time{}, time.Time{}, errors.New("invalid date range format. Expected 'start to end'")
+			return time.Time{}, time.Time{}, errors.New(
+				"invalid date range format. Expected 'start to end'",
+			)
 		}
 
 		var err error
+
 		startTime, err = parseDateString(strings.TrimSpace(parts[0]))
 		if err != nil {
 			return time.Time{}, time.Time{}, err
@@ -144,7 +183,16 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 
 		// If end time doesn't have a time component, set it to end of day
 		if endTime.Hour() == 0 && endTime.Minute() == 0 && endTime.Second() == 0 {
-			endTime = time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 23, 59, 59, 999999999, endTime.Location())
+			endTime = time.Date(
+				endTime.Year(),
+				endTime.Month(),
+				endTime.Day(),
+				23,
+				59,
+				59,
+				999999999,
+				endTime.Location(),
+			)
 		}
 
 		return startTime, endTime, nil
@@ -154,7 +202,17 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 	parsedDate, err := parseDateString(timeFrame)
 	if err == nil {
 		startTime = parsedDate
-		endTime = time.Date(parsedDate.Year(), parsedDate.Month(), parsedDate.Day(), 23, 59, 59, 999999999, parsedDate.Location())
+		endTime = time.Date(
+			parsedDate.Year(),
+			parsedDate.Month(),
+			parsedDate.Day(),
+			23,
+			59,
+			59,
+			999999999,
+			parsedDate.Location(),
+		)
+
 		return startTime, endTime, nil
 	}
 
@@ -165,9 +223,10 @@ func parseTimeFrame(timeFrame string) (time.Time, time.Time, error) {
 func parseRelativeTime(relTime string) (time.Duration, error) {
 	// Extract the number and unit
 	re := regexp.MustCompile(`^(\d+)([smhdwMy])$`)
+
 	matches := re.FindStringSubmatch(relTime)
 	if len(matches) != 3 {
-		return 0, errors.New("invalid relative time format. Expected format: '3h', '7d', etc.")
+		return 0, errors.New("invalid relative time format: expected '3h', '7d', etc")
 	}
 
 	value, err := strconv.Atoi(matches[1])

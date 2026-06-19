@@ -97,6 +97,7 @@ func normalizeExtensions(in []string) []string {
 		}
 
 		seen[e] = struct{}{}
+
 		out = append(out, e)
 
 		if len(out) >= MaxExtensions {

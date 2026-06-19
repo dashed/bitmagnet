@@ -16,13 +16,13 @@ libtorrent variant against the 33.0 M corpus scan; the 3-convention classifier
 covers 33,039,281 rows with a residue of ~759 coincidental substrings (1 in
 ~1.2 M — accepted).
 
-| Dimension | Measured |
-|---|---|
-| Rows in the corpus | **33,035,140 = 3.74 %** of 882.8 M, across **779,071 torrents** (~4.6 % of with-blob torrents) |
-| Share of the NULL-extension bucket | **55.28 %** (33.0 M of 59.8 M) — the "no extension" facet/filter was majority junk |
-| Nominal declared bytes | 101 TB = 0.137 % of total |
-| Disk in the fact | ~3.7 % of rows ≈ 0.3–0.5 GB of the 13 GB fact (RLE/dict compress well) |
-| Scan latency | ~3.7 % of any full-scan query |
+| Dimension                          | Measured                                                                                       |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Rows in the corpus                 | **33,035,140 = 3.74 %** of 882.8 M, across **779,071 torrents** (~4.6 % of with-blob torrents) |
+| Share of the NULL-extension bucket | **55.28 %** (33.0 M of 59.8 M) — the "no extension" facet/filter was majority junk             |
+| Nominal declared bytes             | 101 TB = 0.137 % of total                                                                      |
+| Disk in the fact                   | ~3.7 % of rows ≈ 0.3–0.5 GB of the 13 GB fact (RLE/dict compress well)                         |
+| Scan latency                       | ~3.7 % of any full-scan query                                                                  |
 
 So the **resource** cost is minor; the **result-quality** cost (facet counts,
 NULL-ext and small-size-range queries, per-torrent matching counts) is the real
@@ -65,12 +65,12 @@ sidecar. Never roll a new sidecar onto an old generation.
 
 ## What this does and does not fix
 
-* Fixes: junk-free facets/counts/finds by default, −3.7 % rows on every scan,
+- Fixes: junk-free facets/counts/finds by default, −3.7 % rows on every scan,
   a NULL-ext bucket that means what it says (~26.7 M real files).
-* Does NOT fix the G2 file browser (it reads the blob directly in Go — showing
-  pads there is arguably correct for a *file browser*; a display toggle is a
+- Does NOT fix the G2 file browser (it reads the blob directly in Go — showing
+  pads there is arguably correct for a _file browser_; a display toggle is a
   separate small Go-side decision).
-* Does NOT fully close the GATE C facet mismatch: of the +18,726 blob-side
+- Does NOT fully close the GATE C facet mismatch: of the +18,726 blob-side
   superset rows, ~18,708 were pads — but **18 are real dup-path files** (10
   avi, 6 mp4, 1 url, 1 3gp) the legacy `(info_hash, path)` PK structurally
   cannot store. A strict re-run still shows that residue; the sidecar remains

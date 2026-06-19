@@ -240,10 +240,7 @@ mod tests {
         w.push(row("aa", 1, None, 1)).unwrap();
         let n = w.finish().unwrap();
         assert_eq!(n, 2);
-        assert_eq!(
-            read_back(&p),
-            vec![(Some("mkv".to_owned()), 5), (None, 1)]
-        );
+        assert_eq!(read_back(&p), vec![(Some("mkv".to_owned()), 5), (None, 1)]);
     }
 
     #[test]
@@ -270,11 +267,7 @@ mod tests {
     /// Minimal unique temp dir without pulling in the `tempfile` crate.
     fn tempdir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        let uniq = format!(
-            "bmp-fact-{}-{:p}",
-            std::process::id(),
-            &p as *const _
-        );
+        let uniq = format!("bmp-fact-{}-{:p}", std::process::id(), &p as *const _);
         p.push(uniq);
         std::fs::create_dir_all(&p).unwrap();
         p

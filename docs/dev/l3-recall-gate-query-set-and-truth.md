@@ -35,7 +35,7 @@ within that one path value), so the ngram conjunction matches it. Therefore:
 
 L3 may add false positives (grams scattered across files / across the query) — fine, this is recall-FIRST; L1/L2
 do exactness. We only ever check **truth ⊆ L3**, never the reverse. (A non-contiguous L3 hit correctly absent
-from truth is a *precision* artifact, not a recall miss — confirmed by harness-reviewer.)
+from truth is a _precision_ artifact, not a recall miss — confirmed by harness-reviewer.)
 
 ## 2. Predicate — `position(lower())`, not raw ILIKE
 
@@ -58,26 +58,29 @@ selective. The harness reads each query's exact `candidate_total` and **keeps it
 to "latency-only". So a few of the candidates below may auto-drop — that's expected; provide a surplus.
 
 ### 3a. ASCII compound / realistic (most likely selective)
+
 `1080p.bluray.x264`, `2160p.web-dl`, `dolby.atmos`, `s01e01.1080p`, `directors.cut`, `complete.series`,
 `hevc.10bit`, `remux.2160p`, `extended.edition`, `flac.24bit`
 
 ### 3b. ASCII single-token (selectivity uncertain — candidate_total decides)
+
 `bdremux`, `webrip`, `hdcam`
 
 ### 3d. FINDING (empirical, H4 live probe) — gram-match vs literal-substring divergence
 
 Two distinct match models drive the two halves of the gate, and they diverge widely:
+
 - **L3 `candidate_total`** = ngram(2,3) **token/gram** match: a torrent counts if it contains all the
-  query's grams *scattered anywhere*. Dotted-digit compounds are built from ultra-common grams
+  query's grams _scattered anywhere_. Dotted-digit compounds are built from ultra-common grams
   (`10`,`it`,`bit`,`.1`), so they balloon: `x265.10bit`=58 522, `web-dl.ddp5.1`=126 836, `bluray.remux`=26 639
   — all far over the 5000 cap despite "looking" specific.
 - **PG truth** = `position(lower(q) IN lower(path))` = **literal contiguous substring**. Real paths use varied
-  separators, so a literal dotted compound is often *rare*: `complete.series` cand=4745 → **1 truth**;
+  separators, so a literal dotted compound is often _rare_: `complete.series` cand=4745 → **1 truth**;
   `extended.edition` cand=1900 → **2 truth**. Whereas a real on-disk convention matches both:
   `hevc.10bit` cand=3698 → **13 truth**; `第01集` cand=2395 → **11 truth**.
 
 ⟹ **Dotted multi-token ASCII compounds are doubly bad recall queries**: grams scatter (inflate
-`candidate_total` over the cap) *and* the literal form is rare (starves truth). The **ideal recall query is
+`candidate_total` over the cap) _and_ the literal form is rare (starves truth). The **ideal recall query is
 literal-in-path**: (a) **CJK markers** (`第NN集`, `真人秀` — no separators, written literally; candidate_total ≈
 literal-count) and (b) **distinctive single tokens** (release groups, rare tags — their grams co-occur only in
 the token itself, so candidate_total ≈ literal-count → reliable for BOTH `≤5000` membership AND `≥10` truth).
@@ -95,8 +98,10 @@ the initial 2 robust. Recall is a structural guarantee (literal substring ⊆ ng
 expected and observed outcome; the value of the widen is coverage breadth/credibility, not a different verdict.
 
 ### 3c. CJK — the real recall differentiator (15.2% of corpus)
+
 Longer fragments are the carriers (selective + exercise 2-gram∧3-gram conjunction); the 2-char ones are likely
 over-cap and will auto-drop:
+
 - carriers: `蓝光原盘` (Blu-ray disc), `国语中字` (Mandarin + CN subs), `第01集` (episode 01),
   `字幕组` (subtitle group), `アニメ` (katakana "anime"), `繁體中字` (Traditional-CN subs)
 - likely-broad (auto-drop expected): `高清` (HD), `电影` (movie)
@@ -116,6 +121,7 @@ Because truth is sampled (§5), this is a **systematic-gap / correctness gate, n
 ~10–40 truth hashes/query is a real per-hash test, and **any single real miss fails the gate** → triage:
 
 ### 4c. A truth hash absent from returned candidates, with `candidate_total ≤ 5000` (a REAL miss). It is NOT:
+
 - **the cap** (excluded: `candidate_total ≤ 5000`), nor **freshness** (excluded: §5 `updated_at ≤ W − margin`).
 - So investigate, in order:
   1. **L3 tombstoned the torrent** — empty/undecodable `files_data` blob, or a re-crawl that lost its files
@@ -132,7 +138,7 @@ Because truth is sampled (§5), this is a **systematic-gap / correctness gate, n
 🔧 **Bounding correction:** a PK `info_hash`-range slice does **NOT** bound I/O. `info_hash` is SHA-1 (uniform,
 uncorrelated with heap/insertion order), so any range holds rows scattered across ~every heap page → a bitmap
 heap scan touches nearly the whole 277GB table. Bound by **physical-page sampling** instead:
-`TABLESAMPLE SYSTEM (p)` reads ~p% of *pages* → genuinely bounded I/O. `REPEATABLE(seed)` fixes the sampled
+`TABLESAMPLE SYSTEM (p)` reads ~p% of _pages_ → genuinely bounded I/O. `REPEATABLE(seed)` fixes the sampled
 pages so every query sees the **same** sampled population (clean cross-query comparison + reproducible truth).
 
 🔧 **Freshness correction:** the follow loop carves on **`updated_at`**, not `created_at`
@@ -164,15 +170,16 @@ LIMIT 500;                                                       -- truth-set bo
 - **Truth is a uniform sample of matching torrents.** Soundness holds regardless of sample size: a sampled row
   proving torrent⊇q ⟹ that torrent is an L3 candidate. Sample size ≈ `p% × whole-index match count`.
 - Optional one-scan variant: `CREATE TEMP TABLE tf_sample AS SELECT info_hash,path FROM torrent_files
-  TABLESAMPLE SYSTEM (2.0) REPEATABLE (4242);` then run the per-query filter against `tf_sample` (cheap). Needs
+TABLESAMPLE SYSTEM (2.0) REPEATABLE (4242);` then run the per-query filter against `tf_sample` (cheap). Needs
   a few GB temp space + the `CREATE` must itself finish within 15s — coordinate with access-engineer; the inline
   per-query form above is the safer default.
 
 ### 5c. Knobs
+
 - **Sample %** `TABLESAMPLE SYSTEM (p)`: lower p (→1.0/0.5) if a query times out at 15s; raise p (→5) for bigger
   truth samples on very selective queries. Same `REPEATABLE` seed across all queries + the L3 run.
 - **Stronger full-truth option (opt-in, gated):** for a few marquee queries, drop `TABLESAMPLE` and raise
-  `statement_timeout` deliberately to get the *complete* truth set (full seq scan, minutes/query) — lead +
+  `statement_timeout` deliberately to get the _complete_ truth set (full seq scan, minutes/query) — lead +
   access-engineer decide; not the default.
 
 ## 6. Truth-file format (JSON) — for harness-builder
@@ -194,23 +201,50 @@ contract value the lead plugs into `$2` (= HealthCheck `watermark_epoch − 60`)
     "watermark_margin_secs": 60,
     "limit_per_query": 500,
     "query_floor_chars": 3,
-    "l3_request": { "limit": 5000, "oversample": 0, "note": "returned = min(candidate_total, 5000)" },
+    "l3_request": {
+      "limit": 5000,
+      "oversample": 0,
+      "note": "returned = min(candidate_total, 5000)"
+    },
     "membership_valid_when": "candidate_total <= 5000  (== returned_size)"
   },
   "queries": [
-    { "id": "ascii_1080p_bluray_x264", "q": "1080p.bluray.x264", "class": "recall", "lang": "ascii",
-      "truth_info_hashes": [], "truth_sample_count": null,
-      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } },
-    { "id": "cjk_bluray_disc", "q": "蓝光原盘", "class": "recall", "lang": "cjk",
-      "truth_info_hashes": [], "truth_sample_count": null,
-      "_runtime": { "candidate_total": null, "returned_size": null, "recall": null, "membership_valid": null } }
+    {
+      "id": "ascii_1080p_bluray_x264",
+      "q": "1080p.bluray.x264",
+      "class": "recall",
+      "lang": "ascii",
+      "truth_info_hashes": [],
+      "truth_sample_count": null,
+      "_runtime": {
+        "candidate_total": null,
+        "returned_size": null,
+        "recall": null,
+        "membership_valid": null
+      }
+    },
+    {
+      "id": "cjk_bluray_disc",
+      "q": "蓝光原盘",
+      "class": "recall",
+      "lang": "cjk",
+      "truth_info_hashes": [],
+      "truth_sample_count": null,
+      "_runtime": {
+        "candidate_total": null,
+        "returned_size": null,
+        "recall": null,
+        "membership_valid": null
+      }
+    }
   ]
 }
 ```
 
 Harness rules:
+
 - Read `watermark_epoch` from HealthCheck once at run start; set `meta.watermark_bound_epoch = watermark_epoch −
-  60`; give it to the lead for `$2`.
+60`; give it to the lead for `$2`.
 - Per query: L3 `limit=5000`; record `candidate_total`, `returned_size`. Hex-encode L3 info_hash lowercase.
 - `candidate_total ≤ 5000` → `membership_valid=true`; `recall = |truth ∩ returned| / |truth|`; **gate fails if
   recall < 1.0** → §4c triage.

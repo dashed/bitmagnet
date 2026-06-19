@@ -48,7 +48,11 @@ func TestCompareFiles_ExtensionDivergesWithPath(t *testing.T) {
 			sawExtension = true
 
 			if m.Expected != "mp4" || m.Got != "mkv" {
-				t.Errorf("extension mismatch = (want %q got %q), expected (mp4, mkv)", m.Expected, m.Got)
+				t.Errorf(
+					"extension mismatch = (want %q got %q), expected (mp4, mkv)",
+					m.Expected,
+					m.Got,
+				)
 			}
 		}
 	}

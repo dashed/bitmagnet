@@ -86,7 +86,7 @@ func newComposer(
 ) lazy.Lazy[*pathsearch.Composer] {
 	return lazy.New(func() (*pathsearch.Composer, error) {
 		if !cfg.PathsearchEnabled || client == nil {
-			return nil, nil //nolint:nilnil // disabled: nil composer signals "off"
+			return nil, nil
 		}
 
 		s, err := pg.Get()
@@ -271,6 +271,7 @@ func pollPathsearchHealth(
 	// Optional freshness gate (cfg default 0 = off): a fresh-but-lagging index
 	// can be treated as unhealthy so the route never serves from a stale L3.
 	staleLag := time.Duration(0)
+
 	if healthy && cfg.PathsearchMaxWatermarkLag > 0 && watermark > 0 {
 		if lag := time.Duration(nowEpoch-watermark) * time.Second; lag > cfg.PathsearchMaxWatermarkLag {
 			healthy = false
@@ -285,13 +286,32 @@ func pollPathsearchHealth(
 		ps.logState(healthy, func() {
 			switch {
 			case healthy:
-				logger.Infow("pathsearch: L3 healthy", "doc_count", docCount, "watermark_epoch", watermark)
+				logger.Infow(
+					"pathsearch: L3 healthy",
+					"doc_count",
+					docCount,
+					"watermark_epoch",
+					watermark,
+				)
 			case staleLag > 0:
-				logger.Warnw("pathsearch: L3 watermark lag exceeds threshold; route failing closed to PostgreSQL",
-					"lag", staleLag, "threshold", cfg.PathsearchMaxWatermarkLag, "watermark_epoch", watermark)
+				logger.Warnw(
+					"pathsearch: L3 watermark lag exceeds threshold; route failing closed to PostgreSQL",
+					"lag",
+					staleLag,
+					"threshold",
+					cfg.PathsearchMaxWatermarkLag,
+					"watermark_epoch",
+					watermark,
+				)
 			default:
-				logger.Warnw("pathsearch: L3 reachable but NOT trusted (not SERVING or empty index); route failing closed to PostgreSQL",
-					"status", resp.GetStatus().String(), "doc_count", docCount)
+				logger.Warnw(
+					"pathsearch: L3 reachable but NOT trusted "+
+						"(not SERVING or empty index); route failing closed to PostgreSQL",
+					"status",
+					resp.GetStatus().String(),
+					"doc_count",
+					docCount,
+				)
 			}
 		})
 	}

@@ -25,7 +25,11 @@ func TestCompareStrictE_FlagsEmptyE(t *testing.T) {
 			saw = true
 
 			if m.Expected != "mkv" || m.Got != "" {
-				t.Errorf("extension_raw mismatch = (want %q got %q), expected (mkv, \"\")", m.Expected, m.Got)
+				t.Errorf(
+					"extension_raw mismatch = (want %q got %q), expected (mkv, \"\")",
+					m.Expected,
+					m.Got,
+				)
 			}
 		}
 	}
