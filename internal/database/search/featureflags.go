@@ -1,6 +1,14 @@
 package search
 
-import "sync/atomic"
+import (
+	"errors"
+	"fmt"
+	"sync/atomic"
+)
+
+var ErrLegacyTorrentFilesReadDisabled = errors.New(
+	"legacy torrent_files read is disabled in drop-compatible read mode",
+)
 
 // FeatureFlags holds the DROP-gate / search-migration feature toggles for the
 // torrent_files → blob + sidecar cutover. Every flag defaults to OFF so the app
@@ -87,4 +95,15 @@ func (f FeatureFlags) UseFileBrowserFromBlob() bool {
 // rely on torrent_files for a later rebuild. That repair mode is pre-DROP only.
 func (f FeatureFlags) AllowTorrentFilesRepair() bool {
 	return !f.DropCompatibleReads
+}
+
+// CheckLegacyTorrentFilesReadAllowed fails closed for any served path that still
+// has a legacy torrent_files implementation. Pre-DROP verifier/backfill tooling
+// should not use this package-level Search API for legacy-table parity.
+func (f FeatureFlags) CheckLegacyTorrentFilesReadAllowed(surface string) error {
+	if !f.DropCompatibleReads {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s", ErrLegacyTorrentFilesReadDisabled, surface)
 }

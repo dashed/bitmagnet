@@ -107,6 +107,18 @@ func TestCleanupRuntimeReadGate(t *testing.T) {
 	desc, ok = cleanupRuntimeReadGateForFlags(search.FeatureFlags{DropCompatibleReads: true})
 	assert.True(t, ok)
 	assert.Contains(t, desc, "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true")
+	assert.Contains(t, desc, "blob browser")
+	assert.Contains(t, desc, "JSONB extension filter")
+	assert.Contains(t, desc, "blob-only repair")
+
+	flags := search.FeatureFlags{
+		DropCompatibleReads:     true,
+		GateFileExtensionsJSONB: false,
+		FileBrowserFromBlob:     false,
+	}
+	assert.True(t, flags.UseFileExtensionsJSONB())
+	assert.True(t, flags.UseFileBrowserFromBlob())
+	assert.False(t, flags.AllowTorrentFilesRepair())
 }
 
 func TestPauseResumeLogic(t *testing.T) {

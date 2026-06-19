@@ -839,6 +839,20 @@ func cleanupRuntimeReadGateForFlags(flags search.FeatureFlags) (string, bool) {
 		return "SEARCH_FEATURES_DROP_COMPATIBLE_READS is false; active runtime has not proven no-legacy-read mode", false
 	}
 
+	var missing []string
+	if !flags.UseFileBrowserFromBlob() {
+		missing = append(missing, "blob browser")
+	}
+	if !flags.UseFileExtensionsJSONB() {
+		missing = append(missing, "JSONB extension filter")
+	}
+	if flags.AllowTorrentFilesRepair() {
+		missing = append(missing, "blob-only repair")
+	}
+	if len(missing) > 0 {
+		return "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true, but effective no-legacy-read gates are not forced: " + strings.Join(missing, ", "), false
+	}
+
 	return "SEARCH_FEATURES_DROP_COMPATIBLE_READS is true; blob browser, JSONB extension filter, and blob-only repair gates are forced", true
 }
 

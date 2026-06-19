@@ -46,6 +46,14 @@ func (h torrentContentTorrentHydrator) GetSubs(
 	dbCtx query.DBContext,
 	ids []protocol.ID,
 ) ([]model.Torrent, error) {
+	if h.files {
+		if err := FeatureFlagsValue().CheckLegacyTorrentFilesReadAllowed(
+			"HydrateTorrentContentTorrentWithFiles",
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	result, err := search{dbCtx.Query()}.
 		Torrents(ctx,
 			query.Where(TorrentInfoHashCriteria(ids...)),
