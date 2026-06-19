@@ -31,6 +31,7 @@ func TestTorrentFileSummaryPersistQueryTargetsSummaryTable(t *testing.T) {
 	require.NoError(t, err)
 
 	var infoHash protocol.ID
+
 	copy(infoHash[:], []byte("01234567890123456789"))
 
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -57,6 +58,7 @@ func TestBuildTorrentFileSummarySetsCrawlerTimestamps(t *testing.T) {
 	t.Parallel()
 
 	var infoHash protocol.ID
+
 	copy(infoHash[:], []byte("abcdefghijklmnopqrst"))
 
 	now := time.Unix(1_700_000_123, 0).UTC()
