@@ -662,6 +662,7 @@ dependencies = [
  "bitmagnet-common",
  "rmp-serde",
  "serde",
+ "serde_json",
  "thiserror",
  "zstd",
 ]

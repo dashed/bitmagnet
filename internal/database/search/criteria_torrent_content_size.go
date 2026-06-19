@@ -3,7 +3,9 @@ package search
 import (
 	"fmt"
 	"strings"
+
 	"gorm.io/gorm"
+
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
 )
@@ -31,7 +33,7 @@ func (c SizeRangeCriteria) Apply(q *gorm.DB) (*gorm.DB, error) {
 	return q, nil
 }
 
-func (c SizeRangeCriteria) Raw(ctx query.DbContext) (query.RawCriteria, error) {
+func (c SizeRangeCriteria) Raw(query.DBContext) (query.RawCriteria, error) {
 	conditions := make([]string, 0, 2)
 	args := make([]interface{}, 0, 2)
 
