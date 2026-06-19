@@ -11,6 +11,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/maps"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 )
 
@@ -20,6 +21,9 @@ type TorrentContentQuery struct {
 	// feature is disabled. When nil (or its typeahead flag is off) Search takes
 	// the existing PostgreSQL path unchanged.
 	Pathsearch *pathsearch.Composer
+	// FileSearchClient is the L2 filesearch sidecar client. The API remains dark
+	// unless SEARCH_FEATURES_FILE_SEARCH_ENABLED is also true.
+	FileSearchClient filesearch.Client
 }
 
 type TorrentContent struct {

@@ -1,0 +1,32 @@
+input FileSearchInput {
+  query: String
+  extensions: [String!]
+  minSize: Int
+  maxSize: Int
+  infoHash: Hash20
+  limit: Int
+  offset: Int
+}
+
+type FileSearchItem {
+  infoHash: Hash20!
+  index: Int!
+  path: String!
+  extension: String!
+  size: Int!
+}
+
+type FileSearchResult {
+  totalCount: Int!
+  hasNextPage: Boolean!
+  items: [FileSearchItem!]!
+}
+
+input PathTypeaheadInput {
+  prefix: String!
+  limit: Int
+}
+
+type PathTypeaheadResult {
+  suggestions: [String!]!
+}

@@ -162,6 +162,15 @@ models:
   TorrentFilesQueryResult:
     model:
       - github.com/bitmagnet-io/bitmagnet/internal/database/search.TorrentFilesResult
+  FileSearchResult:
+    model:
+      - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.FileSearchResult
+  FileSearchItem:
+    model:
+      - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.FileSearchItem
+  PathTypeaheadResult:
+    model:
+      - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.PathTypeaheadResult
   TorrentSuggestTagsResult:
     model:
       - github.com/bitmagnet-io/bitmagnet/internal/database/search.TorrentSuggestTagsResult

@@ -62,7 +62,9 @@ func TestFeatureFlagEnvVarNames(t *testing.T) {
 	want := map[string]string{
 		"DropCompatibleReads":     "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
 		"GateFileExtensionsJSONB": "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
+		"PopularitySortDefault":   "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
 		"FileBrowserFromBlob":     "SEARCH_FEATURES_FILE_BROWSER_FROM_BLOB",
+		"FileSearchEnabled":       "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
 	}
 
 	ct := reflect.TypeOf(FeatureFlagsConfig{})
