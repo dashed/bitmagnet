@@ -61,13 +61,7 @@ func (c processor) Process(ctx context.Context, params MessageParams) error {
 	searchResult, searchErr := c.search.TorrentsWithMissingInfoHashes(
 		ctx,
 		params.InfoHashes,
-		query.Preload(func(q *dao.Query) []field.RelationField {
-			return []field.RelationField{
-				q.Torrent.Files.RelationField,
-				q.Torrent.Hint.RelationField,
-				q.Torrent.Sources.RelationField,
-			}
-		}),
+		query.Preload(processorTorrentPreloads),
 	)
 	if searchErr != nil {
 		return searchErr
@@ -245,4 +239,14 @@ func newTorrentContent(t model.Torrent, c classification.Result) model.TorrentCo
 	tc.UpdateTsv()
 
 	return tc
+}
+
+func processorTorrentPreloads(q *dao.Query) []field.RelationField {
+	// Files intentionally stays out of the association preload list. SelectAll()
+	// loads torrents.files_data, and model.Torrent.AfterFind hydrates Torrent.Files
+	// from that L1 blob; preloading Torrent.Files would read legacy torrent_files.
+	return []field.RelationField{
+		q.Torrent.Hint.RelationField,
+		q.Torrent.Sources.RelationField,
+	}
 }
