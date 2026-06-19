@@ -29,7 +29,8 @@ func TorrentFileExtensionCriteria(extensions ...string) query.Criteria {
 		)
 
 		var multiFileBranch query.Criteria
-		if FeatureFlagsValue().GateFileExtensionsJSONB {
+
+		if FeatureFlagsValue().UseFileExtensionsJSONB() {
 			sql, args := fileExtensionsJSONBContains(extensions)
 			multiFileBranch = query.RawCriteria{
 				Query: sql,

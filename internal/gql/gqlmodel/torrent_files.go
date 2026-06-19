@@ -30,7 +30,7 @@ func (t TorrentQuery) Files(ctx context.Context, query TorrentFilesQueryInput) (
 	// (torrents.files_data) so it survives the torrent_files DROP. Flag-gated
 	// (default OFF) — until flipped the original `SELECT FROM torrent_files`
 	// path below runs unchanged.
-	if search.FeatureFlagsValue().FileBrowserFromBlob {
+	if search.FeatureFlagsValue().UseFileBrowserFromBlob() {
 		return t.filesFromBlob(ctx, query)
 	}
 
@@ -102,6 +102,7 @@ func (t TorrentQuery) filesFromBlob(
 	}
 
 	dao := t.Dao.Torrent.WithContext(ctx)
+
 	if len(in.InfoHashes) > 0 {
 		valuers := make([]driver.Valuer, len(in.InfoHashes))
 		for i, h := range in.InfoHashes {

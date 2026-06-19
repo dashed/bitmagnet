@@ -5,17 +5,20 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
+	dbsearch "github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"go.uber.org/zap"
 )
 
 type LiveChecker struct {
-	dao        *dao.Query
-	interval   time.Duration
-	sampleSize int
-	logger     *zap.SugaredLogger
-	metrics    *Metrics
-	stopCh     chan struct{}
-	cancel     context.CancelFunc
+	dao            *dao.Query
+	interval       time.Duration
+	sampleSize     int
+	logger         *zap.SugaredLogger
+	metrics        *Metrics
+	stopCh         chan struct{}
+	cancel         context.CancelFunc
+	checkLegacy    func(context.Context, *dao.Query, int) (Summary, error)
+	checkBlobsOnly func(context.Context, *dao.Query, int) (Summary, error)
 }
 
 func NewLiveChecker(
@@ -26,12 +29,14 @@ func NewLiveChecker(
 	metrics *Metrics,
 ) *LiveChecker {
 	return &LiveChecker{
-		dao:        q,
-		interval:   interval,
-		sampleSize: sampleSize,
-		logger:     logger.Named("blob_consistency"),
-		metrics:    metrics,
-		stopCh:     make(chan struct{}),
+		dao:            q,
+		interval:       interval,
+		sampleSize:     sampleSize,
+		logger:         logger.Named("blob_consistency"),
+		metrics:        metrics,
+		stopCh:         make(chan struct{}),
+		checkLegacy:    CheckRandom,
+		checkBlobsOnly: CheckRandomBlobsOnly,
 	}
 }
 
@@ -67,7 +72,20 @@ func (lc *LiveChecker) run(ctx context.Context) {
 }
 
 func (lc *LiveChecker) check(ctx context.Context) {
-	summary, err := CheckRandom(ctx, lc.dao, lc.sampleSize)
+	dropCompatible := !dbsearch.FeatureFlagsValue().AllowTorrentFilesRepair()
+	check := lc.checkLegacy
+	if dropCompatible {
+		check = lc.checkBlobsOnly
+	}
+	if check == nil {
+		if dropCompatible {
+			check = CheckRandomBlobsOnly
+		} else {
+			check = CheckRandom
+		}
+	}
+
+	summary, err := check(ctx, lc.dao, lc.sampleSize)
 	if err != nil {
 		lc.logger.Errorw("consistency check failed", "error", err)
 		return
@@ -77,8 +95,8 @@ func (lc *LiveChecker) check(ctx context.Context) {
 	lc.metrics.ChecksTotal.Add(float64(summary.TotalChecked))
 	lc.metrics.LastCheckAt.Set(now)
 
-	if summary.Mismatches > 0 {
-		lc.metrics.ErrorsTotal.Add(float64(summary.Mismatches))
+	if summary.Mismatches+summary.Errors > 0 {
+		lc.metrics.ErrorsTotal.Add(float64(summary.Mismatches + summary.Errors))
 		lc.metrics.LastErrorAt.Set(now)
 
 		for _, detail := range summary.MismatchDetails {
@@ -101,6 +119,14 @@ func (lc *LiveChecker) check(ctx context.Context) {
 }
 
 func (lc *LiveChecker) healTorrent(ctx context.Context, infoHash [20]byte) {
+	if !dbsearch.FeatureFlagsValue().AllowTorrentFilesRepair() {
+		lc.logger.Warnw(
+			"blob/row mismatch repair skipped in drop-compatible read mode",
+			"info_hash", infoHash,
+		)
+		return
+	}
+
 	err := lc.dao.Torrent.UnderlyingDB().WithContext(ctx).
 		Table("torrents").
 		Where("info_hash = ?", infoHash).

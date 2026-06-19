@@ -8,6 +8,7 @@ package search
 // It is registered with configfx.NewConfigModule in databasefx and applied to
 // the package-level snapshot by ApplyFeatureFlags.
 type FeatureFlagsConfig struct {
+	DropCompatibleReads     bool
 	GateFileExtensionsJSONB bool
 	PopularitySortDefault   bool
 	FileBrowserFromBlob     bool
@@ -17,6 +18,7 @@ type FeatureFlagsConfig struct {
 // NewDefaultFeatureFlagsConfig returns the safe, all-OFF default.
 func NewDefaultFeatureFlagsConfig() FeatureFlagsConfig {
 	return FeatureFlagsConfig{
+		DropCompatibleReads:     false,
 		GateFileExtensionsJSONB: false,
 		PopularitySortDefault:   false,
 		FileBrowserFromBlob:     false,
@@ -25,12 +27,7 @@ func NewDefaultFeatureFlagsConfig() FeatureFlagsConfig {
 }
 
 func (c FeatureFlagsConfig) flags() FeatureFlags {
-	return FeatureFlags{
-		GateFileExtensionsJSONB: c.GateFileExtensionsJSONB,
-		PopularitySortDefault:   c.PopularitySortDefault,
-		FileBrowserFromBlob:     c.FileBrowserFromBlob,
-		FileSearchEnabled:       c.FileSearchEnabled,
-	}
+	return FeatureFlags(c)
 }
 
 // ApplyFeatureFlags publishes the resolved config to the package-level snapshot.
