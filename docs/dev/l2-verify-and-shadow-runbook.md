@@ -162,12 +162,11 @@ Window: **2026-06-12T01:18:38Z -> 01:32:51Z**.
 ## 4. The deletion audit (closes delta stub #5)
 
 `deleted_torrents` (bytea PK + `deleted_at`, upsert) is fed by an
-`AFTER DELETE` trigger on `torrents`; DDL ships as the homelab playbook
-`bitmagnet_deleted_audit.yml` (`make bitmagnet-deleted-audit`, idempotent —
-deliberately NOT a goose migration: the deployed Go image is digest-pinned and
-`00023` is contested by the v2 branch; a future adopting migration is a no-op
-over the `IF NOT EXISTS` DDL). The delta job consumes it over the SAME
-half-open lagged window as the change carve:
+`AFTER DELETE` trigger on `torrents`; canonical DDL now ships in source as
+`migrations/00024_l1_l2_l3_follow_contract.sql`. Homelab keeps
+`bitmagnet_deleted_audit.yml` (`make bitmagnet-deleted-audit`) as an idempotent
+adoption overlay for already-deployed clusters. The delta job consumes it over
+the SAME half-open lagged window as the change carve:
 
 ```bash
 bitmagnet-parquet delta --dsn "$DSN" --deleted-source audit

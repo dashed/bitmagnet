@@ -117,8 +117,9 @@ LIMIT $4";
 /// Reads up to `limit` torrents changed in the half-open window
 /// `(since_epoch, until_epoch]` whose `info_hash` is greater than
 /// `after_info_hash`, ordered by `info_hash` — the per-minute delta carve for
-/// the L2 Parquet/agg refresh. Requires an index on `torrents.updated_at` for
-/// an efficient carve (see the L2 spec §2a/§6).
+/// the L2 Parquet/agg refresh. Requires the source-owned
+/// `torrents_updated_at_info_hash_idx` from
+/// `migrations/00024_l1_l2_l3_follow_contract.sql` for an efficient carve.
 ///
 /// `until_epoch` MUST be a commit-visibility-lagged "now" (now − ~30 s; see
 /// `bitmagnet_parquet::export::CARVE_LAG_SECS`): `updated_at` is set at

@@ -258,8 +258,10 @@ func TestV2MigrationUpDown(t *testing.T) {
 	assert.True(t, row.MetaVersion.Valid)
 	assert.Equal(t, int64(1), row.MetaVersion.Int64)
 
-	// Down migration removes the columns again.
-	require.NoError(t, goose.DownContext(ctx, sqlDB, "."))
+	// Down migrations through 00023 remove the columns again. Later migrations
+	// may be present, so roll back to the pre-v2 version instead of assuming the
+	// current head is 00023.
+	require.NoError(t, goose.DownToContext(ctx, sqlDB, ".", 22))
 	assert.False(t, hasColumn("info_hash_v1"))
 	assert.False(t, hasColumn("info_hash_v2"))
 	assert.False(t, hasColumn("meta_version"))

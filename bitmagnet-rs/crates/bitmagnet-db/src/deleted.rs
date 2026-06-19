@@ -2,9 +2,10 @@
 //!
 //! Hard-deleted torrents vanish from `torrents`, so the delta carve cannot see
 //! them — the audit table `deleted_torrents` (a tiny `AFTER DELETE` trigger
-//! target on `torrents`; DDL ships with the homelab playbook
-//! `bitmagnet_deleted_audit.yml` and is documented in
-//! `docs/dev/l2-verify-and-shadow-runbook.md`) records each deletion:
+//! target on `torrents`; source-owned DDL ships in
+//! `migrations/00024_l1_l2_l3_follow_contract.sql`, while homelab keeps an
+//! idempotent adoption playbook for already-deployed clusters) records each
+//! deletion:
 //!
 //! ```sql
 //! CREATE TABLE deleted_torrents (
