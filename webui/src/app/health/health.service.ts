@@ -43,7 +43,7 @@ const initialResult: Result = {
   error: null,
 };
 
-const pollInterval = 10000;
+const pollInterval = 3000;
 
 export class HealthService {
   private apollo = inject(Apollo);
@@ -82,10 +82,12 @@ export class HealthService {
               ...c,
               icon: icons[c.status],
             })),
-            workers: r.data.workers.listAll.workers.map((w) => ({
-              ...w,
-              icon: icons[w.started ? "started" : "inactive"],
-            })),
+            workers: r.data.workers.listAll.workers
+              .filter((w) => w.started)
+              .map((w) => ({
+                ...w,
+                icon: icons.started,
+              })),
             icon: icons[r.data.health.status],
             error: null,
           }),

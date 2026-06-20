@@ -23,6 +23,7 @@ type Resolver struct {
 	Search               search.Search
 	Workers              worker.Registry
 	Checker              health.Checker
+	HealthPeerConfig     health.PeerConfig
 	QueueMetricsClient   queuemetrics.Client
 	QueueManager         manager.Manager
 	TorrentMetricsClient torrentmetrics.Client

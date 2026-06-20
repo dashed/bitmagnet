@@ -149,6 +149,7 @@
     "components": {
       "dht": "DHT",
       "postgres": "Postgres",
+      "status_peer": "Primary status peer",
       "tmdb": "TMDB"
     },
     "dismiss": "Dismiss",
@@ -166,6 +167,7 @@
     "summary": "Health summary",
     "worker": "Worker",
     "workers": {
+      "blob_consistency_checker": "Blob consistency checker",
       "dht_crawler": "DHT crawler",
       "http_server": "HTTP server",
       "queue_server": "Queue server"

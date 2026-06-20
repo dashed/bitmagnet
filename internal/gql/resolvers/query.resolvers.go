@@ -32,6 +32,7 @@ func (r *queryResolver) Workers(ctx context.Context) (gen.WorkersQuery, error) {
 			Started: w.Started(),
 		})
 	}
+	workers = r.Resolver.mergePeerWorkers(ctx, workers)
 
 	return gen.WorkersQuery{
 		ListAll: gen.WorkersListAllQueryResult{
@@ -81,6 +82,7 @@ func (r *queryResolver) Health(ctx context.Context) (gen.HealthQuery, error) {
 		Status: transformHealthCheckStatus(check.Status),
 		Checks: checks,
 	}
+	result = r.Resolver.mergePeerHealth(ctx, result)
 
 	return result, nil
 }

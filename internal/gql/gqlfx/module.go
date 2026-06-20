@@ -84,6 +84,7 @@ func New() fx.Option {
 							Dao:                  d,
 							Search:               s,
 							Checker:              ch,
+							HealthPeerConfig:     p.HealthPeerConfig,
 							QueueMetricsClient:   qmc,
 							QueueManager:         qm,
 							TorrentMetricsClient: tm,
@@ -114,6 +115,7 @@ type Params struct {
 	Search               lazy.Lazy[search.Search]
 	Dao                  lazy.Lazy[*dao.Query]
 	Checker              lazy.Lazy[health.Checker]
+	HealthPeerConfig     health.PeerConfig
 	QueueMetricsClient   lazy.Lazy[queuemetrics.Client]
 	QueueManager         lazy.Lazy[manager.Manager]
 	TorrentMetricsClient lazy.Lazy[torrentmetrics.Client]

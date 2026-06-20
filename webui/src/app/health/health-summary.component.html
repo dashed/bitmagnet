@@ -8,7 +8,10 @@
           <th></th>
           <th>{{ t("health.component") }}</th>
           <th>{{ t("general.status") }}</th>
-          @if (health.result.status === "down") {
+          @if (
+            health.result.status === "down" ||
+            health.result.status === "degraded"
+          ) {
             <th>{{ t("general.error") }}</th>
           }
         </tr>
@@ -21,7 +24,10 @@
             </td>
             <th scope="row">{{ t("health.components." + check.key) }}</th>
             <td>{{ t("health.statuses." + check.status) }}</td>
-            @if (health.result.status === "down") {
+            @if (
+              health.result.status === "down" ||
+              health.result.status === "degraded"
+            ) {
               <td>{{ check.error }}</td>
             }
           </tr>
@@ -41,7 +47,10 @@
                 )
               }}
             </td>
-            @if (health.result.status === "down") {
+            @if (
+              health.result.status === "down" ||
+              health.result.status === "degraded"
+            ) {
               <td></td>
             }
           </tr>

@@ -50,6 +50,7 @@ func TestConfig(t *testing.T) {
 						"TEST_DURATION":                   "2s",
 						"TEST_NESTED_INT_WITH_VALIDATION": "2",
 						"TEST_NESTED_DB":                  "3",
+						"TEST_STRING_SLICE":               "peer-a,peer-b",
 					}, configresolver.WithPriority(-10)), nil
 				},
 			},
@@ -76,7 +77,7 @@ func TestConfig(t *testing.T) {
 			assert.Equal(t, TestConfig{
 				Foo:         "foo",
 				Bar:         2,
-				StringSlice: []string{"a", "b", "c"},
+				StringSlice: []string{"peer-a", "peer-b"},
 				Duration:    time.Second * 2,
 				Duration2:   time.Second * 3,
 				Nested: Nested{
