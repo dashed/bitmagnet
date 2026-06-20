@@ -113,3 +113,60 @@ func TestRunPersistTorrentsWriteContract(t *testing.T) {
 	assert.False(t, summary.CreatedAt.IsZero())
 	assert.False(t, summary.UpdatedAt.IsZero())
 }
+
+func TestPersistScrapedTorrentSourcesSeenCount(t *testing.T) {
+	db := setupV2TestDB(t)
+	q := dao.Use(db)
+
+	var infoHash protocol.ID
+	copy(infoHash[:], []byte("source-seen-count-1"))
+
+	now := time.Now()
+	torrent := model.Torrent{
+		InfoHash:    infoHash,
+		Name:        "source-seen-count",
+		Size:        1000,
+		FilesStatus: model.FilesStatusSingle,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, insertTorrentModel(db, &torrent))
+
+	source := &model.TorrentsTorrentSource{
+		Source:    "dht",
+		InfoHash:  infoHash,
+		Seeders:   model.NewNullUint(1),
+		Leechers:  model.NewNullUint(2),
+		SeenCount: 1,
+	}
+	require.NoError(t, persistScrapedTorrentSources(context.Background(), q, []*model.TorrentsTorrentSource{source}))
+
+	source.Seeders = model.NewNullUint(3)
+	source.Leechers = model.NewNullUint(4)
+	require.NoError(t, persistScrapedTorrentSources(context.Background(), q, []*model.TorrentsTorrentSource{source}))
+
+	var got model.TorrentsTorrentSource
+	require.NoError(t, db.Where("info_hash = ? AND source = ?", infoHash[:], "dht").First(&got).Error)
+	assert.Equal(t, uint(2), got.SeenCount)
+	assert.Equal(t, uint(3), got.Seeders.Uint)
+	assert.Equal(t, uint(4), got.Leechers.Uint)
+	assert.False(t, got.CreatedAt.IsZero())
+	assert.False(t, got.UpdatedAt.IsZero())
+	assert.True(t, got.UpdatedAt.After(got.CreatedAt) || got.UpdatedAt.Equal(got.CreatedAt))
+
+	var missingHash protocol.ID
+	copy(missingHash[:], []byte("source-missing-hash"))
+	require.NoError(t, persistScrapedTorrentSources(context.Background(), q, []*model.TorrentsTorrentSource{{
+		Source:    "dht",
+		InfoHash:  missingHash,
+		Seeders:   model.NewNullUint(9),
+		Leechers:  model.NewNullUint(9),
+		SeenCount: 1,
+	}}))
+
+	var missingCount int64
+	require.NoError(t, db.Table(model.TableNameTorrentsTorrentSource).
+		Where("info_hash = ?", missingHash[:]).
+		Count(&missingCount).Error)
+	assert.Zero(t, missingCount)
+}

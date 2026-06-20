@@ -3,6 +3,7 @@ package dhtcrawler
 import (
 	"context"
 	"database/sql/driver"
+	"strings"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
@@ -12,7 +13,6 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/prometheus/client_golang/prometheus"
-	"gorm.io/gen"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -438,43 +438,7 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 				}
 			}
 
-			if persistErr := c.dao.WithContext(ctx).TorrentsTorrentSource.Clauses(
-				clause.OnConflict{
-					Columns: []clause.Column{
-						{Name: string(c.dao.TorrentsTorrentSource.InfoHash.ColumnName())},
-						{Name: string(c.dao.TorrentsTorrentSource.Source.ColumnName())},
-					},
-					DoUpdates: clause.Set{
-						{
-							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.Seeders.ColumnName())},
-							Value:  gorm.Expr("excluded.seeders"),
-						},
-						{
-							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.Leechers.ColumnName())},
-							Value:  gorm.Expr("excluded.leechers"),
-						},
-						// sets to null, fixes torrents indexed before 0.8.0 with published_at
-						// 0001-01-01 00:00:00+00:
-						{
-							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName())},
-							Value:  gorm.Expr("excluded.published_at"),
-						},
-						{
-							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName())},
-							Value:  gorm.Expr("excluded.updated_at"),
-						},
-						{
-							Column: clause.Column{Name: "seen_count"},
-							Value:  gorm.Expr("torrents_torrent_sources.seen_count + 1"),
-						},
-					},
-				},
-			).Where(
-				// check that the torrent record hasn't been deleted:
-				gen.Exists(c.dao.WithContext(ctx).Torrent.Where(
-					c.dao.Torrent.InfoHash.EqCol(c.dao.TorrentsTorrentSource.InfoHash),
-				)),
-			).CreateInBatches(srcs, 100); persistErr != nil {
+			if persistErr := persistScrapedTorrentSources(ctx, c.dao, srcs); persistErr != nil {
 				c.logger.Errorf("error persisting torrent sources: %s", persistErr.Error())
 			} else {
 				c.persistedTotal.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
@@ -482,6 +446,66 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func persistScrapedTorrentSources(
+	ctx context.Context,
+	q *dao.Query,
+	srcs []*model.TorrentsTorrentSource,
+) error {
+	const batchSize = 100
+
+	now := time.Now()
+	db := q.Torrent.UnderlyingDB().WithContext(ctx)
+
+	for start := 0; start < len(srcs); start += batchSize {
+		end := min(start+batchSize, len(srcs))
+		batch := srcs[start:end]
+
+		var b strings.Builder
+		args := make([]any, 0, len(batch)*8)
+
+		b.WriteString("INSERT INTO torrents_torrent_sources " +
+			"(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ")
+		b.WriteString("SELECT v.source, decode(v.info_hash, 'hex'), v.seeders, v.leechers, " +
+			"v.published_at, v.seen_count, v.created_at, v.updated_at FROM (VALUES ")
+
+		for i, src := range batch {
+			if i > 0 {
+				b.WriteString(",")
+			}
+
+			b.WriteString("(?,?,?::integer,?::integer,?::timestamptz,?::integer,?::timestamptz,?::timestamptz)")
+			args = append(
+				args,
+				src.Source,
+				src.InfoHash.String(),
+				src.Seeders,
+				src.Leechers,
+				src.PublishedAt,
+				src.SeenCount,
+				now,
+				now,
+			)
+		}
+
+		b.WriteString(") AS v(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ")
+		b.WriteString("WHERE EXISTS (SELECT 1 FROM torrents t WHERE t.info_hash = decode(v.info_hash, 'hex')) ")
+		b.WriteString("ON CONFLICT (info_hash, source) DO UPDATE SET " +
+			"seeders = excluded.seeders, " +
+			"leechers = excluded.leechers, " +
+			// sets to null, fixes torrents indexed before 0.8.0 with published_at
+			// 0001-01-01 00:00:00+00:
+			"published_at = excluded.published_at, " +
+			"updated_at = excluded.updated_at, " +
+			"seen_count = torrents_torrent_sources.seen_count + 1")
+
+		if err := db.Exec(b.String(), args...).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func createTorrentSourceModel(
