@@ -104,6 +104,27 @@ export class TorrentsTableComponent implements OnInit {
   item(item: generated.TorrentContent): generated.TorrentContent {
     return item;
   }
+
+  dhtSeenTooltip(
+    item: generated.TorrentContent,
+    countLabel: string,
+    lastSeenLabel: string,
+    firstSeenLabel: string,
+  ): string {
+    if (!item.dhtLastSeenAt) {
+      return "";
+    }
+
+    const lines = [
+      `${countLabel}: ${item.dhtSeenCount.toLocaleString()}`,
+      `${lastSeenLabel}: ${item.dhtLastSeenAt}`,
+    ];
+    if (item.dhtFirstSeenAt) {
+      lines.push(`${firstSeenLabel}: ${item.dhtFirstSeenAt}`);
+    }
+
+    return lines.join("\n");
+  }
 }
 
 export const allColumns = [
@@ -111,6 +132,7 @@ export const allColumns = [
   "summary",
   "size",
   "publishedAt",
+  "dhtSeen",
   "peers",
   "magnet",
 ] as const;

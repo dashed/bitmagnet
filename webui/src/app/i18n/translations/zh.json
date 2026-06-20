@@ -33,6 +33,11 @@
       "processed": "已处理",
       "updated": "已更新"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "全部",
       "days": "天",
@@ -51,8 +56,17 @@
       "seconds_30": "30秒",
       "weeks_1": "1周"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "事件",
+      "no_data": "__missing__",
       "resolution": "分辨率",
       "throughput": "吞吐量",
       "timeframe": "时间范围",
@@ -263,6 +277,10 @@
     "delete_action_cannot_be_undone": "此操作无法撤销",
     "delete_are_you_sure": "您确定要删除此种子吗？",
     "deselect_all": "取消全选",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "编辑标签",
     "episodes": "剧集",
     "external_links": "外部链接",

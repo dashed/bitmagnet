@@ -298,6 +298,9 @@ type ComplexityRoot struct {
 		ContentSource   func(childComplexity int) int
 		ContentType     func(childComplexity int) int
 		CreatedAt       func(childComplexity int) int
+		DHTFirstSeenAt  func(childComplexity int) int
+		DHTLastSeenAt   func(childComplexity int) int
+		DHTSeenCount    func(childComplexity int) int
 		Episodes        func(childComplexity int) int
 		ID              func(childComplexity int) int
 		InfoHash        func(childComplexity int) int
@@ -409,11 +412,14 @@ type ComplexityRoot struct {
 	}
 
 	TorrentSourceInfo struct {
-		ImportID func(childComplexity int) int
-		Key      func(childComplexity int) int
-		Leechers func(childComplexity int) int
-		Name     func(childComplexity int) int
-		Seeders  func(childComplexity int) int
+		FirstSeenAt func(childComplexity int) int
+		ImportID    func(childComplexity int) int
+		Key         func(childComplexity int) int
+		LastSeenAt  func(childComplexity int) int
+		Leechers    func(childComplexity int) int
+		Name        func(childComplexity int) int
+		Seeders     func(childComplexity int) int
+		SeenCount   func(childComplexity int) int
 	}
 
 	TorrentSuggestTagsResult struct {
@@ -1538,6 +1544,27 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.TorrentContent.CreatedAt(childComplexity), true
 
+	case "TorrentContent.dhtFirstSeenAt":
+		if e.complexity.TorrentContent.DHTFirstSeenAt == nil {
+			break
+		}
+
+		return e.complexity.TorrentContent.DHTFirstSeenAt(childComplexity), true
+
+	case "TorrentContent.dhtLastSeenAt":
+		if e.complexity.TorrentContent.DHTLastSeenAt == nil {
+			break
+		}
+
+		return e.complexity.TorrentContent.DHTLastSeenAt(childComplexity), true
+
+	case "TorrentContent.dhtSeenCount":
+		if e.complexity.TorrentContent.DHTSeenCount == nil {
+			break
+		}
+
+		return e.complexity.TorrentContent.DHTSeenCount(childComplexity), true
+
 	case "TorrentContent.episodes":
 		if e.complexity.TorrentContent.Episodes == nil {
 			break
@@ -2076,6 +2103,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.TorrentSourceAgg.Value(childComplexity), true
 
+	case "TorrentSourceInfo.firstSeenAt":
+		if e.complexity.TorrentSourceInfo.FirstSeenAt == nil {
+			break
+		}
+
+		return e.complexity.TorrentSourceInfo.FirstSeenAt(childComplexity), true
+
 	case "TorrentSourceInfo.importId":
 		if e.complexity.TorrentSourceInfo.ImportID == nil {
 			break
@@ -2089,6 +2123,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.TorrentSourceInfo.Key(childComplexity), true
+
+	case "TorrentSourceInfo.lastSeenAt":
+		if e.complexity.TorrentSourceInfo.LastSeenAt == nil {
+			break
+		}
+
+		return e.complexity.TorrentSourceInfo.LastSeenAt(childComplexity), true
 
 	case "TorrentSourceInfo.leechers":
 		if e.complexity.TorrentSourceInfo.Leechers == nil {
@@ -2110,6 +2151,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.TorrentSourceInfo.Seeders(childComplexity), true
+
+	case "TorrentSourceInfo.seenCount":
+		if e.complexity.TorrentSourceInfo.SeenCount == nil {
+			break
+		}
+
+		return e.complexity.TorrentSourceInfo.SeenCount(childComplexity), true
 
 	case "TorrentSuggestTagsResult.suggestions":
 		if e.complexity.TorrentSuggestTagsResult.Suggestions == nil {
@@ -2659,6 +2707,9 @@ type TorrentSourceInfo {
   importId: String
   seeders: Int
   leechers: Int
+  seenCount: Int!
+  firstSeenAt: DateTime!
+  lastSeenAt: DateTime!
 }
 
 type TorrentContent {
@@ -2680,6 +2731,9 @@ type TorrentContent {
   releaseGroup: String
   seeders: Int
   leechers: Int
+  dhtSeenCount: Int!
+  dhtFirstSeenAt: DateTime
+  dhtLastSeenAt: DateTime
   publishedAt: DateTime!
   createdAt: DateTime!
   updatedAt: DateTime!
@@ -9934,6 +9988,12 @@ func (ec *executionContext) fieldContext_Torrent_sources(_ context.Context, fiel
 				return ec.fieldContext_TorrentSourceInfo_seeders(ctx, field)
 			case "leechers":
 				return ec.fieldContext_TorrentSourceInfo_leechers(ctx, field)
+			case "seenCount":
+				return ec.fieldContext_TorrentSourceInfo_seenCount(ctx, field)
+			case "firstSeenAt":
+				return ec.fieldContext_TorrentSourceInfo_firstSeenAt(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_TorrentSourceInfo_lastSeenAt(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type TorrentSourceInfo", field.Name)
 		},
@@ -11045,6 +11105,132 @@ func (ec *executionContext) fieldContext_TorrentContent_leechers(_ context.Conte
 	return fc, nil
 }
 
+func (ec *executionContext) _TorrentContent_dhtSeenCount(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContent) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContent_dhtSeenCount(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.DHTSeenCount, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContent_dhtSeenCount(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContent",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContent_dhtFirstSeenAt(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContent) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContent_dhtFirstSeenAt(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.DHTFirstSeenAt, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*time.Time)
+	fc.Result = res
+	return ec.marshalODateTime2ᚖtimeᚐTime(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContent_dhtFirstSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContent",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type DateTime does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContent_dhtLastSeenAt(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContent) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContent_dhtLastSeenAt(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.DHTLastSeenAt, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		return graphql.Null
+	}
+	res := resTmp.(*time.Time)
+	fc.Result = res
+	return ec.marshalODateTime2ᚖtimeᚐTime(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContent_dhtLastSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContent",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type DateTime does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _TorrentContent_publishedAt(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContent) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_TorrentContent_publishedAt(ctx, field)
 	if err != nil {
@@ -12029,6 +12215,12 @@ func (ec *executionContext) fieldContext_TorrentContentSearchResult_items(_ cont
 				return ec.fieldContext_TorrentContent_seeders(ctx, field)
 			case "leechers":
 				return ec.fieldContext_TorrentContent_leechers(ctx, field)
+			case "dhtSeenCount":
+				return ec.fieldContext_TorrentContent_dhtSeenCount(ctx, field)
+			case "dhtFirstSeenAt":
+				return ec.fieldContext_TorrentContent_dhtFirstSeenAt(ctx, field)
+			case "dhtLastSeenAt":
+				return ec.fieldContext_TorrentContent_dhtLastSeenAt(ctx, field)
 			case "publishedAt":
 				return ec.fieldContext_TorrentContent_publishedAt(ctx, field)
 			case "createdAt":
@@ -14014,6 +14206,138 @@ func (ec *executionContext) fieldContext_TorrentSourceInfo_leechers(_ context.Co
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentSourceInfo_seenCount(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentSourceInfo) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentSourceInfo_seenCount(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.SeenCount, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentSourceInfo_seenCount(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentSourceInfo",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentSourceInfo_firstSeenAt(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentSourceInfo) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentSourceInfo_firstSeenAt(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.FirstSeenAt, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(time.Time)
+	fc.Result = res
+	return ec.marshalNDateTime2timeᚐTime(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentSourceInfo_firstSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentSourceInfo",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type DateTime does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentSourceInfo_lastSeenAt(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentSourceInfo) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentSourceInfo_lastSeenAt(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.LastSeenAt, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(time.Time)
+	fc.Result = res
+	return ec.marshalNDateTime2timeᚐTime(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentSourceInfo_lastSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentSourceInfo",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type DateTime does not have child fields")
 		},
 	}
 	return fc, nil
@@ -20092,6 +20416,15 @@ func (ec *executionContext) _TorrentContent(ctx context.Context, sel ast.Selecti
 			out.Values[i] = ec._TorrentContent_seeders(ctx, field, obj)
 		case "leechers":
 			out.Values[i] = ec._TorrentContent_leechers(ctx, field, obj)
+		case "dhtSeenCount":
+			out.Values[i] = ec._TorrentContent_dhtSeenCount(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "dhtFirstSeenAt":
+			out.Values[i] = ec._TorrentContent_dhtFirstSeenAt(ctx, field, obj)
+		case "dhtLastSeenAt":
+			out.Values[i] = ec._TorrentContent_dhtLastSeenAt(ctx, field, obj)
 		case "publishedAt":
 			out.Values[i] = ec._TorrentContent_publishedAt(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
@@ -21182,6 +21515,21 @@ func (ec *executionContext) _TorrentSourceInfo(ctx context.Context, sel ast.Sele
 			out.Values[i] = ec._TorrentSourceInfo_seeders(ctx, field, obj)
 		case "leechers":
 			out.Values[i] = ec._TorrentSourceInfo_leechers(ctx, field, obj)
+		case "seenCount":
+			out.Values[i] = ec._TorrentSourceInfo_seenCount(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "firstSeenAt":
+			out.Values[i] = ec._TorrentSourceInfo_firstSeenAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "lastSeenAt":
+			out.Values[i] = ec._TorrentSourceInfo_lastSeenAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}

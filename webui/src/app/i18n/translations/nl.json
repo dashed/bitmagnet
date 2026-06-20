@@ -33,6 +33,11 @@
       "processed": "Verwerkt",
       "updated": "Bijgewerkt"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Alle",
       "days": "Dagen",
@@ -51,8 +56,17 @@
       "seconds_30": "30 seconden",
       "weeks_1": "1 week"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Gebeurtenis",
+      "no_data": "__missing__",
       "resolution": "Resolutie",
       "throughput": "Doorvoer",
       "timeframe": "Tijdsperiode",
@@ -263,6 +277,10 @@
     "delete_action_cannot_be_undone": "Deze actie kan niet ongedaan worden gemaakt",
     "delete_are_you_sure": "Weet u zeker dat u deze torrent wilt verwijderen?",
     "deselect_all": "Deselecteer alles",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Tags bewerken",
     "episodes": "Afleveringen",
     "external_links": "Externe links",

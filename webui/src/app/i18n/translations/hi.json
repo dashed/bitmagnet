@@ -33,6 +33,11 @@
       "processed": "प्रसंस्कृत",
       "updated": "अपडेट किया गया"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "सभी",
       "days": "दिन",
@@ -51,8 +56,17 @@
       "seconds_30": "30 सेकंड",
       "weeks_1": "1 सप्ताह"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "घटना",
+      "no_data": "__missing__",
       "resolution": "रिज़ॉल्यूशन",
       "throughput": "थ्रूपुट",
       "timeframe": "समय सीमा",
@@ -263,6 +277,10 @@
     "delete_action_cannot_be_undone": "यह क्रिया पूर्ववत नहीं की जा सकती",
     "delete_are_you_sure": "क्या आप वाकई इस टोरेंट को हटाना चाहते हैं?",
     "deselect_all": "सभी को अचयनित करें",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "टैग संपादित करें",
     "episodes": "एपिसोड्स",
     "external_links": "बाहरी लिंक",

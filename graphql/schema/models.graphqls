@@ -43,6 +43,9 @@ type TorrentSourceInfo {
   importId: String
   seeders: Int
   leechers: Int
+  seenCount: Int!
+  firstSeenAt: DateTime!
+  lastSeenAt: DateTime!
 }
 
 type TorrentContent {
@@ -64,6 +67,9 @@ type TorrentContent {
   releaseGroup: String
   seeders: Int
   leechers: Int
+  dhtSeenCount: Int!
+  dhtFirstSeenAt: DateTime
+  dhtLastSeenAt: DateTime
   publishedAt: DateTime!
   createdAt: DateTime!
   updatedAt: DateTime!

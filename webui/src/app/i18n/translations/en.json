@@ -56,14 +56,6 @@
       "seconds_30": "30 seconds",
       "weeks_1": "1 week"
     },
-    "metrics": {
-      "event": "Event",
-      "no_data": "No data",
-      "resolution": "Resolution",
-      "throughput": "Throughput",
-      "timeframe": "Timeframe",
-      "toggle_legend": "Toggle legend"
-    },
     "live": {
       "auto_refresh": "Auto refresh",
       "last_updated": "Updated",
@@ -71,6 +63,14 @@
       "refresh_now": "Refresh now",
       "title": "Live",
       "waiting_for_data": "Waiting for data"
+    },
+    "metrics": {
+      "event": "Event",
+      "no_data": "No data",
+      "resolution": "Resolution",
+      "throughput": "Throughput",
+      "timeframe": "Timeframe",
+      "toggle_legend": "Toggle legend"
     },
     "queues": {
       "created": "Created",
@@ -288,6 +288,10 @@
     "delete_action_cannot_be_undone": "This action cannot be undone",
     "delete_are_you_sure": "Are you sure you want to delete this torrent?",
     "deselect_all": "Deselect All",
+    "dht_first_seen": "DHT first seen",
+    "dht_last_seen": "DHT last seen",
+    "dht_seen": "DHT seen",
+    "dht_seen_count": "DHT crawl count",
     "edit_tags": "Edit tags",
     "episodes": "Episodes",
     "external_links": "External links",

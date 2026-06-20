@@ -33,6 +33,11 @@
       "processed": "Обработано",
       "updated": "Обновлено"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Все",
       "days": "Дни",
@@ -51,8 +56,17 @@
       "seconds_30": "30 секунд",
       "weeks_1": "1 неделя"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Событие",
+      "no_data": "__missing__",
       "resolution": "Разрешение",
       "throughput": "Пропускная способность",
       "timeframe": "Период времени",
@@ -263,6 +277,10 @@
     "delete_action_cannot_be_undone": "Это действие нельзя отменить",
     "delete_are_you_sure": "Вы уверены, что хотите удалить этот торрент?",
     "deselect_all": "Снять выделение",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Редактировать теги",
     "episodes": "Эпизоды",
     "external_links": "Внешние ссылки",

@@ -44,6 +44,9 @@ type TorrentContent struct {
 	SearchString    string
 	Seeders         model.NullUint
 	Leechers        model.NullUint
+	DHTSeenCount    int
+	DHTFirstSeenAt  *time.Time
+	DHTLastSeenAt   *time.Time
 	PublishedAt     time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -77,6 +80,11 @@ func NewTorrentContentFromResultItem(item search.TorrentContentResultItem) Torre
 		UpdatedAt:       item.UpdatedAt,
 		Torrent:         item.Torrent,
 	}
+	if firstSeenAt, lastSeenAt, seenCount := DHTSeenStatsFromTorrent(item.Torrent); lastSeenAt != nil {
+		c.DHTSeenCount = seenCount
+		c.DHTFirstSeenAt = firstSeenAt
+		c.DHTLastSeenAt = lastSeenAt
+	}
 	if item.Content.ID != "" {
 		c.Content = &item.Content
 	}
@@ -97,11 +105,14 @@ func NewTorrentContentFromResultItem(item search.TorrentContentResultItem) Torre
 }
 
 type TorrentSourceInfo struct {
-	Key      string
-	Name     string
-	ImportID model.NullString
-	Seeders  model.NullUint
-	Leechers model.NullUint
+	Key         string
+	Name        string
+	ImportID    model.NullString
+	Seeders     model.NullUint
+	Leechers    model.NullUint
+	SeenCount   int
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
 }
 
 func TorrentSourceInfosFromTorrent(t model.Torrent) []TorrentSourceInfo {
@@ -109,15 +120,33 @@ func TorrentSourceInfosFromTorrent(t model.Torrent) []TorrentSourceInfo {
 
 	for _, s := range t.Sources {
 		sources = append(sources, TorrentSourceInfo{
-			Key:      s.Source,
-			Name:     s.TorrentSource.Name,
-			ImportID: s.ImportID,
-			Seeders:  s.Seeders,
-			Leechers: s.Leechers,
+			Key:         s.Source,
+			Name:        s.TorrentSource.Name,
+			ImportID:    s.ImportID,
+			Seeders:     s.Seeders,
+			Leechers:    s.Leechers,
+			SeenCount:   int(s.SeenCount),
+			FirstSeenAt: s.CreatedAt,
+			LastSeenAt:  s.UpdatedAt,
 		})
 	}
 
 	return sources
+}
+
+func DHTSeenStatsFromTorrent(t model.Torrent) (*time.Time, *time.Time, int) {
+	for _, s := range t.Sources {
+		if s.Source != "dht" {
+			continue
+		}
+
+		firstSeenAt := s.CreatedAt
+		lastSeenAt := s.UpdatedAt
+
+		return &firstSeenAt, &lastSeenAt, int(s.SeenCount)
+	}
+
+	return nil, nil, 0
 }
 
 type TorrentContentSearchQueryInput struct {

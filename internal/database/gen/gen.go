@@ -82,6 +82,7 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		infoHashReadOnly,
 		gen.FieldType("seeders", "NullUint"),
 		gen.FieldType("leechers", "NullUint"),
+		gen.FieldType("seen_count", "uint"),
 		gen.FieldType("published_at", "sql.NullTime"),
 		gen.FieldRelate(
 			field.HasOne,

@@ -12,6 +12,9 @@ fragment Torrent on Torrent {
   sources {
     key
     name
+    seenCount
+    firstSeenAt
+    lastSeenAt
   }
   seeders
   leechers

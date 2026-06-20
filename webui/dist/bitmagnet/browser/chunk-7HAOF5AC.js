@@ -101,6 +101,9 @@ this in the docs: http://dev.apollodata.com/core/fragments.html#unique-names`):a
   sources {
     key
     name
+    seenCount
+    firstSeenAt
+    lastSeenAt
   }
   seeders
   leechers
@@ -192,6 +195,9 @@ this in the docs: http://dev.apollodata.com/core/fragments.html#unique-names`):a
   videoSource
   seeders
   leechers
+  dhtSeenCount
+  dhtFirstSeenAt
+  dhtLastSeenAt
   publishedAt
   createdAt
   updatedAt

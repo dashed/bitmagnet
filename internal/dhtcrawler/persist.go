@@ -444,14 +444,30 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 						{Name: string(c.dao.TorrentsTorrentSource.InfoHash.ColumnName())},
 						{Name: string(c.dao.TorrentsTorrentSource.Source.ColumnName())},
 					},
-					DoUpdates: clause.AssignmentColumns([]string{
-						string(c.dao.TorrentsTorrentSource.Seeders.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.Leechers.ColumnName()),
+					DoUpdates: clause.Set{
+						{
+							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.Seeders.ColumnName())},
+							Value:  gorm.Expr("excluded.seeders"),
+						},
+						{
+							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.Leechers.ColumnName())},
+							Value:  gorm.Expr("excluded.leechers"),
+						},
 						// sets to null, fixes torrents indexed before 0.8.0 with published_at
 						// 0001-01-01 00:00:00+00:
-						string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName()),
-					}),
+						{
+							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName())},
+							Value:  gorm.Expr("excluded.published_at"),
+						},
+						{
+							Column: clause.Column{Name: string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName())},
+							Value:  gorm.Expr("excluded.updated_at"),
+						},
+						{
+							Column: clause.Column{Name: "seen_count"},
+							Value:  gorm.Expr("torrents_torrent_sources.seen_count + 1"),
+						},
+					},
 				},
 			).Where(
 				// check that the torrent record hasn't been deleted:
@@ -475,9 +491,10 @@ func createTorrentSourceModel(
 	leechers := model.NewNullUint(uint(result.bfpe.ApproximatedSize()))
 
 	return model.TorrentsTorrentSource{
-		Source:   "dht",
-		InfoHash: result.infoHash,
-		Seeders:  seeders,
-		Leechers: leechers,
+		Source:    "dht",
+		InfoHash:  result.infoHash,
+		Seeders:   seeders,
+		Leechers:  leechers,
+		SeenCount: 1,
 	}, nil
 }

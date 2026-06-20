@@ -24,6 +24,15 @@
     }
   },
   "dashboard": {
+    "event": {
+      "created": "__missing__",
+      "updated": "__missing__"
+    },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Tot",
       "days": "Dies",
@@ -42,8 +51,17 @@
       "seconds_30": "30 segons",
       "weeks_1": "1 setmana"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Esdeveniment",
+      "no_data": "__missing__",
       "resolution": "Resolució",
       "throughput": "Rendiment",
       "timeframe": "Període de temps",
@@ -243,6 +261,10 @@
     "delete_action_cannot_be_undone": "Aquesta acció no es pot desfer",
     "delete_are_you_sure": "Estàs segur que vols esborrar aquest torrent?",
     "deselect_all": "Desselecciona-ho tot",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Edita l'etiqueta",
     "episodes": "Episodis",
     "external_links": "Enllaços externs",

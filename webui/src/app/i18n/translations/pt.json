@@ -33,6 +33,11 @@
       "processed": "Processado",
       "updated": "Atualizado"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Todos",
       "days": "Dias",
@@ -51,8 +56,17 @@
       "seconds_30": "30 segundos",
       "weeks_1": "1 semana"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Evento",
+      "no_data": "__missing__",
       "resolution": "Resolução",
       "throughput": "Taxa de transferência",
       "timeframe": "Intervalo de tempo",
@@ -263,6 +277,10 @@
     "delete_action_cannot_be_undone": "Esta ação não pode ser desfeita",
     "delete_are_you_sure": "Tem certeza de que deseja excluir este torrent?",
     "deselect_all": "Desmarcar todos",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Editar tags",
     "episodes": "Episódios",
     "external_links": "Links externos",

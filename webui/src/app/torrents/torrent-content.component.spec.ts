@@ -30,6 +30,7 @@ describe("TorrentContentComponent", () => {
         createdAt: date,
         updatedAt: date,
       },
+      dhtSeenCount: 0,
       publishedAt: date,
       createdAt: date,
       updatedAt: date,
