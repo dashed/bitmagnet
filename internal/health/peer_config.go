@@ -5,7 +5,7 @@ import "time"
 // PeerConfig lets an HTTP-only serving role expose a fleet-level health view by
 // aggregating status from one or more peer GraphQL endpoints.
 type PeerConfig struct {
-	PeerGraphqlURLs []string
+	PeerGraphqlUrls []string
 	PeerTimeout     time.Duration
 }
 

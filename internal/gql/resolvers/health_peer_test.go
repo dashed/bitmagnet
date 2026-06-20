@@ -56,7 +56,7 @@ func TestMergePeerHealthPrefersActivePeerOverInactiveLocal(t *testing.T) {
 
 	resolver := Resolver{
 		HealthPeerConfig: health.PeerConfig{
-			PeerGraphqlURLs: []string{peer.URL},
+			PeerGraphqlUrls: []string{peer.URL},
 			PeerTimeout:     time.Second,
 		},
 	}
@@ -103,7 +103,7 @@ func TestMergePeerHealthReportsPeerFailure(t *testing.T) {
 
 	resolver := Resolver{
 		HealthPeerConfig: health.PeerConfig{
-			PeerGraphqlURLs: []string{peer.URL},
+			PeerGraphqlUrls: []string{peer.URL},
 			PeerTimeout:     time.Second,
 		},
 	}

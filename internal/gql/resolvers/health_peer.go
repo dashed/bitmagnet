@@ -100,7 +100,7 @@ func (r *Resolver) mergePeerWorkers(ctx context.Context, local []gen.Worker) []g
 }
 
 func (r *Resolver) fetchHealthPeerSnapshots(ctx context.Context) ([]healthPeerSnapshot, []error) {
-	if r == nil || len(r.HealthPeerConfig.PeerGraphqlURLs) == 0 {
+	if r == nil || len(r.HealthPeerConfig.PeerGraphqlUrls) == 0 {
 		return nil, nil
 	}
 
@@ -110,10 +110,10 @@ func (r *Resolver) fetchHealthPeerSnapshots(ctx context.Context) ([]healthPeerSn
 	}
 
 	client := &http.Client{Timeout: timeout}
-	snapshots := make([]healthPeerSnapshot, 0, len(r.HealthPeerConfig.PeerGraphqlURLs))
+	snapshots := make([]healthPeerSnapshot, 0, len(r.HealthPeerConfig.PeerGraphqlUrls))
 	errs := make([]error, 0)
 
-	for _, rawURL := range r.HealthPeerConfig.PeerGraphqlURLs {
+	for _, rawURL := range r.HealthPeerConfig.PeerGraphqlUrls {
 		peerURL := strings.TrimSpace(rawURL)
 		if peerURL == "" {
 			continue
