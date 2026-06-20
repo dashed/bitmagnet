@@ -1,0 +1,45 @@
+<ng-container *transloco="let t">
+  <div class="live-status" [class.live-status-paused]="!isLive">
+    <div class="live-status-indicator">
+      <mat-icon>{{ icon }}</mat-icon>
+      <div>
+        <div class="live-status-title">
+          {{ isLive ? t("dashboard.live.title") : t("dashboard.live.paused") }}
+        </div>
+        <div class="live-status-meta">
+          @if (lastUpdatedAt) {
+            {{ t("dashboard.live.last_updated") }}
+            {{ lastUpdatedAt | timeAgo }}
+          } @else {
+            {{ t("dashboard.live.waiting_for_data") }}
+          }
+        </div>
+      </div>
+    </div>
+
+    <div class="live-status-controls">
+      <mat-form-field subscriptSizing="dynamic">
+        <mat-select
+          [attr.aria-label]="t('dashboard.live.auto_refresh')"
+          [value]="autoRefresh"
+          (valueChange)="autoRefreshChange.emit($event)"
+        >
+          @for (name of intervals; track name) {
+            <mat-option [value]="name">{{
+              t("dashboard.interval." + name)
+            }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+      <button
+        type="button"
+        mat-icon-button
+        [disabled]="loading"
+        [matTooltip]="t('dashboard.live.refresh_now')"
+        (click)="refresh.emit()"
+      >
+        <mat-icon>{{ loading ? "sync_problem" : "sync" }}</mat-icon>
+      </button>
+    </div>
+  </div>
+</ng-container>

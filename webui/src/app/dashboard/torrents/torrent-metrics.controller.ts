@@ -35,6 +35,7 @@ export class TorrentMetricsController {
   private resultSubject = new BehaviorSubject<Result>(emptyResult);
   public result$ = this.resultSubject.asObservable();
   private loadingSubject = new BehaviorSubject(false);
+  public lastUpdatedAt?: Date;
 
   private refreshTimeout?: number;
 
@@ -182,6 +183,7 @@ export class TorrentMetricsController {
         map((r) => {
           if (r) {
             this.loadingSubject.next(false);
+            this.lastUpdatedAt = new Date();
             this.rawResultSubject.next(r.data);
           }
         }),

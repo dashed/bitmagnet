@@ -33,6 +33,7 @@ type Result = {
   workers: Worker[];
   error: Error | null;
   icon: string;
+  lastUpdatedAt?: Date;
 };
 
 const initialResult: Result = {
@@ -82,14 +83,13 @@ export class HealthService {
               ...c,
               icon: icons[c.status],
             })),
-            workers: r.data.workers.listAll.workers
-              .filter((w) => w.started)
-              .map((w) => ({
-                ...w,
-                icon: icons.started,
-              })),
+            workers: r.data.workers.listAll.workers.map((w) => ({
+              ...w,
+              icon: icons[w.started ? "started" : "inactive"],
+            })),
             icon: icons[r.data.health.status],
             error: null,
+            lastUpdatedAt: new Date(),
           }),
         ),
       )

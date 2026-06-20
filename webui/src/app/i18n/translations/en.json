@@ -33,6 +33,11 @@
       "processed": "Processed",
       "updated": "Updated"
     },
+    "home": {
+      "queue_jobs": "Queue jobs",
+      "queue_metrics": "Queue metrics",
+      "torrent_metrics": "Torrent metrics"
+    },
     "interval": {
       "all": "All",
       "days": "Days",
@@ -53,10 +58,19 @@
     },
     "metrics": {
       "event": "Event",
+      "no_data": "No data",
       "resolution": "Resolution",
       "throughput": "Throughput",
       "timeframe": "Timeframe",
       "toggle_legend": "Toggle legend"
+    },
+    "live": {
+      "auto_refresh": "Auto refresh",
+      "last_updated": "Updated",
+      "paused": "Paused",
+      "refresh_now": "Refresh now",
+      "title": "Live",
+      "waiting_for_data": "Waiting for data"
     },
     "queues": {
       "created": "Created",

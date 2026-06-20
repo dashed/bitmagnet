@@ -1,6 +1,16 @@
 <ng-container *transloco="let t">
-  <mat-card>
-    <mat-card-content>
+  <section class="metrics-panel">
+    <app-metrics-live-status
+      [autoRefresh]="torrentMetricsController.params.autoRefresh"
+      [intervals]="autoRefreshIntervalNames"
+      [loading]="torrentMetricsController.loading"
+      [lastUpdatedAt]="torrentMetricsController.lastUpdatedAt"
+      (autoRefreshChange)="
+        torrentMetricsController.setAutoRefreshInterval($event)
+      "
+      (refresh)="torrentMetricsController.refresh()"
+    />
+    <div class="metrics-controls">
       <mat-grid-list
         [cols]="
           breakpoints.sizeAtLeast('Large')
@@ -264,7 +274,7 @@
                     )
                   "
                 >
-                  <mat-option value="_all">All</mat-option>
+                  <mat-option value="_all">{{ t("general.all") }}</mat-option>
                   @for (
                     source of (torrentMetricsController.result$ | async)
                       ?.availableSources;
@@ -279,7 +289,7 @@
               <div class="actions">
                 <button
                   mat-icon-button
-                  [matTooltip]="'all'"
+                  [matTooltip]="t('general.all')"
                   [class]="
                     torrentMetricsController.params.source
                       ? 'deselected'
@@ -289,22 +299,26 @@
                 >
                   <mat-icon fontSet="material-icons">workspaces</mat-icon>
                 </button>
-                @for (source of ["dht"]; track source) {
+                @for (
+                  source of (torrentMetricsController.result$ | async)
+                    ?.availableSources;
+                  track source.key
+                ) {
                   <button
                     mat-icon-button
                     [class]="
-                      torrentMetricsController.params.source === source
+                      torrentMetricsController.params.source === source.key
                         ? 'selected'
                         : 'deselected'
                     "
-                    [matTooltip]="source"
+                    [matTooltip]="source.name"
                     (click)="
-                      torrentMetricsController.params.source === source ||
-                        torrentMetricsController.setSource(source)
+                      torrentMetricsController.params.source === source.key ||
+                        torrentMetricsController.setSource(source.key)
                     "
                   >
                     <mat-icon>{{
-                      torrentMetricsController.params.source === source
+                      torrentMetricsController.params.source === source.key
                         ? "radio_button_checked"
                         : "radio_button_unchecked"
                     }}</mat-icon>
@@ -331,7 +345,7 @@
                     )
                   "
                 >
-                  <mat-option value="_all">All</mat-option>
+                  <mat-option value="_all">{{ t("general.all") }}</mat-option>
                   @for (event of eventNames; track event) {
                     <mat-option [value]="event">{{
                       t("dashboard.event." + event)
@@ -342,7 +356,7 @@
               <div class="actions">
                 <button
                   mat-icon-button
-                  [matTooltip]="'all'"
+                  [matTooltip]="t('general.all')"
                   [class]="
                     !torrentMetricsController.params.event
                       ? 'selected'
@@ -356,7 +370,7 @@
                 </button>
                 <button
                   mat-icon-button
-                  [matTooltip]="'created'"
+                  [matTooltip]="t('dashboard.event.created')"
                   [class]="
                     torrentMetricsController.params.event === 'created'
                       ? 'selected'
@@ -371,7 +385,7 @@
                 </button>
                 <button
                   mat-icon-button
-                  [matTooltip]="'updated'"
+                  [matTooltip]="t('dashboard.event.updated')"
                   [class]="
                     torrentMetricsController.params.event === 'updated'
                       ? 'selected'
@@ -388,64 +402,26 @@
             </mat-card-content>
           </mat-card>
         </mat-grid-tile>
-        <mat-grid-tile [colspan]="1" [rowspan]="2">
-          <mat-card class="form-refresh">
-            <mat-card-header>
-              <mat-card-title>
-                <h4>{{ t("general.refresh") }}</h4>
-              </mat-card-title>
-            </mat-card-header>
-            <mat-card-content>
-              <mat-form-field subscriptSizing="dynamic">
-                <mat-select
-                  [value]="torrentMetricsController.params.autoRefresh"
-                  (valueChange)="
-                    torrentMetricsController.setAutoRefreshInterval($event)
-                  "
-                >
-                  @for (name of autoRefreshIntervalNames; track name) {
-                    <mat-option [value]="name">{{
-                      t("dashboard.interval." + name)
-                    }}</mat-option>
-                  }
-                </mat-select>
-              </mat-form-field>
-              <div class="actions">
-                <button
-                  mat-icon-button
-                  [matTooltip]="'Refresh'"
-                  (click)="torrentMetricsController.refresh()"
-                >
-                  <mat-icon>sync</mat-icon>
-                </button>
-              </div>
-            </mat-card-content>
-          </mat-card>
-        </mat-grid-tile>
       </mat-grid-list>
-      <div class="progress-bar-container">
-        <mat-progress-bar
-          [mode]="
-            torrentMetricsController.loading ? 'indeterminate' : 'determinate'
-          "
-          [value]="0"
-        ></mat-progress-bar>
+    </div>
+    <div class="progress-bar-container">
+      <mat-progress-bar
+        [mode]="
+          torrentMetricsController.loading ? 'indeterminate' : 'determinate'
+        "
+        [value]="0"
+      ></mat-progress-bar>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-panel">
+        <app-chart
+          [title]="t('dashboard.metrics.throughput')"
+          [adapter]="timeline"
+          [$data]="torrentMetricsController.result$"
+          [height]="400"
+          [width]="550"
+        />
       </div>
-      <mat-grid-list
-        [cols]="breakpoints.sizeAtLeast('Large') ? 2 : 1"
-        rowHeight="100px"
-      >
-        <mat-grid-tile [colspan]="1" [rowspan]="6">
-          <app-chart
-            [title]="t('dashboard.metrics.throughput')"
-            [adapter]="timeline"
-            [$data]="torrentMetricsController.result$"
-            [height]="400"
-            [width]="550"
-          />
-        </mat-grid-tile>
-        <mat-grid-tile [colspan]="1" [rowspan]="5"> </mat-grid-tile>
-      </mat-grid-list>
-    </mat-card-content>
-  </mat-card>
+    </div>
+  </section>
 </ng-container>
