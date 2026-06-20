@@ -1,6 +1,8 @@
 package health
 
 import (
+	"net/http"
+
 	"github.com/bitmagnet-io/bitmagnet/internal/httpserver"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/gin-gonic/gin"
@@ -47,6 +49,11 @@ func (b handlerBuilder) Apply(e *gin.Engine) error {
 
 	e.GET("/status", func(c *gin.Context) {
 		handler(c.Writer, c.Request)
+	})
+
+	e.GET("/livez", func(c *gin.Context) {
+		disableResponseCache(c.Writer)
+		c.JSON(http.StatusOK, CheckerResult{Status: StatusUp})
 	})
 
 	return nil
