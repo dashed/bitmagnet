@@ -56,6 +56,9 @@ type FileSearchInput struct {
 	// Limit / Offset paginate the result; Limit is clamped to [1, MaxLimit].
 	Limit  uint
 	Offset uint
+	// SkipTotalCount avoids the exact CountFiles RPC for first-page/low-latency
+	// callers. Existing callers default to exact counts.
+	SkipTotalCount bool
 }
 
 // FileSearchItem is a single matched file.

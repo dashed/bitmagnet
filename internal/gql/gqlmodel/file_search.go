@@ -31,6 +31,7 @@ type FileSearchInput struct {
 	InfoHash   *protocol.ID
 	Limit      uint
 	Offset     uint
+	TotalCount *bool
 }
 
 type PathTypeaheadInput struct {
@@ -61,6 +62,7 @@ func (q FileSearchQuery) Search(ctx context.Context, in FileSearchInput) (filese
 		InfoHash:   in.InfoHash,
 		Limit:      in.Limit,
 		Offset:     in.Offset,
+		TotalCount: in.TotalCount,
 	})
 	if err != nil {
 		return filesearch.FileSearchResult{}, err

@@ -122,6 +122,7 @@ type FileSearchParams struct {
 	InfoHash   *protocol.ID
 	Limit      uint
 	Offset     uint
+	TotalCount *bool
 }
 
 // NewFileSearchInput validates and normalises raw params into a FileSearchInput.
@@ -144,6 +145,7 @@ func NewFileSearchInput(p FileSearchParams) (FileSearchInput, error) {
 		InfoHash:         p.InfoHash,
 		Limit:            clampLimit(p.Limit, DefaultLimit, MaxLimit),
 		Offset:           p.Offset,
+		SkipTotalCount:   p.TotalCount != nil && !*p.TotalCount,
 	}, nil
 }
 

@@ -170,6 +170,36 @@ func TestFileSearchMapsRowsOffsetHasNextAndCount(t *testing.T) {
 	assert.Equal(t, id3, got.Items[1].InfoHash)
 }
 
+func TestFileSearchSkipsCountWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	id := protocol.MustParseID("1111111111111111111111111111111111111111")
+	rpc := &fakeRPC{
+		searchResp: &pb.SearchFilesResponse{
+			Files: []*pb.FileHit{
+				{InfoHash: id.String(), FileIndex: 1, Path: "fast.mkv", Extension: "mkv", Size: 100},
+			},
+			HasNext: true,
+		},
+		countResp: &pb.CountFilesResponse{Count: 42},
+	}
+	c := &SidecarClient{svc: rpc, maxRows: DefaultMaxRows}
+
+	got, err := c.FileSearch(context.Background(), FileSearchInput{
+		Query:          "fast",
+		Limit:          1,
+		SkipTotalCount: true,
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, rpc.searchReq)
+	assert.Nil(t, rpc.countReq)
+	assert.Equal(t, uint(0), got.TotalCount)
+	assert.True(t, got.HasNextPage)
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, id, got.Items[0].InfoHash)
+}
+
 func TestFileSearchRejectsUnsupportedRequestShapes(t *testing.T) {
 	t.Parallel()
 

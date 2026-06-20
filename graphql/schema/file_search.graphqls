@@ -6,6 +6,11 @@ input FileSearchInput {
   infoHash: Hash20
   limit: Int
   offset: Int
+  """
+  When false, skip the exact L2 count RPC and return totalCount as 0.
+  Omitted defaults to true for compatibility with existing callers.
+  """
+  totalCount: Boolean
 }
 
 type FileSearchItem {

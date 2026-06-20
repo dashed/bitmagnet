@@ -119,6 +119,11 @@ export type FileSearchInput = {
   minSize?: InputMaybe<Scalars['Int']['input']>;
   offset?: InputMaybe<Scalars['Int']['input']>;
   query?: InputMaybe<Scalars['String']['input']>;
+  /**
+   * When false, skip the exact L2 count RPC and return totalCount as 0.
+   * Omitted defaults to true for compatibility with existing callers.
+   */
+  totalCount?: InputMaybe<Scalars['Boolean']['input']>;
 };
 
 export type FileSearchItem = {

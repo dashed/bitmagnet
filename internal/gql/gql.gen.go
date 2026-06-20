@@ -2592,6 +2592,11 @@ enum QueueJobsOrderByField {
   infoHash: Hash20
   limit: Int
   offset: Int
+  """
+  When false, skip the exact L2 count RPC and return totalCount as 0.
+  Omitted defaults to true for compatibility with existing callers.
+  """
+  totalCount: Boolean
 }
 
 type FileSearchItem {
@@ -17093,7 +17098,7 @@ func (ec *executionContext) unmarshalInputFileSearchInput(ctx context.Context, o
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"query", "extensions", "minSize", "maxSize", "infoHash", "limit", "offset"}
+	fieldsInOrder := [...]string{"query", "extensions", "minSize", "maxSize", "infoHash", "limit", "offset", "totalCount"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -17149,6 +17154,13 @@ func (ec *executionContext) unmarshalInputFileSearchInput(ctx context.Context, o
 				return it, err
 			}
 			it.Offset = data
+		case "totalCount":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("totalCount"))
+			data, err := ec.unmarshalOBoolean2ᚖbool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.TotalCount = data
 		}
 	}
 

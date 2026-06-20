@@ -132,6 +132,37 @@ func TestNewFileSearchInput_CapsQueryAndClampsLimit(t *testing.T) {
 	}
 }
 
+func TestNewFileSearchInput_TotalCountDefaultsAndOptOut(t *testing.T) {
+	in, err := NewFileSearchInput(FileSearchParams{Query: "linux"})
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+
+	if in.SkipTotalCount {
+		t.Error("omitted totalCount should keep exact count enabled")
+	}
+
+	requestCount := true
+	in, err = NewFileSearchInput(FileSearchParams{Query: "linux", TotalCount: &requestCount})
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+
+	if in.SkipTotalCount {
+		t.Error("totalCount=true should keep exact count enabled")
+	}
+
+	requestCount = false
+	in, err = NewFileSearchInput(FileSearchParams{Query: "linux", TotalCount: &requestCount})
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+
+	if !in.SkipTotalCount {
+		t.Error("totalCount=false should skip exact count")
+	}
+}
+
 func TestDisabledClient(t *testing.T) {
 	c := Disabled()
 

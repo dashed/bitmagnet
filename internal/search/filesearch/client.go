@@ -118,10 +118,6 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 		},
 		CollapseToTorrent: false,
 	}
-	countReq := &pb.CountFilesRequest{
-		Filters:           filters,
-		CollapseToTorrent: false,
-	}
 
 	ctx, cancel := c.callCtx(ctx)
 	defer cancel()
@@ -131,9 +127,17 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 		return FileSearchResult{}, err
 	}
 
-	count, err := c.svc.CountFiles(ctx, countReq)
-	if err != nil {
-		return FileSearchResult{}, err
+	var totalCount uint
+	if !in.SkipTotalCount {
+		countReq := &pb.CountFilesRequest{
+			Filters:           filters,
+			CollapseToTorrent: false,
+		}
+		count, err := c.svc.CountFiles(ctx, countReq)
+		if err != nil {
+			return FileSearchResult{}, err
+		}
+		totalCount = boundedUint(count.GetCount())
 	}
 
 	items, err := convertHits(resp.GetFiles())
@@ -155,7 +159,7 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 
 	return FileSearchResult{
 		Items:       items,
-		TotalCount:  boundedUint(count.GetCount()),
+		TotalCount:  totalCount,
 		HasNextPage: resp.GetHasNext(),
 	}, nil
 }
