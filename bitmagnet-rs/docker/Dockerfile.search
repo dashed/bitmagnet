@@ -33,6 +33,10 @@ RUN groupadd --system --gid 65532 bitmagnet \
     && chown -R 65532:65532 /var/lib/bitmagnet
 
 COPY --from=builder /build/target/release/bitmagnet-search /usr/local/bin/bitmagnet-search
+# Main-search backfill bin (src/bin/backfill.rs auto-discovers as `backfill`);
+# shipped as bitmagnet-backfill — the k8s backfill Job's entrypoint. Was the
+# long-standing P3-plan prereq that never landed (caught by the first real Job).
+COPY --from=builder /build/target/release/backfill /usr/local/bin/bitmagnet-backfill
 COPY --from=builder /build/target/release/bitmagnet-pathsearch /usr/local/bin/bitmagnet-pathsearch
 COPY --from=builder /build/target/release/bitmagnet-pathsearch-backfill /usr/local/bin/bitmagnet-pathsearch-backfill
 
