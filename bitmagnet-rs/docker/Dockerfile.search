@@ -43,17 +43,13 @@ ENV BITMAGNET_SEARCH_ADDR=0.0.0.0:50051 \
     BITMAGNET_SEARCH_INDEX=/var/lib/bitmagnet/search \
     BITMAGNET_PATHSEARCH_ADDR=0.0.0.0:50053 \
     BITMAGNET_PATHSEARCH_INDEX=/var/lib/bitmagnet/pathsearch
-# NO `VOLUME` directive: an image VOLUME at /var/lib/bitmagnet/{search,pathsearch}
-# makes containerd create an EPHEMERAL anonymous volume at those subpaths that
-# SHADOWS a PVC mounted at the parent /var/lib/bitmagnet — every index write then
-# lands on pod-ephemeral storage and is wiped on restart. The index must persist,
-# so the volume is supplied by the deployment (PVC at the parent mount), never by
-# the image.
+# No image VOLUME here: index dirs are expected to be mounted by the runtime
+# (for example via a Kubernetes PVC).
 
 USER 65532:65532
 # 50051 = SearchService (default entrypoint); 50053 = PathSearchService when the
 # image is run as the bitmagnet-pathsearch binary.
 EXPOSE 50051 50053
-# Health is exposed via the SearchService.HealthCheck RPC; wire a gRPC probe
-# (e.g. grpc_health_probe) in the orchestrator rather than a shell HEALTHCHECK.
+# Standard grpc.health.v1.Health supports grpc_health_probe; the custom
+# SearchService.HealthCheck RPC remains available for bitmagnet clients.
 ENTRYPOINT ["/usr/local/bin/bitmagnet-search"]

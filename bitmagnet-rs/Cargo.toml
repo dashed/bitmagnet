@@ -27,6 +27,7 @@ repository = "https://github.com/bitmagnet-io/bitmagnet"
 # `tonic` / `tonic-build` into the `tonic-prost` (runtime) and
 # `tonic-prost-build` (build script) crates.
 tonic = "0.14"
+tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 prost = "0.14"

@@ -58,6 +58,9 @@ impl SearchServer {
     }
 
     /// Open (or create) the on-disk index at `path` and build a server over it.
+    /// The serving sidecar and backfill binary must not share an index directory
+    /// concurrently: Tantivy permits one writer lock, so the second opener fails
+    /// safe. Run backfill only while the server is stopped or scaled to zero.
     ///
     /// # Errors
     /// Returns an error if the index cannot be opened/created or its schema is

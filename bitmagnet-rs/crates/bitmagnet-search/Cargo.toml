@@ -23,6 +23,7 @@ bitmagnet-db = { path = "../bitmagnet-db" }
 tokio.workspace = true
 tracing.workspace = true
 tonic.workspace = true
+tonic-health.workspace = true
 # Tantivy 0.26 exposes aggregations at `tantivy::aggregation` with NO cargo
 # feature gate, so the read path needs no extra feature here. (The old
 # `aggregation` feature no longer exists; enabling it would fail to build.)

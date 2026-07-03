@@ -78,6 +78,9 @@ struct Args {
     after_id: Option<String>,
 }
 
+/// Backfill must not run against the same index directory as a live server:
+/// Tantivy permits one writer lock, so the second opener fails safe. Stop or
+/// scale the server to zero before running this binary.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
