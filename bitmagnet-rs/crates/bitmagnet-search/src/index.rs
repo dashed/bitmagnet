@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, Error};
 use tantivy::directory::MmapDirectory;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError};
 
 use crate::schema::build_schema;
 use crate::tokenizer::{analyzer, TOKENIZER_NAME};
@@ -29,10 +29,38 @@ pub fn open_or_create(path: &Path) -> anyhow::Result<Index> {
         .with_context(|| format!("creating index directory {}", path.display()))?;
     let dir = MmapDirectory::open(path)
         .with_context(|| format!("opening index directory {}", path.display()))?;
-    let index = Index::open_or_create(dir, build_schema())
-        .with_context(|| format!("opening or creating index at {}", path.display()))?;
+    let index = match Index::open_or_create(dir, build_schema()) {
+        Ok(index) => index,
+        Err(error) if is_schema_mismatch(&error) => {
+            return Err(Error::new(error).context(schema_mismatch_rebuild_message(path)));
+        }
+        Err(error) => {
+            return Err(Error::new(error)
+                .context(format!("opening or creating index at {}", path.display())));
+        }
+    };
     register_tokenizer(&index);
     Ok(index)
+}
+
+fn is_schema_mismatch(error: &TantivyError) -> bool {
+    matches!(
+        error,
+        TantivyError::SchemaError(message)
+            if message == "An index exists but the schema does not match."
+    )
+}
+
+fn schema_mismatch_rebuild_message(path: &Path) -> String {
+    format!(
+        "the on-disk search index at {} was built with an incompatible schema. \
+         No in-place migration is supported: delete the index directory, remove \
+         the follow watermark file (default: {}/watermark, or the explicit \
+         --watermark-file/BITMAGNET_SEARCH_WATERMARK_FILE path if set) so follow \
+         re-seeds, and run a full backfill before starting bitmagnet-search",
+        path.display(),
+        path.display()
+    )
 }
 
 /// Register the bitmagnet tokenizer (the `TokenizeFlat` port) under
@@ -71,9 +99,9 @@ pub fn writer(index: &Index) -> tantivy::Result<IndexWriter> {
 
 #[cfg(test)]
 mod tests {
-    use super::{reader, register_tokenizer, writer};
+    use super::{is_schema_mismatch, reader, register_tokenizer, writer};
     use crate::schema::build_schema;
-    use tantivy::Index;
+    use tantivy::{Index, TantivyError};
 
     #[test]
     fn reader_and_writer_build_on_ram_index() {
@@ -82,5 +110,15 @@ mod tests {
         let _writer = writer(&index).expect("writer allocates");
         let reader = reader(&index).expect("reader builds");
         assert_eq!(reader.searcher().num_docs(), 0);
+    }
+
+    #[test]
+    fn tantivy_open_or_create_schema_mismatch_is_detected() {
+        assert!(is_schema_mismatch(&TantivyError::SchemaError(
+            "An index exists but the schema does not match.".to_owned()
+        )));
+        assert!(!is_schema_mismatch(&TantivyError::SchemaError(
+            "some other schema error".to_owned()
+        )));
     }
 }

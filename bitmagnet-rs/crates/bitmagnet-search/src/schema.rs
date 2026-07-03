@@ -44,6 +44,8 @@
 //!   queries can target.
 //! - `STORED` — value is retrievable from the doc store.
 //! - `FAST` — value lives in the columnar store (sorting / faceting / filter).
+//!
+//! Index schema changed 2026-07-03: full rebuild required.
 
 use tantivy::schema::{
     BytesOptions, Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions,

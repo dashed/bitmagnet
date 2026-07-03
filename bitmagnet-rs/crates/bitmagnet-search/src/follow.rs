@@ -28,7 +28,7 @@ pub const DEFAULT_CARVE_LAG_SECS: i64 = 30;
 pub const DEFAULT_FOLLOW_MAX_WINDOW_SECS: i64 = 3600;
 pub const DEFAULT_FOLLOW_BATCH_SIZE: i64 = 1000;
 pub const DEFAULT_DELETED_LIMIT: i64 = 100_000;
-pub const DEFAULT_WATERMARK_FILE: &str = "/var/lib/bitmagnet/search/watermark";
+pub const DEFAULT_WATERMARK_FILE_NAME: &str = "watermark";
 
 /// Backoff cap for a failing follow loop: repeated error ticks settle at one
 /// retry per 5 minutes rather than hammering PostgreSQL.
@@ -49,7 +49,8 @@ pub struct FollowConfig {
     pub batch_size: i64,
     /// Runaway guard for a single deleted-torrents read.
     pub deleted_limit: i64,
-    /// Atomic sidecar watermark file.
+    /// Atomic sidecar watermark file. The serving binary resolves an omitted
+    /// flag/env value to `<index-path>/watermark`.
     pub watermark_file: PathBuf,
 }
 
@@ -74,7 +75,7 @@ impl Default for FollowConfig {
             max_window_secs: DEFAULT_FOLLOW_MAX_WINDOW_SECS,
             batch_size: DEFAULT_FOLLOW_BATCH_SIZE,
             deleted_limit: DEFAULT_DELETED_LIMIT,
-            watermark_file: PathBuf::from(DEFAULT_WATERMARK_FILE),
+            watermark_file: PathBuf::from(DEFAULT_WATERMARK_FILE_NAME),
         }
     }
 }
@@ -293,7 +294,8 @@ async fn follow_tick(
         cursor = page.last().cloned();
     }
 
-    let deleted = read_deleted_torrents(pool, since, until, deleted_limit)
+    let deleted_read_limit = deleted_read_limit_with_sentinel(deleted_limit);
+    let deleted = read_deleted_torrents(pool, since, until, deleted_read_limit)
         .await
         .context("reading deleted torrents")?;
     if deleted_read_truncated(deleted.len(), deleted_limit) {
@@ -477,7 +479,11 @@ pub fn follow_sleep_secs(
 }
 
 fn deleted_read_truncated(found: usize, deleted_limit: i64) -> bool {
-    deleted_limit > 0 && found as i64 >= deleted_limit
+    deleted_limit > 0 && found > deleted_limit as usize
+}
+
+fn deleted_read_limit_with_sentinel(deleted_limit: i64) -> i64 {
+    deleted_limit.max(1).saturating_add(1)
 }
 
 /// Drop stale tombstones for torrents that currently exist and were rebuilt
@@ -492,9 +498,9 @@ fn live_tombstones(deleted: Vec<InfoHash>, upserted: &HashSet<Vec<u8>>) -> Vec<I
 #[cfg(test)]
 mod tests {
     use super::{
-        carve_window, carve_window_with_max, commit_follow_batch, deleted_read_truncated,
-        follow_backoff_secs, follow_sleep_secs, follow_tick, live_tombstones, window_has_backlog,
-        FollowStats, FollowWindow, DEFAULT_CARVE_LAG_SECS,
+        carve_window, carve_window_with_max, commit_follow_batch, deleted_read_limit_with_sentinel,
+        deleted_read_truncated, follow_backoff_secs, follow_sleep_secs, follow_tick,
+        live_tombstones, window_has_backlog, FollowStats, FollowWindow, DEFAULT_CARVE_LAG_SECS,
     };
     use crate::proto::search_service_server::SearchService;
     use crate::proto::{ContentType, HealthCheckRequest, TorrentDocument};
@@ -657,10 +663,14 @@ mod tests {
     }
 
     #[test]
-    fn deleted_read_truncation_is_detected_at_the_limit() {
+    fn deleted_read_truncation_uses_limit_plus_one_sentinel() {
+        assert_eq!(deleted_read_limit_with_sentinel(100), 101);
         assert!(!deleted_read_truncated(0, 100));
         assert!(!deleted_read_truncated(99, 100));
-        assert!(deleted_read_truncated(100, 100));
+        assert!(
+            !deleted_read_truncated(100, 100),
+            "an exactly-full page is complete because the query asks for limit + 1"
+        );
         assert!(deleted_read_truncated(101, 100));
         assert!(!deleted_read_truncated(100, 0));
     }

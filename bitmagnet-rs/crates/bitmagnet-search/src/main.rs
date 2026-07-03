@@ -4,13 +4,12 @@
 //! `grpc.health.v1.Health` service over gRPC for operators and orchestrators.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bitmagnet_search::follow::{
     spawn_follow_loop, FollowConfig, DEFAULT_CARVE_LAG_SECS, DEFAULT_DELETED_LIMIT,
     DEFAULT_FOLLOW_BATCH_SIZE, DEFAULT_FOLLOW_INTERVAL_SECS, DEFAULT_FOLLOW_MAX_WINDOW_SECS,
-    DEFAULT_WATERMARK_FILE,
 };
 use bitmagnet_search::proto::search_service_server::SearchServiceServer;
 use bitmagnet_search::SearchServer;
@@ -92,13 +91,9 @@ struct Args {
     )]
     deleted_limit: i64,
 
-    /// Watermark file for follow mode.
-    #[arg(
-        long,
-        env = "BITMAGNET_SEARCH_WATERMARK_FILE",
-        default_value = DEFAULT_WATERMARK_FILE
-    )]
-    watermark_file: PathBuf,
+    /// Watermark file for follow mode. Defaults to `<index-path>/watermark`.
+    #[arg(long, env = "BITMAGNET_SEARCH_WATERMARK_FILE", value_name = "PATH")]
+    watermark_file: Option<PathBuf>,
 }
 
 /// How the server should listen, derived from `--addr`.
@@ -123,6 +118,7 @@ impl Listen {
 async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
     let args = Args::parse();
+    let watermark_file = resolved_watermark_file(&args.index_path, args.watermark_file.as_deref());
 
     let health_reporter = HealthReporter::new();
     set_health_status(&health_reporter, ServingStatus::NotServing).await;
@@ -141,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
                     max_window_secs: args.follow_max_window_secs,
                     batch_size: args.follow_batch_size,
                     deleted_limit: args.deleted_limit,
-                    watermark_file: args.watermark_file.clone(),
+                    watermark_file: watermark_file.clone(),
                 },
                 server.clone(),
             )
@@ -175,6 +171,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("bitmagnet-search stopped");
     Ok(())
+}
+
+fn resolved_watermark_file(index_path: &Path, explicit_watermark_file: Option<&Path>) -> PathBuf {
+    explicit_watermark_file.map_or_else(|| index_path.join("watermark"), Path::to_path_buf)
 }
 
 #[cfg(unix)]
@@ -251,4 +251,33 @@ async fn shutdown_signal() {
         () = terminate => {}
     }
     info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolved_watermark_file, Args};
+    use clap::Parser;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn computed_default_watermark_path_follows_index_path_and_explicit_flag_wins() {
+        let index_path = Path::new("/tmp/custom-search-index");
+        let explicit_args = Args::try_parse_from([
+            "bitmagnet-search",
+            "--index-path",
+            "/tmp/custom-search-index",
+            "--watermark-file",
+            "/tmp/explicit-watermark",
+        ])
+        .expect("explicit watermark flag parses");
+
+        assert_eq!(
+            resolved_watermark_file(index_path, None),
+            PathBuf::from("/tmp/custom-search-index/watermark")
+        );
+        assert_eq!(
+            resolved_watermark_file(index_path, explicit_args.watermark_file.as_deref()),
+            PathBuf::from("/tmp/explicit-watermark")
+        );
+    }
 }
