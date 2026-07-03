@@ -161,7 +161,7 @@ func TestFilesForRefine_DecodesBlobWhenRelationUnpopulated(t *testing.T) {
 
 	tor := model.Torrent{FilesStatus: model.FilesStatusMulti, FilesData: []byte("blob")}
 
-	files, ok := filesForRefine(tor, refinePredicate{substr: "inception"})
+	files, ok := filesForRefine(tor)
 	if !ok || len(files) != 1 || files[0].Path != "Inception.2010.mkv" {
 		t.Fatalf("expected blob-decoded files, got ok=%v files=%v", ok, files)
 	}
@@ -174,9 +174,8 @@ func TestFilesForRefine_DecodesBlobWhenRelationUnpopulated(t *testing.T) {
 // CAVEAT C / #9 — a single-file torrent with no file list verifies the substring
 // and torrent size (both sound: the name IS the filename and t.Size IS the single
 // file's size) against the torrent NAME, mirroring the Rust doc builder's
-// single-file name fallback. It must NOT be wrongly dropped. BUT when an EXTENSION
-// filter is active the name-derived ext is unreliable, so it must FAIL LOUD
-// (ok=false) rather than serve a confidently-wrong ext match (#9).
+// single-file name fallback. It must NOT be wrongly dropped. The extension clause
+// is covered separately in TestTorrentRefine_SingleFileExtFilterRefinesAgainstName.
 func TestTorrentRefine_SingleFileNameFallback(t *testing.T) {
 	// substring-only: sound surrogate, matches.
 	match := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.2010.1080p.mkv", Size: 1500}
@@ -204,24 +203,34 @@ func TestTorrentRefine_SingleFileNameFallback(t *testing.T) {
 	}
 }
 
-// #9 — an extension predicate against a single-file name surrogate is UNSOUND (the
-// display name is not a reliable carrier of the real file extension), so when only
-// the name is available and an ext filter is active the refine must fail loud
-// (ok=false) so the composer falls back to PG — NOT silently serve a name-derived
-// ext match. Pre-fix filesForRefine returned ok=true and the predicate matched the
-// name-derived ext, serving a confidently-wrong result.
-func TestTorrentRefine_SingleFileExtFilterFailsLoud(t *testing.T) {
-	tor := model.Torrent{FilesStatus: model.FilesStatusSingle, Name: "Inception.2010.1080p.mkv", Size: 1500}
+// CAVEAT C / #9 — an extension predicate against a single-file name surrogate is
+// SOUND: fileExtension() derives the ext from the name via
+// model.FileExtensionFromPath, which is byte-identical to PG's generated
+// torrents.extension column, model.Torrent.FileExtensions(), and the Tantivy doc
+// builder — all of which take single-file extension from the NAME via the same
+// regex. So the ext clause refines against the name like substring and size: a
+// name-derived ext matching the filter is KEPT, a non-matching one is a clean
+// drop, and the route NEVER falls back (ok stays true). The old behavior fail-loud
+// (ok=false) forced every ext-faceted path query to PG.
+func TestTorrentRefine_SingleFileExtFilterRefinesAgainstName(t *testing.T) {
+	single := func(name string) model.Torrent {
+		return model.Torrent{FilesStatus: model.FilesStatusSingle, Name: name, Size: 1500}
+	}
+	p := refinePredicate{substr: "inception", extensions: extSet("mkv")}
 
-	if _, ok := torrentRefine(tor, refinePredicate{substr: "inception", extensions: extSet("mkv")}); ok {
-		t.Fatal(
-			"single-file name surrogate under an ext filter must fail loud (ok=false), not serve a name-derived ext match (#9)",
-		)
+	// name-derived ext matches the filter -> kept, no fallback.
+	if matched, ok := torrentRefine(single("Inception.2010.1080p.mkv"), p); !ok || !matched {
+		t.Fatalf("single-file name ext matching the filter must be kept (ok=true, matched=true), got matched=%v ok=%v", matched, ok)
 	}
 
-	// Same torrent without an ext filter: the surrogate is sound and is used.
-	if _, ok := filesForRefine(tor, refinePredicate{substr: "inception"}); !ok {
-		t.Fatal("single-file name surrogate without an ext filter must remain usable (ok=true)")
+	// name-derived ext does NOT match the filter -> clean drop, still no fallback.
+	if matched, ok := torrentRefine(single("Inception.2010.1080p.avi"), p); !ok || matched {
+		t.Fatalf("single-file name ext not matching the filter must be a clean drop (ok=true, matched=false), got matched=%v ok=%v", matched, ok)
+	}
+
+	// the surrogate is always usable now (ok=true), independent of any predicate.
+	if _, ok := filesForRefine(single("Inception.2010.1080p.mkv")); !ok {
+		t.Fatal("single-file name surrogate must always be usable (ok=true)")
 	}
 }
 

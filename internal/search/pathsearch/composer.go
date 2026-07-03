@@ -768,7 +768,7 @@ func (c *Composer) refineMatches(
 
 		it := items[i]
 
-		files, fok := filesForRefine(it.Torrent, pred)
+		files, fok := filesForRefine(it.Torrent)
 		if !fok {
 			return out, newRetained, capNone, false
 		}
@@ -1318,7 +1318,7 @@ collapse:
 
 			item := items[i]
 
-			files, fok := filesForRefine(item.Torrent, pred)
+			files, fok := filesForRefine(item.Torrent)
 			if !fok {
 				// Fail loud: cannot verify this candidate's paths.
 				c.metrics.IncRoute(RouteFallback)

@@ -99,15 +99,11 @@ func torrentMatches(files []model.TorrentFile, p refinePredicate) bool {
 //	preloaded/AfterFind-decoded t.Files -> else explicit FilesData blob decode
 //	-> else single-file name surrogate (CAVEAT C) -> else ok=false (CAVEAT B).
 //
-// ok=false means a candidate's files were genuinely unobtainable (a projection
-// that omitted files_data, or — see CAVEAT C — a single-file torrent under an
-// extension predicate where only the name is available); the caller must fail
-// loud / fall back, NEVER silently drop it (that would hide real matches = worse
-// than today).
-//
-// The predicate p is consulted ONLY for the single-file name-surrogate guard
-// (CAVEAT C, #9): the rest of the resolution is predicate-independent.
-func filesForRefine(t model.Torrent, p refinePredicate) (files []model.TorrentFile, ok bool) {
+// ok=false means a candidate's files were genuinely unobtainable — a multi-file
+// projection that omitted files_data with no single-file name to fall back on;
+// the caller must fail loud / fall back, NEVER silently drop it (that would hide
+// real matches = worse than today).
+func filesForRefine(t model.Torrent) (files []model.TorrentFile, ok bool) {
 	if len(t.Files) > 0 {
 		return t.Files, true
 	}
@@ -120,26 +116,22 @@ func filesForRefine(t model.Torrent, p refinePredicate) (files []model.TorrentFi
 
 	// No file list available. A single-file torrent legitimately carries its one
 	// file as the torrent name — refine against a name surrogate so the same
-	// matchFile predicate applies. This mirrors the Rust doc builder's single-file
-	// name fallback. (CAVEAT C)
+	// matchFile predicate applies to substring, extension, and size alike. This
+	// mirrors the Rust doc builder's single-file name fallback. (CAVEAT C)
 	//
-	// SOUNDNESS (#9): for a single-file torrent the substring and size clauses are
-	// trustworthy against the name surrogate — the name IS essentially the filename
-	// (PG's own search matches the name/tsv), and t.Size IS the single file's size
-	// (a single-file torrent has exactly one file == the whole payload). But the
-	// EXTENSION clause is NOT: the display name is not a reliable carrier of the
-	// real file extension (many single-file torrents are named release-style with
-	// no extension, or end in an ext-looking token that isn't the file's), so a
-	// path-derived ext from the name could wrongly include/exclude. So when an
-	// extension predicate is active and we have only the name, we FAIL LOUD
-	// (ok=false) — mirroring the multi-file no-files case — rather than serve a
-	// confidently-wrong ext match. Without an ext filter the surrogate is sound and
-	// is used as before.
+	// SOUNDNESS INVARIANT (#9): every clause is trustworthy against the name
+	// surrogate, so there is nothing to fail loud about. The substring and size
+	// clauses are sound because the name IS the filename (PG's own search matches
+	// the name/tsv) and t.Size IS the single file's size (a single-file torrent has
+	// exactly one file == the whole payload). The EXTENSION clause is EQUALLY sound:
+	// fileExtension() derives it from the name via model.FileExtensionFromPath, and
+	// for a single-file torrent that derivation is byte-identical to every other
+	// place the stack computes single-file extension — PG's generated
+	// torrents.extension column (migrations/00002_files_status.sql), model.Torrent
+	// .FileExtensions(), and the Tantivy doc builder (fileExtensionsForDoc) ALL take
+	// the single-file extension from the NAME via the same regex. A name-surrogate
+	// ext match therefore agrees with the PG column and the index by construction.
 	if t.SingleFile() {
-		if p.hasExtensionFilter() {
-			return nil, false
-		}
-
 		return []model.TorrentFile{{Path: t.Name, Size: t.Size}}, true
 	}
 
@@ -149,9 +141,9 @@ func filesForRefine(t model.Torrent, p refinePredicate) (files []model.TorrentFi
 
 // torrentRefine reports whether a candidate torrent keeps a real match, and
 // whether it could be refined at all (ok). ok=false propagates the fail-loud
-// signal from filesForRefine. (CAVEAT B + C)
+// signal from filesForRefine. (CAVEAT B)
 func torrentRefine(t model.Torrent, p refinePredicate) (matched, ok bool) {
-	resolved, ok := filesForRefine(t, p)
+	resolved, ok := filesForRefine(t)
 	if !ok {
 		return false, false
 	}
