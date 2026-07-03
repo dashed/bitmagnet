@@ -5,8 +5,8 @@
 - **Phase 3** — the Rust Tantivy search sidecar on branch `feat/tantivy-search-sidecar`
   (commit `5f5093a9`, frozen 2026-05-29). Never deployed.
 - **Phase 4** — the Go shadow-mode integration (`internal/search/{tantivy,shadow,router,searchfx}`
-  + the processor dual-write hook) as present on the **deployed lineage** `alberto/my-fork`
-  (audited at `c2b505ac`). Compiled into the production binary, disabled by default.
+  - the processor dual-write hook) as present on the **deployed lineage** `alberto/my-fork`
+    (audited at `c2b505ac`). Compiled into the production binary, disabled by default.
 
 **Method:** two independent audit agents; the Rust side was built + tested in a throwaway jj
 workspace on the frozen branch; the Go side was audited on the deployed tip with
@@ -22,10 +22,10 @@ wall. This audit answers: (a) is the dormant Phase-4 code safe in production tod
 
 ## Verdict summary
 
-| Target | Grade | One-liner |
-|---|---|---|
-| Phase-4 shadow machinery (live binary, disabled) | **A — dormant-safe** | Inert when off; observation-only when on; one load hazard at flip time |
-| Phase-3 Rust sidecar (frozen branch) | **A− — production-quality engine** | Would NOT ship today without the v2-infohash fix; all blockers at the DB boundary |
+| Target                                           | Grade                              | One-liner                                                                         |
+| ------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------- |
+| Phase-4 shadow machinery (live binary, disabled) | **A — dormant-safe**               | Inert when off; observation-only when on; one load hazard at flip time            |
+| Phase-3 Rust sidecar (frozen branch)             | **A− — production-quality engine** | Would NOT ship today without the v2-infohash fix; all blockers at the DB boundary |
 
 ---
 
@@ -62,7 +62,7 @@ wall. This audit answers: (a) is the dormant Phase-4 code safe in production tod
 ## Phase 4 — behavior if flipped today (`SEARCH_ENGINE=shadow|tantivy`)
 
 - 🔑 **Observation-only.** `router.go:111-115`: `ModeCanary`/`ModeTantivy` still serve the
-  PostgreSQL result; Tantivy-*served* results are a **Phase-6 TODO that was never built**
+  PostgreSQL result; Tantivy-_served_ results are a **Phase-6 TODO that was never built**
   (`config.go:18-24`). A flip cannot change served results, bypass the L3 pathsearch route,
   fight the FIND-2 rewrite, or touch the drop-compatible read gates.
 - **Interaction with the L3 route:** the gql resolver takes the L3 composer route first
@@ -163,7 +163,7 @@ tests correctly `#[ignore]`d; this era has no DuckDB dependency).
 7. ✅ DONE (105918b0) — Implement `grpc.health.v1` (or fix probe guidance); delete the `VOLUME` line; refresh
    the stale stub docstrings.
 8. ✅ DONE (9c5800ca) — Cap shadow-comparison concurrency and default `SEARCH_SAMPLE_RATE ≪ 1` before any flip.
-9. 🟡 DESIGN DONE (docs/dev/phase6-tantivy-served-design.md); build remains — **Design + build Phase 6** (Tantivy-*served* results) — Phase 4 only observes; a real
+9. 🟡 DESIGN DONE (docs/dev/phase6-tantivy-served-design.md); build remains — **Design + build Phase 6** (Tantivy-_served_ results) — Phase 4 only observes; a real
    BM25 cutover does not exist yet.
 10. ✅ DONE (105918b0, documented on both binaries) — Ops note: the backfill binary and the server cannot share an index dir concurrently
     (writer lock; safe-fail).

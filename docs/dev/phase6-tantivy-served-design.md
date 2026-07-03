@@ -1,9 +1,9 @@
-# Phase 6 design — Tantivy-*served* main-search results
+# Phase 6 design — Tantivy-_served_ main-search results
 
 **Status:** design only (not built). Scopes audit revival item #9
 (`docs/dev/tantivy-p3p4-audit-2026-07-03.md:166`) — turning the dormant Phase-4
-shadow machinery into a real BM25 read path. Phase 4 *observes* Tantivy; Phase 6
-lets Tantivy *serve*.
+shadow machinery into a real BM25 read path. Phase 4 _observes_ Tantivy; Phase 6
+lets Tantivy _serve_.
 
 **Audience:** whoever picks up `router.go:111-115` (the `TODO(phase6)`). Read the
 audit first — this doc assumes its verdict (engine core is production-quality,
@@ -13,14 +13,14 @@ blockers are DB-boundary schema drift + one goroutine-leak hazard).
 
 ## 0. The one-paragraph shape
 
-Serving is a *strict superset* of the shadow path that already runs the Tantivy
+Serving is a _strict superset_ of the shadow path that already runs the Tantivy
 query. Where `runShadow` (`router.go:136-176`) throws the `pb.SearchResponse`
 away after comparing it, Phase 6 keeps it: hydrate the hit info-hashes back into
 `search.TorrentContentResultItem`s from PostgreSQL (mirroring the L3 composer's
 `orderItemsByIDs` requery, `pathsearch/composer.go:812-842`), preserve Tantivy's
 score order, and return `resp.TotalHits` as the count. The hard parts are **not**
 the hydration — that is a solved pattern — they are the **eligibility gate**
-(which queries Tantivy is *allowed* to serve) and the **freshness gate** (when
+(which queries Tantivy is _allowed_ to serve) and the **freshness gate** (when
 the index is current enough to trust). Both are default-deny whitelists, and both
 already have in-repo templates (`pathsearchOrderEligible`,
 `registerPathsearchHealthReporter`).
@@ -30,7 +30,7 @@ already have in-repo templates (`pathsearchOrderEligible`,
 ## 1. Serving shape — hits → `search.TorrentContentResult`
 
 **Decision: PG-requery-by-info_hash + score-order restore + `TotalHits` count.**
-Do *not* build result items from the Tantivy document — the stored doc is a
+Do _not_ build result items from the Tantivy document — the stored doc is a
 denormalised search projection, not the GraphQL/Torznab shape, and re-deriving
 `Content`, `Episodes`, source rows, etc. from it would fork the hydration logic.
 Instead reuse the exact PG hydrators the fallback path uses.
@@ -47,13 +47,13 @@ Concretely, in the serving branch of `Router.TorrentContent`:
 3. Extract ordered ids: `extractTantivyIDs(resp)` already exists
    (`router.go:193-202`) and returns `DocID`s in rank order. Derive the
    `protocol.ID` set (info_hash) for the PG `IN(...)`.
-4. Requery PG restricted to those info-hashes with the *same hydrators* the
+4. Requery PG restricted to those info-hashes with the _same hydrators_ the
    fallback uses (`HydrateTorrentContentContent` + `HydrateTorrentContentTorrent`
-   + `TorrentContentCoreJoins`), **no page window, no tsquery** — exactly
-   `composer.candidateRows` (`composer.go:506-519`).
+   - `TorrentContentCoreJoins`), **no page window, no tsquery** — exactly
+     `composer.candidateRows` (`composer.go:506-519`).
 5. Restore Tantivy order: `orderItemsByIDs(items, ids)`
    (`composer.go:822-842`) — a stable sort by rank position. This is the proven
-   template; the only wrinkle is that Tantivy keys per *torrent_content* (DocID
+   template; the only wrinkle is that Tantivy keys per _torrent_content_ (DocID
    includes content_type/source/id) while `orderItemsByIDs` keys by
    `Torrent.InfoHash`. A torrent with N classifications produces N DocIDs but one
    info_hash, so ordering by info_hash alone is ambiguous for multi-classified
@@ -62,20 +62,20 @@ Concretely, in the serving branch of `Router.TorrentContent`:
    (`router.go:178-202`), so add an `orderItemsByInferID` variant rather than
    reuse the info_hash one. This is the single non-trivial serving-code delta.
 
-**Counts / paging — simpler than L3, and *exact*:**
+**Counts / paging — simpler than L3, and _exact_:**
 
-| Field | Value | Why |
-|---|---|---|
-| `TotalCount` | `resp.TotalHits` (`search.pb.go:915`) | Tantivy returns the exact match total, not a gram-conjunction upper bound. No refine, no false positives to drop. |
-| `TotalCountIsEstimate` | **false** | Unlike L3 (`composer.go:1145`), this is an exact count. |
-| `HasNextPage` | `offset+len(page) < TotalHits` | Direct — Tantivy paged natively. |
-| `Aggregations` | **empty** — facets are ineligible in v1 (§2). | Facet parity is a known caveat (audit defect #3); not in Phase-6 scope. |
+| Field                  | Value                                         | Why                                                                                                               |
+| ---------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `TotalCount`           | `resp.TotalHits` (`search.pb.go:915`)         | Tantivy returns the exact match total, not a gram-conjunction upper bound. No refine, no false positives to drop. |
+| `TotalCountIsEstimate` | **false**                                     | Unlike L3 (`composer.go:1145`), this is an exact count.                                                           |
+| `HasNextPage`          | `offset+len(page) < TotalHits`                | Direct — Tantivy paged natively.                                                                                  |
+| `Aggregations`         | **empty** — facets are ineligible in v1 (§2). | Facet parity is a known caveat (audit defect #3); not in Phase-6 scope.                                           |
 
 **Why no exact-refine step (the big divergence from L3):** the L3 composer
 blob-decodes candidates and drops false positives because ngram-recall is a
-*superset*. Tantivy main-search returns the authoritative ranked matches
+_superset_. Tantivy main-search returns the authoritative ranked matches
 directly — there is nothing to refine, no blob decode, no file-budget chunking,
-no `RetainedFileBudget`. Serving is therefore *cheaper and simpler* than the L3
+no `RetainedFileBudget`. Serving is therefore _cheaper and simpler_ than the L3
 route: one Tantivy RPC + one PG `IN(...)` hydrate of ≤`limit` rows.
 
 ---
@@ -87,17 +87,17 @@ route: one Tantivy RPC + one PG `IN(...)` hydrate of ≤`limit` rows.
 all** hold:
 
 1. **Has a free-text query string.** Empty query = browse/filter listing → PG.
-2. **No structured filters.** Reuse the *existing* `canCompare` signal: the
+2. **No structured filters.** Reuse the _existing_ `canCompare` signal: the
    `requestBuilder` maps **zero** `query.Where` criteria to `pb.SearchFilters`
    (`request_builder.go:31-59` — `skippedFilter` on any filter option). Phase 4
    already treats `canCompare=false` as "skip the shadow" (`router.go:145-157`);
-   Phase 6 treats it as "not eligible to serve." This is the *same gate*, reused,
+   Phase 6 treats it as "not eligible to serve." This is the _same gate_, reused,
    and it is what makes serving safe under the L3 route (§3).
 3. **Relevance ordering only.** Empty `OrderBy` or explicit relevance — identical
    to `pathsearchOrderEligible`. Structured sorts are excluded because the
    Phase-3 proto honours only the first `SortBy` and field-sorted hits carry
    score 0.0 (audit defect / plan caveat 4, `rust-rewrite-plan.md:274`). The
-   `sortableFields` map (`request_builder.go:178-185`) exists for *shadow*
+   `sortableFields` map (`request_builder.go:178-185`) exists for _shadow_
    comparison; do **not** promote it to a serving contract in v1.
 4. **No facets/aggregations requested.** Facet counts diverge (overcount on 2+
    same-type extensions, no null bucket — audit defect #3). The web UI always
@@ -108,13 +108,13 @@ all** hold:
 
 **Alternatives weighed:**
 
-- *Serve facets from Tantivy `GetFacets`* — rejected for v1: the overcount +
+- _Serve facets from Tantivy `GetFacets`_ — rejected for v1: the overcount +
   null-bucket gaps are a visible UX regression in the sidebar, and reconciling
   them is a whole workstream (audit revival #4). Explicitly out of scope (§7).
-- *Whitelist the mapped structured sorts* — rejected for v1: the single-key-sort
+- _Whitelist the mapped structured sorts_ — rejected for v1: the single-key-sort
   proto limit means a multi-key sort silently drops keys. Revisit only after the
   proto grows a real multi-sort + non-zero field-sorted scores.
-- *Map a safe subset of filters to `pb.SearchFilters`* (content_type, size,
+- _Map a safe subset of filters to `pb.SearchFilters`_ (content_type, size,
   release_year all exist, `search.pb.go:335-349`) — deferred: it needs the
   call-site cooperation the audit flags as "Phase-5 work" and every mapped filter
   is a new parity surface. v1 ships the unfiltered class and grows the whitelist
@@ -132,8 +132,8 @@ search. Small, but it is exactly the class where BM25 name-ranking beats
 The read pod (`bitmagnet-l3`) already intercepts query-string searches **before**
 the router: the resolver calls `Pathsearch.TorrentContent` first and only falls
 to the router-decorated PG search on `served=false`
-(`torrent_content.go:210-229`). So the two search engines answer *different
-questions*:
+(`torrent_content.go:210-229`). So the two search engines answer _different
+questions_:
 
 - **L3** = path/file-substring relevance (ngram recall over file paths).
 - **Tantivy main-search** = name/title BM25 relevance (the `tsvector` replacement).
@@ -144,14 +144,14 @@ construction.** Order of interception for a query-string search:
 1. **L3 composer** takes its eligible class (typeahead on, eligible length,
    relevance order, healthy) and serves or declines.
 2. On L3 `served=false` the query hits the router-decorated
-   `TorrentContentSearch.TorrentContent`. *Here* Phase-6 serving applies to the
+   `TorrentContentSearch.TorrentContent`. _Here_ Phase-6 serving applies to the
    eligible residual (§2).
 3. Otherwise PG.
 
 **The safety property that makes this work:** the L3 composer's own PG hydrate
 calls the router-decorated search (`composer.go:518`), and those calls carry
 `query.Where(TorrentContentInfoHashCriteria(...))` — a **filter** — so they hit
-`canCompare=false` → **ineligible** → straight to PG. The router can *never*
+`canCompare=false` → **ineligible** → straight to PG. The router can _never_
 recursively re-route an L3 hydrate through Tantivy, for exactly the reason the
 shadow path already skips those chunks (audit "Interaction with the L3 route").
 The eligibility gate is load-bearing for this, not just for parity.
@@ -191,7 +191,7 @@ reachable  &&  Status == SERVING  &&  DocCount > 0  &&  now - watermark_epoch <=
 
 `maxStaleness` default **2 min**, matching the L2 file-search freshness SLA
 (memory: `bitmagnet-l2-filesearch-deploy`). On stale/unhealthy → the query is
-ineligible → PG serves. Staleness is fail-*safe*: a lagging index silently yields
+ineligible → PG serves. Staleness is fail-_safe_: a lagging index silently yields
 to PG, never serves wrong results.
 
 ---
@@ -200,19 +200,19 @@ to PG, never serves wrong results.
 
 Shadow mode already computes every signal needed to green-light serving
 (`shadow/comparator.go`): `JaccardAt20`, `JaccardAt50`, `RBO` (p=0.9),
-`Top1Match`, and `PGCount==TantivyCount`. Serving is gated on these *over the
-eligible class only* (filtered/faceted queries are skipped in shadow too, so the
+`Top1Match`, and `PGCount==TantivyCount`. Serving is gated on these _over the
+eligible class only_ (filtered/faceted queries are skipped in shadow too, so the
 metric already reflects the servable population).
 
 **Gate thresholds (over ≥7 days of real traffic, sampled):**
 
-| Metric | Serve-GO threshold | Rationale |
-|---|---|---|
-| `Top1Match` rate | ≥ 0.98 | The #1 result is what most users act on; near-parity required. |
-| `JaccardAt20` (mean) | ≥ 0.90 | First page set-overlap. |
-| `RBO` (mean) | ≥ 0.92 | Rank-weighted agreement; catches reordering the Jaccard misses. |
-| `PGCount==TantivyCount` rate | ≥ 0.95 | `TotalHits` drives the UI count; large disagreement means a match-set defect (audit defects #1/#2 — phrase-over-group, prefix cap). |
-| Tantivy p99 serve latency | ≤ PG p99 | No latency regression on the served path. |
+| Metric                       | Serve-GO threshold | Rationale                                                                                                                           |
+| ---------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `Top1Match` rate             | ≥ 0.98             | The #1 result is what most users act on; near-parity required.                                                                      |
+| `JaccardAt20` (mean)         | ≥ 0.90             | First page set-overlap.                                                                                                             |
+| `RBO` (mean)                 | ≥ 0.92             | Rank-weighted agreement; catches reordering the Jaccard misses.                                                                     |
+| `PGCount==TantivyCount` rate | ≥ 0.95             | `TotalHits` drives the UI count; large disagreement means a match-set defect (audit defects #1/#2 — phrase-over-group, prefix cap). |
+| Tantivy p99 serve latency    | ≤ PG p99           | No latency regression on the served path.                                                                                           |
 
 Sub-threshold on any → **do not cut over**; the failing metric points at a
 specific audit defect to fix first.
@@ -244,22 +244,22 @@ keep the mode env-driven, not config-file-driven.
   `serve_fallback` counter). Serving must **never** return an error the PG path
   could have answered — the fail-closed-to-PG contract is identical to the L3
   route's (`composer.go:1163-1172`).
-- **Sidecar down / not SERVING / stale** → caught by the §4 health gate *before*
+- **Sidecar down / not SERVING / stale** → caught by the §4 health gate _before_
   the RPC (ineligible → PG), so a dead sidecar costs zero per-query RPCs, exactly
   as `Composer.Healthy()` gates the L3 route (`torrent_content.go:213`).
 - **Hard prerequisite — the unbounded-goroutine fix (audit #8, task #6, in
   parallel).** Today `r.run = func(f){ go f() }` (`router.go:81`) spawns one
-  unbounded goroutine per sampled shadow. Serving does *not* add goroutines (it
+  unbounded goroutine per sampled shadow. Serving does _not_ add goroutines (it
   runs inline on the request), but a canary runs shadow **and** serve, so the
   flip still amplifies the existing leak. **Cap shadow concurrency and default
   `SEARCH_SAMPLE_RATE ≪ 1` before any `ModeCanary`/`ModeTantivy` flip** — this is
   already a standalone blocker (audit revival #8); Phase 6 inherits it as a
   gate, it does not re-solve it.
-- **Match-set correctness defects gate the *count* not the crash.** Audit defects
+- **Match-set correctness defects gate the _count_ not the crash.** Audit defects
   #1 (phrase-over-group) and #2 (prefix-expansion cap) mean Tantivy can miss docs
   PG returns. These surface as `PGCount != TantivyCount` and a depressed
   `JaccardAt20` — caught by the §5 gates, not a runtime failure. Serving a
-  slightly-different set is acceptable *within* the gate thresholds; below them,
+  slightly-different set is acceptable _within_ the gate thresholds; below them,
   fix the defect first (revival #6).
 
 ---
@@ -268,14 +268,14 @@ keep the mode env-driven, not config-file-driven.
 
 - **Ranking-quality / BM25 tuning.** `WithFreqs` vs `WithFreqsAndPositions`
   (audit #5), field-boost tuning, the phrase/prefix defects (#1/#2) — Phase 6
-  *serves* the ranking the engine produces and *measures* it via the gates; it
+  _serves_ the ranking the engine produces and _measures_ it via the gates; it
   does not tune it. Sub-threshold parity is a signal to fix those items, not a
   Phase-6 deliverable.
 - **Facets / aggregations from Tantivy.** Faceted queries stay on PG (§2). The
   overcount + null-bucket + per-facet-OR gaps (audit #3, plan caveats 1-3) are a
   separate phase. This is why the web UI stays on PG in v1.
 - **Structured filters beyond the empty-filter class.** Mapping `content_type` /
-  `size` / `release_year` (which the proto *has*) to `pb.SearchFilters` is a
+  `size` / `release_year` (which the proto _has_) to `pb.SearchFilters` is a
   later whitelist expansion, each entry a new parity surface.
 - **Structured sorts.** Blocked on the proto's single-key-sort + zero-score
   field-sort limits.

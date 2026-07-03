@@ -570,6 +570,22 @@ export type TorrentContentAggregations = {
   videoSource?: Maybe<Array<VideoSourceAgg>>;
 };
 
+/**
+ * TorrentContentCollapsePathsInput drives the collapse:path query: the L3-routed
+ * grouping of matching torrents by their distinct matched file path. It carries the
+ * raw path free-text only (no facets in v1).
+ */
+export type TorrentContentCollapsePathsInput = {
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  offset?: InputMaybe<Scalars['Int']['input']>;
+  queryString: Scalars['String']['input'];
+};
+
+export type TorrentContentCollapsePathsResult = {
+  __typename?: 'TorrentContentCollapsePathsResult';
+  groups: Array<TorrentContentPathGroup>;
+};
+
 export type TorrentContentFacetsInput = {
   contentType?: InputMaybe<ContentTypeFacetInput>;
   genre?: InputMaybe<GenreFacetInput>;
@@ -600,11 +616,28 @@ export type TorrentContentOrderByInput = {
   field: TorrentContentOrderByField;
 };
 
+/**
+ * TorrentContentPathGroup is one distinct matched file path and the info hashes of
+ * the candidate torrents that contain a file at that path. v1 is UNHYDRATED: it
+ * returns raw info hashes only; clients hydrate via the existing search-by-infoHashes.
+ */
+export type TorrentContentPathGroup = {
+  __typename?: 'TorrentContentPathGroup';
+  infoHashes: Array<Scalars['Hash20']['output']>;
+  path: Scalars['String']['output'];
+};
+
 export type TorrentContentQuery = {
   __typename?: 'TorrentContentQuery';
+  collapsePaths: TorrentContentCollapsePathsResult;
   fileSearch: FileSearchResult;
   pathTypeahead: PathTypeaheadResult;
   search: TorrentContentSearchResult;
+};
+
+
+export type TorrentContentQueryCollapsePathsArgs = {
+  input: TorrentContentCollapsePathsInput;
 };
 
 
