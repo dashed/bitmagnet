@@ -7,6 +7,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 )
 
+//nolint:paralleltest // mutates package-wide search feature flags.
 func TestTorrentFilesDropCompatibleReadsUseBlobPath(t *testing.T) {
 	t.Cleanup(func() { search.SetFeatureFlags(search.FeatureFlags{}) })
 	search.SetFeatureFlags(search.FeatureFlags{DropCompatibleReads: true})

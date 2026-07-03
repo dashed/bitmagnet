@@ -106,6 +106,8 @@ func collapseComposer(
 // the GraphQL model. Two single-file candidates sharing one path collapse into a
 // single group carrying both info hashes, in candidate order.
 func TestCollapsePaths_ServedMapsGroups(t *testing.T) {
+	t.Parallel()
+
 	l3 := &collapseL3{resp: &pb.PathCandidatesResponse{
 		Candidates: []*pb.PathCandidate{collapseCandidate(1), collapseCandidate(2)},
 	}}
@@ -145,6 +147,8 @@ func TestCollapsePaths_ServedMapsGroups(t *testing.T) {
 // A nil composer (feature off) is a hard error, not a silent empty — there is no
 // PostgreSQL fallback for collapse:path.
 func TestCollapsePaths_NilComposerErrors(t *testing.T) {
+	t.Parallel()
+
 	var tcq TorrentContentQuery // Pathsearch nil
 
 	_, err := tcq.CollapsePaths(context.Background(), TorrentContentCollapsePathsInput{QueryString: "inception"})
@@ -155,6 +159,8 @@ func TestCollapsePaths_NilComposerErrors(t *testing.T) {
 
 // Collapse disabled on an otherwise-healthy composer is a hard error.
 func TestCollapsePaths_DisabledErrors(t *testing.T) {
+	t.Parallel()
+
 	composer := pathsearch.NewComposer(
 		&collapseL3{resp: &pb.PathCandidatesResponse{}},
 		&collapsePG{},
@@ -173,6 +179,8 @@ func TestCollapsePaths_DisabledErrors(t *testing.T) {
 // An unhealthy L3 is a hard error: collapse never serves against a known-bad index
 // and there is no fallback.
 func TestCollapsePaths_UnhealthyErrors(t *testing.T) {
+	t.Parallel()
+
 	l3 := &collapseL3{resp: &pb.PathCandidatesResponse{Candidates: []*pb.PathCandidate{collapseCandidate(1)}}}
 	pg := &collapsePG{result: search.TorrentContentResult{Items: []search.TorrentContentResultItem{
 		singleFileItem(1, "Inception.2010.mkv"),
@@ -189,6 +197,8 @@ func TestCollapsePaths_UnhealthyErrors(t *testing.T) {
 // A query below the composer's min length is a distinct client error (there is no
 // PG fallback to absorb it as the search route does).
 func TestCollapsePaths_QueryTooShortErrors(t *testing.T) {
+	t.Parallel()
+
 	tcq := TorrentContentQuery{Pathsearch: collapseComposer(
 		&collapseL3{resp: &pb.PathCandidatesResponse{}},
 		&collapsePG{},
@@ -203,6 +213,8 @@ func TestCollapsePaths_QueryTooShortErrors(t *testing.T) {
 
 // A composer/sidecar error propagates as a GraphQL error, never a silent empty.
 func TestCollapsePaths_ComposerErrorPropagates(t *testing.T) {
+	t.Parallel()
+
 	sidecarErr := errors.New("sidecar down")
 	tcq := TorrentContentQuery{Pathsearch: collapseComposer(
 		&collapseL3{err: sidecarErr},

@@ -85,6 +85,7 @@ func NewTorrentContentFromResultItem(item search.TorrentContentResultItem) Torre
 		c.DHTFirstSeenAt = firstSeenAt
 		c.DHTLastSeenAt = lastSeenAt
 	}
+
 	if item.Content.ID != "" {
 		c.Content = &item.Content
 	}
@@ -134,16 +135,18 @@ func TorrentSourceInfosFromTorrent(t model.Torrent) []TorrentSourceInfo {
 	return sources
 }
 
-func DHTSeenStatsFromTorrent(t model.Torrent) (*time.Time, *time.Time, int) {
+func DHTSeenStatsFromTorrent(
+	t model.Torrent,
+) (firstSeenAt *time.Time, lastSeenAt *time.Time, seenCount int) {
 	for _, s := range t.Sources {
 		if s.Source != "dht" {
 			continue
 		}
 
-		firstSeenAt := s.CreatedAt
-		lastSeenAt := s.UpdatedAt
+		dhtFirstSeenAt := s.CreatedAt
+		dhtLastSeenAt := s.UpdatedAt
 
-		return &firstSeenAt, &lastSeenAt, int(s.SeenCount)
+		return &dhtFirstSeenAt, &dhtLastSeenAt, int(s.SeenCount)
 	}
 
 	return nil, nil, 0

@@ -122,9 +122,12 @@ func (t TorrentQuery) filesFromBlob(
 
 	for _, tor := range torrents {
 		torFiles := tor.Files
+
 		if len(tor.FilesData) > 0 {
 			if model.FilesDataDeserializer == nil {
-				return search.TorrentFilesResult{}, errors.New("filesFromBlob: files_data deserializer not wired")
+				return search.TorrentFilesResult{}, errors.New(
+					"filesFromBlob: files_data deserializer not wired",
+				)
 			}
 
 			decoded, decodeErr := model.FilesDataDeserializer(tor.FilesData)

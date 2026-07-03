@@ -462,20 +462,23 @@ func persistScrapedTorrentSources(
 		end := min(start+batchSize, len(srcs))
 		batch := srcs[start:end]
 
-		var b strings.Builder
+		b := strings.Builder{}
 		args := make([]any, 0, len(batch)*8)
 
-		b.WriteString("INSERT INTO torrents_torrent_sources " +
+		_, _ = b.WriteString("INSERT INTO torrents_torrent_sources " +
 			"(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ")
-		b.WriteString("SELECT v.source, decode(v.info_hash, 'hex'), v.seeders, v.leechers, " +
+		_, _ = b.WriteString("SELECT v.source, decode(v.info_hash, 'hex'), v.seeders, v.leechers, " +
 			"v.published_at, v.seen_count, v.created_at, v.updated_at FROM (VALUES ")
 
 		for i, src := range batch {
 			if i > 0 {
-				b.WriteString(",")
+				_, _ = b.WriteString(",")
 			}
 
-			b.WriteString("(?,?,?::integer,?::integer,?::timestamptz,?::integer,?::timestamptz,?::timestamptz)")
+			_, _ = b.WriteString(
+				"(?,?,?::integer,?::integer,?::timestamptz,?::integer,?::timestamptz,?::timestamptz)",
+			)
+
 			args = append(
 				args,
 				src.Source,
@@ -489,9 +492,13 @@ func persistScrapedTorrentSources(
 			)
 		}
 
-		b.WriteString(") AS v(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ")
-		b.WriteString("WHERE EXISTS (SELECT 1 FROM torrents t WHERE t.info_hash = decode(v.info_hash, 'hex')) ")
-		b.WriteString("ON CONFLICT (info_hash, source) DO UPDATE SET " +
+		_, _ = b.WriteString(
+			") AS v(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ",
+		)
+		_, _ = b.WriteString(
+			"WHERE EXISTS (SELECT 1 FROM torrents t WHERE t.info_hash = decode(v.info_hash, 'hex')) ",
+		)
+		_, _ = b.WriteString("ON CONFLICT (info_hash, source) DO UPDATE SET " +
 			"seeders = excluded.seeders, " +
 			"leechers = excluded.leechers, " +
 			// sets to null, fixes torrents indexed before 0.8.0 with published_at

@@ -40,15 +40,16 @@ func TestProcessorTorrentPreloadsSkipLegacyFiles(t *testing.T) {
 	q := newProcessorTestDao(t)
 	preloads := processorTorrentPreloads(q)
 	names := make([]string, 0, len(preloads))
+
 	for _, preload := range preloads {
 		names = append(names, preload.Name())
 	}
 
 	assert.ElementsMatch(t, []string{
-		q.Torrent.Hint.RelationField.Name(),
-		q.Torrent.Sources.RelationField.Name(),
+		q.Torrent.Hint.Name(),
+		q.Torrent.Sources.Name(),
 	}, names)
-	assert.NotContains(t, names, q.Torrent.Files.RelationField.Name(),
+	assert.NotContains(t, names, q.Torrent.Files.Name(),
 		"processor must not preload Torrent.Files because that association reads torrent_files")
 }
 

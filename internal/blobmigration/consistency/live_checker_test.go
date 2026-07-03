@@ -34,6 +34,7 @@ func TestLiveCheckerUsesBlobOnlyCheckInDropCompatibleReads(t *testing.T) {
 	if legacyCalled {
 		t.Fatal("legacy torrent_files checker was called in drop-compatible read mode")
 	}
+
 	if !blobOnlyCalled {
 		t.Fatal("blob-only checker was not called in drop-compatible read mode")
 	}
@@ -63,6 +64,7 @@ func TestLiveCheckerUsesLegacyCheckByDefault(t *testing.T) {
 	if !legacyCalled {
 		t.Fatal("legacy checker was not called by default")
 	}
+
 	if blobOnlyCalled {
 		t.Fatal("blob-only checker was called outside drop-compatible read mode")
 	}
@@ -87,6 +89,7 @@ func TestLiveCheckerCountsBlobOnlyErrors(t *testing.T) {
 	if err := metrics.ErrorsTotal.Write(&m); err != nil {
 		t.Fatalf("ErrorsTotal.Write: %v", err)
 	}
+
 	if got := m.GetCounter().GetValue(); got != 1 {
 		t.Fatalf("ErrorsTotal = %v, want 1", got)
 	}

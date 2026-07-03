@@ -143,6 +143,7 @@ func TestNewFileSearchInput_TotalCountDefaultsAndOptOut(t *testing.T) {
 	}
 
 	requestCount := true
+
 	in, err = NewFileSearchInput(FileSearchParams{Query: "linux", TotalCount: &requestCount})
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)
@@ -153,6 +154,7 @@ func TestNewFileSearchInput_TotalCountDefaultsAndOptOut(t *testing.T) {
 	}
 
 	requestCount = false
+
 	in, err = NewFileSearchInput(FileSearchParams{Query: "linux", TotalCount: &requestCount})
 	if err != nil {
 		t.Fatalf("unexpected err %v", err)

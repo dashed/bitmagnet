@@ -33,7 +33,11 @@ type Config struct {
 type fileSearchRPC interface {
 	SearchFiles(context.Context, *pb.SearchFilesRequest, ...grpc.CallOption) (*pb.SearchFilesResponse, error)
 	CountFiles(context.Context, *pb.CountFilesRequest, ...grpc.CallOption) (*pb.CountFilesResponse, error)
-	HealthCheck(context.Context, *pb.FileHealthCheckRequest, ...grpc.CallOption) (*pb.FileHealthCheckResponse, error)
+	HealthCheck(
+		context.Context,
+		*pb.FileHealthCheckRequest,
+		...grpc.CallOption,
+	) (*pb.FileHealthCheckResponse, error)
 }
 
 // SidecarClient is a thin, safe wrapper over the generated FileSearchService.
@@ -128,15 +132,18 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 	}
 
 	var totalCount uint
+
 	if !in.SkipTotalCount {
 		countReq := &pb.CountFilesRequest{
 			Filters:           filters,
 			CollapseToTorrent: false,
 		}
+
 		count, err := c.svc.CountFiles(ctx, countReq)
 		if err != nil {
 			return FileSearchResult{}, err
 		}
+
 		totalCount = boundedUint(count.GetCount())
 	}
 
@@ -182,7 +189,13 @@ func (c *SidecarClient) requestLimit(in FileSearchInput) (uint, error) {
 	}
 
 	if in.Offset > c.maxRows || limit > c.maxRows-in.Offset {
-		return 0, fmt.Errorf("%w: offset=%d limit=%d max_rows=%d", ErrOffsetUnsupported, in.Offset, limit, c.maxRows)
+		return 0, fmt.Errorf(
+			"%w: offset=%d limit=%d max_rows=%d",
+			ErrOffsetUnsupported,
+			in.Offset,
+			limit,
+			c.maxRows,
+		)
 	}
 
 	return in.Offset + limit, nil

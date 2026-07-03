@@ -1,6 +1,8 @@
 package resolvers
 
 import (
+	"net/http"
+
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
@@ -24,6 +26,7 @@ type Resolver struct {
 	Workers              worker.Registry
 	Checker              health.Checker
 	HealthPeerConfig     health.PeerConfig
+	healthPeerHTTPClient *http.Client
 	QueueMetricsClient   queuemetrics.Client
 	QueueManager         manager.Manager
 	TorrentMetricsClient torrentmetrics.Client

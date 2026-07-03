@@ -2914,7 +2914,9 @@ type TorrentContentQuery {
   search(input: TorrentContentSearchQueryInput!): TorrentContentSearchResult!
   fileSearch(input: FileSearchInput!): FileSearchResult!
   pathTypeahead(input: PathTypeaheadInput!): PathTypeaheadResult!
-  collapsePaths(input: TorrentContentCollapsePathsInput!): TorrentContentCollapsePathsResult!
+  collapsePaths(
+    input: TorrentContentCollapsePathsInput!
+  ): TorrentContentCollapsePathsResult!
 }
 
 type Worker {

@@ -120,11 +120,12 @@ func TestFileSearchSendsRawPathQueryNotLikePattern(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NotNil(t, rpc.searchReq)
-	require.NotNil(t, rpc.searchReq.Filters)
-	assert.Equal(t, "50%_raw", rpc.searchReq.Filters.GetPathQuery())
-	assert.Equal(t, []string{"mkv"}, rpc.searchReq.Filters.GetExtensions())
-	assert.Equal(t, uint64(10), rpc.searchReq.Filters.GetSizeMin())
-	assert.Equal(t, uint64(20), rpc.searchReq.Filters.GetSizeMax())
+	filters := rpc.searchReq.GetFilters()
+	require.NotNil(t, filters)
+	assert.Equal(t, "50%_raw", filters.GetPathQuery())
+	assert.Equal(t, []string{"mkv"}, filters.GetExtensions())
+	assert.Equal(t, uint64(10), filters.GetSizeMin())
+	assert.Equal(t, uint64(20), filters.GetSizeMax())
 	assert.False(t, rpc.searchReq.GetCollapseToTorrent())
 	assert.Equal(t, uint32(5), rpc.searchReq.GetPagination().GetLimit())
 
@@ -211,14 +212,14 @@ func TestFileSearchRejectsUnsupportedRequestShapes(t *testing.T) {
 		InfoHash: &id,
 		Limit:    1,
 	})
-	assert.ErrorIs(t, err, ErrInfoHashUnsupported)
+	require.ErrorIs(t, err, ErrInfoHashUnsupported)
 
 	_, err = c.FileSearch(context.Background(), FileSearchInput{
 		Query:  "x",
 		Limit:  5,
 		Offset: 6,
 	})
-	assert.ErrorIs(t, err, ErrOffsetUnsupported)
+	require.ErrorIs(t, err, ErrOffsetUnsupported)
 }
 
 func TestFileSearchPropagatesRPCError(t *testing.T) {

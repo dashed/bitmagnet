@@ -191,6 +191,7 @@ func (r *Router) runShadow(
 	if r.metrics != nil {
 		r.metrics.Observe(c)
 	}
+
 	shadow.LogComparison(r.logger, req.GetQuery(), c, r.cfg.LogDiscrepancies)
 }
 

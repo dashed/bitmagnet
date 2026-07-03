@@ -1,10 +1,11 @@
 package resolvers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -18,13 +19,8 @@ func TestMergePeerHealthPrefersActivePeerOverInactiveLocal(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC()
-	peer := newHealthPeerServer(t, healthPeerResponse{
-		Data: struct {
-			Health  gen.HealthQuery "json:\"health\""
-			Workers struct {
-				ListAll gen.WorkersListAllQueryResult "json:\"listAll\""
-			} "json:\"workers\""
-		}{
+	peerClient := newHealthPeerClient(t, healthPeerResponse{
+		Data: healthPeerDataResponse{
 			Health: gen.HealthQuery{
 				Status: gen.HealthStatusUp,
 				Checks: []gen.HealthCheck{
@@ -40,9 +36,7 @@ func TestMergePeerHealthPrefersActivePeerOverInactiveLocal(t *testing.T) {
 					},
 				},
 			},
-			Workers: struct {
-				ListAll gen.WorkersListAllQueryResult "json:\"listAll\""
-			}{
+			Workers: healthPeerWorkerPayload{
 				ListAll: gen.WorkersListAllQueryResult{
 					Workers: []gen.Worker{
 						{Key: "dht_crawler", Started: true},
@@ -52,13 +46,13 @@ func TestMergePeerHealthPrefersActivePeerOverInactiveLocal(t *testing.T) {
 			},
 		},
 	})
-	defer peer.Close()
 
 	resolver := Resolver{
 		HealthPeerConfig: health.PeerConfig{
-			PeerGraphqlUrls: []string{peer.URL},
+			PeerGraphqlUrls: []string{"http://peer.test/graphql"},
 			PeerTimeout:     time.Second,
 		},
+		healthPeerHTTPClient: peerClient,
 	}
 	localHealth := gen.HealthQuery{
 		Status: gen.HealthStatusUp,
@@ -96,16 +90,24 @@ func TestMergePeerHealthPrefersActivePeerOverInactiveLocal(t *testing.T) {
 func TestMergePeerHealthReportsPeerFailure(t *testing.T) {
 	t.Parallel()
 
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-	}))
-	defer peer.Close()
+	peerClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Status:     "503 Service Unavailable",
+				Body:       io.NopCloser(bytes.NewBufferString("not ready")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
 
 	resolver := Resolver{
 		HealthPeerConfig: health.PeerConfig{
-			PeerGraphqlUrls: []string{peer.URL},
+			PeerGraphqlUrls: []string{"http://peer.test/graphql"},
 			PeerTimeout:     time.Second,
 		},
+		healthPeerHTTPClient: peerClient,
 	}
 
 	merged := resolver.mergePeerHealth(context.Background(), gen.HealthQuery{
@@ -126,14 +128,34 @@ func TestMergePeerHealthReportsPeerFailure(t *testing.T) {
 	assert.Contains(t, *peerCheck.Error, "503")
 }
 
-func newHealthPeerServer(t *testing.T, response healthPeerResponse) *httptest.Server {
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func newHealthPeerClient(t *testing.T, response healthPeerResponse) *http.Client {
 	t.Helper()
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPost, r.Method)
-		w.Header().Set("content-type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(response))
-	}))
+	return &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			assert.Equal(t, http.MethodPost, req.Method)
+			assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
+
+			body, err := json.Marshal(response)
+			if err != nil {
+				return nil, err
+			}
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(bytes.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	}
 }
 
 func healthCheckByKey(t *testing.T, checks []gen.HealthCheck, key string) *gen.HealthCheck {
@@ -158,5 +180,6 @@ func workerByKey(t *testing.T, workers []gen.Worker, key string) gen.Worker {
 	}
 
 	t.Fatalf("worker %q not found", key)
+
 	return gen.Worker{}
 }

@@ -100,8 +100,14 @@ func TestDropCompatibleReadsForcesNoLegacyReadGates(t *testing.T) {
 		t.Error("DropCompatibleReads should disable torrent_files-backed repair")
 	}
 
-	if err := got.CheckLegacyTorrentFilesReadAllowed("unit-test"); !errors.Is(err, ErrLegacyTorrentFilesReadDisabled) {
-		t.Errorf("DropCompatibleReads legacy-read check error = %v, want ErrLegacyTorrentFilesReadDisabled", err)
+	if err := got.CheckLegacyTorrentFilesReadAllowed("unit-test"); !errors.Is(
+		err,
+		ErrLegacyTorrentFilesReadDisabled,
+	) {
+		t.Errorf(
+			"DropCompatibleReads legacy-read check error = %v, want ErrLegacyTorrentFilesReadDisabled",
+			err,
+		)
 	}
 }
 
@@ -150,7 +156,10 @@ func TestHydrateTorrentContentTorrentWithFilesFailsClosedInDropCompatibleMode(t 
 
 	_, err := h.GetSubs(context.Background(), nil, nil)
 	if !errors.Is(err, ErrLegacyTorrentFilesReadDisabled) {
-		t.Fatalf("HydrateTorrentContentTorrentWithFiles error = %v, want ErrLegacyTorrentFilesReadDisabled", err)
+		t.Fatalf(
+			"HydrateTorrentContentTorrentWithFiles error = %v, want ErrLegacyTorrentFilesReadDisabled",
+			err,
+		)
 	}
 }
 

@@ -244,6 +244,7 @@ func runGateCheck(t *testing.T, kvs map[string]string, confirmFlag bool, dropCom
 	if len(dropCompatible) > 0 && dropCompatible[0] {
 		flags.DropCompatibleReads = true
 	}
+
 	if desc, ok := cleanupRuntimeReadGateForFlags(flags); ok {
 		pass(desc)
 	} else {

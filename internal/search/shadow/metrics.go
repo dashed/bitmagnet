@@ -76,7 +76,8 @@ func NewMetrics() *Metrics {
 			Namespace: namespace,
 			Subsystem: subsystemShadow,
 			Name:      "dropped_total",
-			Help:      "Total number of sampled shadow-mode comparisons dropped because the shadow concurrency limit was saturated. Drops are expected back-pressure, not errors.",
+			Help: "Total number of sampled shadow-mode comparisons dropped because " +
+				"the shadow concurrency limit was saturated. Drops are expected back-pressure, not errors.",
 		}),
 		tantivyDocCount: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,

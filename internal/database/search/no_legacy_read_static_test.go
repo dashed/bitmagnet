@@ -22,6 +22,8 @@ var noLegacyReadForbiddenPatterns = []string{
 }
 
 func TestNoLegacyReadStaticAllowlist(t *testing.T) {
+	t.Parallel()
+
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -33,12 +35,15 @@ func TestNoLegacyReadStaticAllowlist(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
+
 		if entry.IsDir() {
 			if shouldSkipNoLegacyReadDir(entry.Name()) {
 				return filepath.SkipDir
 			}
+
 			return nil
 		}
+
 		if shouldSkipNoLegacyReadFile(path) {
 			return nil
 		}
@@ -53,6 +58,7 @@ func TestNoLegacyReadStaticAllowlist(t *testing.T) {
 			_ = file.Close()
 			return relErr
 		}
+
 		rel = filepath.ToSlash(rel)
 
 		scanner := bufio.NewScanner(file)
@@ -68,6 +74,7 @@ func TestNoLegacyReadStaticAllowlist(t *testing.T) {
 				}
 			}
 		}
+
 		if scanErr := scanner.Err(); scanErr != nil {
 			_ = file.Close()
 			return scanErr
@@ -81,17 +88,24 @@ func TestNoLegacyReadStaticAllowlist(t *testing.T) {
 
 	if len(findings) > 0 {
 		var msg strings.Builder
-		msg.WriteString("production legacy torrent_files read references are not allowlisted:\n")
+
+		_, _ = msg.WriteString("production legacy torrent_files read references are not allowlisted:\n")
+
 		for _, finding := range findings {
-			msg.WriteString("  - ")
-			msg.WriteString(finding.path)
-			msg.WriteString(":")
-			msg.WriteString(testLineNumber(finding.line))
-			msg.WriteString(" contains ")
-			msg.WriteString(finding.pattern)
-			msg.WriteString("\n")
+			_, _ = msg.WriteString("  - ")
+			_, _ = msg.WriteString(finding.path)
+			_, _ = msg.WriteString(":")
+			_, _ = msg.WriteString(testLineNumber(finding.line))
+			_, _ = msg.WriteString(" contains ")
+			_, _ = msg.WriteString(finding.pattern)
+			_, _ = msg.WriteString("\n")
 		}
-		msg.WriteString("Add a fail-closed DropCompatibleReads guard or classify the reference as pre-DROP tooling before allowlisting it.")
+
+		_, _ = msg.WriteString(
+			"Add a fail-closed DropCompatibleReads guard or classify the reference " +
+				"as pre-DROP tooling before allowlisting it.",
+		)
+
 		t.Fatal(msg.String())
 	}
 }
@@ -111,6 +125,7 @@ func findRepoRoot() (string, error) {
 		if parent == dir {
 			return "", os.ErrNotExist
 		}
+
 		dir = parent
 	}
 }
@@ -128,9 +143,11 @@ func shouldSkipNoLegacyReadFile(path string) bool {
 	if filepath.Ext(path) != ".go" {
 		return true
 	}
+
 	if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".gen.go") {
 		return true
 	}
+
 	if strings.HasSuffix(path, filepath.Join("internal", "gql", "gql.gen.go")) {
 		return true
 	}

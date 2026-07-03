@@ -417,6 +417,7 @@ func CheckRandomBlobsOnly(ctx context.Context, q *dao.Query, sampleSize int) (Su
 					Got:       err.Error(),
 				}},
 			})
+
 			continue
 		}
 

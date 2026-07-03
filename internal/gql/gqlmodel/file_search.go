@@ -74,7 +74,10 @@ func (q FileSearchQuery) Search(ctx context.Context, in FileSearchInput) (filese
 // PathTypeahead returns path completions for a prefix. Returns
 // filesearch.ErrDisabled unless the flag is on AND a real client is wired, and
 // filesearch.ErrPrefixTooShort for prefixes under the min-chars threshold.
-func (q FileSearchQuery) PathTypeahead(ctx context.Context, in PathTypeaheadInput) (filesearch.PathTypeaheadResult, error) {
+func (q FileSearchQuery) PathTypeahead(
+	ctx context.Context,
+	in PathTypeaheadInput,
+) (filesearch.PathTypeaheadResult, error) {
 	if !search.FeatureFlagsValue().FileSearchEnabled {
 		return filesearch.PathTypeaheadResult{}, filesearch.ErrDisabled
 	}

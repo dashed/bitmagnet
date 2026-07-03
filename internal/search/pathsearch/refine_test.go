@@ -220,12 +220,20 @@ func TestTorrentRefine_SingleFileExtFilterRefinesAgainstName(t *testing.T) {
 
 	// name-derived ext matches the filter -> kept, no fallback.
 	if matched, ok := torrentRefine(single("Inception.2010.1080p.mkv"), p); !ok || !matched {
-		t.Fatalf("single-file name ext matching the filter must be kept (ok=true, matched=true), got matched=%v ok=%v", matched, ok)
+		t.Fatalf(
+			"single-file name ext matching the filter must be kept (ok=true, matched=true), got matched=%v ok=%v",
+			matched,
+			ok,
+		)
 	}
 
 	// name-derived ext does NOT match the filter -> clean drop, still no fallback.
 	if matched, ok := torrentRefine(single("Inception.2010.1080p.avi"), p); !ok || matched {
-		t.Fatalf("single-file name ext not matching the filter must be a clean drop (ok=true, matched=false), got matched=%v ok=%v", matched, ok)
+		t.Fatalf(
+			"single-file name ext not matching the filter must be a clean drop (ok=true, matched=false), got matched=%v ok=%v",
+			matched,
+			ok,
+		)
 	}
 
 	// the surrogate is always usable now (ok=true), independent of any predicate.

@@ -74,9 +74,11 @@ func (lc *LiveChecker) run(ctx context.Context) {
 func (lc *LiveChecker) check(ctx context.Context) {
 	dropCompatible := !dbsearch.FeatureFlagsValue().AllowTorrentFilesRepair()
 	check := lc.checkLegacy
+
 	if dropCompatible {
 		check = lc.checkBlobsOnly
 	}
+
 	if check == nil {
 		if dropCompatible {
 			check = CheckRandomBlobsOnly
@@ -124,6 +126,7 @@ func (lc *LiveChecker) healTorrent(ctx context.Context, infoHash [20]byte) {
 			"blob/row mismatch repair skipped in drop-compatible read mode",
 			"info_hash", infoHash,
 		)
+
 		return
 	}
 

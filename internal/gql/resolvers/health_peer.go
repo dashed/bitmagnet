@@ -43,15 +43,21 @@ type healthPeerSnapshot struct {
 }
 
 type healthPeerResponse struct {
-	Data struct {
-		Health  gen.HealthQuery `json:"health"`
-		Workers struct {
-			ListAll gen.WorkersListAllQueryResult `json:"listAll"`
-		} `json:"workers"`
-	} `json:"data"`
-	Errors []struct {
-		Message string `json:"message"`
-	} `json:"errors,omitempty"`
+	Data   healthPeerDataResponse    `json:"data"`
+	Errors []healthPeerErrorResponse `json:"errors,omitempty"`
+}
+
+type healthPeerDataResponse struct {
+	Health  gen.HealthQuery         `json:"health"`
+	Workers healthPeerWorkerPayload `json:"workers"`
+}
+
+type healthPeerWorkerPayload struct {
+	ListAll gen.WorkersListAllQueryResult `json:"listAll"`
+}
+
+type healthPeerErrorResponse struct {
+	Message string `json:"message"`
 }
 
 func (r *Resolver) mergePeerHealth(ctx context.Context, local gen.HealthQuery) gen.HealthQuery {
@@ -61,6 +67,7 @@ func (r *Resolver) mergePeerHealth(ctx context.Context, local gen.HealthQuery) g
 	for _, snapshot := range snapshots {
 		checks = mergeHealthChecks(checks, snapshot.Health.Checks)
 	}
+
 	if len(errs) > 0 {
 		checks = mergeHealthChecks(checks, []gen.HealthCheck{healthPeerErrorCheck(errs)})
 	}
@@ -109,7 +116,7 @@ func (r *Resolver) fetchHealthPeerSnapshots(ctx context.Context) ([]healthPeerSn
 		timeout = 1500 * time.Millisecond
 	}
 
-	client := &http.Client{Timeout: timeout}
+	client := r.healthPeerClient(timeout)
 	snapshots := make([]healthPeerSnapshot, 0, len(r.HealthPeerConfig.PeerGraphqlUrls))
 	errs := make([]error, 0)
 
@@ -131,6 +138,14 @@ func (r *Resolver) fetchHealthPeerSnapshots(ctx context.Context) ([]healthPeerSn
 	return snapshots, errs
 }
 
+func (r *Resolver) healthPeerClient(timeout time.Duration) *http.Client {
+	if r.healthPeerHTTPClient != nil {
+		return r.healthPeerHTTPClient
+	}
+
+	return &http.Client{Timeout: timeout}
+}
+
 func fetchHealthPeerSnapshot(
 	ctx context.Context,
 	client *http.Client,
@@ -145,12 +160,14 @@ func fetchHealthPeerSnapshot(
 	if err != nil {
 		return healthPeerSnapshot{}, err
 	}
-	req.Header.Set("content-type", "application/json")
+
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
 		return healthPeerSnapshot{}, err
 	}
+
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
@@ -164,6 +181,7 @@ func fetchHealthPeerSnapshot(
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return healthPeerSnapshot{}, err
 	}
+
 	if len(decoded.Errors) > 0 {
 		messages := make([]string, 0, len(decoded.Errors))
 		for _, gqlErr := range decoded.Errors {
@@ -211,6 +229,7 @@ func shouldReplaceHealthCheck(existing gen.HealthCheck, candidate gen.HealthChec
 	if existing.Status == gen.HealthStatusInactive && candidate.Status != gen.HealthStatusInactive {
 		return true
 	}
+
 	if candidateSeverity != existingSeverity {
 		return candidateSeverity > existingSeverity
 	}
@@ -224,6 +243,7 @@ func aggregateHealthStatus(checks []gen.HealthCheck) gen.HealthStatus {
 	}
 
 	status := gen.HealthStatusUp
+
 	for _, check := range checks {
 		switch check.Status {
 		case gen.HealthStatusDown:
@@ -256,6 +276,7 @@ func healthPeerErrorCheck(errs []error) gen.HealthCheck {
 	for _, err := range errs {
 		messages = append(messages, err.Error())
 	}
+
 	message := strings.Join(messages, "; ")
 
 	return gen.HealthCheck{
