@@ -3,6 +3,7 @@
 
 use bitmagnet_model::{deserialize_files, BlobError, BlobFile, InfoHash};
 use sqlx::{PgPool, Row};
+use tracing::warn;
 
 use crate::error::{DbError, Result};
 
@@ -237,6 +238,55 @@ impl TorrentForIndex {
     }
 }
 
+/// One keyset page for the main Tantivy search backfill.
+#[derive(Debug, Clone, Default)]
+pub struct TorrentForIndexPage {
+    pub rows: Vec<TorrentForIndex>,
+    /// Rows skipped because `tc.info_hash` could not be decoded as a v1
+    /// 20-byte [`InfoHash`].
+    pub skipped_info_hash_decodes: u64,
+    /// Last `tc.id` observed in this page, including rows skipped during
+    /// mapping. Callers use this to advance the keyset cursor even when a bad
+    /// row is deliberately skipped.
+    pub last_seen_id: Option<String>,
+}
+
+impl TorrentForIndexPage {
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+impl std::ops::Deref for TorrentForIndexPage {
+    type Target = [TorrentForIndex];
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
+}
+
+impl<'a> IntoIterator for &'a TorrentForIndexPage {
+    type Item = &'a TorrentForIndex;
+    type IntoIter = std::slice::Iter<'a, TorrentForIndex>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.iter()
+    }
+}
+
+impl IntoIterator for TorrentForIndexPage {
+    type Item = TorrentForIndex;
+    type IntoIter = std::vec::IntoIter<TorrentForIndex>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.into_iter()
+    }
+}
+
 /// SQL for [`stream_torrents_for_index`]. Drives FROM `torrent_contents` (one
 /// row = one search document), mirroring bitmagnet's `tsv @@ tsquery` search so
 /// the Tantivy index matches Postgres exactly — in particular it never indexes
@@ -245,6 +295,10 @@ impl TorrentForIndex {
 /// PK `tc.id`, which is also the Tantivy `doc_id`. Integers are cast to
 /// `bigint`, the JSONB `languages` column is flattened to `text[]`, and genres
 /// come from a correlated `content_collections` (type `genre`) subquery.
+///
+/// Current main search indexes the v1 identity only. The v2 identity is the
+/// unbuilt G1d slice, so rows carrying 32-byte hashes are deliberately excluded
+/// until that slice owns them.
 const STREAM_FOR_INDEX_SQL: &str = "\
 SELECT \
 tc.id AS id, \
@@ -289,6 +343,7 @@ ON c.type = tc.content_type \
 AND c.source = tc.content_source \
 AND c.id = tc.content_id \
 WHERE ($1::text IS NULL OR tc.id > $1) \
+AND octet_length(tc.info_hash) = 20 \
 ORDER BY tc.id ASC \
 LIMIT $2";
 
@@ -301,7 +356,7 @@ pub async fn stream_torrents_for_index(
     pool: &PgPool,
     after_id: Option<&str>,
     limit: i64,
-) -> Result<Vec<TorrentForIndex>> {
+) -> Result<TorrentForIndexPage> {
     let after = after_id.map(str::to_owned);
 
     let rows = sqlx::query(STREAM_FOR_INDEX_SQL)
@@ -311,12 +366,18 @@ pub async fn stream_torrents_for_index(
         .await?;
 
     let mut out = Vec::with_capacity(rows.len());
+    let mut skipped_info_hash_decodes = 0_u64;
+    let mut last_seen_id = None;
     for row in &rows {
+        let id: String = row.try_get("id")?;
+        last_seen_id = Some(id.clone());
         let raw: Vec<u8> = row.try_get("info_hash")?;
-        let info_hash =
-            InfoHash::from_slice(&raw).map_err(|e| DbError::Decode(format!("info_hash: {e}")))?;
+        let Some(info_hash) = decode_index_info_hash(&id, &raw, &mut skipped_info_hash_decodes)
+        else {
+            continue;
+        };
         out.push(TorrentForIndex {
-            id: row.try_get("id")?,
+            id,
             info_hash,
             torrent_name: row.try_get("torrent_name")?,
             files_status: row.try_get("files_status")?,
@@ -342,7 +403,26 @@ pub async fn stream_torrents_for_index(
             files_data: row.try_get("files_data")?,
         });
     }
-    Ok(out)
+    Ok(TorrentForIndexPage {
+        rows: out,
+        skipped_info_hash_decodes,
+        last_seen_id,
+    })
+}
+
+fn decode_index_info_hash(
+    id: &str,
+    raw: &[u8],
+    skipped_info_hash_decodes: &mut u64,
+) -> Option<InfoHash> {
+    match InfoHash::from_slice(raw) {
+        Ok(info_hash) => Some(info_hash),
+        Err(error) => {
+            *skipped_info_hash_decodes += 1;
+            warn!(tc_id = %id, %error, "skipping torrent_content with undecodable info_hash");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +527,37 @@ mod tests {
     }
 
     #[test]
+    fn for_index_info_hash_decode_accepts_v1_identity() {
+        let mut skipped = 0_u64;
+        let raw = [0x11; 20];
+
+        let decoded = decode_index_info_hash(
+            "1111111111111111111111111111111111111111:movie:tmdb:1",
+            &raw,
+            &mut skipped,
+        )
+        .expect("20-byte v1 info_hash decodes");
+
+        assert_eq!(decoded.as_slice(), raw.as_slice());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn for_index_info_hash_decode_skips_non_v1_identity() {
+        let mut skipped = 0_u64;
+        let raw = [0x22; 32];
+
+        let decoded = decode_index_info_hash(
+            "2222222222222222222222222222222222222222222222222222222222222222:movie:tmdb:1",
+            &raw,
+            &mut skipped,
+        );
+
+        assert!(decoded.is_none());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
     fn changed_sql_shape() {
         // The delta carve: a BOUNDED half-open updated_at window
         // (since, until] + keyset on info_hash. The upper bound is the
@@ -473,6 +584,7 @@ mod tests {
         assert!(STREAM_FOR_INDEX_SQL.contains("JOIN torrents t ON t.info_hash = tc.info_hash"));
         assert!(STREAM_FOR_INDEX_SQL.contains("LEFT JOIN content c"));
         assert!(STREAM_FOR_INDEX_SQL.contains("tc.id > $1"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("octet_length(tc.info_hash) = 20"));
         assert!(STREAM_FOR_INDEX_SQL.contains("ORDER BY tc.id ASC"));
         assert!(STREAM_FOR_INDEX_SQL.contains("LIMIT $2"));
         // Genres via content_collections (type 'genre'); JSONB languages flattened.

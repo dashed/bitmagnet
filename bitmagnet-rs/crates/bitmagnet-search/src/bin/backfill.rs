@@ -118,12 +118,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let mut indexed: u64 = 0;
     let mut since_commit: u64 = 0;
     let mut blob_errors: u64 = 0;
+    let mut info_hash_decode_skips: u64 = 0;
 
     'pages: loop {
         let page = stream_torrents_for_index(&pool, cursor.as_deref(), args.batch_size)
             .await
             .context("reading torrent_contents page from postgres")?;
+        info_hash_decode_skips += page.skipped_info_hash_decodes;
         if page.is_empty() {
+            if let Some(last_seen_id) = page.last_seen_id {
+                cursor = Some(last_seen_id);
+                continue;
+            }
             break;
         }
 
@@ -146,12 +152,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 break 'pages;
             }
         }
+        cursor = page.last_seen_id;
     }
 
     index_writer.commit().context("final index commit")?;
     info!(
         indexed,
         blob_errors,
+        info_hash_decode_skips,
         last_id = cursor.as_deref(),
         "backfill complete"
     );
