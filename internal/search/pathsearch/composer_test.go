@@ -159,6 +159,60 @@ func TestComposer_TorrentContent_RefinesAndPaginates(t *testing.T) {
 	}
 }
 
+// TestComposer_TorrentContent_TotalCountUsesCandidateTotalWhenTruncated is the
+// #10 follow-up: when the candidate window is budget-truncated, TotalCount must
+// serve the sidecar's full candidate_total (upper-bound estimate) instead of the
+// badly-low refined-window count ("1080p" with millions of matches showed ~200).
+// The untruncated case (TotalCount == refined count) is covered by
+// TestComposer_TorrentContent_RefinesAndPaginates.
+func TestComposer_TorrentContent_TotalCountUsesCandidateTotalWhenTruncated(t *testing.T) {
+	const sidecarTotal = 5000
+
+	// limit=2 * oversample(4) = budget 8; the sidecar returns 10 (its own +200
+	// floor behavior in miniature) with a full-corpus candidate_total of 5000.
+	cands := make([]*pb.PathCandidate, 0, 10)
+	items := make([]search.TorrentContentResultItem, 0, 10)
+
+	for i := 1; i <= 10; i++ {
+		cands = append(cands, candidate(byte(i)))
+		items = append(items, item(byte(i), tf("Inception.2010.1080p.mkv", "mkv", uint(i))))
+	}
+
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{
+		Candidates:     cands,
+		CandidateTotal: sidecarTotal,
+		Estimated:      true,
+	}}
+	pg := &fakePG{result: search.TorrentContentResult{Items: items}}
+
+	c := newTestComposer(l3, pg)
+
+	res, served, err := c.TorrentContent(
+		context.Background(),
+		Filters{Query: "inception"},
+		QueryOptions{},
+		2,
+		0,
+		nil,
+	)
+	if err != nil || !served {
+		t.Fatalf("expected served result, got served=%v err=%v", served, err)
+	}
+
+	if res.TotalCount != sidecarTotal {
+		t.Fatalf("truncated window must serve candidate_total=%d as TotalCount, got %d",
+			sidecarTotal, res.TotalCount)
+	}
+
+	if !res.TotalCountIsEstimate {
+		t.Fatal("TotalCountIsEstimate must stay true on the L3 route")
+	}
+
+	if len(res.Items) != 2 {
+		t.Fatalf("page size must be unaffected by the count change, got %d items", len(res.Items))
+	}
+}
+
 func TestComposer_TorrentContent_IneligibleShortQueryFallsBack(t *testing.T) {
 	c := newTestComposer(&fakeL3{}, &fakePG{})
 
@@ -336,7 +390,7 @@ func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands, CandidateTotal: uint64(len(cands))}}
 	c := NewComposer(l3, nil, ComposerConfig{OversampleFactor: oversample, MaxCandidates: maxCands}, nil)
 
-	ids, err := c.candidates(context.Background(), Filters{Query: "matrix"}, limit, 0, nil)
+	ids, gotTotal, err := c.candidates(context.Background(), Filters{Query: "matrix"}, limit, 0, nil)
 	if err != nil {
 		t.Fatalf("candidates: %v", err)
 	}
@@ -354,6 +408,12 @@ func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
 			len(ids),
 			wantBudget,
 		)
+	}
+
+	// candidate_total must survive the truncation untouched — it is the sidecar's
+	// FULL match count, not the decoded-window size (#10 follow-up).
+	if gotTotal != uint(len(cands)) {
+		t.Errorf("candidateTotal = %d, want sidecar candidate_total %d", gotTotal, len(cands))
 	}
 }
 

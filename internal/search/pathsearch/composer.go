@@ -401,13 +401,20 @@ func (c *Composer) candidateBudget(limit, offset uint) uint {
 }
 
 // candidates dials L3 for the page's candidate budget and returns the decoded
-// info_hash set, in L3's returned (recall) order.
+// info_hash set, in L3's returned (recall) order, plus the sidecar's
+// candidate_total: the FULL count of torrent-docs matching the gram query
+// before any limit/truncation (the sidecar runs an unconditional Count
+// collector per request — pathsearch/query.rs — so this is already paid for
+// and was previously discarded). candidate_total is an UPPER bound on the
+// true match total (the gram conjunction is a superset of substring matches;
+// refine drops the false positives), which makes it the honest TotalCount
+// estimate whenever the decode window is budget-truncated. (#10 follow-up)
 func (c *Composer) candidates(
 	ctx context.Context,
 	f Filters,
 	limit, offset uint,
 	sorts []*pb.SortBy,
-) ([]protocol.ID, error) {
+) ([]protocol.ID, uint, error) {
 	budget := c.candidateBudget(limit, offset)
 
 	resp, err := c.l3.PathCandidates(ctx, &pb.PathCandidatesRequest{
@@ -416,7 +423,7 @@ func (c *Composer) candidates(
 		Sort:  sorts,
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Hard-truncate the candidate set to `budget` BEFORE the PG IN(...) requery and
@@ -458,7 +465,7 @@ func (c *Composer) candidates(
 		out = append(out, id)
 	}
 
-	return out, nil
+	return out, uint(resp.GetCandidateTotal()), nil
 }
 
 // QueryOptions carries the PostgreSQL option sets the chunked refine needs. The
@@ -867,7 +874,7 @@ func (c *Composer) TorrentContent(
 	ctx, cancel := context.WithTimeout(ctx, c.routeTimeout)
 	defer cancel()
 
-	ids, err := c.candidates(ctx, f, limit, offset, sorts)
+	ids, candidateTotal, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
 		c.metrics.IncRoute(RouteError)
 
@@ -1116,15 +1123,25 @@ func (c *Composer) TorrentContent(
 
 	c.metrics.IncRoute(RouteServed)
 
+	// TotalCount (#10 follow-up): when the decode window covered EVERY candidate
+	// (candidateTotal <= len(ids)), len(refined) IS the complete exact-refined
+	// match count — serve it as before. When the window was budget-truncated,
+	// len(refined) is a badly-low lower bound (a "1080p" search with millions of
+	// matches used to show ~200); the sidecar's candidate_total — the full
+	// Tantivy Count it already computes per request — is a far closer UPPER
+	// bound (gram-conjunction superset; refine only removes false positives), so
+	// serve that instead. TotalCountIsEstimate stays true in both cases and the
+	// web UI renders the `~`-prefixed rounded form. We still deliberately ignore
+	// the client's totalCount flag — an exact global count is not available on
+	// the L3 route.
+	totalCount := uint(len(refined))
+	if candidateTotal > uint(len(ids)) && candidateTotal > totalCount {
+		totalCount = candidateTotal
+	}
+
 	return search.TorrentContentResult{
-		Items: page,
-		// TotalCount is an honest CAPPED estimate: it counts the refined matches
-		// within the candidate budget, NOT the global match total (which would
-		// require scanning all of PG). TotalCountIsEstimate stays true so callers
-		// treat it as a lower-bound-ish hint, not an exact count. We deliberately
-		// ignore the client's totalCount flag here — an exact count is not available
-		// on the L3 route. (#10)
-		TotalCount:           uint(len(refined)),
+		Items:                page,
+		TotalCount:           totalCount,
 		TotalCountIsEstimate: true,
 		// HasNextPage is computed from rows actually consumed by THIS page, not from
 		// offset+limit: with limit==0 paginate returns ALL remaining rows, so there
@@ -1188,7 +1205,9 @@ func (c *Composer) CollapsePaths(
 	ctx, cancel := context.WithTimeout(ctx, c.routeTimeout)
 	defer cancel()
 
-	ids, err := c.candidates(ctx, f, limit, offset, sorts)
+	// CollapsePaths groups the refined window; a global candidate_total has no
+	// per-group meaning here, so it is intentionally unused.
+	ids, _, err := c.candidates(ctx, f, limit, offset, sorts)
 	if err != nil {
 		c.metrics.IncRoute(RouteError)
 
