@@ -3,7 +3,9 @@ package router
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
@@ -53,10 +55,61 @@ func (f *fakeTantivy) Search(_ context.Context, req *pb.SearchRequest) (*pb.Sear
 
 type spyObserver struct {
 	comparisons []shadow.Comparison
+	drops       int
 }
 
 func (s *spyObserver) Observe(c shadow.Comparison) {
 	s.comparisons = append(s.comparisons, c)
+}
+
+func (s *spyObserver) IncDropped() {
+	s.drops++
+}
+
+type blockingTantivy struct {
+	started chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func newBlockingTantivy() *blockingTantivy {
+	return &blockingTantivy{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingTantivy) Search(ctx context.Context, _ *pb.SearchRequest) (*pb.SearchResponse, error) {
+	f.calls.Add(1)
+
+	select {
+	case f.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-f.release:
+		return &pb.SearchResponse{}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type countingObserver struct {
+	drops       atomic.Int32
+	comparisons chan shadow.Comparison
+}
+
+func newCountingObserver() *countingObserver {
+	return &countingObserver{comparisons: make(chan shadow.Comparison, 1)}
+}
+
+func (o *countingObserver) Observe(c shadow.Comparison) {
+	o.comparisons <- c
+}
+
+func (o *countingObserver) IncDropped() {
+	o.drops.Add(1)
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -130,6 +183,34 @@ func TestPostgresModeNeverShadows(t *testing.T) {
 	assert.Equal(t, pg.result, result, "postgres mode returns the PG result unchanged")
 	assert.Equal(t, 0, tv.calls, "tantivy must not be queried in postgres mode")
 	assert.Empty(t, obs.comparisons, "no comparison in postgres mode")
+}
+
+func TestPostgresModeDoesNotInvokeRunHook(t *testing.T) {
+	t.Parallel()
+
+	pg := &fakePGSearch{result: pgResult(pgItem(0xAA, "1"))}
+	tv := &fakeTantivy{resp: &pb.SearchResponse{}}
+	obs := &spyObserver{}
+	r := New(pg, tv, obs, nil, Config{
+		Mode:                ModePostgres,
+		SampleRate:          1,
+		ShadowMaxConcurrent: 1,
+	})
+	r.sample = func() float64 { return 0 }
+
+	runCalled := false
+	r.run = func(func()) {
+		runCalled = true
+	}
+
+	result, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
+	require.NoError(t, err)
+
+	assert.Equal(t, pg.result, result, "postgres mode returns the PG result unchanged")
+	assert.False(t, runCalled, "disabled/postgres mode must not spawn a shadow goroutine")
+	assert.Equal(t, 0, tv.calls, "tantivy must not be queried in postgres mode")
+	assert.Empty(t, obs.comparisons, "no comparison in postgres mode")
+	assert.Equal(t, 0, obs.drops, "disabled/postgres mode must not record drops")
 }
 
 func TestShadowModeServesPGAndObserves(t *testing.T) {
@@ -238,6 +319,54 @@ func TestCanaryModeStillShadows(t *testing.T) {
 	assert.Equal(t, pg.result, result)
 	assert.Equal(t, 1, tv.calls)
 	assert.Len(t, obs.comparisons, 1)
+}
+
+func TestShadowRunnerDropsWhenMaxConcurrentSaturated(t *testing.T) {
+	t.Parallel()
+
+	pg := &fakePGSearch{result: pgResult(pgItem(0xAA, "1"))}
+	tv := newBlockingTantivy()
+	obs := newCountingObserver()
+	r := New(pg, tv, obs, nil, Config{
+		Mode:                ModeShadow,
+		SampleRate:          1,
+		ShadowTimeout:       time.Second,
+		ShadowMaxConcurrent: 1,
+	})
+	r.sample = func() float64 { return 0 }
+
+	_, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
+	require.NoError(t, err)
+
+	select {
+	case <-tv.started:
+	case <-time.After(time.Second):
+		t.Fatal("first shadow comparison did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, callErr := r.TorrentContent(context.Background(), query.SearchString("matrix"))
+		secondDone <- callErr
+	}()
+
+	select {
+	case callErr := <-secondDone:
+		require.NoError(t, callErr)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("second sampled query blocked instead of dropping the shadow comparison")
+	}
+
+	assert.Equal(t, int32(1), tv.calls.Load(), "saturated runner must not start a second Tantivy query")
+	assert.Equal(t, int32(1), obs.drops.Load(), "saturated runner must count one dropped comparison")
+
+	close(tv.release)
+
+	select {
+	case <-obs.comparisons:
+	case <-time.After(time.Second):
+		t.Fatal("first admitted shadow comparison did not finish")
+	}
 }
 
 func TestShadowSkipsFilteredQueries(t *testing.T) {

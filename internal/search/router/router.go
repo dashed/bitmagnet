@@ -23,6 +23,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 )
 
 // tantivySearcher is the slice of the Tantivy client the router depends on.
@@ -31,9 +32,10 @@ type tantivySearcher interface {
 	Search(ctx context.Context, req *pb.SearchRequest) (*pb.SearchResponse, error)
 }
 
-// observer records a single shadow comparison. *shadow.Metrics satisfies it.
+// observer records shadow comparison outcomes. *shadow.Metrics satisfies it.
 type observer interface {
 	Observe(shadow.Comparison)
+	IncDropped()
 }
 
 var (
@@ -70,6 +72,8 @@ func New(
 	logger *zap.SugaredLogger,
 	cfg Config,
 ) *Router {
+	sem := semaphore.NewWeighted(int64(cfg.shadowMaxConcurrent()))
+
 	return &Router{
 		Search:  pg,
 		tantivy: client,
@@ -78,7 +82,20 @@ func New(
 		logger:  logger,
 		cfg:     cfg,
 		sample:  rand.Float64,
-		run:     func(f func()) { go f() },
+		run: func(f func()) {
+			if !sem.TryAcquire(1) {
+				if metrics != nil {
+					metrics.IncDropped()
+				}
+
+				return
+			}
+
+			go func() {
+				defer sem.Release(1)
+				f()
+			}()
+		},
 	}
 }
 
@@ -171,7 +188,9 @@ func (r *Router) runShadow(
 	tantivyLatency := time.Since(start)
 
 	c := shadow.Compare(extractPGIDs(pgResult), extractTantivyIDs(resp), pgLatency, tantivyLatency)
-	r.metrics.Observe(c)
+	if r.metrics != nil {
+		r.metrics.Observe(c)
+	}
 	shadow.LogComparison(r.logger, req.GetQuery(), c, r.cfg.LogDiscrepancies)
 }
 

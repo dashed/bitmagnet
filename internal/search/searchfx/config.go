@@ -12,8 +12,9 @@ import (
 // Config is the application-level "search" config section binding the Tantivy
 // sidecar client + the search router. It is registered under the "search" key
 // (so env vars are SEARCH_*, e.g. SEARCH_ENABLED, SEARCH_ADDRESS,
-// SEARCH_SAMPLE_RATE). It is disabled by default: with Enabled=false the app
-// behaves exactly as before (router passes through to Postgres, no dual-write).
+// SEARCH_SAMPLE_RATE, SEARCH_SHADOW_MAX_CONCURRENT). It is disabled by default:
+// with Enabled=false the app behaves exactly as before (router passes through to
+// Postgres, no dual-write).
 type Config struct {
 	// Enabled is the master switch. When false the Tantivy client is not built,
 	// the router serves Postgres only, and the dual-write is a no-op.
@@ -25,7 +26,9 @@ type Config struct {
 	// tantivy. Ignored (forced to postgres) when Enabled is false.
 	Engine string `validate:"omitempty,oneof=postgres shadow canary tantivy"`
 	// SampleRate in [0,1] is the fraction of queries shadow-compared. Out-of-range
-	// values are handled gracefully by the router (>=1 always, <=0 never).
+	// values are handled gracefully by the router (>=1 always, <=0 never). Keep
+	// this well below 1 in production; ShadowMaxConcurrent drops are expected
+	// back-pressure, not errors, when sampled shadow work exceeds capacity.
 	SampleRate float64
 	// CanaryPercent in [0,100] is the canary's Tantivy-serving share (Phase 6).
 	CanaryPercent float64
@@ -35,6 +38,10 @@ type Config struct {
 	BatchTimeout time.Duration
 	// ShadowTimeout bounds a background shadow comparison.
 	ShadowTimeout time.Duration
+	// ShadowMaxConcurrent bounds in-flight shadow comparisons
+	// (SEARCH_SHADOW_MAX_CONCURRENT). Default 4. When saturated, sampled
+	// comparisons are dropped without blocking the serving path.
+	ShadowMaxConcurrent int
 	// LogDiscrepancies logs each shadow comparison the comparator flags.
 	LogDiscrepancies bool
 
@@ -154,15 +161,16 @@ type Config struct {
 // NewDefaultConfig returns the safe, disabled-by-default search config.
 func NewDefaultConfig() Config {
 	return Config{
-		Enabled:          false,
-		Address:          "unix:///run/bitmagnet/search.sock",
-		Engine:           string(router.ModePostgres),
-		SampleRate:       1,
-		CanaryPercent:    0,
-		Timeout:          5 * time.Second,
-		BatchTimeout:     0,
-		ShadowTimeout:    5 * time.Second,
-		LogDiscrepancies: true,
+		Enabled:             false,
+		Address:             "unix:///run/bitmagnet/search.sock",
+		Engine:              string(router.ModePostgres),
+		SampleRate:          1,
+		CanaryPercent:       0,
+		Timeout:             5 * time.Second,
+		BatchTimeout:        0,
+		ShadowTimeout:       5 * time.Second,
+		ShadowMaxConcurrent: 4,
+		LogDiscrepancies:    true,
 
 		// L2 filesearch — client construction defaults false (feature dark).
 		FileSearchEnabled: false,
@@ -254,10 +262,11 @@ func (c Config) routerConfig() router.Config {
 	}
 
 	return router.Config{
-		Mode:             mode,
-		SampleRate:       c.SampleRate,
-		CanaryPercent:    c.CanaryPercent,
-		ShadowTimeout:    c.ShadowTimeout,
-		LogDiscrepancies: c.LogDiscrepancies,
+		Mode:                mode,
+		SampleRate:          c.SampleRate,
+		CanaryPercent:       c.CanaryPercent,
+		ShadowTimeout:       c.ShadowTimeout,
+		ShadowMaxConcurrent: c.ShadowMaxConcurrent,
+		LogDiscrepancies:    c.LogDiscrepancies,
 	}
 }

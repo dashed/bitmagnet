@@ -51,6 +51,17 @@ func TestMetricsObserve(t *testing.T) {
 	assert.Equal(t, 2, testutil.CollectAndCount(m.jaccard))
 }
 
+func TestMetricsIncDropped(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+
+	m.IncDropped()
+	m.IncDropped()
+
+	assert.InDelta(t, 2.0, testutil.ToFloat64(m.droppedTotal), epsilon)
+}
+
 func TestMetricsSetTantivyDocCount(t *testing.T) {
 	t.Parallel()
 
@@ -78,6 +89,7 @@ func TestNewResultRegisters(t *testing.T) {
 		r.Top1MatchCollector,
 		r.ResultCountDeltaCollector,
 		r.ComparisonsTotalCollector,
+		r.DroppedTotalCollector,
 		r.DocCountCollector,
 	}
 	reg := prometheus.NewRegistry()

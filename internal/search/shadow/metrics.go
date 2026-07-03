@@ -15,7 +15,7 @@ const (
 // It is a thin facade: the search router calls Observe for each comparison and
 // SetTantivyDocCount from the Tantivy health check. The underlying collectors
 // are registered with Prometheus via the fx "prometheus_collectors" group — see
-// New and Result.
+// New and Result. It is nil-safe: methods tolerate a nil receiver.
 type Metrics struct {
 	jaccard          *prometheus.HistogramVec
 	rbo              prometheus.Histogram
@@ -23,6 +23,7 @@ type Metrics struct {
 	top1Match        *prometheus.CounterVec
 	resultCountDelta prometheus.Histogram
 	comparisonsTotal prometheus.Counter
+	droppedTotal     prometheus.Counter
 	tantivyDocCount  prometheus.Gauge
 }
 
@@ -71,6 +72,12 @@ func NewMetrics() *Metrics {
 			Name:      "comparisons_total",
 			Help:      "Total number of shadow-mode comparisons performed.",
 		}),
+		droppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystemShadow,
+			Name:      "dropped_total",
+			Help:      "Total number of sampled shadow-mode comparisons dropped because the shadow concurrency limit was saturated. Drops are expected back-pressure, not errors.",
+		}),
 		tantivyDocCount: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: subsystemTantivy,
@@ -82,6 +89,10 @@ func NewMetrics() *Metrics {
 
 // Observe records a single comparison across all relevant collectors.
 func (m *Metrics) Observe(c Comparison) {
+	if m == nil {
+		return
+	}
+
 	m.comparisonsTotal.Inc()
 	m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
 	m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
@@ -96,15 +107,33 @@ func (m *Metrics) Observe(c Comparison) {
 	m.resultCountDelta.Observe(float64(c.PGCount - c.TantivyCount))
 }
 
+// IncDropped records one sampled shadow comparison dropped because the
+// concurrency limiter was saturated. nil-safe.
+func (m *Metrics) IncDropped() {
+	if m == nil {
+		return
+	}
+
+	m.droppedTotal.Inc()
+}
+
 // SetTantivyDocCount records the current Tantivy index document count. It is
 // expected to be called from the Tantivy health check.
 func (m *Metrics) SetTantivyDocCount(count int64) {
+	if m == nil {
+		return
+	}
+
 	m.tantivyDocCount.Set(float64(count))
 }
 
 // Collectors returns all Prometheus collectors owned by the metrics, for
 // registration with a registry.
 func (m *Metrics) Collectors() []prometheus.Collector {
+	if m == nil {
+		return nil
+	}
+
 	return []prometheus.Collector{
 		m.jaccard,
 		m.rbo,
@@ -112,6 +141,7 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 		m.top1Match,
 		m.resultCountDelta,
 		m.comparisonsTotal,
+		m.droppedTotal,
 		m.tantivyDocCount,
 	}
 }
@@ -138,6 +168,7 @@ type Result struct {
 	Top1MatchCollector        prometheus.Collector `group:"prometheus_collectors"`
 	ResultCountDeltaCollector prometheus.Collector `group:"prometheus_collectors"`
 	ComparisonsTotalCollector prometheus.Collector `group:"prometheus_collectors"`
+	DroppedTotalCollector     prometheus.Collector `group:"prometheus_collectors"`
 	DocCountCollector         prometheus.Collector `group:"prometheus_collectors"`
 }
 
@@ -155,6 +186,7 @@ func New() Result {
 		Top1MatchCollector:        m.top1Match,
 		ResultCountDeltaCollector: m.resultCountDelta,
 		ComparisonsTotalCollector: m.comparisonsTotal,
+		DroppedTotalCollector:     m.droppedTotal,
 		DocCountCollector:         m.tantivyDocCount,
 	}
 }

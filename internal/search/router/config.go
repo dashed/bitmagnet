@@ -41,7 +41,9 @@ type Config struct {
 	// ModePostgres (safe passthrough) by the router.
 	Mode Mode
 	// SampleRate in [0,1] is the fraction of queries shadow-compared against
-	// Tantivy. <= 0 disables shadowing; >= 1 shadows every query.
+	// Tantivy. <= 0 disables shadowing; >= 1 shadows every query. In production
+	// this should stay well below 1; saturated shadow comparisons are dropped by
+	// ShadowMaxConcurrent as expected back-pressure, not queued.
 	SampleRate float64
 	// CanaryPercent in [0,100] is the percentage of traffic the canary routes to
 	// the Tantivy-serving path (sticky per query). Unused until the Phase-6
@@ -50,6 +52,10 @@ type Config struct {
 	// ShadowTimeout bounds the background Tantivy query + comparison so a slow or
 	// stuck sidecar can never leak goroutines. <= 0 falls back to defaultShadowTimeout.
 	ShadowTimeout time.Duration
+	// ShadowMaxConcurrent bounds in-flight shadow comparisons. <= 0 falls back to
+	// defaultShadowMaxConcurrent. When full, sampled comparisons are dropped
+	// without blocking the serving path.
+	ShadowMaxConcurrent int
 	// LogDiscrepancies enables a structured log line for each shadow comparison
 	// the comparator flags as a discrepancy (see shadow.LogComparison).
 	LogDiscrepancies bool
@@ -59,6 +65,10 @@ type Config struct {
 // is unset.
 const defaultShadowTimeout = 5 * time.Second
 
+// defaultShadowMaxConcurrent bounds background shadow comparisons when
+// Config.ShadowMaxConcurrent is unset.
+const defaultShadowMaxConcurrent = 4
+
 // shadowTimeout returns the configured timeout or the default when unset.
 func (c Config) shadowTimeout() time.Duration {
 	if c.ShadowTimeout <= 0 {
@@ -66,4 +76,14 @@ func (c Config) shadowTimeout() time.Duration {
 	}
 
 	return c.ShadowTimeout
+}
+
+// shadowMaxConcurrent returns the configured concurrency limit or the default
+// when unset.
+func (c Config) shadowMaxConcurrent() int {
+	if c.ShadowMaxConcurrent <= 0 {
+		return defaultShadowMaxConcurrent
+	}
+
+	return c.ShadowMaxConcurrent
 }
