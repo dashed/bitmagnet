@@ -7,6 +7,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/httpserver"
 	"github.com/bitmagnet-io/bitmagnet/webui"
+	webuireact "github.com/bitmagnet-io/bitmagnet/webui-react"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -54,6 +55,14 @@ func (b *builder) Apply(e *gin.Engine) error {
 	e.GET("/", func(c *gin.Context) {
 		c.Redirect(301, "/webui")
 	})
+
+	if webuireact.Enabled {
+		appHandler := gin.WrapH(webuireact.Handler(webuireact.FS))
+		e.GET("/app", appHandler)
+		e.HEAD("/app", appHandler)
+		e.GET("/app/*filepath", appHandler)
+		e.HEAD("/app/*filepath", appHandler)
+	}
 
 	return nil
 }

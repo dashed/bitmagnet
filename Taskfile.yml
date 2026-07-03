@@ -122,6 +122,22 @@ tasks:
     cmds:
       - npm run build
 
+  build-webui-react:
+    dir: ./webui-react
+    cmds:
+      # Include these assets in the Go binary with: go build -tags webuireact ./...
+      - pnpm build
+
+  # Tagged Go build INCLUDING the React app. go:embed all:dist errors on a
+  # fresh checkout (webui-react/dist is gitignored), so the Vite build MUST
+  # run first — this task encodes that ordering; CI must use it (or replicate
+  # the deps).
+  build-with-webui-react:
+    deps:
+      - build-webui-react
+    cmds:
+      - go build -tags webuireact -ldflags "-X github.com/bitmagnet-io/bitmagnet/internal/version.GitTag=$(git describe --tags --always --dirty)"
+
   build-docsite:
     dir: ./bitmagnet.io
     cmds:
