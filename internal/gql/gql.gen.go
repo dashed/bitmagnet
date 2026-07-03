@@ -331,7 +331,17 @@ type ComplexityRoot struct {
 		VideoSource     func(childComplexity int) int
 	}
 
+	TorrentContentCollapsePathsResult struct {
+		Groups func(childComplexity int) int
+	}
+
+	TorrentContentPathGroup struct {
+		InfoHashes func(childComplexity int) int
+		Path       func(childComplexity int) int
+	}
+
 	TorrentContentQuery struct {
+		CollapsePaths func(childComplexity int, input gqlmodel.TorrentContentCollapsePathsInput) int
 		FileSearch    func(childComplexity int, input gqlmodel.FileSearchInput) int
 		PathTypeahead func(childComplexity int, input gqlmodel.PathTypeaheadInput) int
 		Search        func(childComplexity int, input gqlmodel.TorrentContentSearchQueryInput) int
@@ -1740,6 +1750,39 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.TorrentContentAggregations.VideoSource(childComplexity), true
 
+	case "TorrentContentCollapsePathsResult.groups":
+		if e.complexity.TorrentContentCollapsePathsResult.Groups == nil {
+			break
+		}
+
+		return e.complexity.TorrentContentCollapsePathsResult.Groups(childComplexity), true
+
+	case "TorrentContentPathGroup.infoHashes":
+		if e.complexity.TorrentContentPathGroup.InfoHashes == nil {
+			break
+		}
+
+		return e.complexity.TorrentContentPathGroup.InfoHashes(childComplexity), true
+
+	case "TorrentContentPathGroup.path":
+		if e.complexity.TorrentContentPathGroup.Path == nil {
+			break
+		}
+
+		return e.complexity.TorrentContentPathGroup.Path(childComplexity), true
+
+	case "TorrentContentQuery.collapsePaths":
+		if e.complexity.TorrentContentQuery.CollapsePaths == nil {
+			break
+		}
+
+		args, err := ec.field_TorrentContentQuery_collapsePaths_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.TorrentContentQuery.CollapsePaths(childComplexity, args["input"].(gqlmodel.TorrentContentCollapsePathsInput)), true
+
 	case "TorrentContentQuery.fileSearch":
 		if e.complexity.TorrentContentQuery.FileSearch == nil {
 			break
@@ -2302,6 +2345,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputReleaseYearFacetInput,
 		ec.unmarshalInputSizeRangeInput,
 		ec.unmarshalInputSuggestTagsQueryInput,
+		ec.unmarshalInputTorrentContentCollapsePathsInput,
 		ec.unmarshalInputTorrentContentFacetsInput,
 		ec.unmarshalInputTorrentContentOrderByInput,
 		ec.unmarshalInputTorrentContentSearchQueryInput,
@@ -2870,6 +2914,7 @@ type TorrentContentQuery {
   search(input: TorrentContentSearchQueryInput!): TorrentContentSearchResult!
   fileSearch(input: FileSearchInput!): FileSearchResult!
   pathTypeahead(input: PathTypeaheadInput!): PathTypeaheadResult!
+  collapsePaths(input: TorrentContentCollapsePathsInput!): TorrentContentCollapsePathsResult!
 }
 
 type Worker {
@@ -3193,6 +3238,31 @@ input TorrentContentOrderByInput {
   field: TorrentContentOrderByField!
   descending: Boolean
 }
+
+"""
+TorrentContentCollapsePathsInput drives the collapse:path query: the L3-routed
+grouping of matching torrents by their distinct matched file path. It carries the
+raw path free-text only (no facets in v1).
+"""
+input TorrentContentCollapsePathsInput {
+  queryString: String!
+  limit: Int
+  offset: Int
+}
+
+"""
+TorrentContentPathGroup is one distinct matched file path and the info hashes of
+the candidate torrents that contain a file at that path. v1 is UNHYDRATED: it
+returns raw info hashes only; clients hydrate via the existing search-by-infoHashes.
+"""
+type TorrentContentPathGroup {
+  path: String!
+  infoHashes: [Hash20!]!
+}
+
+type TorrentContentCollapsePathsResult {
+  groups: [TorrentContentPathGroup!]!
+}
 `, BuiltIn: false},
 	{Name: "../../graphql/schema/torrent_files.graphqls", Input: `input TorrentFilesQueryInput {
   limit: Int
@@ -3360,6 +3430,34 @@ func (ec *executionContext) field_QueueQuery_metrics_argsInput(
 	}
 
 	var zeroVal gen.QueueMetricsQueryInput
+	return zeroVal, nil
+}
+
+func (ec *executionContext) field_TorrentContentQuery_collapsePaths_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := ec.field_TorrentContentQuery_collapsePaths_argsInput(ctx, rawArgs)
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg0
+	return args, nil
+}
+func (ec *executionContext) field_TorrentContentQuery_collapsePaths_argsInput(
+	ctx context.Context,
+	rawArgs map[string]any,
+) (gqlmodel.TorrentContentCollapsePathsInput, error) {
+	if _, ok := rawArgs["input"]; !ok {
+		var zeroVal gqlmodel.TorrentContentCollapsePathsInput
+		return zeroVal, nil
+	}
+
+	ctx = graphql.WithPathContext(ctx, graphql.NewPathWithField("input"))
+	if tmp, ok := rawArgs["input"]; ok {
+		return ec.unmarshalNTorrentContentCollapsePathsInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentCollapsePathsInput(ctx, tmp)
+	}
+
+	var zeroVal gqlmodel.TorrentContentCollapsePathsInput
 	return zeroVal, nil
 }
 
@@ -7307,6 +7405,8 @@ func (ec *executionContext) fieldContext_Query_torrentContent(_ context.Context,
 				return ec.fieldContext_TorrentContentQuery_fileSearch(ctx, field)
 			case "pathTypeahead":
 				return ec.fieldContext_TorrentContentQuery_pathTypeahead(ctx, field)
+			case "collapsePaths":
+				return ec.fieldContext_TorrentContentQuery_collapsePaths(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type TorrentContentQuery", field.Name)
 		},
@@ -11827,6 +11927,144 @@ func (ec *executionContext) fieldContext_TorrentContentAggregations_videoSource(
 	return fc, nil
 }
 
+func (ec *executionContext) _TorrentContentCollapsePathsResult_groups(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentCollapsePathsResult) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContentCollapsePathsResult_groups(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Groups, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]gqlmodel.TorrentContentPathGroup)
+	fc.Result = res
+	return ec.marshalNTorrentContentPathGroup2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentPathGroupᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContentCollapsePathsResult_groups(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContentCollapsePathsResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "path":
+				return ec.fieldContext_TorrentContentPathGroup_path(ctx, field)
+			case "infoHashes":
+				return ec.fieldContext_TorrentContentPathGroup_infoHashes(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type TorrentContentPathGroup", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContentPathGroup_path(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentPathGroup) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContentPathGroup_path(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Path, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(string)
+	fc.Result = res
+	return ec.marshalNString2string(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContentPathGroup_path(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContentPathGroup",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContentPathGroup_infoHashes(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentPathGroup) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContentPathGroup_infoHashes(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.InfoHashes, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]protocol.ID)
+	fc.Result = res
+	return ec.marshalNHash202ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋprotocolᚐIDᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContentPathGroup_infoHashes(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContentPathGroup",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Hash20 does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _TorrentContentQuery_search(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentQuery) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_TorrentContentQuery_search(ctx, field)
 	if err != nil {
@@ -12010,6 +12248,65 @@ func (ec *executionContext) fieldContext_TorrentContentQuery_pathTypeahead(ctx c
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_TorrentContentQuery_pathTypeahead_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContentQuery_collapsePaths(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentQuery) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContentQuery_collapsePaths(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.CollapsePaths(ctx, fc.Args["input"].(gqlmodel.TorrentContentCollapsePathsInput))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(gqlmodel.TorrentContentCollapsePathsResult)
+	fc.Result = res
+	return ec.marshalNTorrentContentCollapsePathsResult2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentCollapsePathsResult(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContentQuery_collapsePaths(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContentQuery",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "groups":
+				return ec.fieldContext_TorrentContentCollapsePathsResult_groups(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type TorrentContentCollapsePathsResult", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_TorrentContentQuery_collapsePaths_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -17771,6 +18068,47 @@ func (ec *executionContext) unmarshalInputSuggestTagsQueryInput(ctx context.Cont
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputTorrentContentCollapsePathsInput(ctx context.Context, obj any) (gqlmodel.TorrentContentCollapsePathsInput, error) {
+	var it gqlmodel.TorrentContentCollapsePathsInput
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"queryString", "limit", "offset"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "queryString":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("queryString"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.QueryString = data
+		case "limit":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("limit"))
+			data, err := ec.unmarshalOInt2uint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Limit = data
+		case "offset":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("offset"))
+			data, err := ec.unmarshalOInt2uint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Offset = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputTorrentContentFacetsInput(ctx context.Context, obj any) (gen.TorrentContentFacetsInput, error) {
 	var it gen.TorrentContentFacetsInput
 	asMap := map[string]any{}
@@ -20527,6 +20865,89 @@ func (ec *executionContext) _TorrentContentAggregations(ctx context.Context, sel
 	return out
 }
 
+var torrentContentCollapsePathsResultImplementors = []string{"TorrentContentCollapsePathsResult"}
+
+func (ec *executionContext) _TorrentContentCollapsePathsResult(ctx context.Context, sel ast.SelectionSet, obj *gqlmodel.TorrentContentCollapsePathsResult) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, torrentContentCollapsePathsResultImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TorrentContentCollapsePathsResult")
+		case "groups":
+			out.Values[i] = ec._TorrentContentCollapsePathsResult_groups(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var torrentContentPathGroupImplementors = []string{"TorrentContentPathGroup"}
+
+func (ec *executionContext) _TorrentContentPathGroup(ctx context.Context, sel ast.SelectionSet, obj *gqlmodel.TorrentContentPathGroup) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, torrentContentPathGroupImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("TorrentContentPathGroup")
+		case "path":
+			out.Values[i] = ec._TorrentContentPathGroup_path(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "infoHashes":
+			out.Values[i] = ec._TorrentContentPathGroup_infoHashes(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var torrentContentQueryImplementors = []string{"TorrentContentQuery"}
 
 func (ec *executionContext) _TorrentContentQuery(ctx context.Context, sel ast.SelectionSet, obj *gqlmodel.TorrentContentQuery) graphql.Marshaler {
@@ -20620,6 +21041,42 @@ func (ec *executionContext) _TorrentContentQuery(ctx context.Context, sel ast.Se
 					}
 				}()
 				res = ec._TorrentContentQuery_pathTypeahead(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "collapsePaths":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._TorrentContentQuery_collapsePaths(ctx, field, obj)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -23094,6 +23551,15 @@ func (ec *executionContext) marshalNTorrentContentAggregations2githubᚗcomᚋbi
 	return ec._TorrentContentAggregations(ctx, sel, &v)
 }
 
+func (ec *executionContext) unmarshalNTorrentContentCollapsePathsInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentCollapsePathsInput(ctx context.Context, v any) (gqlmodel.TorrentContentCollapsePathsInput, error) {
+	res, err := ec.unmarshalInputTorrentContentCollapsePathsInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNTorrentContentCollapsePathsResult2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentCollapsePathsResult(ctx context.Context, sel ast.SelectionSet, v gqlmodel.TorrentContentCollapsePathsResult) graphql.Marshaler {
+	return ec._TorrentContentCollapsePathsResult(ctx, sel, &v)
+}
+
 func (ec *executionContext) unmarshalNTorrentContentOrderByField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐTorrentContentOrderByField(ctx context.Context, v any) (gen.TorrentContentOrderByField, error) {
 	var res gen.TorrentContentOrderByField
 	err := res.UnmarshalGQL(v)
@@ -23107,6 +23573,54 @@ func (ec *executionContext) marshalNTorrentContentOrderByField2githubᚗcomᚋbi
 func (ec *executionContext) unmarshalNTorrentContentOrderByInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐTorrentContentOrderByInput(ctx context.Context, v any) (gen.TorrentContentOrderByInput, error) {
 	res, err := ec.unmarshalInputTorrentContentOrderByInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNTorrentContentPathGroup2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentPathGroup(ctx context.Context, sel ast.SelectionSet, v gqlmodel.TorrentContentPathGroup) graphql.Marshaler {
+	return ec._TorrentContentPathGroup(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNTorrentContentPathGroup2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentPathGroupᚄ(ctx context.Context, sel ast.SelectionSet, v []gqlmodel.TorrentContentPathGroup) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNTorrentContentPathGroup2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentPathGroup(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) marshalNTorrentContentQuery2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐTorrentContentQuery(ctx context.Context, sel ast.SelectionSet, v gqlmodel.TorrentContentQuery) graphql.Marshaler {
