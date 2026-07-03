@@ -40,7 +40,8 @@
 //! Flag conventions:
 //! - `STRING` — indexed, untokenized (exact match), for enum/keyword values.
 //! - `TEXT` — built here by hand so the tier fields use the bitmagnet
-//!   tokenizer with positions (phrase queries).
+//!   tokenizer, with positions only on the title/name tier that phrase-class
+//!   queries can target.
 //! - `STORED` — value is retrievable from the doc store.
 //! - `FAST` — value lives in the columnar store (sorting / faceting / filter).
 
@@ -136,12 +137,18 @@ pub const FIELD_NAMES: [&str; 28] = [
 pub fn build_schema() -> Schema {
     let mut builder = Schema::builder();
 
-    // Tokenized relevance tiers: bitmagnet tokenizer + positions (for phrase
-    // queries), indexed only — never stored or fast.
-    let tier = TextOptions::default().set_indexing_options(
+    // Tokenized relevance tiers: bitmagnet tokenizer, indexed only — never
+    // stored or fast. Positions are retained only where phrase/prefix queries
+    // can target; PS-MB1 found lower-tier positions are ~83% dead weight.
+    let tier_with_positions = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
             .set_tokenizer(TOKENIZER_NAME)
             .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+    let tier_without_positions = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(TOKENIZER_NAME)
+            .set_index_option(IndexRecordOption::WithFreqs),
     );
 
     // Exact keyword fields that are also faceted/filtered: indexed (exact),
@@ -172,10 +179,18 @@ pub fn build_schema() -> Schema {
     builder.add_text_field(name::ORIGINAL_TITLE, STORED);
 
     // --- Relevance tiers --------------------------------------------------
-    builder.add_text_field(name::TEXT_A, tier.clone());
-    builder.add_text_field(name::TEXT_B, tier.clone());
-    builder.add_text_field(name::TEXT_C, tier.clone());
-    builder.add_text_field(name::TEXT_D, tier);
+    // text_a keeps positions: phrase/prefix queries are constrained to this
+    // title/name tier, so Tantivy can safely run phrase-class queries here.
+    builder.add_text_field(name::TEXT_A, tier_with_positions);
+    // text_b drops positions: phrase/prefix cannot target it, and PS-MB1 found
+    // lower-tier positions are ~83% dead weight.
+    builder.add_text_field(name::TEXT_B, tier_without_positions.clone());
+    // text_c drops positions: phrase/prefix cannot target it, and PS-MB1 found
+    // lower-tier positions are ~83% dead weight.
+    builder.add_text_field(name::TEXT_C, tier_without_positions.clone());
+    // text_d drops positions: phrase/prefix cannot target it, and PS-MB1 found
+    // lower-tier positions are ~83% dead weight.
+    builder.add_text_field(name::TEXT_D, tier_without_positions);
 
     // --- Keyword facets / filters (exact value, stored + fast) ------------
     builder.add_text_field(name::CONTENT_TYPE, keyword_facet.clone());
@@ -301,6 +316,7 @@ impl Fields {
 #[cfg(test)]
 mod tests {
     use super::{build_schema, Fields, FIELD_NAMES};
+    use tantivy::schema::IndexRecordOption;
 
     #[test]
     fn schema_contains_all_mapped_fields() {
@@ -328,5 +344,34 @@ mod tests {
             .map(|(_, b)| *b)
             .collect();
         assert_eq!(boosts, vec![4.0, 2.0, 1.5, 0.5]);
+    }
+
+    #[test]
+    fn text_tier_index_options_keep_positions_only_on_text_a() {
+        let schema = build_schema();
+        let fields = Fields::from_schema(&schema).unwrap();
+        let index_option = |field| {
+            schema
+                .get_field_entry(field)
+                .field_type()
+                .get_index_record_option()
+        };
+
+        assert_eq!(
+            index_option(fields.text_a),
+            Some(IndexRecordOption::WithFreqsAndPositions)
+        );
+        assert_eq!(
+            index_option(fields.text_b),
+            Some(IndexRecordOption::WithFreqs)
+        );
+        assert_eq!(
+            index_option(fields.text_c),
+            Some(IndexRecordOption::WithFreqs)
+        );
+        assert_eq!(
+            index_option(fields.text_d),
+            Some(IndexRecordOption::WithFreqs)
+        );
     }
 }

@@ -161,6 +161,48 @@ async fn search_matches_ranks_and_filters_through_the_server() {
 }
 
 #[tokio::test]
+async fn phrase_and_prefix_queries_run_through_server_with_positions_only_on_text_a() {
+    let server = SearchServer::in_ram().expect("in-ram server");
+    index(
+        &server,
+        movie(vec![4; 20], "Star Field Archive", "400", "2160p", 25, 2024),
+    )
+    .await;
+
+    let phrase = search(
+        &server,
+        SearchRequest {
+            query: "star.field".to_owned(),
+            filters: None,
+            pagination: None,
+            sort: vec![],
+        },
+    )
+    .await;
+    assert_eq!(phrase.total_hits, 1, "phrase query matches title text_a");
+    assert_eq!(
+        phrase.hits[0].document.as_ref().unwrap().torrent_name,
+        "Star Field Archive"
+    );
+
+    let prefix = search(
+        &server,
+        SearchRequest {
+            query: "arch*".to_owned(),
+            filters: None,
+            pagination: None,
+            sort: vec![],
+        },
+    )
+    .await;
+    assert_eq!(prefix.total_hits, 1, "prefix query matches title text_a");
+    assert_eq!(
+        prefix.hits[0].document.as_ref().unwrap().torrent_name,
+        "Star Field Archive"
+    );
+}
+
+#[tokio::test]
 async fn get_facets_counts_buckets_through_the_server() {
     let server = SearchServer::in_ram().expect("in-ram server");
     index(

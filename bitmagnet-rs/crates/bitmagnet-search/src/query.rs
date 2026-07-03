@@ -18,11 +18,11 @@
 //!    [`crate::tokenizer`] (the identical routine the index writer registers as
 //!    its analyzer), so query lexemes equal indexed terms byte-for-byte.
 //! 2. [`tsquery_to_tantivy`] parses that `tsquery` string with Postgres operator
-//!    precedence (`!` > `<->` > `&` > `|`) into a Tantivy [`Query`]. Each lexeme
-//!    is searched across the four weight tiers `text_a..d` with the A/B/C/D
-//!    boosts (a [`DisjunctionMaxQuery`] of per-tier [`BoostQuery`]s), `<->`
-//!    chains become [`PhraseQuery`]s, and a trailing `:*` becomes a
-//!    [`PhrasePrefixQuery`].
+//!    precedence (`!` > `<->` > `&` > `|`) into a Tantivy [`Query`]. Plain
+//!    lexemes are searched across the four weight tiers `text_a..d` with the
+//!    A/B/C/D boosts (a [`DisjunctionMaxQuery`] of per-tier [`BoostQuery`]s).
+//!    Phrase-class queries (`<->` chains and trailing-prefix `:*`) are
+//!    constrained to `text_a`, the only tier that stores positions.
 //!
 //! [`run_search`] glues the two together, applies the structured
 //! [`SearchFilters`], paginates, sorts, and reconstructs each hit's
@@ -44,7 +44,7 @@ use bitmagnet_model::ContentType as ModelContentType;
 use crate::proto::{
     Pagination, SearchFilters, SearchHit, SearchRequest, SearchResponse, SortBy, TorrentDocument,
 };
-use crate::schema::Fields;
+use crate::schema::{Fields, BOOST_A};
 use crate::tokenizer::tokenize_flat;
 
 /// Page size used when a request carries no [`Pagination`] message at all.
@@ -56,7 +56,7 @@ const MAX_LIMIT: usize = 10_000;
 /// small bonus for the term also matching in other tiers. Approximates the
 /// additive nature of PG `ts_rank` without fully summing the tiers.
 const TIE_BREAKER: Score = 0.3;
-/// Cap on prefix (`:*`) term expansions per tier, bounding a `PhrasePrefixQuery`.
+/// Cap on prefix (`:*`) term expansions, bounding each `PhrasePrefixQuery`.
 const PREFIX_MAX_EXPANSIONS: u32 = 256;
 
 // ===========================================================================
@@ -724,7 +724,7 @@ fn lower(ast: &Ast, fields: &Fields) -> Box<dyn Query> {
     match ast {
         Ast::MatchAll => Box::new(AllQuery),
         Ast::Term { text, prefix } => term_across_tiers(fields, text, *prefix),
-        Ast::Phrase { terms } => phrase_across_tiers(fields, terms),
+        Ast::Phrase { terms } => phrase_on_text_a(fields, terms),
         Ast::Not(inner) => Box::new(BooleanQuery::new(vec![
             (Occur::Must, Box::new(AllQuery) as Box<dyn Query>),
             (Occur::MustNot, lower(inner, fields)),
@@ -758,24 +758,23 @@ fn lower(ast: &Ast, fields: &Fields) -> Box<dyn Query> {
     }
 }
 
-/// Search a single lexeme across the four weight tiers, boosted per tier and
-/// combined with a [`DisjunctionMaxQuery`]. A prefix lexeme uses a single-term
-/// [`PhrasePrefixQuery`] (a pure prefix scan).
+/// Search a single non-prefix lexeme across the four weight tiers, boosted per
+/// tier and combined with a [`DisjunctionMaxQuery`]. A prefix lexeme uses a
+/// single-term [`PhrasePrefixQuery`] on `text_a`, because lower tiers do not
+/// store positions.
 fn term_across_tiers(fields: &Fields, text: &str, prefix: bool) -> Box<dyn Query> {
+    if prefix {
+        return prefix_on_text_a(fields, text);
+    }
+
     let disjuncts = fields
         .weighted_text_fields()
         .iter()
         .map(|&(field, boost)| {
-            let inner: Box<dyn Query> = if prefix {
-                let mut q = PhrasePrefixQuery::new(vec![Term::from_field_text(field, text)]);
-                q.set_max_expansions(PREFIX_MAX_EXPANSIONS);
-                Box::new(q)
-            } else {
-                Box::new(TermQuery::new(
-                    Term::from_field_text(field, text),
-                    IndexRecordOption::WithFreqs,
-                ))
-            };
+            let inner = Box::new(TermQuery::new(
+                Term::from_field_text(field, text),
+                IndexRecordOption::WithFreqs,
+            ));
             Box::new(BoostQuery::new(inner, boost)) as Box<dyn Query>
         })
         .collect();
@@ -785,35 +784,33 @@ fn term_across_tiers(fields: &Fields, text: &str, prefix: bool) -> Box<dyn Query
     ))
 }
 
-/// Search an adjacency phrase across the four weight tiers, boosted per tier and
-/// combined with a [`DisjunctionMaxQuery`]. A trailing-prefix phrase uses a
+/// Search a single-term prefix on `text_a`, preserving the weight-A boost while
+/// avoiding positionless lower-tier fields.
+fn prefix_on_text_a(fields: &Fields, text: &str) -> Box<dyn Query> {
+    let mut q = PhrasePrefixQuery::new(vec![Term::from_field_text(fields.text_a, text)]);
+    q.set_max_expansions(PREFIX_MAX_EXPANSIONS);
+    Box::new(BoostQuery::new(Box::new(q), BOOST_A))
+}
+
+/// Search an adjacency phrase on `text_a`, preserving the weight-A boost while
+/// avoiding positionless lower-tier fields. A trailing-prefix phrase uses a
 /// [`PhrasePrefixQuery`]; otherwise a [`PhraseQuery`]. `terms` always has ≥ 2
 /// elements (the parser only builds a phrase from a multi-operand `<->` chain),
 /// so [`PhraseQuery::new`] never hits its single-term assertion.
-fn phrase_across_tiers(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query> {
+fn phrase_on_text_a(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query> {
     let last_is_prefix = terms.last().is_some_and(|(_, p)| *p);
-    let disjuncts = fields
-        .weighted_text_fields()
+    let term_objs: Vec<Term> = terms
         .iter()
-        .map(|&(field, boost)| {
-            let term_objs: Vec<Term> = terms
-                .iter()
-                .map(|(t, _)| Term::from_field_text(field, t))
-                .collect();
-            let inner: Box<dyn Query> = if last_is_prefix {
-                let mut q = PhrasePrefixQuery::new(term_objs);
-                q.set_max_expansions(PREFIX_MAX_EXPANSIONS);
-                Box::new(q)
-            } else {
-                Box::new(PhraseQuery::new(term_objs))
-            };
-            Box::new(BoostQuery::new(inner, boost)) as Box<dyn Query>
-        })
+        .map(|(t, _)| Term::from_field_text(fields.text_a, t))
         .collect();
-    Box::new(DisjunctionMaxQuery::with_tie_breaker(
-        disjuncts,
-        TIE_BREAKER,
-    ))
+    let inner: Box<dyn Query> = if last_is_prefix {
+        let mut q = PhrasePrefixQuery::new(term_objs);
+        q.set_max_expansions(PREFIX_MAX_EXPANSIONS);
+        Box::new(q)
+    } else {
+        Box::new(PhraseQuery::new(term_objs))
+    };
+    Box::new(BoostQuery::new(inner, BOOST_A))
 }
 
 // ===========================================================================
