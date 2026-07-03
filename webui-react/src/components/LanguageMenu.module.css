@@ -1,0 +1,37 @@
+.root {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.label {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+}
+
+.select {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  height: 36px;
+  min-width: 112px;
+  padding: 0 32px 0 10px;
+}
+
+@media (max-width: 47.999em) {
+  .label {
+    position: absolute;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    white-space: nowrap;
+    width: 1px;
+  }
+
+  .select {
+    min-width: 92px;
+  }
+}

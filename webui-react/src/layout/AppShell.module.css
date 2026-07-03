@@ -1,0 +1,149 @@
+.root {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--mantine-color-blue-0), transparent 70%),
+      transparent 260px
+    ),
+    var(--mantine-color-body);
+  color: var(--mantine-color-text);
+  min-height: 100vh;
+}
+
+:global([data-mantine-color-scheme="dark"]) .root {
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--mantine-color-dark-5), transparent 72%),
+      transparent 260px
+    ),
+    var(--mantine-color-body);
+}
+
+.topBar {
+  align-items: center;
+  backdrop-filter: blur(14px);
+  background: color-mix(in srgb, var(--mantine-color-body), transparent 10%);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: auto 1fr auto;
+  min-height: 64px;
+  padding: 0 24px;
+  position: sticky;
+  top: 0;
+  z-index: var(--mantine-z-index-app);
+}
+
+.brand {
+  align-items: baseline;
+  color: inherit;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+  text-decoration: none;
+}
+
+.brandName {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.version {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  white-space: nowrap;
+}
+
+.desktopNav,
+.actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.desktopNav {
+  justify-content: flex-start;
+}
+
+.actions {
+  justify-content: flex-end;
+}
+
+.navLink {
+  align-items: center;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  display: inline-flex;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  min-height: 36px;
+  padding: 0 12px;
+  text-decoration: none;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.navLink:hover,
+.navLinkActive {
+  background: var(--mantine-color-default-hover);
+  color: var(--mantine-color-text);
+}
+
+.main {
+  margin: 0 auto;
+  max-width: 1120px;
+  padding: 40px 24px 64px;
+  width: 100%;
+}
+
+.bottomNav {
+  display: none;
+}
+
+@media (max-width: 61.999em) {
+  .root {
+    min-height: 100dvh;
+  }
+
+  .topBar {
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-height: 60px;
+    padding: 0 16px;
+  }
+
+  .desktopNav {
+    display: none;
+  }
+
+  .actions {
+    gap: 6px;
+  }
+
+  .main {
+    padding: 28px 16px 96px;
+  }
+
+  .bottomNav {
+    background: color-mix(in srgb, var(--mantine-color-body), transparent 4%);
+    border-top: 1px solid var(--mantine-color-default-border);
+    bottom: 0;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    left: 0;
+    padding: 8px max(12px, env(safe-area-inset-left)) max(8px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-right));
+    position: fixed;
+    right: 0;
+    z-index: var(--mantine-z-index-app);
+  }
+
+  .bottomNav .navLink {
+    justify-content: center;
+    min-height: 44px;
+  }
+}

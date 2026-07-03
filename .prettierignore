@@ -1,5 +1,7 @@
 bitmagnet.io/schemas/**/*.*
 webui/dist/**/*.*
+webui-react/dist/**/*.*
+webui-react/coverage/**/*.*
 webui/src/app/graphql/generated/**/*.*
 webui/src/app/i18n/translations/*.json
 webui/.angular

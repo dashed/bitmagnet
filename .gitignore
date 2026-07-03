@@ -12,6 +12,9 @@ dump.rdb
 
 # Node
 /webui/node_modules
+/webui-react/node_modules
+/webui-react/dist
+/webui-react/coverage
 npm-debug.log
 yarn-error.log
 

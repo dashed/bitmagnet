@@ -1,0 +1,29 @@
+.root {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  height: 36px;
+  justify-content: center;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+  width: 36px;
+}
+
+.root:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.icon {
+  fill: none;
+  height: 18px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 18px;
+}

@@ -1,0 +1,27 @@
+.content {
+  display: grid;
+  gap: 12px;
+}
+
+.content p {
+  margin: 0;
+}
+
+.retryButton {
+  align-self: start;
+  background: var(--mantine-color-red-light);
+  border: 1px solid var(--mantine-color-red-light-color);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-red-light-color);
+  cursor: pointer;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.retryButton:hover {
+  background: var(--mantine-color-red-1);
+}
+
+:global([data-mantine-color-scheme="dark"]) .retryButton:hover {
+  background: var(--mantine-color-dark-5);
+}

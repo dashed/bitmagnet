@@ -1,0 +1,18 @@
+.root {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 8px;
+  padding: 24px;
+}
+
+.root h1 {
+  font-size: 24px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.root p {
+  color: var(--mantine-color-dimmed);
+  margin: 0;
+}
