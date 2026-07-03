@@ -21,30 +21,35 @@
 //!    precedence (`!` > `<->` > `&` > `|`) into a Tantivy [`Query`]. Plain
 //!    lexemes are searched across the four weight tiers `text_a..d` with the
 //!    A/B/C/D boosts (a [`DisjunctionMaxQuery`] of per-tier [`BoostQuery`]s).
-//!    Phrase-class queries (`<->` chains and trailing-prefix `:*`) are
-//!    constrained to `text_a`, the only tier that stores positions.
+//!    Phrase-class queries (`<->` chains and trailing-prefix `:*`) use real
+//!    positional matching on `text_a`, the only tier that stores positions, and
+//!    fall back to positions-free lower-tier term intersections to preserve
+//!    recall against Postgres.
 //!
 //! [`run_search`] glues the two together, applies the structured
 //! [`SearchFilters`], paginates, sorts, and reconstructs each hit's
 //! [`TorrentDocument`] from the STORED fields (`file_paths` is intentionally not
 //! retrievable — it only feeds relevance).
 
+use std::collections::BTreeSet;
 use std::ops::Bound;
 
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, Occur, PhrasePrefixQuery, PhraseQuery,
-    Query, RangeQuery, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, DisjunctionMaxQuery, EmptyQuery, EnableScoring, Occur,
+    PhrasePrefixQuery, PhraseQuery, Query, RangeQuery, TermQuery, Weight,
 };
 use tantivy::schema::{Field, IndexRecordOption, Schema, Value};
-use tantivy::{DocAddress, Index, IndexReader, Order, Score, Searcher, TantivyDocument, Term};
+use tantivy::{
+    DocAddress, Index, IndexReader, Order, Score, Searcher, TantivyDocument, TantivyError, Term,
+};
 
 use bitmagnet_model::ContentType as ModelContentType;
 
 use crate::proto::{
     Pagination, SearchFilters, SearchHit, SearchRequest, SearchResponse, SortBy, TorrentDocument,
 };
-use crate::schema::{Fields, BOOST_A};
+use crate::schema::Fields;
 use crate::tokenizer::tokenize_flat;
 
 /// Page size used when a request carries no [`Pagination`] message at all.
@@ -56,7 +61,7 @@ const MAX_LIMIT: usize = 10_000;
 /// small bonus for the term also matching in other tiers. Approximates the
 /// additive nature of PG `ts_rank` without fully summing the tiers.
 const TIE_BREAKER: Score = 0.3;
-/// Cap on prefix (`:*`) term expansions, bounding each `PhrasePrefixQuery`.
+/// Cap on prefix (`:*`) term expansions, bounding each prefix expansion.
 /// Postgres prefix matches are unbounded; Tantivy requires a cap, so prefixes
 /// with more than this many distinct indexed completions may silently miss the
 /// tail during shadow-mode PG parity comparisons. Tantivy does not appear to
@@ -853,13 +858,13 @@ fn lower(ast: &Ast, fields: &Fields) -> Box<dyn Query> {
     }
 }
 
-/// Search a single non-prefix lexeme across the four weight tiers, boosted per
-/// tier and combined with a [`DisjunctionMaxQuery`]. A prefix lexeme uses a
-/// single-term [`PhrasePrefixQuery`] on `text_a`, because lower tiers do not
-/// store positions.
+/// Search a single lexeme across the four weight tiers, boosted per tier and
+/// combined with a [`DisjunctionMaxQuery`]. Prefix lexemes use a
+/// [`PhrasePrefixQuery`] on `text_a` and a bounded term-dictionary expansion on
+/// lower tiers, because those fields do not store positions.
 fn term_across_tiers(fields: &Fields, text: &str, prefix: bool) -> Box<dyn Query> {
     if prefix {
-        return prefix_on_text_a(fields, text);
+        return prefix_across_tiers(fields, text);
     }
 
     let disjuncts = fields
@@ -879,20 +884,70 @@ fn term_across_tiers(fields: &Fields, text: &str, prefix: bool) -> Box<dyn Query
     ))
 }
 
-/// Search a single-term prefix on `text_a`, preserving the weight-A boost while
-/// avoiding positionless lower-tier fields.
+/// Search a single-term prefix across all tiers. The `text_a` branch keeps
+/// Tantivy's existing [`PhrasePrefixQuery`] path; lower tiers expand matching
+/// terms from the dictionary up to [`PREFIX_MAX_EXPANSIONS`] and OR those terms
+/// with `WithFreqs`, avoiding position requirements while keeping prefix recall
+/// bounded like the A-tier path.
+fn prefix_across_tiers(fields: &Fields, text: &str) -> Box<dyn Query> {
+    let disjuncts = fields
+        .weighted_text_fields()
+        .into_iter()
+        .map(|(field, boost)| {
+            let inner = if field == fields.text_a {
+                prefix_on_text_a(fields, text)
+            } else {
+                Box::new(BoundedPrefixTermQuery::new(
+                    field,
+                    text,
+                    PREFIX_MAX_EXPANSIONS,
+                )) as Box<dyn Query>
+            };
+            Box::new(BoostQuery::new(inner, boost)) as Box<dyn Query>
+        })
+        .collect();
+    Box::new(DisjunctionMaxQuery::with_tie_breaker(
+        disjuncts,
+        TIE_BREAKER,
+    ))
+}
+
+/// Search a single-term prefix on `text_a`, where positions are available.
 fn prefix_on_text_a(fields: &Fields, text: &str) -> Box<dyn Query> {
     let mut q = PhrasePrefixQuery::new(vec![Term::from_field_text(fields.text_a, text)]);
     q.set_max_expansions(PREFIX_MAX_EXPANSIONS);
-    Box::new(BoostQuery::new(Box::new(q), BOOST_A))
+    Box::new(q)
 }
 
-/// Search an adjacency phrase on `text_a`, preserving the weight-A boost while
-/// avoiding positionless lower-tier fields. A trailing-prefix phrase uses a
-/// [`PhrasePrefixQuery`]; otherwise a [`PhraseQuery`]. `terms` always has ≥ 2
+/// Search a phrase across all tiers. `text_a` keeps true adjacency semantics via
+/// positions. Lower tiers do not store positions, so they degrade to requiring
+/// all phrase terms in the same tier. This preserves recall against Postgres and
+/// the old `text_d` file-path behavior, with slightly looser precision on B/C/D
+/// because adjacency is approximated rather than enforced.
+fn phrase_on_text_a(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query> {
+    let disjuncts = fields
+        .weighted_text_fields()
+        .into_iter()
+        .map(|(field, boost)| {
+            let inner = if field == fields.text_a {
+                phrase_on_positioned_text_a(fields, terms)
+            } else {
+                phrase_degradation_on_positionless_tier(field, terms)
+            };
+            Box::new(BoostQuery::new(inner, boost)) as Box<dyn Query>
+        })
+        .collect();
+    Box::new(DisjunctionMaxQuery::with_tie_breaker(
+        disjuncts,
+        TIE_BREAKER,
+    ))
+}
+
+/// Search an adjacency phrase on `text_a`. A trailing-prefix phrase uses a
+/// [`PhrasePrefixQuery`]; otherwise a [`PhraseQuery`]. `terms` always has >= 2
 /// elements (the parser only builds a phrase from a multi-operand `<->` chain),
 /// so [`PhraseQuery::new`] never hits its single-term assertion.
-fn phrase_on_text_a(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query> {
+fn phrase_on_positioned_text_a(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query> {
     let last_is_prefix = terms.last().is_some_and(|(_, p)| *p);
     let term_objs: Vec<Term> = terms
         .iter()
@@ -905,7 +960,111 @@ fn phrase_on_text_a(fields: &Fields, terms: &[(String, bool)]) -> Box<dyn Query>
     } else {
         Box::new(PhraseQuery::new(term_objs))
     };
-    Box::new(BoostQuery::new(inner, BOOST_A))
+    inner
+}
+
+/// Lower-tier phrase degradation: all exact terms must exist in this tier; a
+/// trailing prefix term keeps prefix semantics via bounded dictionary expansion.
+fn phrase_degradation_on_positionless_tier(
+    field: Field,
+    terms: &[(String, bool)],
+) -> Box<dyn Query> {
+    let last_index = terms.len().saturating_sub(1);
+    let clauses = terms
+        .iter()
+        .enumerate()
+        .map(|(index, (text, prefix))| {
+            let query: Box<dyn Query> = if index == last_index && *prefix {
+                Box::new(BoundedPrefixTermQuery::new(
+                    field,
+                    text,
+                    PREFIX_MAX_EXPANSIONS,
+                ))
+            } else {
+                Box::new(TermQuery::new(
+                    Term::from_field_text(field, text),
+                    IndexRecordOption::WithFreqs,
+                ))
+            };
+            (Occur::Must, query)
+        })
+        .collect();
+    Box::new(BooleanQuery::new(clauses))
+}
+
+/// A bounded prefix query for fields without positions.
+///
+/// We avoid [`RegexQuery`](tantivy::query::RegexQuery) here because Tantivy 0.26
+/// does not expose a max-expansion cap for it. Instead, at weight construction
+/// time, we read the live segment term dictionaries, collect at most
+/// [`PREFIX_MAX_EXPANSIONS`] matching terms, and delegate to ordinary
+/// `WithFreqs` [`TermQuery`] disjunctions.
+#[derive(Debug, Clone)]
+struct BoundedPrefixTermQuery {
+    field: Field,
+    text: String,
+    max_expansions: u32,
+}
+
+impl BoundedPrefixTermQuery {
+    fn new(field: Field, text: &str, max_expansions: u32) -> Self {
+        Self {
+            field,
+            text: text.to_owned(),
+            max_expansions,
+        }
+    }
+
+    fn expand_terms(&self, searcher: &Searcher) -> tantivy::Result<Vec<Term>> {
+        let prefix = Term::from_field_text(self.field, &self.text);
+        let prefix_bytes = prefix.serialized_value_bytes();
+        let mut matching_term_bytes = BTreeSet::new();
+
+        'segments: for reader in searcher.segment_readers() {
+            let inverted_index = reader.inverted_index(self.field)?;
+            let mut stream = inverted_index
+                .terms()
+                .range()
+                .ge(prefix_bytes)
+                .into_stream()?;
+
+            while stream.advance() {
+                let term_bytes = stream.key();
+                if !term_bytes.starts_with(prefix_bytes) {
+                    break;
+                }
+                matching_term_bytes.insert(term_bytes.to_vec());
+                if matching_term_bytes.len() >= self.max_expansions as usize {
+                    break 'segments;
+                }
+            }
+        }
+
+        Ok(matching_term_bytes
+            .into_iter()
+            .map(|term_bytes| {
+                let mut term = prefix.clone();
+                term.clear_with_type(term.typ());
+                term.append_bytes(&term_bytes);
+                term
+            })
+            .collect())
+    }
+}
+
+impl Query for BoundedPrefixTermQuery {
+    fn weight(&self, enable_scoring: EnableScoring<'_>) -> tantivy::Result<Box<dyn Weight>> {
+        let searcher = enable_scoring.searcher().ok_or_else(|| {
+            TantivyError::InvalidArgument(
+                "BoundedPrefixTermQuery requires a searcher for term expansion".to_owned(),
+            )
+        })?;
+        let terms = self.expand_terms(searcher)?;
+        if terms.is_empty() {
+            return EmptyQuery.weight(enable_scoring);
+        }
+        BooleanQuery::new_multiterms_query(terms).weight(enable_scoring)
+    }
 }
 
 // ===========================================================================
@@ -1355,16 +1514,48 @@ mod tests {
 
     #[test]
     fn phrase_over_or_group_matches_only_adjacent_alternatives() {
-        let docs = [
-            base_doc(vec![0x01; 20], "Alpha Beta"),
-            base_doc(vec![0x02; 20], "Alpha Gamma"),
-            base_doc(vec![0x03; 20], "Alpha Far Beta"),
-        ];
+        let a = base_doc(vec![0x01; 20], "Alpha Beta");
+        let b = base_doc(vec![0x02; 20], "Alpha Gamma");
+        let mut c = base_doc(vec![0x03; 20], "Alpha Far Beta");
+        // Keep this parity test isolated to text_a adjacency; otherwise the
+        // lower-tier recall fallback correctly sees alpha+beta in the file path.
+        c.file_paths = vec!["unrelated-third-file.mkv".to_owned()];
+        let docs = [a, b, c];
         let (index, reader, fields) = index_docs(&docs);
 
         let r = search(&index, &reader, &fields, "alpha . (beta|gamma)");
         assert_eq!(r.total_hits, 2);
         assert_eq!(sorted_names(&r), vec!["Alpha Beta", "Alpha Gamma"]);
+    }
+
+    #[test]
+    fn phrase_terms_only_in_text_d_file_path_match() {
+        let mut doc = base_doc(vec![0x01; 20], "Unrelated Title");
+        doc.file_paths = vec!["extras/rare phrase sample.mkv".to_owned()];
+        let (index, reader, fields) = index_docs(&[doc]);
+
+        let r = search(&index, &reader, &fields, "\"rare phrase\"");
+        assert_eq!(names(&r), vec!["Unrelated Title"]);
+    }
+
+    #[test]
+    fn non_adjacent_phrase_terms_in_text_d_match_via_degradation() {
+        let mut doc = base_doc(vec![0x01; 20], "Unrelated Title");
+        doc.file_paths = vec!["extras/rare intervening phrase sample.mkv".to_owned()];
+        let (index, reader, fields) = index_docs(&[doc]);
+
+        let r = search(&index, &reader, &fields, "\"rare phrase\"");
+        assert_eq!(names(&r), vec!["Unrelated Title"]);
+    }
+
+    #[test]
+    fn prefix_term_only_in_text_d_file_path_matches() {
+        let mut doc = base_doc(vec![0x01; 20], "Unrelated Title");
+        doc.file_paths = vec!["extras/solarprefixonly-sample.mkv".to_owned()];
+        let (index, reader, fields) = index_docs(&[doc]);
+
+        let r = search(&index, &reader, &fields, "solarprefix*");
+        assert_eq!(names(&r), vec!["Unrelated Title"]);
     }
 
     #[test]
