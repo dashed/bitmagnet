@@ -22,6 +22,7 @@ use bitmagnet_parquet::export::{self, Sinks};
 use bitmagnet_parquet::fact::SortMode;
 use bitmagnet_parquet::generation::{Kind, Layout};
 use clap::{Parser, Subcommand, ValueEnum};
+use tracing::{error, info};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -100,6 +101,39 @@ enum Cmd {
         deleted_file: Option<PathBuf>,
         #[arg(long, default_value_t = 20_000)]
         page_size: i64,
+    },
+    /// In-process follow loop: run a `delta` tick, sleep, repeat — the L2
+    /// freshness engine that replaces the per-minute delta CronJob (minute →
+    /// seconds). Each tick is IDENTICAL to `delta` (a cumulative carve from the
+    /// base watermark to a lagged now, same `--deleted-source`); ticks NEVER
+    /// advance the base watermark (compaction owns it), so every tick is
+    /// idempotent. A failed tick is logged and retried with exponential backoff
+    /// — it never kills the loop; only a startup config error (bad DSN) exits
+    /// non-zero.
+    Follow {
+        #[arg(long, env = "BITMAGNET_POSTGRES_DSN")]
+        dsn: String,
+        /// Deleted-torrents source per tick (same semantics as `delta`).
+        #[arg(long, value_enum, default_value = "none")]
+        deleted_source: DeletedSource,
+        /// File of newline-separated deleted info_hash hex (with
+        /// `--deleted-source file`); re-read every tick.
+        #[arg(long)]
+        deleted_file: Option<PathBuf>,
+        #[arg(long, default_value_t = 20_000)]
+        page_size: i64,
+        /// Seconds to sleep between ticks (~45s freshness at 15s: tick + the
+        /// 30s serving self-reload).
+        #[arg(
+            long,
+            env = "BITMAGNET_PARQUET_FOLLOW_INTERVAL_SECS",
+            default_value_t = 15
+        )]
+        interval_secs: u64,
+        /// TESTING ONLY: stop after N ticks (0 = endless). Lets a test run one
+        /// or two ticks and exit.
+        #[arg(long, hide = true, default_value_t = 0)]
+        max_ticks: u64,
     },
     /// Full rebuild + empty-delta reset.
     Compact {
@@ -229,30 +263,41 @@ async fn main() -> Result<()> {
             let pool = bitmagnet_db::PgPool::connect(&dsn)
                 .await
                 .context("connecting to postgres")?;
-            let version = version.unwrap_or_else(|| now_epoch().to_string());
-            // Lagged now: the carve window END (export::CARVE_LAG_SECS closes
-            // the commit-visibility race). The carve ORIGIN is the base
-            // watermark — compaction-owned; ticks never advance it.
-            let new_wm = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
-            let deleted = match deleted_source {
-                DeletedSource::None => Vec::new(),
-                DeletedSource::File => read_deleted(deleted_file.as_deref())?,
-                DeletedSource::Audit => {
-                    // Same half-open (since, until] window as the change carve,
-                    // so a deletion is tombstoned by exactly the run whose
-                    // window contains its deleted_at.
-                    let since = layout.read_watermark();
-                    bitmagnet_db::read_deleted_torrents(&pool, since, new_wm, 1_000_000)
-                        .await
-                        .context("reading deleted_torrents audit window")?
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect()
-                }
-            };
-            let stats =
-                export::run_delta(&pool, &layout, &version, new_wm, &deleted, page_size).await?;
+            let stats = one_delta_tick(
+                &pool,
+                &layout,
+                version,
+                watermark,
+                deleted_source,
+                deleted_file.as_deref(),
+                page_size,
+            )
+            .await?;
             report("delta", &stats);
+        }
+        Cmd::Follow {
+            dsn,
+            deleted_source,
+            deleted_file,
+            page_size,
+            interval_secs,
+            max_ticks,
+        } => {
+            // Startup config errors (bad DSN) exit non-zero here; from this
+            // point on a per-tick failure is logged + retried, never fatal.
+            let pool = bitmagnet_db::PgPool::connect(&dsn)
+                .await
+                .context("connecting to postgres")?;
+            run_follow(
+                &pool,
+                &layout,
+                deleted_source,
+                deleted_file.as_deref(),
+                page_size,
+                interval_secs,
+                max_ticks,
+            )
+            .await?;
         }
         Cmd::Compact {
             dsn,
@@ -385,6 +430,144 @@ fn report(job: &str, s: &export::BuildStats) {
     );
 }
 
+/// One delta carve — the shared body of the `delta` subcommand and each
+/// `follow` tick. Cumulative: carves `(base watermark, window_end]` (plus the
+/// deleted-audit window) into a fresh delta generation that atomically replaces
+/// the current one, and NEVER advances the base watermark (compaction owns it).
+/// `follow` passes `version = None` / `watermark = None` so every tick gets a
+/// fresh version dir and re-evaluates the lagged-now window end.
+async fn one_delta_tick(
+    pool: &bitmagnet_db::PgPool,
+    layout: &Layout,
+    version: Option<String>,
+    watermark: Option<i64>,
+    deleted_source: DeletedSource,
+    deleted_file: Option<&std::path::Path>,
+    page_size: i64,
+) -> Result<export::BuildStats> {
+    let version = version.unwrap_or_else(|| now_epoch().to_string());
+    // Lagged now: the carve window END (export::CARVE_LAG_SECS closes the
+    // commit-visibility race). The carve ORIGIN is the base watermark —
+    // compaction-owned; ticks never advance it.
+    let window_end = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
+    let deleted = match deleted_source {
+        DeletedSource::None => Vec::new(),
+        DeletedSource::File => read_deleted(deleted_file)?,
+        DeletedSource::Audit => {
+            // Same half-open (since, window_end] window as the change carve,
+            // so a deletion is tombstoned by exactly the run whose window
+            // contains its deleted_at.
+            let since = layout.read_watermark();
+            bitmagnet_db::read_deleted_torrents(pool, since, window_end, 1_000_000)
+                .await
+                .context("reading deleted_torrents audit window")?
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+    };
+    export::run_delta(pool, layout, &version, window_end, &deleted, page_size).await
+}
+
+/// Backoff cap for a failing `follow` loop: a tick that keeps erroring settles
+/// at one retry per 5 minutes rather than hammering PG.
+const FOLLOW_MAX_BACKOFF_SECS: u64 = 300;
+
+/// Seconds to sleep before the next `follow` tick. On success
+/// (`consecutive_failures == 0`) this is the base `interval_secs`; after the
+/// nth consecutive failure it is `min(interval * 2^(n-1), 300)` — exponential
+/// backoff that resets to the base interval as soon as a tick succeeds.
+/// Saturating throughout: no overflow/panic on extreme inputs.
+fn follow_backoff_secs(interval_secs: u64, consecutive_failures: u32) -> u64 {
+    if consecutive_failures == 0 {
+        return interval_secs;
+    }
+    // 2^(n-1); an over-large shift means "way past the cap" → factor = u64::MAX.
+    let factor = 1u64
+        .checked_shl(consecutive_failures - 1)
+        .unwrap_or(u64::MAX);
+    interval_secs
+        .saturating_mul(factor)
+        .min(FOLLOW_MAX_BACKOFF_SECS)
+}
+
+/// The in-process `follow` loop: run a delta tick, log it, sleep, repeat. A
+/// failed tick is logged at error level and retried with exponential backoff
+/// ([`follow_backoff_secs`]); the loop never exits on a tick failure. Returns
+/// only when `max_ticks` (> 0, testing) is reached.
+async fn run_follow(
+    pool: &bitmagnet_db::PgPool,
+    layout: &Layout,
+    deleted_source: DeletedSource,
+    deleted_file: Option<&std::path::Path>,
+    page_size: i64,
+    interval_secs: u64,
+    max_ticks: u64,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let interval = interval_secs.max(1);
+    let mut consecutive_failures: u32 = 0;
+    let mut ticks: u64 = 0;
+    info!(
+        interval_secs = interval,
+        max_ticks,
+        carve_lag_secs = export::CARVE_LAG_SECS,
+        "bitmagnet-parquet follow starting (in-process cumulative delta loop)"
+    );
+    loop {
+        let started = Instant::now();
+        match one_delta_tick(
+            pool,
+            layout,
+            None,
+            None,
+            deleted_source,
+            deleted_file,
+            page_size,
+        )
+        .await
+        {
+            Ok(stats) => {
+                consecutive_failures = 0;
+                // Same numbers as the `delta` subcommand's report(), plus tick
+                // duration, so `kubectl logs` shows freshness at a glance.
+                info!(
+                    torrents_ok = stats.decode.torrents_ok,
+                    decode_errors = stats.decode.decode_errors,
+                    file_rows = stats.fact_rows,
+                    tombstones = stats.tombstones,
+                    clean = stats.is_clean(),
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "delta follow tick complete"
+                );
+            }
+            Err(err) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let backoff = follow_backoff_secs(interval, consecutive_failures);
+                error!(
+                    error = format!("{err:#}"),
+                    consecutive_failures,
+                    backoff_secs = backoff,
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    "delta follow tick FAILED; backing off (loop continues)"
+                );
+            }
+        }
+        ticks += 1;
+        if max_ticks != 0 && ticks >= max_ticks {
+            info!(ticks, "follow reached --max-ticks; exiting");
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(follow_backoff_secs(
+            interval,
+            consecutive_failures,
+        )))
+        .await;
+    }
+    Ok(())
+}
+
 fn read_deleted(path: Option<&std::path::Path>) -> Result<Vec<String>> {
     let Some(path) = path else {
         return Ok(Vec::new());
@@ -428,4 +611,93 @@ fn run_from_hex(
     let stats = sinks.finish(&dir)?;
     layout.publish(Kind::Base, &dir)?;
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::follow_backoff_secs;
+
+    #[test]
+    fn backoff_is_base_interval_when_no_failures() {
+        // The steady-state cadence: a clean tick sleeps exactly interval_secs.
+        assert_eq!(follow_backoff_secs(15, 0), 15);
+        assert_eq!(follow_backoff_secs(60, 0), 60);
+    }
+
+    #[test]
+    fn backoff_doubles_each_consecutive_failure() {
+        // n-th failure → interval * 2^(n-1): first retry keeps the base cadence,
+        // then doubles.
+        assert_eq!(follow_backoff_secs(15, 1), 15); // 15 * 2^0
+        assert_eq!(follow_backoff_secs(15, 2), 30); // 15 * 2^1
+        assert_eq!(follow_backoff_secs(15, 3), 60);
+        assert_eq!(follow_backoff_secs(15, 4), 120);
+        assert_eq!(follow_backoff_secs(15, 5), 240);
+    }
+
+    #[test]
+    fn backoff_caps_at_300_seconds() {
+        assert_eq!(follow_backoff_secs(15, 6), 300); // 480 → capped
+        assert_eq!(follow_backoff_secs(60, 3), 240); // 240 < cap
+        assert_eq!(follow_backoff_secs(60, 4), 300); // 480 → capped
+    }
+
+    #[test]
+    fn backoff_saturates_without_panicking() {
+        // A huge shift or product must clamp to the cap, never overflow/panic.
+        assert_eq!(follow_backoff_secs(15, 100), 300);
+        assert_eq!(follow_backoff_secs(1, u32::MAX), 300);
+        assert_eq!(follow_backoff_secs(u64::MAX, 1), 300);
+        assert_eq!(follow_backoff_secs(u64::MAX, u32::MAX), 300);
+    }
+
+    /// A single `follow` tick against a live PostgreSQL: identical carve to the
+    /// `delta` subcommand (cumulative, watermark unchanged). Read-only against
+    /// PG apart from a throwaway generation root under the temp dir. Ignored by
+    /// default:
+    ///
+    /// ```sh
+    /// BITMAGNET_POSTGRES_DSN=postgres://postgres@localhost/bitmagnet \
+    ///   cargo test -p bitmagnet-parquet --bin bitmagnet-parquet -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a live PostgreSQL (set BITMAGNET_POSTGRES_DSN)"]
+    async fn one_follow_tick_carves_a_delta() {
+        use super::{one_delta_tick, DeletedSource};
+        use bitmagnet_parquet::generation::Layout;
+
+        let dsn = std::env::var("BITMAGNET_POSTGRES_DSN").expect("BITMAGNET_POSTGRES_DSN set");
+        let pool = bitmagnet_db::PgPool::connect(&dsn)
+            .await
+            .expect("connect to postgres");
+
+        let root = std::env::temp_dir().join(format!(
+            "bitmagnet-parquet-follow-it-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(root.clone());
+        layout.ensure_dirs().expect("ensure generation dirs");
+
+        // Exactly what a follow tick runs: version/watermark = None so the tick
+        // mints a fresh version and carves to a lagged now from the base
+        // watermark (0 on a fresh root → full cumulative window).
+        let stats = one_delta_tick(
+            &pool,
+            &layout,
+            None,
+            None,
+            DeletedSource::None,
+            None,
+            20_000,
+        )
+        .await
+        .expect("delta tick completes");
+        assert!(
+            stats.is_clean(),
+            "a clean-corpus tick must report zero decode errors: {stats:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
