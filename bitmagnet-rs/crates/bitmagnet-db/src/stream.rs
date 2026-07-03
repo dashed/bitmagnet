@@ -2,7 +2,7 @@
 //! blob, for the Phase 3 search backfill.
 
 use bitmagnet_model::{deserialize_files, BlobError, BlobFile, InfoHash};
-use sqlx::{PgPool, Row};
+use sqlx::{types::Json, PgPool, Row};
 use tracing::warn;
 
 use crate::error::{DbError, Result};
@@ -175,9 +175,10 @@ pub async fn stream_changed_torrents(
 ///
 /// Scalar columns keep their raw PostgreSQL types; nullable columns are
 /// `Option`. Integer columns are widened to `i64` in SQL so the backfill maps
-/// them onto the proto's `u32`/`u64`/`i64` fields uniformly. `languages` and
+/// them onto the proto's `u32`/`u64`/`i64` fields uniformly. `file_extensions`
+/// arrives as Postgres `jsonb` and is decoded through serde; `languages` and
 /// `genres` arrive as Postgres `text[]` (the JSONB `languages` column is
-/// flattened in SQL), so no JSON decoding is needed here.
+/// flattened in SQL).
 #[derive(Debug, Clone)]
 pub struct TorrentForIndex {
     /// `torrent_contents.id`: the generated composite PK
@@ -190,8 +191,10 @@ pub struct TorrentForIndex {
     pub torrent_name: String,
     /// Files-status enum value as text (e.g. `"single"`, `"multi"`); cast to
     /// `text` in SQL so it decodes into a `String` regardless of the column's
-    /// PostgreSQL enum type. Drives the single-file `file_extensions` fallback.
+    /// PostgreSQL enum type.
     pub files_status: String,
+    /// Authoritative denormalized file extensions from `torrents.file_extensions`.
+    pub file_extensions: Vec<String>,
     /// Classification key; all `None` for an unclassified torrent_content.
     pub content_type: Option<String>,
     pub content_source: Option<String>,
@@ -223,7 +226,7 @@ pub struct TorrentForIndex {
     /// Genre collection names (`content_collections` of type `genre`).
     pub genres: Vec<String>,
     /// Compressed file list (`NULL` when no blob is stored); decode with
-    /// [`Self::files`] to derive file paths / extensions.
+    /// [`Self::files`] to derive file paths.
     pub files_data: Option<Vec<u8>>,
 }
 
@@ -305,6 +308,7 @@ tc.id AS id, \
 tc.info_hash AS info_hash, \
 t.name AS torrent_name, \
 t.files_status::text AS files_status, \
+t.file_extensions AS file_extensions, \
 tc.content_type AS content_type, \
 tc.content_source AS content_source, \
 tc.content_id AS content_id, \
@@ -381,6 +385,7 @@ pub async fn stream_torrents_for_index(
             info_hash,
             torrent_name: row.try_get("torrent_name")?,
             files_status: row.try_get("files_status")?,
+            file_extensions: jsonb_text_array_or_empty(row.try_get("file_extensions")?),
             content_type: row.try_get("content_type")?,
             content_source: row.try_get("content_source")?,
             content_id: row.try_get("content_id")?,
@@ -423,6 +428,10 @@ fn decode_index_info_hash(
             None
         }
     }
+}
+
+fn jsonb_text_array_or_empty(raw: Option<Json<Vec<String>>>) -> Vec<String> {
+    raw.map(|value| value.0).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -502,6 +511,7 @@ mod tests {
             info_hash: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
             torrent_name: "t".to_owned(),
             files_status: "multi".to_owned(),
+            file_extensions: vec!["mkv".to_owned()],
             content_type: Some("movie".to_owned()),
             content_source: Some("tmdb".to_owned()),
             content_id: Some("1".to_owned()),
@@ -543,6 +553,15 @@ mod tests {
     }
 
     #[test]
+    fn jsonb_text_array_or_empty_handles_null() {
+        assert!(jsonb_text_array_or_empty(None).is_empty());
+        assert_eq!(
+            jsonb_text_array_or_empty(Some(Json(vec!["mkv".to_owned(), "srt".to_owned()]))),
+            vec!["mkv", "srt"]
+        );
+    }
+
+    #[test]
     fn for_index_info_hash_decode_skips_non_v1_identity() {
         let mut skipped = 0_u64;
         let raw = [0x22; 32];
@@ -581,6 +600,7 @@ mod tests {
         // torrents + content, keysets on the composite PK tc.id.
         assert!(STREAM_FOR_INDEX_SQL.contains("FROM torrent_contents tc"));
         assert!(STREAM_FOR_INDEX_SQL.contains("t.files_status::text AS files_status"));
+        assert!(STREAM_FOR_INDEX_SQL.contains("t.file_extensions AS file_extensions"));
         assert!(STREAM_FOR_INDEX_SQL.contains("JOIN torrents t ON t.info_hash = tc.info_hash"));
         assert!(STREAM_FOR_INDEX_SQL.contains("LEFT JOIN content c"));
         assert!(STREAM_FOR_INDEX_SQL.contains("tc.id > $1"));

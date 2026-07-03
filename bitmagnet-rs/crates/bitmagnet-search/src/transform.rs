@@ -19,9 +19,10 @@
 //!
 //! ## Field sources & parity notes
 //!
-//! * `file_paths` (weight D, never stored) and `file_extensions` (facet) come
-//!   straight from the decoded blob — every non-empty path, and the distinct
-//!   (sorted) non-empty extensions the blob already records per file.
+//! * `file_paths` (weight D, never stored) come straight from the decoded blob:
+//!   every non-empty path.
+//! * `file_extensions` (facet) comes from the authoritative
+//!   `torrents.file_extensions` column, not from the blob.
 //! * `content_type` maps the canonical Postgres string back to the proto enum
 //!   int via [`ContentType`].
 //! * `video_resolution` (`V1080p`…) and `video_3d` (`V3D` / `V3DSBS` / `V3DOU`)
@@ -31,10 +32,8 @@
 //! * `audio_languages` (proto field 22) has **no** Postgres source — bitmagnet
 //!   only stores `languages` — so it is deliberately left empty here.
 
-use std::collections::BTreeSet;
-
 use bitmagnet_db::TorrentForIndex;
-use bitmagnet_model::{file_extension_from_path, BlobFile, ContentType, FilesStatus};
+use bitmagnet_model::{BlobFile, ContentType};
 
 use crate::proto::TorrentDocument;
 
@@ -42,55 +41,25 @@ use crate::proto::TorrentDocument;
 /// decoded file blob.
 ///
 /// `files` is the already-deserialized blob (empty for torrents with no file
-/// data); only the file *paths* and their recorded extensions are used — the
-/// blob's own size/index fields are not indexed. `row.files_data` is therefore
-/// ignored here; the binary decodes it once and passes the result in.
+/// data); only the file *paths* are used from it. The blob's own size/index
+/// fields are not indexed, and its recorded extensions are not authoritative.
+/// `row.files_data` is therefore ignored here; the binary decodes it once and
+/// passes the result in.
 ///
 /// Empty / absent optional values become the proto defaults (empty string, `0`);
 /// [`crate::indexer::document_to_tantivy`] then skips those, so this need not
 /// pre-filter them.
 #[must_use]
 pub fn build_document(row: &TorrentForIndex, files: &[BlobFile]) -> TorrentDocument {
-    // File paths feed weight-D relevance; extensions are a facet. Both come only
-    // from the blob: every non-empty path, and the distinct (sorted) non-empty
-    // extensions the blob already records per file.
+    // File paths feed weight-D relevance and remain blob-sourced.
     let file_paths: Vec<String> = files
         .iter()
         .filter(|f| !f.path.is_empty())
         .map(|f| f.path.clone())
         .collect();
-    // G1 defense-in-depth: derive the extension from the file PATH, not the blob's
-    // stored `e` (which is empty for pre-G1 crawl-path blobs). Mirrors
-    // bitmagnet-parquet/decode.rs and every Go consumer. This superseded Tantivy
-    // crate is NOT in the live serving path (the live L2/L3 parquet/DuckDB sidecar
-    // already path-derives), but keeping it path-derived makes it correct
-    // regardless of the blob `e` value.
-    let file_extensions: Vec<String> = files
-        .iter()
-        .filter_map(|f| file_extension_from_path(&f.path))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    // Single-file fallback (Go↔Rust parity): a single-file torrent stores no
-    // per-file blob, so the blob yields no extensions. Postgres derives the
-    // `extension` facet column from the torrent name for single-file torrents
-    // only, so mirror exactly that — synthesize the name-derived extension when
-    // the blob produced none and `files_status == "single"`. `file_paths` stays
-    // blob-only (no synthetic path), and NoInfo is excluded so Tantivy never
-    // becomes a superset of PG.
-    let file_extensions: Vec<String> = if file_extensions.is_empty()
-        && row
-            .files_status
-            .parse::<FilesStatus>()
-            .map(|s| s == FilesStatus::Single)
-            .unwrap_or(false)
-    {
-        file_extension_from_path(&row.torrent_name)
-            .into_iter()
-            .collect()
-    } else {
-        file_extensions
-    };
+    // The DB column is authoritative for facets, including G9 single-file
+    // name-derived extensions. Blob-derived extensions can drift from it.
+    let file_extensions = row.file_extensions.clone();
 
     TorrentDocument {
         info_hash: row.info_hash.as_slice().to_vec(),
@@ -194,6 +163,7 @@ mod tests {
             info_hash: info_hash(0xAB),
             torrent_name: "The Matrix 1999 1080p BluRay x265-GROUP".to_owned(),
             files_status: "multi".to_owned(),
+            file_extensions: vec!["mkv".to_owned(), "srt".to_owned()],
             content_type: Some("movie".to_owned()),
             content_source: Some("tmdb".to_owned()),
             content_id: Some("603".to_owned()),
@@ -225,6 +195,7 @@ mod tests {
             info_hash: info_hash(0x01),
             torrent_name: "ubuntu-24.04-desktop-amd64.iso".to_owned(),
             files_status: "no_info".to_owned(),
+            file_extensions: Vec::new(),
             content_type: None,
             content_source: None,
             content_id: None,
@@ -252,7 +223,7 @@ mod tests {
         vec![
             blob_file(0, "The.Matrix.1999.1080p.mkv", "mkv", 8_900_000_000),
             blob_file(1, "The.Matrix.1999.1080p.srt", "srt", 50_000),
-            // A path with no extension contributes a path but no file extension.
+            // A path with no extension is still searchable as a path.
             blob_file(2, "readme", "", 100),
         ]
     }
@@ -284,8 +255,10 @@ mod tests {
     }
 
     #[test]
-    fn file_paths_and_extensions_come_from_the_blob() {
-        let doc = build_document(&classified_row(), &classified_files());
+    fn column_file_extensions_win_over_blob_extensions() {
+        let mut row = classified_row();
+        row.file_extensions = vec!["avi".to_owned(), "nfo".to_owned()];
+        let doc = build_document(&row, &classified_files());
 
         // Every non-empty path is kept (including the extensionless one).
         assert_eq!(
@@ -296,9 +269,34 @@ mod tests {
                 "readme",
             ]
         );
-        // Extensions are unique + sorted and re-derived from the path; "readme"
-        // contributes none.
-        assert_eq!(doc.file_extensions, vec!["mkv", "srt"]);
+        assert_eq!(doc.file_extensions, vec!["avi", "nfo"]);
+    }
+
+    #[test]
+    fn empty_column_file_extensions_yield_empty_facet() {
+        // The DB stream maps SQL NULL to Vec::new(); the transform preserves
+        // that as an empty facet even when the blob contains path extensions.
+        let mut row = classified_row();
+        row.file_extensions = Vec::new();
+        let doc = build_document(&row, &classified_files());
+
+        assert!(doc.file_extensions.is_empty());
+    }
+
+    #[test]
+    fn file_paths_still_come_from_the_blob() {
+        let mut row = classified_row();
+        row.file_extensions = vec!["column-only".to_owned()];
+        let doc = build_document(&row, &classified_files());
+
+        assert_eq!(
+            doc.file_paths,
+            vec![
+                "The.Matrix.1999.1080p.mkv",
+                "The.Matrix.1999.1080p.srt",
+                "readme",
+            ]
+        );
     }
 
     #[test]
@@ -342,19 +340,19 @@ mod tests {
         assert!(doc.languages.is_empty());
         assert!(doc.file_paths.is_empty());
         assert!(doc.file_extensions.is_empty());
-        // No blob and no column → files_count falls back to 0.
+        // No files_count column value → files_count falls back to 0.
         assert_eq!(doc.files_count, 0);
     }
 
     #[test]
-    fn single_file_synthesizes_extension_from_name() {
-        // A single-file torrent stores no per-file blob, so the blob yields no
-        // extensions. PG derives the `extension` facet from the torrent name for
-        // single-file torrents only; the backfill must mirror that — synthesize
-        // the name-derived extension while leaving `file_paths` blob-only (empty).
+    fn single_file_uses_authoritative_column_extension() {
+        // G9 stores the name-derived single-file extension in the column. The
+        // transform consumes that authoritative value while leaving `file_paths`
+        // blob-only (empty).
         let mut row = unclassified_row();
         row.files_status = "single".to_owned();
         row.torrent_name = "Ubuntu.2024.iso".to_owned();
+        row.file_extensions = vec!["iso".to_owned()];
 
         let doc = build_document(&row, &[]);
 
@@ -363,13 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn single_file_extension_round_trips_through_the_indexer() {
-        // End-to-end: a synthesized single-file extension must survive
+    fn single_file_column_extension_round_trips_through_the_indexer() {
+        // End-to-end: a column-sourced single-file extension must survive
         // `document_to_tantivy` so it is retrievable/filterable like a blob ext.
         let fields = Fields::from_schema(&build_schema()).unwrap();
         let mut row = unclassified_row();
         row.files_status = "single".to_owned();
         row.torrent_name = "Ubuntu.2024.iso".to_owned();
+        row.file_extensions = vec!["iso".to_owned()];
 
         let td = document_to_tantivy(&fields, &build_document(&row, &[]));
 
