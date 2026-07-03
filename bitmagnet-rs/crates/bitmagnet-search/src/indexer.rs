@@ -228,8 +228,10 @@ mod tests {
     use crate::index::{register_tokenizer, writer};
     use crate::proto::{ContentType, TorrentDocument};
     use crate::schema::{build_schema, Fields};
-    use tantivy::schema::Value;
-    use tantivy::{Index, TantivyDocument};
+    use tantivy::collector::Count;
+    use tantivy::query::TermQuery;
+    use tantivy::schema::{IndexRecordOption, Value};
+    use tantivy::{Index, TantivyDocument, Term};
 
     fn sample() -> TorrentDocument {
         TorrentDocument {
@@ -414,6 +416,45 @@ mod tests {
             reader.searcher().num_docs(),
             0,
             "delete-by-info_hash removes every document for the torrent"
+        );
+    }
+
+    #[test]
+    fn torrent_level_supersession_removes_dropped_classifications() {
+        let index = Index::create_in_ram(build_schema());
+        register_tokenizer(&index);
+        let fields = Fields::from_schema(&index.schema()).unwrap();
+        let mut w = writer(&index).unwrap();
+
+        let a = sample(); // content_id "603"
+        let mut b = sample();
+        b.content_id = "604".to_owned(); // same info_hash, different doc_id
+        let b_doc_id = doc_id(&b);
+
+        upsert(&w, &fields, &a).unwrap();
+        upsert(&w, &fields, &b).unwrap();
+        w.commit().unwrap();
+        let reader = crate::index::reader(&index).unwrap();
+        reader.reload().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 2);
+
+        // Follow rebuild for the torrent now sees only classification A. The
+        // correct supersession is delete-by-info_hash, then re-add current docs.
+        delete(&w, &fields, &a.info_hash);
+        upsert(&w, &fields, &a).unwrap();
+        w.commit().unwrap();
+        reader.reload().unwrap();
+
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 1);
+        let dropped = TermQuery::new(
+            Term::from_field_text(fields.doc_id, &b_doc_id),
+            IndexRecordOption::Basic,
+        );
+        assert_eq!(
+            searcher.search(&dropped, &Count).unwrap(),
+            0,
+            "classification B must be gone after torrent-level supersession"
         );
     }
 }

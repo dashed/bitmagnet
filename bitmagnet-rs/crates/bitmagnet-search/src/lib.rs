@@ -12,6 +12,7 @@
 //! - [`indexer`] — proto `TorrentDocument` → Tantivy document + upsert/delete.
 //! - [`query`] — `tsquery`-to-Tantivy translation + `run_search` (read path).
 //! - [`facets`] — the 14 search facets + `run_facets` (read path).
+//! - [`follow`] — the in-server 00024 PostgreSQL-tail maintenance loop.
 //! - [`tokenizer`] — the `TokenizeFlat` tokenizer (Task #1).
 //! - [`transform`] — PG row → proto `TorrentDocument` for the backfill bin.
 
@@ -20,6 +21,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod facets;
+pub mod follow;
 pub mod index;
 pub mod indexer;
 pub mod pathsearch;

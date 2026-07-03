@@ -14,6 +14,9 @@
 //!   parity checker (Job A).
 //! * [`read_deleted_torrents`] — the `deleted_torrents` audit window read, the
 //!   delta tombstone's deletion source.
+//! * [`stream_changed_torrent_keys`] +
+//!   [`stream_torrents_for_index_info_hashes`] — the 00024 incremental follow
+//!   contract for the main Tantivy sidecar.
 //!
 //! All queries use the runtime [`sqlx::query`] API (not the compile-time
 //! `query!` macros), so the crate builds and tests green without a live
@@ -34,7 +37,8 @@ pub use deleted::read_deleted_torrents;
 pub use error::{DbError, Result};
 pub use pool::{connect, ping};
 pub use stream::{
-    stream_changed_torrents, stream_torrents_for_index, stream_torrents_with_files,
+    stream_changed_torrent_keys, stream_changed_torrents, stream_torrents_for_index,
+    stream_torrents_for_index_info_hashes, stream_torrents_with_files, ChangedTorrentKey,
     TorrentForIndex, TorrentForIndexPage, TorrentWithBlob,
 };
 

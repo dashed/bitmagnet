@@ -7,6 +7,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
+use bitmagnet_search::follow::{
+    spawn_follow_loop, FollowConfig, DEFAULT_CARVE_LAG_SECS, DEFAULT_DELETED_LIMIT,
+    DEFAULT_FOLLOW_BATCH_SIZE, DEFAULT_FOLLOW_INTERVAL_SECS, DEFAULT_FOLLOW_MAX_WINDOW_SECS,
+    DEFAULT_WATERMARK_FILE,
+};
 use bitmagnet_search::proto::search_service_server::SearchServiceServer;
 use bitmagnet_search::SearchServer;
 use clap::Parser;
@@ -37,6 +42,63 @@ struct Args {
         default_value = "/var/lib/bitmagnet/search"
     )]
     index_path: PathBuf,
+
+    /// Enable the in-process PostgreSQL-tail follow loop.
+    #[arg(long, env = "BITMAGNET_SEARCH_FOLLOW", default_value_t = false)]
+    follow: bool,
+
+    /// PostgreSQL DSN for follow mode. When empty, BITMAGNET_POSTGRES_* env vars
+    /// are used.
+    #[arg(long, env = "BITMAGNET_POSTGRES_DSN", default_value = "")]
+    postgres_dsn: String,
+
+    /// Follow poll interval in seconds.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_FOLLOW_INTERVAL_SECS",
+        default_value_t = DEFAULT_FOLLOW_INTERVAL_SECS
+    )]
+    follow_interval_secs: u64,
+
+    /// Commit-visibility lag for the follow window upper bound.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_CARVE_LAG_SECS",
+        default_value_t = DEFAULT_CARVE_LAG_SECS
+    )]
+    carve_lag_secs: i64,
+
+    /// Maximum follow window width in seconds.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_FOLLOW_MAX_WINDOW_SECS",
+        default_value_t = DEFAULT_FOLLOW_MAX_WINDOW_SECS
+    )]
+    follow_max_window_secs: i64,
+
+    /// Changed-torrent page size for follow mode.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_FOLLOW_BATCH_SIZE",
+        default_value_t = DEFAULT_FOLLOW_BATCH_SIZE
+    )]
+    follow_batch_size: i64,
+
+    /// Deleted-torrent runaway guard for one follow window.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_DELETED_LIMIT",
+        default_value_t = DEFAULT_DELETED_LIMIT
+    )]
+    deleted_limit: i64,
+
+    /// Watermark file for follow mode.
+    #[arg(
+        long,
+        env = "BITMAGNET_SEARCH_WATERMARK_FILE",
+        default_value = DEFAULT_WATERMARK_FILE
+    )]
+    watermark_file: PathBuf,
 }
 
 /// How the server should listen, derived from `--addr`.
@@ -69,11 +131,32 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("opening search index at {}", args.index_path.display()))?;
     set_health_status(&health_reporter, ServingStatus::Serving).await;
 
+    let _follow_task = if args.follow {
+        Some(
+            spawn_follow_loop(
+                FollowConfig {
+                    postgres_dsn: args.postgres_dsn.clone(),
+                    interval_secs: args.follow_interval_secs,
+                    carve_lag_secs: args.carve_lag_secs,
+                    max_window_secs: args.follow_max_window_secs,
+                    batch_size: args.follow_batch_size,
+                    deleted_limit: args.deleted_limit,
+                    watermark_file: args.watermark_file.clone(),
+                },
+                server.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let health_service =
         GrpcHealthServer::new(HealthService::from_health_reporter(health_reporter));
     let service = SearchServiceServer::new(server);
     info!(
         index_path = %args.index_path.display(),
+        follow = args.follow,
         "bitmagnet-search starting (Tantivy read/write path and gRPC health services live)"
     );
 

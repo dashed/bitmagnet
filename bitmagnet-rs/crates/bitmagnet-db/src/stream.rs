@@ -2,7 +2,7 @@
 //! blob, for the Phase 3 search backfill.
 
 use bitmagnet_model::{deserialize_files, BlobError, BlobFile, InfoHash};
-use sqlx::{types::Json, PgPool, Row};
+use sqlx::{postgres::PgRow, types::Json, PgPool, Row};
 use tracing::warn;
 
 use crate::error::{DbError, Result};
@@ -162,6 +162,75 @@ pub async fn stream_changed_torrents(
             files_count: row.try_get("files_count")?,
             published_at: row.try_get("published_at")?,
             files_data: row.try_get("files_data")?,
+        });
+    }
+    Ok(out)
+}
+
+/// One changed torrent key from the 00024 follow contract.
+///
+/// `updated_at_cursor` is `updated_at::text`, bound back as `$3::timestamptz`
+/// by [`stream_changed_torrent_keys`]. Keeping the cursor textual avoids an
+/// extra timestamp dependency while preserving sub-second keyset precision.
+#[derive(Debug, Clone)]
+pub struct ChangedTorrentKey {
+    /// 20-byte info hash.
+    pub info_hash: InfoHash,
+    /// Exact text representation of `torrents.updated_at` for tuple keyset
+    /// pagination.
+    pub updated_at_cursor: String,
+}
+
+/// SQL for [`stream_changed_torrent_keys`]. This is the production 00024 follow
+/// contract: a lagged half-open `(since, until]` carve on `torrents.updated_at`
+/// plus raw tuple keyset pagination on `(updated_at, info_hash)`.
+///
+/// Do not wrap `updated_at` in a cast/expression in the `WHERE` tuple or
+/// `ORDER BY`; the production btree is on the raw `(updated_at, info_hash)`
+/// columns.
+const STREAM_CHANGED_KEYS_SQL: &str = "\
+SELECT info_hash, updated_at::text AS updated_at_cursor \
+FROM torrents \
+WHERE updated_at > to_timestamp($1) \
+AND updated_at <= to_timestamp($2) \
+AND ($3::timestamptz IS NULL OR (updated_at, info_hash) > ($3::timestamptz, $4::bytea)) \
+AND octet_length(info_hash) = 20 \
+ORDER BY updated_at ASC, info_hash ASC \
+LIMIT $5";
+
+/// Reads up to `limit` v1 torrent keys changed in `(since_epoch, until_epoch]`,
+/// ordered by the production `(updated_at, info_hash)` keyset.
+///
+/// Pass the last returned [`ChangedTorrentKey`] as `after` to fetch the next
+/// page. The SQL deliberately keeps `updated_at` raw in the tuple compare so
+/// `torrents_updated_at_info_hash_idx` remains usable.
+pub async fn stream_changed_torrent_keys(
+    pool: &PgPool,
+    since_epoch: i64,
+    until_epoch: i64,
+    after: Option<&ChangedTorrentKey>,
+    limit: i64,
+) -> Result<Vec<ChangedTorrentKey>> {
+    let after_updated_at = after.map(|key| key.updated_at_cursor.clone());
+    let after_info_hash: Option<Vec<u8>> = after.map(|key| key.info_hash.as_slice().to_vec());
+
+    let rows = sqlx::query(STREAM_CHANGED_KEYS_SQL)
+        .bind(since_epoch)
+        .bind(until_epoch)
+        .bind(after_updated_at)
+        .bind(after_info_hash)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let raw: Vec<u8> = row.try_get("info_hash")?;
+        let info_hash =
+            InfoHash::from_slice(&raw).map_err(|e| DbError::Decode(format!("info_hash: {e}")))?;
+        out.push(ChangedTorrentKey {
+            info_hash,
+            updated_at_cursor: row.try_get("updated_at_cursor")?,
         });
     }
     Ok(out)
@@ -351,6 +420,59 @@ AND octet_length(tc.info_hash) = 20 \
 ORDER BY tc.id ASC \
 LIMIT $2";
 
+/// Scoped variant of [`STREAM_FOR_INDEX_SQL`] for incremental follow. It uses
+/// the same `torrent_contents` source and transform columns as the full
+/// backfill, but limits rows to the changed torrent keys from a 00024 carve.
+const STREAM_FOR_INDEX_INFO_HASHES_SQL: &str = "\
+SELECT \
+tc.id AS id, \
+tc.info_hash AS info_hash, \
+t.name AS torrent_name, \
+t.files_status::text AS files_status, \
+t.file_extensions AS file_extensions, \
+tc.content_type AS content_type, \
+tc.content_source AS content_source, \
+tc.content_id AS content_id, \
+c.title AS content_title, \
+c.original_title AS original_title, \
+c.release_year::bigint AS release_year, \
+tc.video_resolution AS video_resolution, \
+tc.video_source AS video_source, \
+tc.video_codec AS video_codec, \
+tc.video_3d AS video_3d, \
+tc.video_modifier AS video_modifier, \
+tc.release_group AS release_group, \
+tc.seeders::bigint AS seeders, \
+tc.leechers::bigint AS leechers, \
+t.size AS size, \
+tc.files_count::bigint AS files_count, \
+CAST(EXTRACT(EPOCH FROM COALESCE(tc.published_at, t.created_at)) AS bigint) AS published_at, \
+ARRAY(SELECT jsonb_array_elements_text(tc.languages)) AS languages, \
+ARRAY( \
+SELECT cc.name FROM content_collections_content ccc \
+JOIN content_collections cc \
+ON cc.type = ccc.content_collection_type \
+AND cc.source = ccc.content_collection_source \
+AND cc.id = ccc.content_collection_id \
+WHERE ccc.content_type = tc.content_type \
+AND ccc.content_source = tc.content_source \
+AND ccc.content_id = tc.content_id \
+AND cc.type = 'genre' \
+ORDER BY cc.name \
+) AS genres, \
+t.files_data AS files_data \
+FROM torrent_contents tc \
+JOIN torrents t ON t.info_hash = tc.info_hash \
+LEFT JOIN content c \
+ON c.type = tc.content_type \
+AND c.source = tc.content_source \
+AND c.id = tc.content_id \
+WHERE tc.info_hash = ANY($1::bytea[]) \
+AND ($2::text IS NULL OR tc.id > $2) \
+AND octet_length(tc.info_hash) = 20 \
+ORDER BY tc.id ASC \
+LIMIT $3";
+
 /// Reads up to `limit` `torrent_contents` rows whose `id` is greater than
 /// `after_id` (or from the start when `None`), ordered by `id` — one row per
 /// search document. Pass the last returned [`TorrentForIndex::id`] back as
@@ -369,10 +491,46 @@ pub async fn stream_torrents_for_index(
         .fetch_all(pool)
         .await?;
 
+    rows_to_index_page(&rows)
+}
+
+/// Reads up to `limit` `torrent_contents` rows for `info_hashes`, ordered by
+/// `tc.id` and shaped identically to [`stream_torrents_for_index`].
+///
+/// This is the incremental follow companion to the full backfill stream: the
+/// caller first carves changed torrent keys, then uses this scoped stream to
+/// re-read all current classification rows for those torrents.
+pub async fn stream_torrents_for_index_info_hashes(
+    pool: &PgPool,
+    info_hashes: &[InfoHash],
+    after_id: Option<&str>,
+    limit: i64,
+) -> Result<TorrentForIndexPage> {
+    if info_hashes.is_empty() || limit <= 0 {
+        return Ok(TorrentForIndexPage::default());
+    }
+
+    let hashes: Vec<Vec<u8>> = info_hashes
+        .iter()
+        .map(|info_hash| info_hash.as_slice().to_vec())
+        .collect();
+    let after = after_id.map(str::to_owned);
+
+    let rows = sqlx::query(STREAM_FOR_INDEX_INFO_HASHES_SQL)
+        .bind(hashes)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+    rows_to_index_page(&rows)
+}
+
+fn rows_to_index_page(rows: &[PgRow]) -> Result<TorrentForIndexPage> {
     let mut out = Vec::with_capacity(rows.len());
     let mut skipped_info_hash_decodes = 0_u64;
     let mut last_seen_id = None;
-    for row in &rows {
+    for row in rows {
         let id: String = row.try_get("id")?;
         last_seen_id = Some(id.clone());
         let raw: Vec<u8> = row.try_get("info_hash")?;
@@ -595,6 +753,21 @@ mod tests {
     }
 
     #[test]
+    fn changed_keys_sql_uses_raw_updated_at_tuple_keyset() {
+        // The main-search follow loop relies on the production
+        // (updated_at, info_hash) btree. The column must stay raw in the
+        // keyset tuple and ORDER BY; only bound parameters are cast.
+        assert!(STREAM_CHANGED_KEYS_SQL.contains("FROM torrents"));
+        assert!(STREAM_CHANGED_KEYS_SQL.contains("updated_at > to_timestamp($1)"));
+        assert!(STREAM_CHANGED_KEYS_SQL.contains("updated_at <= to_timestamp($2)"));
+        assert!(STREAM_CHANGED_KEYS_SQL
+            .contains("(updated_at, info_hash) > ($3::timestamptz, $4::bytea)"));
+        assert!(STREAM_CHANGED_KEYS_SQL.contains("octet_length(info_hash) = 20"));
+        assert!(STREAM_CHANGED_KEYS_SQL.contains("ORDER BY updated_at ASC, info_hash ASC"));
+        assert!(!STREAM_CHANGED_KEYS_SQL.contains("EXTRACT(EPOCH FROM updated_at)"));
+    }
+
+    #[test]
     fn for_index_sql_shape() {
         // Drives from torrent_contents (one row = one search doc), joins
         // torrents + content, keysets on the composite PK tc.id.
@@ -611,5 +784,21 @@ mod tests {
         assert!(STREAM_FOR_INDEX_SQL.contains("content_collections_content ccc"));
         assert!(STREAM_FOR_INDEX_SQL.contains("cc.type = 'genre'"));
         assert!(STREAM_FOR_INDEX_SQL.contains("jsonb_array_elements_text(tc.languages)"));
+    }
+
+    #[test]
+    fn scoped_for_index_sql_shape() {
+        // Incremental follow must rebuild docs through the same source columns
+        // as the full backfill, only scoped to a carved info_hash batch.
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("FROM torrent_contents tc"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL
+            .contains("JOIN torrents t ON t.info_hash = tc.info_hash"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("t.file_extensions AS file_extensions"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("tc.info_hash = ANY($1::bytea[])"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("tc.id > $2"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("octet_length(tc.info_hash) = 20"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("ORDER BY tc.id ASC"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("LIMIT $3"));
+        assert!(STREAM_FOR_INDEX_INFO_HASHES_SQL.contains("t.files_data AS files_data"));
     }
 }

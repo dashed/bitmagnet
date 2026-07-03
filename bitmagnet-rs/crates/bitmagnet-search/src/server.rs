@@ -21,9 +21,17 @@ use crate::proto::search_service_server::SearchService;
 use crate::proto::{
     BatchIndexResponse, DeleteDocumentRequest, DeleteDocumentResponse, GetFacetsRequest,
     GetFacetsResponse, HealthCheckRequest, HealthCheckResponse, IndexDocumentRequest,
-    IndexDocumentResponse, SearchRequest, SearchResponse,
+    IndexDocumentResponse, SearchRequest, SearchResponse, TorrentDocument,
 };
 use crate::schema::{build_schema, Fields};
+
+/// All current main-search documents for one torrent, used by the in-process
+/// follow loop to supersede stale classifications atomically.
+#[derive(Debug, Clone)]
+pub struct TorrentDocumentReplacement {
+    pub info_hash: Vec<u8>,
+    pub documents: Vec<TorrentDocument>,
+}
 
 /// gRPC entry point for the search sidecar.
 ///
@@ -82,6 +90,40 @@ impl SearchServer {
         index::register_tokenizer(&index);
         let fields = Fields::from_schema(&index.schema())?;
         Self::new(index, fields)
+    }
+
+    /// Apply one incremental follow batch and commit it as a single visible
+    /// index update.
+    ///
+    /// Each replacement first deletes every document with the torrent's
+    /// `info_hash`, then adds the current `torrent_contents` documents for that
+    /// torrent. This is the supersession rule the follow contract needs: if a
+    /// re-crawl drops a classification row, the stale document is removed even
+    /// though there is no new `doc_id` for it. `deleted_info_hashes` are applied
+    /// after replacements, matching the tombstone phase of the 00024 window.
+    ///
+    /// # Errors
+    /// Returns Tantivy write/commit/reload failures.
+    pub async fn apply_follow_batch(
+        &self,
+        replacements: &[TorrentDocumentReplacement],
+        deleted_info_hashes: &[Vec<u8>],
+    ) -> tantivy::Result<()> {
+        {
+            let mut writer = self.writer.lock().await;
+            for replacement in replacements {
+                indexer::delete(&writer, &self.fields, &replacement.info_hash);
+                for document in &replacement.documents {
+                    indexer::upsert(&writer, &self.fields, document)?;
+                }
+            }
+            for info_hash in deleted_info_hashes {
+                indexer::delete(&writer, &self.fields, info_hash);
+            }
+            writer.commit()?;
+        }
+        self.reader.reload()?;
+        Ok(())
     }
 }
 
@@ -212,12 +254,12 @@ impl SearchService for SearchServer {
 
 #[cfg(test)]
 mod tests {
-    use super::SearchServer;
+    use super::{SearchServer, TorrentDocumentReplacement};
     use crate::proto::health_check_response::ServingStatus;
     use crate::proto::search_service_server::SearchService;
     use crate::proto::{
         ContentType, DeleteDocumentRequest, HealthCheckRequest, IndexDocumentRequest,
-        TorrentDocument,
+        SearchRequest, TorrentDocument,
     };
     use tonic::Request;
 
@@ -257,6 +299,20 @@ mod tests {
             .expect("health_check ok")
             .into_inner()
             .doc_count
+    }
+
+    async fn search_total(server: &SearchServer, query: &str) -> u64 {
+        server
+            .search(Request::new(SearchRequest {
+                query: query.to_owned(),
+                filters: None,
+                pagination: None,
+                sort: Vec::new(),
+            }))
+            .await
+            .expect("search ok")
+            .into_inner()
+            .total_hits
     }
 
     #[tokio::test]
@@ -318,5 +374,51 @@ mod tests {
             .await
             .expect_err("empty hash must error");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn follow_batch_supersedes_removed_classification_by_info_hash() {
+        let server = SearchServer::in_ram().expect("in-ram server");
+        let info_hash = vec![0x33; 20];
+
+        let mut kept = doc(info_hash.clone(), "Alpha Survivor");
+        kept.content_id = "kept".to_owned();
+        let mut removed = doc(info_hash.clone(), "Beta Removed");
+        removed.content_id = "removed".to_owned();
+
+        server
+            .apply_follow_batch(
+                &[TorrentDocumentReplacement {
+                    info_hash: info_hash.clone(),
+                    documents: vec![kept.clone(), removed],
+                }],
+                &[],
+            )
+            .await
+            .expect("initial follow batch");
+        assert_eq!(count(&server).await, 2);
+        assert_eq!(search_total(&server, "beta removed").await, 1);
+
+        // Rebuild the torrent with only classification A. Correct follow
+        // supersession deletes by torrent-level info_hash before re-adding A;
+        // a delete-by-new-doc_ids-only implementation would leave B behind.
+        server
+            .apply_follow_batch(
+                &[TorrentDocumentReplacement {
+                    info_hash,
+                    documents: vec![kept],
+                }],
+                &[],
+            )
+            .await
+            .expect("superseding follow batch");
+
+        assert_eq!(count(&server).await, 1);
+        assert_eq!(search_total(&server, "alpha survivor").await, 1);
+        assert_eq!(
+            search_total(&server, "beta removed").await,
+            0,
+            "removed classification must be gone after follow supersession"
+        );
     }
 }
