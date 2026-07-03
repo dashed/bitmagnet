@@ -57,7 +57,13 @@ const MAX_LIMIT: usize = 10_000;
 /// additive nature of PG `ts_rank` without fully summing the tiers.
 const TIE_BREAKER: Score = 0.3;
 /// Cap on prefix (`:*`) term expansions, bounding each `PhrasePrefixQuery`.
-const PREFIX_MAX_EXPANSIONS: u32 = 256;
+/// Postgres prefix matches are unbounded; Tantivy requires a cap, so prefixes
+/// with more than this many distinct indexed completions may silently miss the
+/// tail during shadow-mode PG parity comparisons. Tantivy does not appear to
+/// expose whether the cap was hit.
+const PREFIX_MAX_EXPANSIONS: u32 = 2_048;
+/// Bound phrase-over-group distribution so `(a|...) <-> (b|...)` cannot explode.
+const PHRASE_GROUP_MAX_COMBINATIONS: usize = 64;
 
 // ===========================================================================
 // Public entry points
@@ -602,6 +608,7 @@ fn eat_prefix(chars: &[char], i: &mut usize) -> bool {
 /// (`!` > `<->` > `&` > `|`).
 struct TsParser<'a> {
     toks: &'a [TsTok],
+    source: &'a str,
     pos: usize,
 }
 
@@ -645,7 +652,7 @@ impl TsParser<'_> {
         if nodes.len() == 1 {
             nodes.pop().expect("len == 1")
         } else {
-            build_phrase(nodes)
+            build_phrase(nodes, self.source)
         }
     }
 
@@ -689,9 +696,9 @@ impl TsParser<'_> {
 }
 
 /// Build a `<->` chain: a [`Ast::Phrase`] when every operand is a plain lexeme,
-/// otherwise an [`Ast::And`] fallback (Tantivy phrases cannot contain groups or
-/// negations — the adjacency degrades to a conjunction).
-fn build_phrase(nodes: Vec<Ast>) -> Ast {
+/// or an [`Ast::Or`] of concrete phrase combinations when an operand is a
+/// disjunction. Unsupported operands keep the old conjunction fallback.
+fn build_phrase(nodes: Vec<Ast>, source: &str) -> Ast {
     if nodes.iter().all(|n| matches!(n, Ast::Term { .. })) {
         let terms = nodes
             .into_iter()
@@ -702,7 +709,94 @@ fn build_phrase(nodes: Vec<Ast>) -> Ast {
             .collect();
         Ast::Phrase { terms }
     } else {
-        Ast::And(nodes)
+        match distribute_phrase_terms(&nodes, PHRASE_GROUP_MAX_COMBINATIONS) {
+            Ok(mut alternatives) => match alternatives.len() {
+                0 => Ast::And(nodes),
+                1 => Ast::Phrase {
+                    terms: alternatives.pop().expect("len == 1"),
+                },
+                _ => Ast::Or(
+                    alternatives
+                        .into_iter()
+                        .map(|terms| Ast::Phrase { terms })
+                        .collect(),
+                ),
+            },
+            Err(PhraseExpansionError::TooMany) => {
+                tracing::warn!(
+                    query = %source,
+                    max_combinations = PHRASE_GROUP_MAX_COMBINATIONS,
+                    "phrase-over-group expansion exceeded bound; falling back to conjunction"
+                );
+                Ast::And(nodes)
+            }
+            Err(PhraseExpansionError::NonExpandable) => Ast::And(nodes),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhraseExpansionError {
+    NonExpandable,
+    TooMany,
+}
+
+/// Expand `<->` operands into concrete term sequences. Nested `Or` groups are
+/// distributed recursively, with the same global combination bound enforced at
+/// each recursive fan-out and again when operand alternatives are multiplied.
+fn distribute_phrase_terms(
+    nodes: &[Ast],
+    limit: usize,
+) -> Result<Vec<Vec<(String, bool)>>, PhraseExpansionError> {
+    let mut combinations: Vec<Vec<(String, bool)>> = vec![Vec::new()];
+
+    for node in nodes {
+        let alternatives = phrase_term_alternatives(node, limit)?;
+        let next_len = combinations
+            .len()
+            .checked_mul(alternatives.len())
+            .ok_or(PhraseExpansionError::TooMany)?;
+        if next_len > limit {
+            return Err(PhraseExpansionError::TooMany);
+        }
+
+        let mut next = Vec::with_capacity(next_len);
+        for existing in &combinations {
+            for alternative in &alternatives {
+                let mut terms = existing.clone();
+                terms.extend(alternative.clone());
+                next.push(terms);
+            }
+        }
+        combinations = next;
+    }
+
+    Ok(combinations)
+}
+
+fn phrase_term_alternatives(
+    node: &Ast,
+    limit: usize,
+) -> Result<Vec<Vec<(String, bool)>>, PhraseExpansionError> {
+    match node {
+        Ast::Term { text, prefix } => Ok(vec![vec![(text.clone(), *prefix)]]),
+        Ast::Phrase { terms } => Ok(vec![terms.clone()]),
+        Ast::Or(children) => {
+            let mut alternatives = Vec::new();
+            for child in children {
+                let child_alternatives = phrase_term_alternatives(child, limit)?;
+                let next_len = alternatives
+                    .len()
+                    .checked_add(child_alternatives.len())
+                    .ok_or(PhraseExpansionError::TooMany)?;
+                if next_len > limit {
+                    return Err(PhraseExpansionError::TooMany);
+                }
+                alternatives.extend(child_alternatives);
+            }
+            Ok(alternatives)
+        }
+        Ast::And(_) | Ast::Not(_) | Ast::MatchAll => Err(PhraseExpansionError::NonExpandable),
     }
 }
 
@@ -714,6 +808,7 @@ fn parse_tsquery(s: &str) -> Ast {
     }
     TsParser {
         toks: &toks,
+        source: s,
         pos: 0,
     }
     .parse_or()
@@ -1035,6 +1130,13 @@ mod tests {
         }
     }
 
+    fn or_group_terms(count: usize) -> String {
+        (0..count)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
     #[test]
     fn parses_operators_with_postgres_precedence() {
         assert_eq!(parse_tsquery("foo"), term("foo"));
@@ -1082,6 +1184,54 @@ mod tests {
             parse_tsquery("a & (b | c)"),
             Ast::And(vec![term("a"), Ast::Or(vec![term("b"), term("c")]),])
         );
+    }
+
+    #[test]
+    fn phrase_over_or_group_distributes_to_concrete_phrases() {
+        assert_eq!(
+            parse_tsquery("a <-> (b | c)"),
+            Ast::Or(vec![
+                Ast::Phrase {
+                    terms: vec![("a".to_owned(), false), ("b".to_owned(), false)]
+                },
+                Ast::Phrase {
+                    terms: vec![("a".to_owned(), false), ("c".to_owned(), false)]
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn phrase_over_large_or_group_uses_bounded_conjunction_fallback() {
+        let at_bound = format!("a <-> ({})", or_group_terms(PHRASE_GROUP_MAX_COMBINATIONS));
+        match parse_tsquery(&at_bound) {
+            Ast::Or(children) => assert_eq!(children.len(), PHRASE_GROUP_MAX_COMBINATIONS),
+            other => panic!("expected distributed OR at bound, got {other:?}"),
+        }
+
+        let oversized = format!(
+            "a <-> ({})",
+            or_group_terms(PHRASE_GROUP_MAX_COMBINATIONS + 1)
+        );
+        match parse_tsquery(&oversized) {
+            Ast::And(children) => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(
+                    &children[0],
+                    Ast::Term { text, prefix } if text == "a" && !*prefix
+                ));
+                match &children[1] {
+                    Ast::Or(group) => assert_eq!(group.len(), PHRASE_GROUP_MAX_COMBINATIONS + 1),
+                    other => panic!("expected original OR group in fallback, got {other:?}"),
+                }
+            }
+            other => panic!("expected bounded conjunction fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prefix_max_expansions_is_pg_parity_budget() {
+        assert_eq!(PREFIX_MAX_EXPANSIONS, 2_048);
     }
 
     // ---- End-to-end search over an in-RAM index ----
@@ -1158,6 +1308,12 @@ mod tests {
             .collect()
     }
 
+    fn sorted_names(resp: &SearchResponse) -> Vec<String> {
+        let mut out = names(resp);
+        out.sort();
+        out
+    }
+
     #[test]
     fn search_and_or_not_phrase_prefix() {
         let docs = [
@@ -1195,6 +1351,20 @@ mod tests {
         // Empty query matches everything.
         let r = search(&index, &reader, &fields, "");
         assert_eq!(r.total_hits, 4);
+    }
+
+    #[test]
+    fn phrase_over_or_group_matches_only_adjacent_alternatives() {
+        let docs = [
+            base_doc(vec![0x01; 20], "Alpha Beta"),
+            base_doc(vec![0x02; 20], "Alpha Gamma"),
+            base_doc(vec![0x03; 20], "Alpha Far Beta"),
+        ];
+        let (index, reader, fields) = index_docs(&docs);
+
+        let r = search(&index, &reader, &fields, "alpha . (beta|gamma)");
+        assert_eq!(r.total_hits, 2);
+        assert_eq!(sorted_names(&r), vec!["Alpha Beta", "Alpha Gamma"]);
     }
 
     #[test]
