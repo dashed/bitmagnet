@@ -153,19 +153,19 @@ tests correctly `#[ignore]`d; this era has no DuckDB dependency).
 
 ## Revival checklist (blocking → nice-to-have)
 
-1. **BLOCKING:** handle v2 info hashes — widen `InfoHash` to 20/32 bytes, or scope the
+1. ✅ DONE (2026-07-03, commit 28d222ef) — **BLOCKING:** handle v2 info hashes — widen `InfoHash` to 20/32 bytes, or scope the
    backfill to `meta_version = 1` / key on `info_hash_v1`.
-2. Make info_hash decode a per-row skip (like bad blobs), not a page-level abort.
-3. Build the incremental delete/update path on the 00024 follow contract.
-4. Point the `file_type` facet at the authoritative `file_extensions` JSONB.
-5. Drop `WithFreqsAndPositions` → `WithFreqs` on `text_b/c/d`.
-6. Fix phrase-over-group distribution; document or raise the 256 prefix-expansion cap.
-7. Implement `grpc.health.v1` (or fix probe guidance); delete the `VOLUME` line; refresh
+2. ✅ DONE (28d222ef) — Make info_hash decode a per-row skip (like bad blobs), not a page-level abort.
+3. ✅ DONE (f60206cb; fable review SHIP-WITH-FIX, memory-bound fix applied) — Build the incremental delete/update path on the 00024 follow contract.
+4. ✅ DONE (6445106e) — Point the `file_type` facet at the authoritative `file_extensions` JSONB.
+5. ✅ DONE (8fc90b84 + recall-preserving lower-tier degradation 609a68a5 per opus review) — Drop `WithFreqsAndPositions` → `WithFreqs` on `text_b/c/d`.
+6. ✅ DONE (ac18a8c8; opus review SHIP) — Fix phrase-over-group distribution; document or raise the 256 prefix-expansion cap.
+7. ✅ DONE (105918b0) — Implement `grpc.health.v1` (or fix probe guidance); delete the `VOLUME` line; refresh
    the stale stub docstrings.
-8. Cap shadow-comparison concurrency and default `SEARCH_SAMPLE_RATE ≪ 1` before any flip.
-9. **Design + build Phase 6** (Tantivy-*served* results) — Phase 4 only observes; a real
+8. ✅ DONE (9c5800ca) — Cap shadow-comparison concurrency and default `SEARCH_SAMPLE_RATE ≪ 1` before any flip.
+9. 🟡 DESIGN DONE (docs/dev/phase6-tantivy-served-design.md); build remains — **Design + build Phase 6** (Tantivy-*served* results) — Phase 4 only observes; a real
    BM25 cutover does not exist yet.
-10. Ops note: the backfill binary and the server cannot share an index dir concurrently
+10. ✅ DONE (105918b0, documented on both binaries) — Ops note: the backfill binary and the server cannot share an index dir concurrently
     (writer lock; safe-fail).
 
 **Bottom line:** the engine core (tokenizer, query translation, facets, indexer,
