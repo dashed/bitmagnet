@@ -144,7 +144,9 @@ export default function FileSearchView() {
     }
   }
 
+  const hasQuery = search.query.trim().length > 0;
   const { data, error, isError, isFetching, isPending, isSuccess, refetch } = useQuery({
+    enabled: hasQuery,
     placeholderData: keepPreviousData,
     queryFn: async ({ signal }) => {
       const startedAt = performance.now();
@@ -160,7 +162,7 @@ export default function FileSearchView() {
   const result = data?.torrentContent.fileSearch;
   const items = result?.items ?? EMPTY_FILE_ITEMS;
   const hasResults = items.length > 0;
-  const isBusy = isPending || isFetching;
+  const isBusy = hasQuery && (isPending || isFetching);
   const selectedOrder = isFileOrderField(search.order) ? search.order : "size";
 
   return (
@@ -295,8 +297,17 @@ export default function FileSearchView() {
             </ul>
           ) : (
             <div className={styles["emptyState"]}>
-              <h2>{t("fileSearch.emptyTitle")}</h2>
-              <p>{t("fileSearch.emptyBody")}</p>
+              {hasQuery ? (
+                <>
+                  <h2>{t("fileSearch.emptyTitle")}</h2>
+                  <p>{t("fileSearch.emptyBody")}</p>
+                </>
+              ) : (
+                <>
+                  <h2>{t("fileSearch.startTitle")}</h2>
+                  <p>{t("fileSearch.startBody")}</p>
+                </>
+              )}
             </div>
           )}
 

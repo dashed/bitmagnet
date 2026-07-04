@@ -234,6 +234,8 @@ const en = {
     video_source: "Video source",
   },
   fileSearch: {
+    startBody: "File results appear once you enter a search term.",
+    startTitle: "Search inside torrents by file name",
     browseEyebrow: "All indexed files",
     emptyBody: "Try another file name or size range.",
     emptyTitle: "No matching files",
