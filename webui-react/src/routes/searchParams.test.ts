@@ -103,6 +103,36 @@ describe("torrent search params", () => {
     expect(getTorrentSearchFacets(search).torrentTag).not.toHaveProperty("logic");
   });
 
+  it("round-trips search modes while eliding the torrent default", () => {
+    expect(stringifyTorrentSearchParams(parseTorrentSearchParams({ mode: "torrents" }))).toEqual(
+      {},
+    );
+    expect(
+      stringifyTorrentSearchParams(
+        parseTorrentSearchParams({
+          mode: "files",
+          query: "sample",
+        }),
+      ),
+    ).toEqual({
+      mode: "files",
+      query: "sample",
+    });
+    expect(
+      stringifyTorrentSearchParams(
+        parseTorrentSearchParams({
+          mode: "paths",
+          page: "2",
+          query: "movies",
+        }),
+      ),
+    ).toEqual({
+      mode: "paths",
+      page: 2,
+      query: "movies",
+    });
+  });
+
   it("drops content-type-specific facet params when the content type changes", () => {
     const movieSearch = parseTorrentSearchParams({
       content_type: "movie",

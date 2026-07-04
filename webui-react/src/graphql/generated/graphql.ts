@@ -910,6 +910,49 @@ export type WorkersQuery = {
   listAll: WorkersListAllQueryResult;
 };
 
+export type CollapsePathsQueryVariables = Exact<{
+  input: TorrentContentCollapsePathsInput;
+}>;
+
+export type CollapsePathsQuery = {
+  __typename?: "Query";
+  torrentContent: {
+    __typename?: "TorrentContentQuery";
+    collapsePaths: {
+      __typename?: "TorrentContentCollapsePathsResult";
+      groups: Array<{
+        __typename?: "TorrentContentPathGroup";
+        path: string;
+        infoHashes: Array<string>;
+      }>;
+    };
+  };
+};
+
+export type FileSearchQueryVariables = Exact<{
+  input: FileSearchInput;
+}>;
+
+export type FileSearchQuery = {
+  __typename?: "Query";
+  torrentContent: {
+    __typename?: "TorrentContentQuery";
+    fileSearch: {
+      __typename?: "FileSearchResult";
+      totalCount: number;
+      hasNextPage: boolean;
+      items: Array<{
+        __typename?: "FileSearchItem";
+        infoHash: string;
+        index: number;
+        path: string;
+        extension: string;
+        size: number;
+      }>;
+    };
+  };
+};
+
 export type HealthCheckQueryVariables = Exact<{ [key: string]: never }>;
 
 export type HealthCheckQuery = {
@@ -931,6 +974,18 @@ export type HealthCheckQuery = {
       __typename?: "WorkersListAllQueryResult";
       workers: Array<{ __typename?: "Worker"; key: string; started: boolean }>;
     };
+  };
+};
+
+export type PathTypeaheadQueryVariables = Exact<{
+  input: PathTypeaheadInput;
+}>;
+
+export type PathTypeaheadQuery = {
+  __typename?: "Query";
+  torrentContent: {
+    __typename?: "TorrentContentQuery";
+    pathTypeahead: { __typename?: "PathTypeaheadResult"; suggestions: Array<string> };
   };
 };
 
@@ -1329,6 +1384,35 @@ export class TypedDocumentString<TResult, TVariables>
   }
 }
 
+export const CollapsePathsDocument = new TypedDocumentString(`
+    query CollapsePaths($input: TorrentContentCollapsePathsInput!) {
+  torrentContent {
+    collapsePaths(input: $input) {
+      groups {
+        path
+        infoHashes
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<CollapsePathsQuery, CollapsePathsQueryVariables>;
+export const FileSearchDocument = new TypedDocumentString(`
+    query FileSearch($input: FileSearchInput!) {
+  torrentContent {
+    fileSearch(input: $input) {
+      totalCount
+      hasNextPage
+      items {
+        infoHash
+        index
+        path
+        extension
+        size
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<FileSearchQuery, FileSearchQueryVariables>;
 export const HealthCheckDocument = new TypedDocumentString(`
     query HealthCheck {
   health {
@@ -1350,6 +1434,15 @@ export const HealthCheckDocument = new TypedDocumentString(`
   }
 }
     `) as unknown as TypedDocumentString<HealthCheckQuery, HealthCheckQueryVariables>;
+export const PathTypeaheadDocument = new TypedDocumentString(`
+    query PathTypeahead($input: PathTypeaheadInput!) {
+  torrentContent {
+    pathTypeahead(input: $input) {
+      suggestions
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<PathTypeaheadQuery, PathTypeaheadQueryVariables>;
 export const QueueEnqueueReprocessTorrentsBatchDocument = new TypedDocumentString(`
     mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {
   queue {

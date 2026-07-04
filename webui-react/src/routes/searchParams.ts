@@ -14,9 +14,11 @@ import type {
 export const DEFAULT_SEARCH_LIMIT = 20;
 export const DEFAULT_SIZE_UNIT = "MiB";
 export const INFO_HASH_PATTERN = /^[0-9a-fA-F]{40}$/;
+export const SEARCH_MODES = ["torrents", "files", "paths"] as const;
 
 export const SIZE_UNITS = ["KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"] as const;
 export type SizeUnit = (typeof SIZE_UNITS)[number];
+export type SearchMode = (typeof SEARCH_MODES)[number];
 
 export const CONTENT_TYPE_VALUES = [
   "audiobook",
@@ -185,6 +187,7 @@ export type TorrentSearchUrlParams = {
   max_size_unit?: SizeUnit;
   min_size?: number;
   min_size_unit?: SizeUnit;
+  mode?: Exclude<SearchMode, "torrents">;
   order?: TorrentContentOrderByField;
   page?: number;
   published_at?: PublishedPreset;
@@ -200,6 +203,7 @@ export type TorrentSearchState = {
   maxSizeUnit: SizeUnit;
   minSize?: number;
   minSizeUnit: SizeUnit;
+  mode: SearchMode;
   order: TorrentContentOrderByField;
   page: number;
   publishedAt?: PublishedPreset;
@@ -354,6 +358,12 @@ function publishedPresetValue(value: unknown): PublishedPreset | undefined {
     : undefined;
 }
 
+function searchModeValue(value: unknown): SearchMode {
+  const candidate = stringValue(value);
+
+  return SEARCH_MODES.includes(candidate as SearchMode) ? (candidate as SearchMode) : "torrents";
+}
+
 function finiteValue<T extends string>(values: readonly T[], value: string): value is T {
   return (values as readonly string[]).includes(value);
 }
@@ -458,6 +468,7 @@ export function parseTorrentSearchParams(input: unknown): TorrentSearchState {
     maxSizeUnit: sizeUnitValue(params["max_size_unit"]),
     minSize: integerValue(params["min_size"], 1),
     minSizeUnit: sizeUnitValue(params["min_size_unit"]),
+    mode: searchModeValue(params["mode"]),
     order,
     page: integerValue(params["page"], 1) ?? 1,
     publishedAt:
@@ -476,6 +487,10 @@ export function stringifyTorrentSearchParams(search: TorrentSearchState): Torren
 
   if (search.contentType) {
     next.content_type = search.contentType;
+  }
+
+  if (search.mode !== "torrents") {
+    next.mode = search.mode;
   }
 
   if (search.page !== 1) {
@@ -690,5 +705,13 @@ export function updateQuery(search: TorrentSearchState, query: string): TorrentS
     order,
     page: 1,
     query: trimmedQuery,
+  };
+}
+
+export function updateSearchMode(search: TorrentSearchState, mode: SearchMode): TorrentSearchState {
+  return {
+    ...search,
+    mode,
+    page: 1,
   };
 }

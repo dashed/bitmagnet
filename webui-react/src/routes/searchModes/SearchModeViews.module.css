@@ -1,0 +1,296 @@
+.modeView {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 860px);
+}
+
+.toolbar {
+  align-items: end;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.toolbarText {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.eyebrow,
+.latency,
+.muted,
+.metaLabel {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  margin: 0;
+}
+
+.eyebrow,
+.title,
+.pathText {
+  overflow-wrap: anywhere;
+}
+
+.title {
+  color: var(--mantine-color-text);
+  font-size: 20px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.resultList,
+.suggestions,
+.breadcrumb,
+.torrentLinks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.resultList {
+  display: grid;
+  gap: 10px;
+}
+
+.fileRow,
+.pathRow,
+.emptyState {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+}
+
+.fileRow,
+.pathRow {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.fileMain,
+.pathMain {
+  align-items: start;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.pathButton {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  padding: 0;
+  text-align: start;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor, transparent 70%);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.pathButton:hover {
+  text-decoration-color: currentColor;
+}
+
+.pathText {
+  color: var(--mantine-color-text);
+  font-weight: 800;
+  min-width: 0;
+}
+
+.torrentLink {
+  color: var(--mantine-primary-color-filled);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.badge {
+  align-items: center;
+  background: var(--mantine-primary-color-light);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-primary-color-light-color);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  min-height: 24px;
+  padding: 0 8px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.metaGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.metaGrid div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metaGrid dt {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.metaGrid dd {
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.emptyState {
+  color: var(--mantine-color-dimmed);
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.emptyState h2 {
+  color: var(--mantine-color-text);
+  font-size: 20px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.emptyState p {
+  margin: 0;
+}
+
+.breadcrumb {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.breadcrumb li {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.breadcrumb li:not(:last-child)::after {
+  color: var(--mantine-color-dimmed);
+  content: "/";
+  font-weight: 700;
+}
+
+.breadcrumb button {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  font-weight: 700;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.breadcrumb button:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.comboboxWrap {
+  position: relative;
+}
+
+.suggestions {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  box-shadow: var(--mantine-shadow-sm);
+  display: grid;
+  gap: 2px;
+  left: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 6px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+}
+
+:global([data-mantine-color-scheme="dark"]) .suggestions {
+  box-shadow: none;
+}
+
+.suggestion {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  min-height: 36px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  text-align: start;
+}
+
+.suggestion:hover,
+.suggestion[aria-selected="true"] {
+  background: var(--mantine-color-default-hover);
+}
+
+.torrentLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pagination {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.pagination span {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 600;
+  min-width: 72px;
+  text-align: center;
+}
+
+@media (max-width: 47.999em) {
+  .toolbar,
+  .pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fileMain,
+  .pathMain,
+  .metaGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .pagination > button {
+    width: 100%;
+  }
+}

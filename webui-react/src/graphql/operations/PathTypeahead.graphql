@@ -1,0 +1,7 @@
+query PathTypeahead($input: PathTypeaheadInput!) {
+  torrentContent {
+    pathTypeahead(input: $input) {
+      suggestions
+    }
+  }
+}

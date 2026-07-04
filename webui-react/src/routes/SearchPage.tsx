@@ -8,6 +8,7 @@ import { ListSkeleton } from "../components/ListSkeleton";
 import { QueryError } from "../components/QueryError";
 import type { TorrentActionItem } from "../components/TorrentMutationActions";
 import { useToast } from "../components/toast";
+import { isSearchModesEnabled } from "../flags";
 import { execute } from "../graphql/client";
 import { TorrentContentSearchDocument } from "../graphql/generated/graphql";
 import type {
@@ -28,6 +29,7 @@ import {
   DEFAULT_SIZE_UNIT,
   ORDER_OPTIONS,
   PUBLISHED_PRESETS,
+  SEARCH_MODES,
   SIZE_UNITS,
   TORRENT_SEARCH_FACET_KEYS,
   getDefaultDescending,
@@ -38,9 +40,11 @@ import {
   sanitizeFacetSelections,
   stringifyTorrentSearchParams,
   updateQuery,
+  updateSearchMode,
 } from "./searchParams";
 import type {
   ContentTypeSelection,
+  SearchMode,
   SizeUnit,
   TorrentSearchFacetKey,
   TorrentSearchFacetSelections,
@@ -59,6 +63,8 @@ const LazyTorrentBulkActionsBar = lazy(async () => {
 
   return { default: module.TorrentBulkActionsBar };
 });
+const LazyFileSearchView = lazy(() => import("./searchModes/FileSearchView"));
+const LazyPathBrowseView = lazy(() => import("./searchModes/PathBrowseView"));
 
 type SearchResult = TorrentContentSearchQuery["torrentContent"]["search"];
 type SearchItem = SearchResult["items"][number];
@@ -345,6 +351,8 @@ function getContentTypeOptions(
 export function SearchPage() {
   const routeSearch = useSearch({ from: "/" });
   const search = useMemo(() => parseTorrentSearchParams(routeSearch), [routeSearch]);
+  const searchModesEnabled = isSearchModesEnabled();
+  const effectiveMode: SearchMode = searchModesEnabled ? search.mode : "torrents";
   const searchParams = useMemo(() => stringifyTorrentSearchParams(search), [search]);
   const searchParamsKey = useMemo(() => JSON.stringify(searchParams), [searchParams]);
   const sanitizedFacetSelections = useMemo(
@@ -444,6 +452,10 @@ export function SearchPage() {
       search: stringifyTorrentSearchParams(nextSearch),
       to: "/",
     });
+  }
+
+  function handleSearchModeChange(mode: SearchMode) {
+    navigateSearch(updateSearchMode(search, mode));
   }
 
   function handleQueryChange(event: ChangeEvent<HTMLInputElement>) {
@@ -685,6 +697,7 @@ export function SearchPage() {
     isSuccess: isSearchSuccess,
     refetch: refetchSearch,
   } = useQuery({
+    enabled: effectiveMode === "torrents",
     placeholderData: keepPreviousData,
     queryFn: async ({ signal }) => {
       const startedAt = performance.now();
@@ -772,491 +785,537 @@ export function SearchPage() {
   return (
     <section className={styles["root"]}>
       <h1 className={styles["srOnly"]}>{t("search.pageTitle")}</h1>
-      <form className={styles["searchForm"]} onSubmit={handleSubmit} role="search">
-        <label className={styles["label"]} htmlFor="torrent-search">
-          {t("search.inputLabel")}
-        </label>
-        <div className={styles["searchControl"]}>
-          <input
-            autoComplete="off"
-            className={styles["input"]}
-            id="torrent-search"
-            onChange={handleQueryChange}
-            placeholder={t("search.placeholder")}
-            type="search"
-            value={draftQuery}
-          />
-          <button className={styles["submit"]} type="submit">
-            {t("search.submit")}
-          </button>
-        </div>
-      </form>
-
-      <div className={styles["primaryControls"]}>
-        <section className={styles["filterBlock"]}>
-          <h2>{t("search.contentType")}</h2>
-          <div className={styles["chipRow"]}>
+      {searchModesEnabled ? (
+        <nav aria-label={t("search.modes.label")} className={styles["modeSwitch"]}>
+          {SEARCH_MODES.map((mode) => (
             <button
-              aria-pressed={!search.contentType}
-              className={styles["chip"]}
-              data-active={!search.contentType ? "true" : undefined}
-              onClick={() => handleContentTypeChange(undefined)}
+              aria-pressed={effectiveMode === mode}
+              data-active={effectiveMode === mode ? "true" : undefined}
+              key={mode}
+              onClick={() => handleSearchModeChange(mode)}
               type="button"
             >
-              <span>{t("search.contentTypeAll")}</span>
-              <small>
-                {formatIntEstimate(totalContentTypeCount, totalContentTypeIsEstimate, 2, locale)}
-              </small>
+              {t(`search.modes.${mode}`)}
             </button>
-            {contentTypeOptions.map((option) => (
-              <button
-                aria-pressed={search.contentType === option.value}
-                className={styles["chip"]}
-                data-active={search.contentType === option.value ? "true" : undefined}
-                key={option.value}
-                onClick={() => handleContentTypeChange(option.value)}
-                type="button"
-              >
-                <span>{option.label}</span>
-                <small>{formatIntEstimate(option.count, option.isEstimate, 2, locale)}</small>
-              </button>
-            ))}
-          </div>
-        </section>
-        <section className={styles["filterBlock"]}>
-          <h2>{t("search.sort")}</h2>
-          <div className={styles["sortBar"]}>
-            <label>
-              <span>{t("search.orderBy")}</span>
-              <select onChange={handleOrderChange} value={search.order}>
-                {orderOptions}
-              </select>
+          ))}
+        </nav>
+      ) : null}
+      {effectiveMode === "files" ? (
+        <Suspense fallback={<ListSkeleton ariaLabel={t("fileSearch.loading")} rows={6} />}>
+          <LazyFileSearchView />
+        </Suspense>
+      ) : null}
+      {effectiveMode === "paths" ? (
+        <Suspense fallback={<ListSkeleton ariaLabel={t("paths.loading")} rows={6} />}>
+          <LazyPathBrowseView />
+        </Suspense>
+      ) : null}
+      {effectiveMode === "torrents" ? (
+        <>
+          <form className={styles["searchForm"]} onSubmit={handleSubmit} role="search">
+            <label className={styles["label"]} htmlFor="torrent-search">
+              {t("search.inputLabel")}
             </label>
-            <button
-              aria-label={t("search.toggleSortDirection")}
-              className={styles["secondaryButton"]}
-              onClick={handleDirectionToggle}
-              type="button"
-            >
-              {search.descending ? t("search.descending") : t("search.ascending")}
-            </button>
-          </div>
-        </section>
-      </div>
-
-      <details className={styles["filters"]} ref={filtersRef}>
-        <summary
-          aria-label={
-            activeFilterCount > 0
-              ? t("search.filtersSummaryActive", { count: activeFilterCount })
-              : t("search.filtersSummary")
-          }
-        >
-          {t("search.filtersSummary")}
-          {activeFilterCount > 0 ? (
-            <span className={styles["filterBadge"]}>{activeFilterCount}</span>
-          ) : null}
-        </summary>
-        <button
-          aria-label={t("search.closeFilters")}
-          className={styles["filtersScrim"]}
-          onClick={handleCloseFilters}
-          tabIndex={-1}
-          type="button"
-        />
-        <div className={styles["filtersBody"]}>
-          <div className={styles["filtersSheetHeader"]}>
-            <h2>{t("search.filtersSummary")}</h2>
-            <button
-              className={styles["secondaryButton"]}
-              onClick={handleCloseFilters}
-              type="button"
-            >
-              {t("search.closeFilters")}
-            </button>
-          </div>
-          {hasActiveFilters ? (
-            <div className={styles["filtersToolbar"]}>
-              <button
-                className={styles["secondaryButton"]}
-                onClick={handleResetFilters}
-                type="button"
-              >
-                {t("facets.reset")}
+            <div className={styles["searchControl"]}>
+              <input
+                autoComplete="off"
+                className={styles["input"]}
+                id="torrent-search"
+                onChange={handleQueryChange}
+                placeholder={t("search.placeholder")}
+                type="search"
+                value={draftQuery}
+              />
+              <button className={styles["submit"]} type="submit">
+                {t("search.submit")}
               </button>
             </div>
-          ) : null}
+          </form>
 
-          <section className={styles["filterBlock"]}>
-            <h2>{t("search.sizeFilter")}</h2>
-            <form className={styles["sizeForm"]} onSubmit={handleSizeApply}>
-              <label>
-                <span>{t("search.minSize")}</span>
-                <input
-                  min="0"
-                  onChange={(event) =>
-                    setSizeDraft((current) => ({ ...current, min: event.target.value }))
-                  }
-                  type="number"
-                  value={sizeDraft.min}
-                />
-              </label>
-              <label>
-                <span>{t("search.minSizeUnit")}</span>
-                <select
-                  onChange={(event) =>
-                    setSizeDraft((current) => ({
-                      ...current,
-                      minUnit: event.target.value as SizeUnit,
-                    }))
-                  }
-                  value={sizeDraft.minUnit}
-                >
-                  {SIZE_UNITS.map((unit) => (
-                    <option key={unit} value={unit}>
-                      {t(`search.sizeUnits.${unit}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>{t("search.maxSize")}</span>
-                <input
-                  min="0"
-                  onChange={(event) =>
-                    setSizeDraft((current) => ({ ...current, max: event.target.value }))
-                  }
-                  type="number"
-                  value={sizeDraft.max}
-                />
-              </label>
-              <label>
-                <span>{t("search.maxSizeUnit")}</span>
-                <select
-                  onChange={(event) =>
-                    setSizeDraft((current) => ({
-                      ...current,
-                      maxUnit: event.target.value as SizeUnit,
-                    }))
-                  }
-                  value={sizeDraft.maxUnit}
-                >
-                  {SIZE_UNITS.map((unit) => (
-                    <option key={unit} value={unit}>
-                      {t(`search.sizeUnits.${unit}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className={styles["filterActions"]}>
-                <button className={styles["submitSmall"]} type="submit">
-                  {t("search.apply")}
-                </button>
+          <div className={styles["primaryControls"]}>
+            <section className={styles["filterBlock"]}>
+              <h2>{t("search.contentType")}</h2>
+              <div className={styles["chipRow"]}>
                 <button
-                  className={styles["secondaryButton"]}
-                  disabled={!hasSizeFilter && !sizeDraft.min && !sizeDraft.max}
-                  onClick={handleSizeClear}
+                  aria-pressed={!search.contentType}
+                  className={styles["chip"]}
+                  data-active={!search.contentType ? "true" : undefined}
+                  onClick={() => handleContentTypeChange(undefined)}
                   type="button"
                 >
-                  {t("search.clear")}
+                  <span>{t("search.contentTypeAll")}</span>
+                  <small>
+                    {formatIntEstimate(
+                      totalContentTypeCount,
+                      totalContentTypeIsEstimate,
+                      2,
+                      locale,
+                    )}
+                  </small>
+                </button>
+                {contentTypeOptions.map((option) => (
+                  <button
+                    aria-pressed={search.contentType === option.value}
+                    className={styles["chip"]}
+                    data-active={search.contentType === option.value ? "true" : undefined}
+                    key={option.value}
+                    onClick={() => handleContentTypeChange(option.value)}
+                    type="button"
+                  >
+                    <span>{option.label}</span>
+                    <small>{formatIntEstimate(option.count, option.isEstimate, 2, locale)}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+            <section className={styles["filterBlock"]}>
+              <h2>{t("search.sort")}</h2>
+              <div className={styles["sortBar"]}>
+                <label>
+                  <span>{t("search.orderBy")}</span>
+                  <select onChange={handleOrderChange} value={search.order}>
+                    {orderOptions}
+                  </select>
+                </label>
+                <button
+                  aria-label={t("search.toggleSortDirection")}
+                  className={styles["secondaryButton"]}
+                  onClick={handleDirectionToggle}
+                  type="button"
+                >
+                  {search.descending ? t("search.descending") : t("search.ascending")}
                 </button>
               </div>
-            </form>
-          </section>
-
-          <section className={styles["filterBlock"]}>
-            <h2>{t("search.publishedFilter")}</h2>
-            <label className={styles["publishedSelect"]}>
-              <span>{t("search.published")}</span>
-              <select onChange={handlePublishedChange} value={search.publishedAt ?? ""}>
-                <option value="">{t("search.publishedAny")}</option>
-                {PUBLISHED_PRESETS.map((preset) => (
-                  <option key={preset.value} value={preset.value}>
-                    {t(preset.labelKey)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </section>
-
-          <div className={styles["facetGroups"]}>
-            {relevantFacetKeys.map((key) => {
-              const selectedValues = sanitizedFacetSelections[key] ?? [];
-              const options = getDynamicFacetOptions(result?.aggregations, key, selectedValues, t);
-              const isExpanded = expandedFacets.has(key);
-              const hasSelections = selectedValues.length > 0;
-
-              return (
-                <details
-                  className={styles["facetGroup"]}
-                  data-selected={hasSelections ? "true" : undefined}
-                  key={key}
-                  onToggle={(event) => handleFacetExpandedChange(key, event.currentTarget.open)}
-                  open={isExpanded}
-                >
-                  <summary>
-                    <span>{t(`facets.${key}`)}</span>
-                    {hasSelections ? (
-                      <small>{selectedValues.length.toLocaleString(locale)}</small>
-                    ) : null}
-                  </summary>
-                  <div className={styles["facetGroupBody"]}>
-                    {hasSelections ? (
-                      <div className={styles["facetActions"]}>
-                        <button
-                          className={styles["secondaryButton"]}
-                          onClick={() => handleFacetClear(key)}
-                          type="button"
-                        >
-                          {t("facets.clear")}
-                        </button>
-                      </div>
-                    ) : null}
-                    {options.length ? (
-                      <ul className={styles["facetOptionList"]}>
-                        {options.map((option) => (
-                          <li key={option.value}>
-                            <label className={styles["facetOption"]}>
-                              <input
-                                checked={selectedValues.includes(option.value)}
-                                onChange={(event) =>
-                                  handleFacetValueChange(key, option.value, event.target.checked)
-                                }
-                                type="checkbox"
-                              />
-                              <span>{option.label}</span>
-                              <small>
-                                {formatIntEstimate(option.count, option.isEstimate, 2, locale)}
-                              </small>
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className={styles["facetEmpty"]}>{t("facets.none")}</p>
-                    )}
-                  </div>
-                </details>
-              );
-            })}
-          </div>
-        </div>
-      </details>
-
-      {isSearchPending ? (
-        <div className={styles["resultsShell"]}>
-          <ListSkeleton ariaLabel={t("search.loading")} rows={6} />
-        </div>
-      ) : null}
-
-      {isSearchError ? (
-        <div className={styles["resultsShell"]}>
-          <QueryError error={searchError} onRetry={() => void refetchSearch()} />
-        </div>
-      ) : null}
-
-      {isSearchSuccess ? (
-        <div className={styles["resultsShell"]}>
-          <div className={styles["resultsToolbar"]}>
-            <div>
-              <p className={styles["resultsEyebrow"]}>
-                {isBrowse ? t("search.browseEyebrow") : search.query}
-              </p>
-              <h2 className={styles["resultsTitle"]}>{totalCountLabel}</h2>
-              {fetchMsRef.current !== null && result ? (
-                <p className={styles["latency"]}>
-                  {t("search.fetchedIn", { ms: fetchMsRef.current.toLocaleString(locale) })}
-                  {appLoadMs !== null
-                    ? " \u00b7 " + t("search.appLoadedIn", { ms: appLoadMs.toLocaleString(locale) })
-                    : null}
-                </p>
-              ) : null}
-            </div>
-            <div className={styles["resultsActions"]}>
-              <label className={styles["selectAllControl"]}>
-                <IndeterminateCheckbox
-                  aria-label={
-                    pageSelection.allSelected ? t("actions.deselectPage") : t("actions.selectPage")
-                  }
-                  checked={pageSelection.allSelected}
-                  disabled={!hasResults}
-                  indeterminate={pageSelection.partiallySelected}
-                  onChange={handlePageSelectionToggle}
-                />
-                <span>
-                  {selectedItems.length > 0
-                    ? t("actions.selectedCount", { count: selectedItems.length })
-                    : t("actions.selectPage")}
-                </span>
-              </label>
-              <button
-                className={styles["secondaryButton"]}
-                disabled={isBusy}
-                onClick={handleRefresh}
-                type="button"
-              >
-                {t("search.refresh")}
-              </button>
-            </div>
+            </section>
           </div>
 
-          {selectedItems.length > 0 ? (
-            <Suspense
-              fallback={
-                <div className={styles["bulkActionsFallback"]} role="status">
-                  {t("actions.loading")}
-                </div>
+          <details className={styles["filters"]} ref={filtersRef}>
+            <summary
+              aria-label={
+                activeFilterCount > 0
+                  ? t("search.filtersSummaryActive", { count: activeFilterCount })
+                  : t("search.filtersSummary")
               }
             >
-              <LazyTorrentBulkActionsBar
-                items={selectedItems}
-                onClearSelection={handleClearSelection}
-              />
-            </Suspense>
+              {t("search.filtersSummary")}
+              {activeFilterCount > 0 ? (
+                <span className={styles["filterBadge"]}>{activeFilterCount}</span>
+              ) : null}
+            </summary>
+            <button
+              aria-label={t("search.closeFilters")}
+              className={styles["filtersScrim"]}
+              onClick={handleCloseFilters}
+              tabIndex={-1}
+              type="button"
+            />
+            <div className={styles["filtersBody"]}>
+              <div className={styles["filtersSheetHeader"]}>
+                <h2>{t("search.filtersSummary")}</h2>
+                <button
+                  className={styles["secondaryButton"]}
+                  onClick={handleCloseFilters}
+                  type="button"
+                >
+                  {t("search.closeFilters")}
+                </button>
+              </div>
+              {hasActiveFilters ? (
+                <div className={styles["filtersToolbar"]}>
+                  <button
+                    className={styles["secondaryButton"]}
+                    onClick={handleResetFilters}
+                    type="button"
+                  >
+                    {t("facets.reset")}
+                  </button>
+                </div>
+              ) : null}
+
+              <section className={styles["filterBlock"]}>
+                <h2>{t("search.sizeFilter")}</h2>
+                <form className={styles["sizeForm"]} onSubmit={handleSizeApply}>
+                  <label>
+                    <span>{t("search.minSize")}</span>
+                    <input
+                      min="0"
+                      onChange={(event) =>
+                        setSizeDraft((current) => ({ ...current, min: event.target.value }))
+                      }
+                      type="number"
+                      value={sizeDraft.min}
+                    />
+                  </label>
+                  <label>
+                    <span>{t("search.minSizeUnit")}</span>
+                    <select
+                      onChange={(event) =>
+                        setSizeDraft((current) => ({
+                          ...current,
+                          minUnit: event.target.value as SizeUnit,
+                        }))
+                      }
+                      value={sizeDraft.minUnit}
+                    >
+                      {SIZE_UNITS.map((unit) => (
+                        <option key={unit} value={unit}>
+                          {t(`search.sizeUnits.${unit}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>{t("search.maxSize")}</span>
+                    <input
+                      min="0"
+                      onChange={(event) =>
+                        setSizeDraft((current) => ({ ...current, max: event.target.value }))
+                      }
+                      type="number"
+                      value={sizeDraft.max}
+                    />
+                  </label>
+                  <label>
+                    <span>{t("search.maxSizeUnit")}</span>
+                    <select
+                      onChange={(event) =>
+                        setSizeDraft((current) => ({
+                          ...current,
+                          maxUnit: event.target.value as SizeUnit,
+                        }))
+                      }
+                      value={sizeDraft.maxUnit}
+                    >
+                      {SIZE_UNITS.map((unit) => (
+                        <option key={unit} value={unit}>
+                          {t(`search.sizeUnits.${unit}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className={styles["filterActions"]}>
+                    <button className={styles["submitSmall"]} type="submit">
+                      {t("search.apply")}
+                    </button>
+                    <button
+                      className={styles["secondaryButton"]}
+                      disabled={!hasSizeFilter && !sizeDraft.min && !sizeDraft.max}
+                      onClick={handleSizeClear}
+                      type="button"
+                    >
+                      {t("search.clear")}
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section className={styles["filterBlock"]}>
+                <h2>{t("search.publishedFilter")}</h2>
+                <label className={styles["publishedSelect"]}>
+                  <span>{t("search.published")}</span>
+                  <select onChange={handlePublishedChange} value={search.publishedAt ?? ""}>
+                    <option value="">{t("search.publishedAny")}</option>
+                    {PUBLISHED_PRESETS.map((preset) => (
+                      <option key={preset.value} value={preset.value}>
+                        {t(preset.labelKey)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </section>
+
+              <div className={styles["facetGroups"]}>
+                {relevantFacetKeys.map((key) => {
+                  const selectedValues = sanitizedFacetSelections[key] ?? [];
+                  const options = getDynamicFacetOptions(
+                    result?.aggregations,
+                    key,
+                    selectedValues,
+                    t,
+                  );
+                  const isExpanded = expandedFacets.has(key);
+                  const hasSelections = selectedValues.length > 0;
+
+                  return (
+                    <details
+                      className={styles["facetGroup"]}
+                      data-selected={hasSelections ? "true" : undefined}
+                      key={key}
+                      onToggle={(event) => handleFacetExpandedChange(key, event.currentTarget.open)}
+                      open={isExpanded}
+                    >
+                      <summary>
+                        <span>{t(`facets.${key}`)}</span>
+                        {hasSelections ? (
+                          <small>{selectedValues.length.toLocaleString(locale)}</small>
+                        ) : null}
+                      </summary>
+                      <div className={styles["facetGroupBody"]}>
+                        {hasSelections ? (
+                          <div className={styles["facetActions"]}>
+                            <button
+                              className={styles["secondaryButton"]}
+                              onClick={() => handleFacetClear(key)}
+                              type="button"
+                            >
+                              {t("facets.clear")}
+                            </button>
+                          </div>
+                        ) : null}
+                        {options.length ? (
+                          <ul className={styles["facetOptionList"]}>
+                            {options.map((option) => (
+                              <li key={option.value}>
+                                <label className={styles["facetOption"]}>
+                                  <input
+                                    checked={selectedValues.includes(option.value)}
+                                    onChange={(event) =>
+                                      handleFacetValueChange(
+                                        key,
+                                        option.value,
+                                        event.target.checked,
+                                      )
+                                    }
+                                    type="checkbox"
+                                  />
+                                  <span>{option.label}</span>
+                                  <small>
+                                    {formatIntEstimate(option.count, option.isEstimate, 2, locale)}
+                                  </small>
+                                </label>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className={styles["facetEmpty"]}>{t("facets.none")}</p>
+                        )}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            </div>
+          </details>
+
+          {isSearchPending ? (
+            <div className={styles["resultsShell"]}>
+              <ListSkeleton ariaLabel={t("search.loading")} rows={6} />
+            </div>
           ) : null}
 
-          {hasResults && result ? (
-            <ul className={styles["resultsList"]}>
-              {result.items.map((item: SearchItem) => {
-                const title = getResultTitle(item);
-                const torrentName = item.torrent.name.trim();
-                const showTorrentName = torrentName !== title;
-                const selected = selectedInfoHashes.has(item.infoHash);
-                const dhtSeenTooltip = getDhtSeenTooltip(item, {
-                  count: t("search.dhtSeenCount"),
-                  first: t("search.dhtFirstSeen"),
-                  last: t("search.dhtLastSeen"),
-                });
+          {isSearchError ? (
+            <div className={styles["resultsShell"]}>
+              <QueryError error={searchError} onRetry={() => void refetchSearch()} />
+            </div>
+          ) : null}
 
-                return (
-                  <li
-                    className={styles["resultItem"]}
-                    data-selected={selected ? "true" : undefined}
-                    key={item.infoHash}
+          {isSearchSuccess ? (
+            <div className={styles["resultsShell"]}>
+              <div className={styles["resultsToolbar"]}>
+                <div>
+                  <p className={styles["resultsEyebrow"]}>
+                    {isBrowse ? t("search.browseEyebrow") : search.query}
+                  </p>
+                  <h2 className={styles["resultsTitle"]}>{totalCountLabel}</h2>
+                  {fetchMsRef.current !== null && result ? (
+                    <p className={styles["latency"]}>
+                      {t("search.fetchedIn", { ms: fetchMsRef.current.toLocaleString(locale) })}
+                      {appLoadMs !== null
+                        ? " \u00b7 " +
+                          t("search.appLoadedIn", { ms: appLoadMs.toLocaleString(locale) })
+                        : null}
+                    </p>
+                  ) : null}
+                </div>
+                <div className={styles["resultsActions"]}>
+                  <label className={styles["selectAllControl"]}>
+                    <IndeterminateCheckbox
+                      aria-label={
+                        pageSelection.allSelected
+                          ? t("actions.deselectPage")
+                          : t("actions.selectPage")
+                      }
+                      checked={pageSelection.allSelected}
+                      disabled={!hasResults}
+                      indeterminate={pageSelection.partiallySelected}
+                      onChange={handlePageSelectionToggle}
+                    />
+                    <span>
+                      {selectedItems.length > 0
+                        ? t("actions.selectedCount", { count: selectedItems.length })
+                        : t("actions.selectPage")}
+                    </span>
+                  </label>
+                  <button
+                    className={styles["secondaryButton"]}
+                    disabled={isBusy}
+                    onClick={handleRefresh}
+                    type="button"
                   >
-                    <label className={styles["resultSelect"]}>
-                      <input
-                        aria-label={
-                          selected
-                            ? t("actions.deselectResult", { title })
-                            : t("actions.selectResult", { title })
-                        }
-                        checked={selected}
-                        onChange={(event) =>
-                          handleResultSelectionChange(item.infoHash, event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                    </label>
-                    <div className={styles["resultMain"]}>
-                      <h2>
-                        <Link
-                          className={styles["resultTitleLink"]}
-                          params={{ infoHash: item.infoHash }}
-                          to="/torrents/$infoHash"
-                        >
-                          {title}
-                        </Link>
-                      </h2>
-                      {showTorrentName ? <p>{item.torrent.name}</p> : null}
+                    {t("search.refresh")}
+                  </button>
+                </div>
+              </div>
+
+              {selectedItems.length > 0 ? (
+                <Suspense
+                  fallback={
+                    <div className={styles["bulkActionsFallback"]} role="status">
+                      {t("actions.loading")}
                     </div>
-                    <dl className={styles["resultMeta"]}>
-                      <div>
-                        <dt>{t("search.size")}</dt>
-                        <dd>{formatFileSize(item.torrent.size)}</dd>
-                      </div>
-                      <div>
-                        <dt>{t("search.published")}</dt>
-                        <dd>
-                          <time dateTime={item.publishedAt} title={item.publishedAt}>
-                            {formatRelativeTime(item.publishedAt, undefined, locale)}
-                          </time>
-                        </dd>
-                      </div>
-                      {item.dhtLastSeenAt ? (
-                        <div>
-                          <dt>{t("search.dhtSeen")}</dt>
-                          <dd title={dhtSeenTooltip}>
-                            {t("search.dhtSeenSummary", {
-                              seenCount: item.dhtSeenCount.toLocaleString(locale),
-                              time: formatRelativeTime(item.dhtLastSeenAt, undefined, locale),
-                            })}
-                          </dd>
+                  }
+                >
+                  <LazyTorrentBulkActionsBar
+                    items={selectedItems}
+                    onClearSelection={handleClearSelection}
+                  />
+                </Suspense>
+              ) : null}
+
+              {hasResults && result ? (
+                <ul className={styles["resultsList"]}>
+                  {result.items.map((item: SearchItem) => {
+                    const title = getResultTitle(item);
+                    const torrentName = item.torrent.name.trim();
+                    const showTorrentName = torrentName !== title;
+                    const selected = selectedInfoHashes.has(item.infoHash);
+                    const dhtSeenTooltip = getDhtSeenTooltip(item, {
+                      count: t("search.dhtSeenCount"),
+                      first: t("search.dhtFirstSeen"),
+                      last: t("search.dhtLastSeen"),
+                    });
+
+                    return (
+                      <li
+                        className={styles["resultItem"]}
+                        data-selected={selected ? "true" : undefined}
+                        key={item.infoHash}
+                      >
+                        <label className={styles["resultSelect"]}>
+                          <input
+                            aria-label={
+                              selected
+                                ? t("actions.deselectResult", { title })
+                                : t("actions.selectResult", { title })
+                            }
+                            checked={selected}
+                            onChange={(event) =>
+                              handleResultSelectionChange(item.infoHash, event.target.checked)
+                            }
+                            type="checkbox"
+                          />
+                        </label>
+                        <div className={styles["resultMain"]}>
+                          <h2>
+                            <Link
+                              className={styles["resultTitleLink"]}
+                              params={{ infoHash: item.infoHash }}
+                              to="/torrents/$infoHash"
+                            >
+                              {title}
+                            </Link>
+                          </h2>
+                          {showTorrentName ? <p>{item.torrent.name}</p> : null}
                         </div>
-                      ) : null}
-                      <div>
-                        <dt>{t("search.peers")}</dt>
-                        <dd>{getPeerLabel(item, locale)}</dd>
-                      </div>
-                      {item.torrent.filesCount ? (
-                        <div>
-                          <dt>{t("search.files")}</dt>
-                          <dd>{item.torrent.filesCount.toLocaleString(locale)}</dd>
-                        </div>
-                      ) : null}
-                      <div>
-                        <dt>{t("search.infoHash")}</dt>
-                        <dd>
+                        <dl className={styles["resultMeta"]}>
+                          <div>
+                            <dt>{t("search.size")}</dt>
+                            <dd>{formatFileSize(item.torrent.size)}</dd>
+                          </div>
+                          <div>
+                            <dt>{t("search.published")}</dt>
+                            <dd>
+                              <time dateTime={item.publishedAt} title={item.publishedAt}>
+                                {formatRelativeTime(item.publishedAt, undefined, locale)}
+                              </time>
+                            </dd>
+                          </div>
+                          {item.dhtLastSeenAt ? (
+                            <div>
+                              <dt>{t("search.dhtSeen")}</dt>
+                              <dd title={dhtSeenTooltip}>
+                                {t("search.dhtSeenSummary", {
+                                  seenCount: item.dhtSeenCount.toLocaleString(locale),
+                                  time: formatRelativeTime(item.dhtLastSeenAt, undefined, locale),
+                                })}
+                              </dd>
+                            </div>
+                          ) : null}
+                          <div>
+                            <dt>{t("search.peers")}</dt>
+                            <dd>{getPeerLabel(item, locale)}</dd>
+                          </div>
+                          {item.torrent.filesCount ? (
+                            <div>
+                              <dt>{t("search.files")}</dt>
+                              <dd>{item.torrent.filesCount.toLocaleString(locale)}</dd>
+                            </div>
+                          ) : null}
+                          <div>
+                            <dt>{t("search.infoHash")}</dt>
+                            <dd>
+                              <button
+                                className={styles["hashButton"]}
+                                onClick={() => void handleCopyHash(item.infoHash)}
+                                title={item.infoHash}
+                                type="button"
+                              >
+                                <code>{item.infoHash}</code>
+                              </button>
+                            </dd>
+                          </div>
+                        </dl>
+                        <div className={styles["magnetActions"]}>
+                          <a
+                            aria-label={t("search.openMagnetLink", { title })}
+                            className={styles["magnetLink"]}
+                            href={item.torrent.magnetUri}
+                            rel="noopener"
+                          >
+                            {t("search.magnet")}
+                          </a>
                           <button
-                            className={styles["hashButton"]}
-                            onClick={() => void handleCopyHash(item.infoHash)}
-                            title={item.infoHash}
+                            aria-label={t("search.copyMagnetLink", { title })}
+                            className={styles["copyButton"]}
+                            onClick={() => void handleCopyMagnet(item.torrent.magnetUri)}
                             type="button"
                           >
-                            <code>{item.infoHash}</code>
+                            {t("search.copyMagnet")}
                           </button>
-                        </dd>
-                      </div>
-                    </dl>
-                    <div className={styles["magnetActions"]}>
-                      <a
-                        aria-label={t("search.openMagnetLink", { title })}
-                        className={styles["magnetLink"]}
-                        href={item.torrent.magnetUri}
-                        rel="noopener"
-                      >
-                        {t("search.magnet")}
-                      </a>
-                      <button
-                        aria-label={t("search.copyMagnetLink", { title })}
-                        className={styles["copyButton"]}
-                        onClick={() => void handleCopyMagnet(item.torrent.magnetUri)}
-                        type="button"
-                      >
-                        {t("search.copyMagnet")}
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <div className={styles["emptyState"]}>
-              <h1>{isBrowse ? t("search.emptyTitle") : t("search.noResultsTitle")}</h1>
-              <p>{isBrowse ? t("search.emptyBody") : t("search.noResultsBody")}</p>
-            </div>
-          )}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className={styles["emptyState"]}>
+                  <h1>{isBrowse ? t("search.emptyTitle") : t("search.noResultsTitle")}</h1>
+                  <p>{isBrowse ? t("search.emptyBody") : t("search.noResultsBody")}</p>
+                </div>
+              )}
 
-          <div className={styles["pagination"]}>
-            <button
-              className={styles["secondaryButton"]}
-              disabled={search.page <= 1 || isBusy}
-              onClick={() => handlePageChange(search.page - 1)}
-              type="button"
-            >
-              {t("search.previousPage")}
-            </button>
-            <span>{t("search.page", { page: search.page })}</span>
-            <button
-              className={styles["secondaryButton"]}
-              disabled={!result?.hasNextPage || isBusy}
-              onClick={() => handlePageChange(search.page + 1)}
-              type="button"
-            >
-              {t("search.nextPage")}
-            </button>
-          </div>
-        </div>
+              <div className={styles["pagination"]}>
+                <button
+                  className={styles["secondaryButton"]}
+                  disabled={search.page <= 1 || isBusy}
+                  onClick={() => handlePageChange(search.page - 1)}
+                  type="button"
+                >
+                  {t("search.previousPage")}
+                </button>
+                <span>{t("search.page", { page: search.page })}</span>
+                <button
+                  className={styles["secondaryButton"]}
+                  disabled={!result?.hasNextPage || isBusy}
+                  onClick={() => handlePageChange(search.page + 1)}
+                  type="button"
+                >
+                  {t("search.nextPage")}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </>
       ) : null}
     </section>
   );

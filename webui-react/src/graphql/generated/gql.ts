@@ -13,7 +13,10 @@ import * as types from "./graphql";
  * Learn more about it here: https://the-guild.dev/graphql/codegen/plugins/presets/preset-client#reducing-bundle-size
  */
 type Documents = {
+  "query CollapsePaths($input: TorrentContentCollapsePathsInput!) {\n  torrentContent {\n    collapsePaths(input: $input) {\n      groups {\n        path\n        infoHashes\n      }\n    }\n  }\n}": typeof types.CollapsePathsDocument;
+  "query FileSearch($input: FileSearchInput!) {\n  torrentContent {\n    fileSearch(input: $input) {\n      totalCount\n      hasNextPage\n      items {\n        infoHash\n        index\n        path\n        extension\n        size\n      }\n    }\n  }\n}": typeof types.FileSearchDocument;
   "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}": typeof types.HealthCheckDocument;
+  "query PathTypeahead($input: PathTypeaheadInput!) {\n  torrentContent {\n    pathTypeahead(input: $input) {\n      suggestions\n    }\n  }\n}": typeof types.PathTypeaheadDocument;
   "mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {\n  queue {\n    enqueueReprocessTorrentsBatch(input: $input)\n  }\n}": typeof types.QueueEnqueueReprocessTorrentsBatchDocument;
   "query QueueJobs($input: QueueJobsQueryInput!) {\n  queue {\n    jobs(input: $input) {\n      items {\n        id\n        queue\n        status\n        payload\n        priority\n        retries\n        maxRetries\n        runAfter\n        ranAt\n        error\n        createdAt\n      }\n      totalCount\n      hasNextPage\n      aggregations {\n        queue {\n          value\n          label\n          count\n        }\n        status {\n          value\n          label\n          count\n        }\n      }\n    }\n  }\n}": typeof types.QueueJobsDocument;
   "query QueueMetrics($input: QueueMetricsQueryInput!) {\n  queue {\n    metrics(input: $input) {\n      buckets {\n        queue\n        status\n        createdAtBucket\n        ranAtBucket\n        count\n        latency\n      }\n    }\n  }\n}": typeof types.QueueMetricsDocument;
@@ -31,8 +34,14 @@ type Documents = {
   "query Version {\n  version\n}": typeof types.VersionDocument;
 };
 const documents: Documents = {
+  "query CollapsePaths($input: TorrentContentCollapsePathsInput!) {\n  torrentContent {\n    collapsePaths(input: $input) {\n      groups {\n        path\n        infoHashes\n      }\n    }\n  }\n}":
+    types.CollapsePathsDocument,
+  "query FileSearch($input: FileSearchInput!) {\n  torrentContent {\n    fileSearch(input: $input) {\n      totalCount\n      hasNextPage\n      items {\n        infoHash\n        index\n        path\n        extension\n        size\n      }\n    }\n  }\n}":
+    types.FileSearchDocument,
   "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}":
     types.HealthCheckDocument,
+  "query PathTypeahead($input: PathTypeaheadInput!) {\n  torrentContent {\n    pathTypeahead(input: $input) {\n      suggestions\n    }\n  }\n}":
+    types.PathTypeaheadDocument,
   "mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {\n  queue {\n    enqueueReprocessTorrentsBatch(input: $input)\n  }\n}":
     types.QueueEnqueueReprocessTorrentsBatchDocument,
   "query QueueJobs($input: QueueJobsQueryInput!) {\n  queue {\n    jobs(input: $input) {\n      items {\n        id\n        queue\n        status\n        payload\n        priority\n        retries\n        maxRetries\n        runAfter\n        ranAt\n        error\n        createdAt\n      }\n      totalCount\n      hasNextPage\n      aggregations {\n        queue {\n          value\n          label\n          count\n        }\n        status {\n          value\n          label\n          count\n        }\n      }\n    }\n  }\n}":
@@ -68,8 +77,26 @@ const documents: Documents = {
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */
 export function graphql(
+  source: "query CollapsePaths($input: TorrentContentCollapsePathsInput!) {\n  torrentContent {\n    collapsePaths(input: $input) {\n      groups {\n        path\n        infoHashes\n      }\n    }\n  }\n}",
+): typeof import("./graphql").CollapsePathsDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query FileSearch($input: FileSearchInput!) {\n  torrentContent {\n    fileSearch(input: $input) {\n      totalCount\n      hasNextPage\n      items {\n        infoHash\n        index\n        path\n        extension\n        size\n      }\n    }\n  }\n}",
+): typeof import("./graphql").FileSearchDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
   source: "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}",
 ): typeof import("./graphql").HealthCheckDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query PathTypeahead($input: PathTypeaheadInput!) {\n  torrentContent {\n    pathTypeahead(input: $input) {\n      suggestions\n    }\n  }\n}",
+): typeof import("./graphql").PathTypeaheadDocument;
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */

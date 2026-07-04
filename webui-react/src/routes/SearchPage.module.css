@@ -13,6 +13,37 @@
   width: min(100%, 720px);
 }
 
+.modeSwitch {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 4px;
+  width: min(100%, 420px);
+}
+
+.modeSwitch button {
+  background: transparent;
+  border: 0;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  font-weight: 800;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.modeSwitch button:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.modeSwitch button[data-active="true"] {
+  background: var(--mantine-primary-color-filled);
+  color: var(--mantine-color-white);
+}
+
 .label {
   color: var(--mantine-color-dimmed);
   font-size: var(--mantine-font-size-sm);

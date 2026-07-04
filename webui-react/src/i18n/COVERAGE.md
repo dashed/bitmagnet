@@ -7,6 +7,13 @@ Generated from the React catalog keys in `src/i18n/locales/en.ts` and the Angula
 Angular catalogs (14): `ar.json`, `ca.json`, `de.json`, `en.json`, `es.json`, `fr.json`, `hi.json`, `ja.json`, `nl.json`, `pt.json`, `ru.json`, `tr.json`, `uk.json`, `zh.json`.
 React English keys: 442. Static inline defaults folded into English: 158.
 
+## P4 React-Only Keys
+
+The `search.modes.*`, `fileSearch.*`, and `paths.*` keys are en-only for the P4
+beyond-parity search surface. Angular never exposed file search, path
+typeahead, or collapse-path browsing, so there is no Angular Transloco source
+catalog to map from.
+
 ## Mapping Summary
 
 | Confidence                                    | Keys |
