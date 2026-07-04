@@ -1,6 +1,24 @@
-query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
+query TorrentContentSearch(
+  $cached: Boolean
+  $hasNextPage: Boolean
+  $limit: Int
+  $orderBy: [TorrentContentOrderByInput!]
+  $page: Int
+  $queryString: String
+  $totalCount: Boolean
+) {
   torrentContent {
-    search(input: $input) {
+    search(
+      input: {
+        cached: $cached
+        hasNextPage: $hasNextPage
+        limit: $limit
+        orderBy: $orderBy
+        page: $page
+        queryString: $queryString
+        totalCount: $totalCount
+      }
+    ) {
       totalCount
       totalCountIsEstimate
       hasNextPage
@@ -11,6 +29,7 @@ query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
         leechers
         publishedAt
         torrent {
+          magnetUri
           name
           size
         }

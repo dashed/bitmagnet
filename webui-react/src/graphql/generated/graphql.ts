@@ -911,7 +911,13 @@ export type WorkersQuery = {
 };
 
 export type TorrentContentSearchQueryVariables = Exact<{
-  input: TorrentContentSearchQueryInput;
+  cached?: InputMaybe<Scalars["Boolean"]["input"]>;
+  hasNextPage?: InputMaybe<Scalars["Boolean"]["input"]>;
+  limit?: InputMaybe<Scalars["Int"]["input"]>;
+  orderBy?: InputMaybe<Array<TorrentContentOrderByInput> | TorrentContentOrderByInput>;
+  page?: InputMaybe<Scalars["Int"]["input"]>;
+  queryString?: InputMaybe<Scalars["String"]["input"]>;
+  totalCount?: InputMaybe<Scalars["Boolean"]["input"]>;
 }>;
 
 export type TorrentContentSearchQuery = {
@@ -930,7 +936,7 @@ export type TorrentContentSearchQuery = {
         seeders?: number | null;
         leechers?: number | null;
         publishedAt: string;
-        torrent: { __typename?: "Torrent"; name: string; size: number };
+        torrent: { __typename?: "Torrent"; magnetUri: string; name: string; size: number };
       }>;
     };
   };
@@ -960,9 +966,11 @@ export class TypedDocumentString<TResult, TVariables>
 }
 
 export const TorrentContentSearchDocument = new TypedDocumentString(`
-    query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
+    query TorrentContentSearch($cached: Boolean, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
   torrentContent {
-    search(input: $input) {
+    search(
+      input: {cached: $cached, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}
+    ) {
       totalCount
       totalCountIsEstimate
       hasNextPage
@@ -973,6 +981,7 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
         leechers
         publishedAt
         torrent {
+          magnetUri
           name
           size
         }

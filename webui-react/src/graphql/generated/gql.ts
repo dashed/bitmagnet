@@ -13,11 +13,11 @@ import * as types from "./graphql";
  * Learn more about it here: https://the-guild.dev/graphql/codegen/plugins/presets/preset-client#reducing-bundle-size
  */
 type Documents = {
-  "query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {\n  torrentContent {\n    search(input: $input) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          name\n          size\n        }\n      }\n    }\n  }\n}": typeof types.TorrentContentSearchDocument;
+  "query TorrentContentSearch($cached: Boolean, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {\n  torrentContent {\n    search(\n      input: {cached: $cached, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}\n    ) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          magnetUri\n          name\n          size\n        }\n      }\n    }\n  }\n}": typeof types.TorrentContentSearchDocument;
   "query Version {\n  version\n}": typeof types.VersionDocument;
 };
 const documents: Documents = {
-  "query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {\n  torrentContent {\n    search(input: $input) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          name\n          size\n        }\n      }\n    }\n  }\n}":
+  "query TorrentContentSearch($cached: Boolean, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {\n  torrentContent {\n    search(\n      input: {cached: $cached, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}\n    ) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          magnetUri\n          name\n          size\n        }\n      }\n    }\n  }\n}":
     types.TorrentContentSearchDocument,
   "query Version {\n  version\n}": types.VersionDocument,
 };
@@ -26,7 +26,7 @@ const documents: Documents = {
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */
 export function graphql(
-  source: "query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {\n  torrentContent {\n    search(input: $input) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          name\n          size\n        }\n      }\n    }\n  }\n}",
+  source: "query TorrentContentSearch($cached: Boolean, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {\n  torrentContent {\n    search(\n      input: {cached: $cached, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}\n    ) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        seeders\n        leechers\n        publishedAt\n        torrent {\n          magnetUri\n          name\n          size\n        }\n      }\n    }\n  }\n}",
 ): typeof import("./graphql").TorrentContentSearchDocument;
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
