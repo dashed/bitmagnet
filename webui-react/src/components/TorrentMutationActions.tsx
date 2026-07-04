@@ -47,11 +47,6 @@ type TorrentBulkActionsBarProps = {
   onClearSelection: () => void;
 };
 
-function invalidateTorrentQueries(queryClient: ReturnType<typeof useQueryClient>) {
-  void queryClient.invalidateQueries({ queryKey: ["torrentContentSearch"] });
-  void queryClient.invalidateQueries({ queryKey: ["torrentDetail"] });
-}
-
 const DIALOG_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -241,7 +236,11 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
 
-  const suggestionQuery = useQuery({
+  const {
+    data: suggestionData,
+    error: suggestionError,
+    isError: isSuggestionError,
+  } = useQuery({
     enabled: prefix.length > 0,
     queryFn: ({ signal }) =>
       execute(
@@ -263,11 +262,11 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
     }
 
     return (
-      suggestionQuery.data?.torrent.suggestTags.suggestions.filter(
+      suggestionData?.torrent.suggestTags.suggestions.filter(
         (suggestion) => !tagNames.includes(suggestion.name),
       ) ?? []
     );
-  }, [prefix, suggestionQuery.data, tagNames]);
+  }, [prefix, suggestionData, tagNames]);
 
   const tagMutation = useMutation({
     mutationFn: async ({
@@ -307,7 +306,8 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
       });
     },
     onSuccess: (_data, variables) => {
-      invalidateTorrentQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["torrentContentSearch"] });
+      void queryClient.invalidateQueries({ queryKey: ["torrentDetail"] });
       notify({
         message: t(`actions.tags.${variables.kind}Success`, {
           count: variables.infoHashes.length,
@@ -318,17 +318,17 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
   });
 
   useEffect(() => {
-    if (!suggestionQuery.isError) {
+    if (!isSuggestionError) {
       return;
     }
 
     notify({
       message: t("actions.tags.suggestionError", {
-        error: getErrorMessage(suggestionQuery.error),
+        error: getErrorMessage(suggestionError),
       }),
       tone: "error",
     });
-  }, [notify, suggestionQuery.error, suggestionQuery.isError, t]);
+  }, [isSuggestionError, notify, suggestionError, t]);
 
   useEffect(() => {
     setActiveSuggestionIndex((currentIndex) =>
@@ -546,7 +546,8 @@ function ReprocessActions({ infoHashes }: { infoHashes: readonly string[] }) {
       });
     },
     onSuccess: (_data, variables) => {
-      invalidateTorrentQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["torrentContentSearch"] });
+      void queryClient.invalidateQueries({ queryKey: ["torrentDetail"] });
       notify({
         message: t("actions.reprocess.success", { count: variables.infoHashes.length }),
       });
@@ -640,7 +641,8 @@ function DeleteActions({
       });
     },
     onSuccess: (_data, variables) => {
-      invalidateTorrentQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["torrentContentSearch"] });
+      void queryClient.invalidateQueries({ queryKey: ["torrentDetail"] });
       setDialogOpen(false);
       setAcknowledged(false);
       notify({
@@ -702,6 +704,7 @@ function DeleteActions({
               closeDialog();
             }
           }}
+          role="presentation"
         >
           <div
             aria-labelledby="torrent-delete-dialog-title"

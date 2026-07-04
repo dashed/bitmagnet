@@ -34,11 +34,11 @@ function NavLink({
 export function AppShell({ children }: PropsWithChildren) {
   const { t } = useTranslation();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const versionQuery = useQuery({
+  const { data: versionData } = useQuery({
     queryFn: () => execute(VersionDocument, {}),
     queryKey: ["version"],
   });
-  const version = versionQuery.data?.version ?? t("app.version");
+  const version = versionData?.version ?? t("app.version");
   const torrentsActive =
     pathname === "/" || pathname === "/torrents" || pathname.startsWith("/torrents/");
   const dashboardActive = pathname === "/dashboard";

@@ -1,4 +1,4 @@
-import type { ChangeEvent, FormEvent, InputHTMLAttributes } from "react";
+import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -69,6 +69,10 @@ type SizeDraft = {
   maxUnit: SizeUnit;
   min: string;
   minUnit: SizeUnit;
+};
+type SearchSelectionState = {
+  infoHashes: Set<string>;
+  searchParamsKey: string;
 };
 type ContentTypeOption = {
   count: number;
@@ -384,13 +388,28 @@ export function SearchPage() {
     nonce: 0,
     uncachedSearchKey: null,
   });
-  const [selectedInfoHashes, setSelectedInfoHashes] = useState<Set<string>>(() => new Set());
+  const [selection, setSelection] = useState<SearchSelectionState>(() => ({
+    infoHashes: new Set(),
+    searchParamsKey,
+  }));
   const filtersRef = useRef<HTMLDetailsElement>(null);
-  const previousSearchParamsRef = useRef(searchParamsKey);
   const navigate = useNavigate({ from: "/" });
   const notify = useToast();
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
+  let selectedInfoHashes = selection.infoHashes;
+
+  if (selection.searchParamsKey !== searchParamsKey) {
+    selectedInfoHashes = clearSelectionOnSearchParamsChange(
+      selection.infoHashes,
+      selection.searchParamsKey,
+      searchParamsKey,
+    );
+    setSelection({
+      infoHashes: selectedInfoHashes,
+      searchParamsKey,
+    });
+  }
 
   useEffect(() => {
     setDraftQuery(search.query);
@@ -399,17 +418,6 @@ export function SearchPage() {
   useEffect(() => {
     setSizeDraft(getSizeDraft(search));
   }, [search]);
-
-  useEffect(() => {
-    setSelectedInfoHashes((currentSelection) =>
-      clearSelectionOnSearchParamsChange(
-        currentSelection,
-        previousSearchParamsRef.current,
-        searchParamsKey,
-      ),
-    );
-    previousSearchParamsRef.current = searchParamsKey;
-  }, [searchParamsKey]);
 
   useEffect(() => {
     setExpandedFacets((currentFacets) => {
@@ -593,20 +601,46 @@ export function SearchPage() {
     filters?.querySelector("summary")?.focus();
   }
 
+  function setCurrentSelection(updater: (currentSelection: Set<string>) => Set<string>) {
+    setSelection((currentSelection) => {
+      const currentInfoHashes =
+        currentSelection.searchParamsKey === searchParamsKey
+          ? currentSelection.infoHashes
+          : clearSelectionOnSearchParamsChange(
+              currentSelection.infoHashes,
+              currentSelection.searchParamsKey,
+              searchParamsKey,
+            );
+      const nextInfoHashes = updater(currentInfoHashes);
+
+      if (
+        currentSelection.searchParamsKey === searchParamsKey &&
+        nextInfoHashes === currentSelection.infoHashes
+      ) {
+        return currentSelection;
+      }
+
+      return {
+        infoHashes: nextInfoHashes,
+        searchParamsKey,
+      };
+    });
+  }
+
   function handleResultSelectionChange(infoHash: string, checked: boolean) {
-    setSelectedInfoHashes((currentSelection) =>
+    setCurrentSelection((currentSelection) =>
       toggleInfoHashSelection(currentSelection, infoHash, checked),
     );
   }
 
   function handlePageSelectionToggle() {
-    setSelectedInfoHashes((currentSelection) =>
+    setCurrentSelection((currentSelection) =>
       togglePageSelection(currentSelection, pageInfoHashes),
     );
   }
 
   function handleClearSelection() {
-    setSelectedInfoHashes(new Set());
+    setCurrentSelection(() => new Set());
   }
 
   async function handleCopyHash(infoHash: string) {
@@ -642,7 +676,15 @@ export function SearchPage() {
 
     return Math.round(nav.loadEventEnd - nav.startTime);
   }, []);
-  const searchQuery = useQuery({
+  const {
+    data: searchData,
+    error: searchError,
+    isError: isSearchError,
+    isFetching: isSearchFetching,
+    isPending: isSearchPending,
+    isSuccess: isSearchSuccess,
+    refetch: refetchSearch,
+  } = useQuery({
     placeholderData: keepPreviousData,
     queryFn: async ({ signal }) => {
       const startedAt = performance.now();
@@ -668,30 +710,34 @@ export function SearchPage() {
     queryKey: ["torrentContentSearch", searchKey, refresh.nonce],
   });
 
-  const result = searchQuery.data?.torrentContent.search;
+  const result = searchData?.torrentContent.search;
   const pageItems = result?.items ?? EMPTY_SEARCH_ITEMS;
   const pageInfoHashes = useMemo(() => pageItems.map((item) => item.infoHash), [pageItems]);
   const pageSelection = useMemo(
     () => getPageSelectionState(selectedInfoHashes, pageInfoHashes),
     [pageInfoHashes, selectedInfoHashes],
   );
-  const selectedItems = useMemo<TorrentActionItem[]>(
-    () =>
-      pageItems
-        .filter((item) => selectedInfoHashes.has(item.infoHash))
-        .map((item) => ({
+  const selectedItems = useMemo<TorrentActionItem[]>(() => {
+    const items: TorrentActionItem[] = [];
+
+    for (const item of pageItems) {
+      if (selectedInfoHashes.has(item.infoHash)) {
+        items.push({
           infoHash: item.infoHash,
           magnetUri: item.torrent.magnetUri,
-        })),
-    [pageItems, selectedInfoHashes],
-  );
+        });
+      }
+    }
+
+    return items;
+  }, [pageItems, selectedInfoHashes]);
   const resultCount = result?.totalCount ?? 0;
   const isBrowse = search.query.length === 0;
   const totalCountLabel = result?.totalCountIsEstimate
     ? t("search.resultsCountEstimate", { count: resultCount })
     : t("search.resultsCount", { count: resultCount });
   const hasResults = Boolean(result && result.items.length > 0);
-  const isBusy = searchQuery.isPending || searchQuery.isFetching;
+  const isBusy = isSearchPending || isSearchFetching;
   const contentTypeAggregations = result?.aggregations.contentType ?? [];
   const totalContentTypeCount =
     contentTypeAggregations.length > 0
@@ -709,6 +755,19 @@ export function SearchPage() {
   );
   const activeFilterCount =
     (hasSizeFilter ? 1 : 0) + (search.publishedAt ? 1 : 0) + selectedFacetKeys.length;
+  const orderOptions: ReactNode[] = [];
+
+  for (const option of ORDER_OPTIONS) {
+    if (option.field === "relevance" && !search.query) {
+      continue;
+    }
+
+    orderOptions.push(
+      <option key={option.field} value={option.field}>
+        {t(`search.ordering.${option.field}`)}
+      </option>,
+    );
+  }
 
   return (
     <section className={styles["root"]}>
@@ -770,13 +829,7 @@ export function SearchPage() {
             <label>
               <span>{t("search.orderBy")}</span>
               <select onChange={handleOrderChange} value={search.order}>
-                {ORDER_OPTIONS.filter((option) => option.field !== "relevance" || search.query).map(
-                  (option) => (
-                    <option key={option.field} value={option.field}>
-                      {t(`search.ordering.${option.field}`)}
-                    </option>
-                  ),
-                )}
+                {orderOptions}
               </select>
             </label>
             <button
@@ -990,19 +1043,19 @@ export function SearchPage() {
         </div>
       </details>
 
-      {searchQuery.isPending ? (
+      {isSearchPending ? (
         <div className={styles["resultsShell"]}>
           <ListSkeleton ariaLabel={t("search.loading")} rows={6} />
         </div>
       ) : null}
 
-      {searchQuery.isError ? (
+      {isSearchError ? (
         <div className={styles["resultsShell"]}>
-          <QueryError error={searchQuery.error} onRetry={() => void searchQuery.refetch()} />
+          <QueryError error={searchError} onRetry={() => void refetchSearch()} />
         </div>
       ) : null}
 
-      {searchQuery.isSuccess ? (
+      {isSearchSuccess ? (
         <div className={styles["resultsShell"]}>
           <div className={styles["resultsToolbar"]}>
             <div>

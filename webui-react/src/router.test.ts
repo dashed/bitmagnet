@@ -1,7 +1,7 @@
 import { createMemoryHistory } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
 
-import { createAppRouter } from "./router";
+import { createAppRouter } from "./appRouter";
 
 const INFO_HASH = "0123456789abcdef0123456789abcdef01234567";
 
