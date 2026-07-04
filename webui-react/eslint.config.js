@@ -66,4 +66,14 @@ export default tseslint.config(
       },
     },
   },
+  {
+    files: ["*.cjs", "scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      globals: {
+        ...globals.es2022,
+        ...globals.node,
+      },
+    },
+  },
 );
