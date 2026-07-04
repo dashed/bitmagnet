@@ -2,374 +2,186 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 
-export const LANGUAGE_STORAGE_KEY = "bitmagnet-language";
+import en from "./locales/en";
+
+export const LANGUAGE_STORAGE_KEY = "bitmagnet-lng";
 
 export const SUPPORTED_LANGUAGES = [
+  {
+    label: "العربية",
+    value: "ar",
+  },
+  {
+    label: "Català",
+    value: "ca",
+  },
+  {
+    label: "Deutsch",
+    value: "de",
+  },
   {
     label: "English",
     value: "en",
   },
+  {
+    label: "Español",
+    value: "es",
+  },
+  {
+    label: "Français",
+    value: "fr",
+  },
+  {
+    label: "हिन्दी",
+    value: "hi",
+  },
+  {
+    label: "日本語",
+    value: "ja",
+  },
+  {
+    label: "Nederlands",
+    value: "nl",
+  },
+  {
+    label: "Português",
+    value: "pt",
+  },
+  {
+    label: "Русский",
+    value: "ru",
+  },
+  {
+    label: "Türkçe",
+    value: "tr",
+  },
+  {
+    label: "Українська",
+    value: "uk",
+  },
+  {
+    label: "中文",
+    value: "zh",
+  },
 ] as const;
 
-type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number]["value"];
+export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number]["value"];
+
+type LocaleResource = Record<string, unknown>;
 type LocaleModule = {
-  default: Record<string, unknown>;
+  default: LocaleResource;
 };
 
-const en = {
-  app: {
-    title: "bitmagnet",
-    version: "v0.0.0",
-  },
-  actions: {
-    bulkLabel: "Bulk torrent actions",
-    clearSelection: "Clear selection",
-    deselectPage: "Deselect results on this page",
-    deselectResult: "Deselect {{title}}",
-    selectPage: "Select page",
-    selectResult: "Select {{title}}",
-    selectedCount: "{{count}} selected",
-    loading: "Loading actions",
-    title: "Actions",
-    copy: {
-      body: "Copy selected values to the clipboard.",
-      infoHashes: "Info hashes",
-      infoHashError: "Could not copy info hashes",
-      infoHashSuccess: "Copied info hash",
-      infoHashSuccess_other: "Copied {{count}} info hashes",
-      magnetError: "Could not copy magnet links",
-      magnetLinks: "Magnet links",
-      magnetSuccess: "Copied magnet link",
-      magnetSuccess_other: "Copied {{count}} magnet links",
-      title: "Copy",
-    },
-    delete: {
-      acknowledge: "I understand this cannot be undone",
-      cancel: "Cancel",
-      confirm: "Delete",
-      dialogBody: "This will delete {{count}} selected torrent.",
-      dialogBody_other: "This will delete {{count}} selected torrents.",
-      dialogTitle: "Delete {{count}} torrent?",
-      dialogTitle_other: "Delete {{count}} torrents?",
-      error: "Error deleting torrents: {{error}}",
-      open: "Delete",
-      success: "Deleted {{count}} torrent",
-      success_other: "Deleted {{count}} torrents",
-      title: "Delete",
-      warning: "This action cannot be undone.",
-    },
-    reprocess: {
-      error: "Error reprocessing torrents: {{error}}",
-      externalApiSearch: "Match content by external API search",
-      forceRematch: "Force rematch of already matched content",
-      localSearch: "Match content by local search",
-      options: "Reprocess options",
-      submit: "Reprocess",
-      success: "Queued {{count}} torrent for reprocessing",
-      success_other: "Queued {{count}} torrents for reprocessing",
-      title: "Reprocess",
-    },
-    tags: {
-      delete: "Remove from selected",
-      deleteSuccess: "Removed tags from {{count}} torrent",
-      deleteSuccess_other: "Removed tags from {{count}} torrents",
-      error: "Error updating tags: {{error}}",
-      inputLabel: "Tags",
-      placeholder: "Add a tag",
-      put: "Add to selected",
-      putSuccess: "Added tags to {{count}} torrent",
-      putSuccess_other: "Added tags to {{count}} torrents",
-      removeChip: "Remove {{tagName}}",
-      set: "Replace on selected",
-      setSuccess: "Replaced tags on {{count}} torrent",
-      setSuccess_other: "Replaced tags on {{count}} torrents",
-      suggestionError: "Error loading tag suggestions: {{error}}",
-      suggestionsLabel: "Tag suggestions",
-      title: "Tags",
-    },
-  },
-  dashboard: {
-    body: "No dashboard data yet.",
-    title: "Dashboard",
-  },
-  contentTypes: {
-    audiobook: "Audiobook",
-    comic: "Comic",
-    ebook: "Ebook",
-    game: "Game",
-    movie: "Movie",
-    music: "Music",
-    software: "Software",
-    tv_show: "TV show",
-    unknown: "Unknown",
-    xxx: "XXX",
-  },
-  detail: {
-    content: "Content",
-    copyInfoHash: "Copy hash",
-    dhtFirstSeen: "DHT first seen",
-    dhtLastSeen: "DHT last seen",
-    dhtSeen: "DHT seen",
-    dhtSeenCount: "DHT crawl count",
-    dhtSeenSummary: "seen {{time}} · {{seenCount}}×",
-    episodes: "Episodes",
-    externalLinks: "External links",
-    fileFilterLabel: "Filter files",
-    fileFilterPlaceholder: "Filter files...",
-    fileIndex: "Index",
-    fileIndexValue: "#{{index}}",
-    filePath: "Path / Name",
-    fileSize: "Size",
-    fileSortAscending: "Asc",
-    fileSortDescending: "Desc",
-    fileType: "Type",
-    files: "Files",
-    filesCount: "{{count}} file",
-    filesCount_other: "{{count}} files",
-    filesEmpty: "No file rows are available.",
-    filesFilterEmpty: "No files match this filter.",
-    filesLimitedWindow: "Sorting and search cover the first {{shown}} of {{total}} files",
-    filesLoading: "Loading files",
-    filesMatchCount: "{{count}} of {{total}} files match",
-    filesNoInfo: "No file information is available for this torrent.",
-    filesPage: "Page {{page}} of {{totalPages}}",
-    filesShowingCount: "Showing {{shown}} of {{total}} files",
-    firstSeen: "First seen",
-    genres: "Genres",
-    infoHash: "Info hash",
-    languages: "Languages",
-    lastSeen: "Last seen",
-    loading: "Loading torrent details",
-    notFoundBody: "No torrent matched this info hash.",
-    notFoundTitle: "Torrent not found",
-    originalMarker: "(original)",
-    originalTitle: "Original title",
-    overview: "Overview",
-    peers: "Seeders / Leechers",
-    posterAlt: "Poster for {{title}}",
-    published: "Published",
-    rating: "Rating",
-    ratingVotes: "{{count}} vote",
-    ratingVotes_other: "{{count}} votes",
-    releaseDate: "Release date",
-    returnToSearch: "Return to torrents",
-    seen: "Seen",
-    size: "Size",
-    sourceSeenCount: "{{count}} time",
-    sourceSeenCount_other: "{{count}} times",
-    sources: "Sources",
-    unknown: "Unknown",
-  },
-  error: {
-    empty: "Nothing to show.",
-    loading: "Loading...",
-    notFound: "Not found",
-    retry: "Retry",
-    title: "Something went wrong",
-  },
-  facets: {
-    clear: "Clear",
-    file_type: "File type",
-    genre: "Genre",
-    language: "Language",
-    none: "No values",
-    reset: "Reset all filters",
-    torrent_source: "Torrent source",
-    torrent_tag: "Torrent tag",
-    unknown: "Unknown",
-    video_resolution: "Video resolution",
-    video_source: "Video source",
-  },
-  fileTypes: {
-    archive: "Archive",
-    audio: "Audio",
-    data: "Data",
-    document: "Document",
-    image: "Image",
-    software: "Software",
-    subtitles: "Subtitles",
-    unknown: "Unknown",
-    video: "Video",
-  },
-  language: {
-    label: "Language",
-  },
-  metrics: {
-    autoRefresh: {
-      minutes_1: "1m",
-      minutes_5: "5m",
-      off: "Off",
-      seconds_10: "10s",
-      seconds_30: "30s",
-    },
-    bucketDurations: {
-      day: "Days",
-      hour: "Hours",
-      minute: "Minutes",
-    },
-    charts: {
-      empty: "No metric buckets to show.",
-      seconds: "{{value}}s",
-    },
-    controls: {
-      bucketDuration: "Bucket",
-      lastUpdated: "Updated {{time}}",
-      loading: "Loading metrics",
-      refresh: "Refresh",
-      timeframe: "Timeframe",
-      waiting: "Waiting for data",
-    },
-    statuses: {
-      failed: "Failed",
-      pending: "Pending",
-      processed: "Processed",
-      retry: "Retry",
-    },
-    timeframes: {
-      all: "All time",
-      days_1: "1 day",
-      hours_1: "1 hour",
-      hours_6: "6 hours",
-      hours_12: "12 hours",
-      minutes_15: "15 minutes",
-      minutes_30: "30 minutes",
-      weeks_1: "1 week",
-    },
-  },
-  nav: {
-    classicUi: "Classic UI",
-    dashboard: "Dashboard",
-    torrents: "Torrents",
-  },
-  search: {
-    apply: "Apply",
-    ascending: "Ascending",
-    browseEyebrow: "Newest torrents",
-    clear: "Clear",
-    contentType: "Content type",
-    contentTypeAll: "All",
-    copyMagnet: "Copy",
-    copyMagnetLink: "Copy magnet link for {{title}}",
-    descending: "Descending",
-    dhtFirstSeen: "DHT first seen",
-    dhtLastSeen: "DHT last seen",
-    dhtSeen: "DHT seen",
-    dhtSeenCount: "DHT crawl count",
-    dhtSeenSummary: "seen {{time}} · {{seenCount}}×",
-    emptyBody: "No torrents to show.",
-    emptyTitle: "No torrents yet",
-    closeFilters: "Close filters",
-    filtersSummary: "Filters",
-    filtersSummaryActive: "Filters, {{count}} active",
-    inputLabel: "Search torrents",
-    leechers: "Leechers",
-    loading: "Loading search results",
-    magnet: "Magnet",
-    maxSize: "Max size",
-    maxSizeUnit: "Max unit",
-    minSize: "Min size",
-    minSizeUnit: "Min unit",
-    nextPage: "Next",
-    noResultsBody: "Try another query.",
-    noResultsTitle: "No matching torrents",
-    openMagnetLink: "Open magnet link for {{title}}",
-    orderBy: "Order by",
-    ordering: {
-      files_count: "Files count",
-      info_hash: "Info hash",
-      leechers: "Leechers",
-      name: "Name",
-      published_at: "Published at",
-      relevance: "Relevance",
-      seeders: "Seeders",
-      size: "Size",
-      updated_at: "Updated at",
-    },
-    page: "Page {{page}}",
-    appLoadedIn: "app loaded in {{ms}} ms",
-    fetchedIn: "fetched in {{ms}} ms",
-    files: "Files",
-    infoHash: "Info hash",
-    pageTitle: "Torrent search",
-    peers: "Seeders / Leechers",
-    placeholder: "Search torrents by name or hash",
-    previousPage: "Previous",
-    published: "Published",
-    publishedAny: "Any time",
-    publishedFilter: "Published date",
-    publishedLastDay: "Last day",
-    publishedLastMonth: "Last month",
-    publishedLastThreeMonths: "Last 3 months",
-    publishedLastWeek: "Last week",
-    publishedLastYear: "Last year",
-    refresh: "Refresh",
-    resultsCount: "{{count}} result",
-    resultsCount_other: "{{count}} results",
-    resultsCountEstimate: "About {{count}} result",
-    resultsCountEstimate_other: "About {{count}} results",
-    seeders: "Seeders",
-    size: "Size",
-    sizeFilter: "Size",
-    sizeUnits: {
-      GB: "GB",
-      GiB: "GiB",
-      KB: "KB",
-      KiB: "KiB",
-      MB: "MB",
-      MiB: "MiB",
-      TB: "TB",
-      TiB: "TiB",
-    },
-    sort: "Sort",
-    submit: "Search",
-    toggleSortDirection: "Toggle sort direction",
-  },
-  theme: {
-    switchToDark: "Switch to dark theme",
-    switchToLight: "Switch to light theme",
-  },
-  toast: {
-    dismiss: "Dismiss notification",
-    infoHashCopied: "Info hash copied",
-    infoHashCopyFailed: "Could not copy info hash",
-    hashCopied: "Info hash copied",
-    hashCopyFailed: "Could not copy the info hash",
-    magnetCopied: "Magnet link copied",
-    magnetCopyFailed: "Could not copy magnet link",
-    searchSubmitted: "Search submitted",
-  },
-};
+const SUPPORTED_LANGUAGE_VALUES = SUPPORTED_LANGUAGES.map((language) => language.value);
+const SUPPORTED_LANGUAGE_SET = new Set<string>(SUPPORTED_LANGUAGE_VALUES);
+const RTL_LANGUAGES = new Set<SupportedLanguage>(["ar"]);
 
-const localeModules = import.meta.glob<LocaleModule>("./locales/*.json");
+const localeLoaders = {
+  ar: () => import("./locales/ar"),
+  ca: () => import("./locales/ca"),
+  de: () => import("./locales/de"),
+  es: () => import("./locales/es"),
+  fr: () => import("./locales/fr"),
+  hi: () => import("./locales/hi"),
+  ja: () => import("./locales/ja"),
+  nl: () => import("./locales/nl"),
+  pt: () => import("./locales/pt"),
+  ru: () => import("./locales/ru"),
+  tr: () => import("./locales/tr"),
+  uk: () => import("./locales/uk"),
+  zh: () => import("./locales/zh"),
+} satisfies Partial<Record<SupportedLanguage, () => Promise<LocaleModule>>>;
 
-function normalizeLanguage(language: string) {
-  return language.toLowerCase().split("-")[0] ?? "en";
+const pendingLanguageLoads = new Map<SupportedLanguage, Promise<SupportedLanguage>>();
+
+export function normalizeLanguage(language: string | null | undefined): SupportedLanguage {
+  const normalized = language?.trim().toLowerCase().replace("_", "-");
+  const baseLanguage = normalized?.split("-")[0];
+
+  return baseLanguage && SUPPORTED_LANGUAGE_SET.has(baseLanguage)
+    ? (baseLanguage as SupportedLanguage)
+    : "en";
 }
 
-export async function loadLanguage(language: string) {
+export function getLanguageDirection(language: string | null | undefined) {
+  return RTL_LANGUAGES.has(normalizeLanguage(language)) ? "rtl" : "ltr";
+}
+
+export function applyDocumentLanguage(language: string | null | undefined) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const normalized = normalizeLanguage(language);
+  document.documentElement.lang = normalized;
+  document.documentElement.dir = getLanguageDirection(normalized);
+}
+
+function persistLanguage(language: SupportedLanguage) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+  } catch {
+    // localStorage can be disabled; language selection still works for the session.
+  }
+}
+
+export async function loadLanguage(language: string | null | undefined) {
   const normalized = normalizeLanguage(language);
 
-  if (i18n.hasResourceBundle(normalized, "translation")) {
+  if (normalized === "en" || i18n.hasResourceBundle(normalized, "translation")) {
     return normalized;
   }
 
-  const moduleLoader = localeModules[`./locales/${normalized}.json`];
+  const pendingLoad = pendingLanguageLoads.get(normalized);
+  if (pendingLoad) {
+    return pendingLoad;
+  }
 
+  const moduleLoader = localeLoaders[normalized];
   if (!moduleLoader) {
     return "en";
   }
 
-  const loaded = await moduleLoader();
-  i18n.addResourceBundle(normalized, "translation", loaded.default, true, true);
+  const loadPromise = moduleLoader()
+    .then((loaded) => {
+      i18n.addResourceBundle(normalized, "translation", loaded.default, true, true);
+      return normalized;
+    })
+    .finally(() => {
+      pendingLanguageLoads.delete(normalized);
+    });
 
-  return normalized;
+  pendingLanguageLoads.set(normalized, loadPromise);
+
+  return loadPromise;
 }
 
-export async function setLanguage(language: SupportedLanguage) {
+export async function setLanguage(language: string) {
   const loadedLanguage = await loadLanguage(language);
-  window.localStorage.setItem(LANGUAGE_STORAGE_KEY, loadedLanguage);
+  persistLanguage(loadedLanguage);
   await i18n.changeLanguage(loadedLanguage);
 }
+
+function handleLanguageChanged(language: string) {
+  const normalized = normalizeLanguage(language);
+  applyDocumentLanguage(normalized);
+
+  if (normalized === "en" || i18n.hasResourceBundle(normalized, "translation")) {
+    return;
+  }
+
+  void loadLanguage(normalized).then((loadedLanguage) => {
+    if (loadedLanguage === normalizeLanguage(i18n.language)) {
+      void i18n.changeLanguage(loadedLanguage);
+    }
+  });
+}
+
+i18n.on("languageChanged", handleLanguageChanged);
 
 void i18n
   .use(LanguageDetector)
@@ -377,6 +189,7 @@ void i18n
   .init({
     detection: {
       caches: ["localStorage"],
+      convertDetectedLanguage: normalizeLanguage,
       lookupLocalStorage: LANGUAGE_STORAGE_KEY,
       order: ["localStorage", "navigator", "htmlTag"],
     },
@@ -384,12 +197,22 @@ void i18n
     interpolation: {
       escapeValue: false,
     },
+    load: "languageOnly",
+    nonExplicitSupportedLngs: true,
+    partialBundledLanguages: true,
+    react: {
+      bindI18nStore: "added",
+    },
     resources: {
       en: {
         translation: en,
       },
     },
-    supportedLngs: SUPPORTED_LANGUAGES.map((language) => language.value),
+    returnEmptyString: false,
+    supportedLngs: SUPPORTED_LANGUAGE_VALUES,
+  })
+  .then(() => {
+    handleLanguageChanged(i18n.resolvedLanguage ?? i18n.language);
   });
 
 export { i18n };

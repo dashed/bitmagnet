@@ -27,13 +27,11 @@ export function QueuePurgeDialog({
   const [acknowledged, setAcknowledged] = useState(false);
   const dialogRef = useDialogFocus(open, onClose);
   const queueScope =
-    filters.queues.length > 0
-      ? filters.queues.join(", ")
-      : t("queue.admin.allQueues", "all queues");
+    filters.queues.length > 0 ? filters.queues.join(", ") : t("queue.admin.allQueues");
   const statusScope =
     filters.statuses.length > 0
-      ? filters.statuses.map((status) => t(`queue.status.${status}`, status)).join(", ")
-      : t("queue.admin.allStatuses", "all statuses");
+      ? filters.statuses.map((status) => t(`queue.status.${status}`)).join(", ")
+      : t("queue.admin.allStatuses");
   const fullQueuePurge = filters.queues.length === 0 && filters.statuses.length === 0;
 
   useEffect(() => {
@@ -65,28 +63,19 @@ export function QueuePurgeDialog({
         role="dialog"
         tabIndex={-1}
       >
-        <h3 id="queue-purge-dialog-title">{t("queue.admin.dialogTitle", "Purge queue jobs")}</h3>
+        <h3 id="queue-purge-dialog-title">{t("queue.admin.dialogTitle")}</h3>
         <p className={styles["panelText"]} id="queue-purge-dialog-body">
-          {t(
-            "queue.admin.dialogBody",
-            "This will delete jobs in {{queueScope}} with {{statusScope}}.",
-            {
-              queueScope,
-              statusScope,
-            },
-          )}
+          {t("queue.admin.dialogBody", {
+            queueScope,
+            statusScope,
+          })}
         </p>
         {fullQueuePurge ? (
-          <p className={styles["warningText"]}>
-            {t(
-              "queue.admin.fullPurgeWarning",
-              "No queue or status scope is selected, so this will purge the entire queue table.",
-            )}
-          </p>
+          <p className={styles["warningText"]}>{t("queue.admin.fullPurgeWarning")}</p>
         ) : null}
         {error ? (
           <p className={styles["warningText"]} role="alert">
-            {t("queue.admin.dialogError", "Purge failed: {{error}}", {
+            {t("queue.admin.dialogError", {
               error: getErrorMessage(error),
             })}
           </p>
@@ -98,12 +87,7 @@ export function QueuePurgeDialog({
             onChange={(event) => setAcknowledged(event.target.checked)}
             type="checkbox"
           />
-          <span>
-            {t(
-              "queue.admin.acknowledge",
-              "I understand this permanently deletes the selected queue jobs.",
-            )}
-          </span>
+          <span>{t("queue.admin.acknowledge")}</span>
         </label>
         <div className={styles["dialogActions"]}>
           <button
@@ -112,7 +96,7 @@ export function QueuePurgeDialog({
             onClick={onClose}
             type="button"
           >
-            {t("queue.admin.cancel", "Cancel")}
+            {t("queue.admin.cancel")}
           </button>
           <button
             className={styles["dangerButton"]}
@@ -120,9 +104,7 @@ export function QueuePurgeDialog({
             onClick={onConfirm}
             type="button"
           >
-            {isPending
-              ? t("queue.admin.purging", "Purging")
-              : t("queue.admin.confirmPurge", "Purge jobs")}
+            {isPending ? t("queue.admin.purging") : t("queue.admin.confirmPurge")}
           </button>
         </div>
       </div>

@@ -100,7 +100,7 @@ export function QueueAdminSection() {
   const statusOptions = useMemo(
     () =>
       QUEUE_STATUSES.map((status) => ({
-        label: t(`queue.status.${status}`, status),
+        label: t(`queue.status.${status}`),
         value: status,
       })),
     [t],
@@ -112,7 +112,7 @@ export function QueueAdminSection() {
       }),
     onError: (error) => {
       notify({
-        message: t("queue.admin.purgeError", "Failed to purge queue jobs: {{error}}", {
+        message: t("queue.admin.purgeError", {
           error: getErrorMessage(error),
         }),
         tone: "error",
@@ -123,7 +123,7 @@ export function QueueAdminSection() {
       void queryClient.invalidateQueries({ queryKey: ["queueMetrics"] });
       setPurgeDialogOpen(false);
       notify({
-        message: t("queue.admin.purgeSuccess", "Queue jobs purged"),
+        message: t("queue.admin.purgeSuccess"),
       });
     },
   });
@@ -134,7 +134,7 @@ export function QueueAdminSection() {
       }),
     onError: (error) => {
       notify({
-        message: t("queue.admin.reprocessError", "Failed to enqueue jobs: {{error}}", {
+        message: t("queue.admin.reprocessError", {
           error: getErrorMessage(error),
         }),
         tone: "error",
@@ -145,7 +145,7 @@ export function QueueAdminSection() {
       void queryClient.invalidateQueries({ queryKey: ["queueMetrics"] });
       setReprocessDialogOpen(false);
       notify({
-        message: t("queue.admin.reprocessSuccess", "Torrent processing batch enqueued"),
+        message: t("queue.admin.reprocessSuccess"),
       });
     },
   });
@@ -182,28 +182,23 @@ export function QueueAdminSection() {
     <section className={styles["section"]} id="queue-admin">
       <div className={styles["sectionHeader"]}>
         <div>
-          <h2>{t("queue.admin.title", "Admin")}</h2>
-          <p>
-            {t(
-              "queue.admin.body",
-              "Purge queue jobs by queue and status, or enqueue a scoped torrent reprocess batch.",
-            )}
-          </p>
+          <h2>{t("queue.admin.title")}</h2>
+          <p>{t("queue.admin.body")}</p>
         </div>
       </div>
 
       <div className={styles["adminPanel"]}>
         <ScopeChips
-          allLabel={t("queue.facets.allQueues", "All queues")}
-          legend={t("queue.admin.queueScope", "Queue scope")}
+          allLabel={t("queue.facets.allQueues")}
+          legend={t("queue.admin.queueScope")}
           onClear={() => setSelectedQueues([])}
           onToggle={(queue) => setSelectedQueues((current) => toggleQueueScope(current, queue))}
           options={queueOptions}
           selected={selectedQueues}
         />
         <ScopeChips
-          allLabel={t("queue.facets.allStatuses", "All statuses")}
-          legend={t("queue.admin.statusScope", "Status scope")}
+          allLabel={t("queue.facets.allStatuses")}
+          legend={t("queue.admin.statusScope")}
           onClear={() => setSelectedStatuses([])}
           onToggle={(status) =>
             setSelectedStatuses((current) => toggleStatusScope(current, status))
@@ -212,19 +207,14 @@ export function QueueAdminSection() {
           selected={selectedStatuses}
         />
         <div className={styles["adminActions"]}>
-          <p className={styles["warningText"]}>
-            {t(
-              "queue.admin.warning",
-              "Purge is destructive. Review the scope in the confirmation dialog before continuing.",
-            )}
-          </p>
+          <p className={styles["warningText"]}>{t("queue.admin.warning")}</p>
           <button
             className={styles["secondaryButton"]}
             disabled={reprocessMutation.isPending}
             onClick={openReprocessDialog}
             type="button"
           >
-            {t("queue.admin.openReprocess", "Enqueue reprocess batch")}
+            {t("queue.admin.openReprocess")}
           </button>
           <button
             className={styles["dangerButton"]}
@@ -232,7 +222,7 @@ export function QueueAdminSection() {
             onClick={openPurgeDialog}
             type="button"
           >
-            {t("queue.admin.openPurge", "Purge jobs")}
+            {t("queue.admin.openPurge")}
           </button>
         </div>
       </div>

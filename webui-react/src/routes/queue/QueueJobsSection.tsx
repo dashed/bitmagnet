@@ -11,11 +11,7 @@ import {
   type QueueJobsQuery,
   type QueueJobStatus,
 } from "../../graphql/generated/graphql";
-import {
-  formatQueueDateTime,
-  formatQueueRelativeTime,
-  prettifyQueuePayload,
-} from "./format";
+import { formatQueueDateTime, formatQueueRelativeTime, prettifyQueuePayload } from "./format";
 import {
   DEFAULT_QUEUE_ORDER,
   DEFAULT_QUEUE_PAGE_SIZE,
@@ -26,7 +22,11 @@ import {
   sortQueues,
   sortStatuses,
 } from "./constants";
-import { createQueueJobsVariables, type QueueFilterSelection, type QueueOrderSelection } from "./variables";
+import {
+  createQueueJobsVariables,
+  type QueueFilterSelection,
+  type QueueOrderSelection,
+} from "./variables";
 import styles from "../QueuePage.module.css";
 
 type QueueJobsResult = QueueJobsQuery["queue"]["jobs"];
@@ -185,13 +185,7 @@ function FacetChipGroup<TValue extends string>({
   );
 }
 
-function StatusBadge({
-  label,
-  status,
-}: {
-  label: string;
-  status: QueueJobStatus;
-}) {
+function StatusBadge({ label, status }: { label: string; status: QueueJobStatus }) {
   return (
     <span className={styles["statusBadge"]} data-status={status}>
       {label}
@@ -293,7 +287,15 @@ export function QueueJobsSection() {
         }),
         signal,
       ),
-    queryKey: ["queueJobs", page, limit, order.field, order.descending, selectedQueues, selectedStatuses],
+    queryKey: [
+      "queueJobs",
+      page,
+      limit,
+      order.field,
+      order.descending,
+      selectedQueues,
+      selectedStatuses,
+    ],
   });
   const result = jobsData?.queue.jobs;
   const jobs = result?.items ?? EMPTY_JOBS;
@@ -310,7 +312,7 @@ export function QueueJobsSection() {
       mergeStatusOptions(
         result?.aggregations.status ?? EMPTY_STATUS_AGGS,
         selectedStatuses,
-        (status) => t(`queue.status.${status}`, status),
+        (status) => t(`queue.status.${status}`),
       ),
     [result?.aggregations.status, selectedStatuses, t],
   );
@@ -318,18 +320,18 @@ export function QueueJobsSection() {
   const totalPages = Math.max(1, Math.ceil(totalCount / limit));
   const hasNextPage = result?.hasNextPage ?? page < totalPages;
   const tableLabels = {
-    createdAt: t("queue.jobs.createdAt", "Created"),
-    error: t("queue.jobs.error", "Error"),
-    expand: t("queue.jobs.expand", "Expand"),
-    id: t("queue.jobs.id", "ID"),
-    notRun: t("queue.jobs.notRun", "Not run"),
-    payload: t("queue.jobs.payload", "Payload"),
-    priority: t("queue.jobs.priority", "Priority"),
-    queue: t("queue.jobs.queue", "Queue"),
-    ranAt: t("queue.jobs.ranAt", "Ran"),
-    retries: t("queue.jobs.retries", "Retries"),
-    runAfter: t("queue.jobs.runAfter", "Run after"),
-    status: t("queue.jobs.status", "Status"),
+    createdAt: t("queue.jobs.createdAt"),
+    error: t("queue.jobs.error"),
+    expand: t("queue.jobs.expand"),
+    id: t("queue.jobs.id"),
+    notRun: t("queue.jobs.notRun"),
+    payload: t("queue.jobs.payload"),
+    priority: t("queue.jobs.priority"),
+    queue: t("queue.jobs.queue"),
+    ranAt: t("queue.jobs.ranAt"),
+    retries: t("queue.jobs.retries"),
+    runAfter: t("queue.jobs.runAfter"),
+    status: t("queue.jobs.status"),
   };
 
   useEffect(() => {
@@ -366,23 +368,18 @@ export function QueueJobsSection() {
     <section className={styles["section"]} id="queue-jobs">
       <div className={styles["sectionHeader"]}>
         <div>
-          <h2>{t("queue.jobs.title", "Jobs")}</h2>
-          <p>
-            {t(
-              "queue.jobs.body",
-              "Inspect queued work by queue, status, priority, timing, payload, and error.",
-            )}
-          </p>
+          <h2>{t("queue.jobs.title")}</h2>
+          <p>{t("queue.jobs.body")}</p>
         </div>
         <span className={styles["sectionKicker"]}>
-          {t("queue.jobs.count", "{{count}} jobs", { count: totalCount })}
+          {t("queue.jobs.count", { count: totalCount })}
         </span>
       </div>
 
       <div className={styles["jobsControls"]}>
         <FacetChipGroup
-          allLabel={t("queue.facets.allQueues", "All queues")}
-          legend={t("queue.facets.queue", "Queue")}
+          allLabel={t("queue.facets.allQueues")}
+          legend={t("queue.facets.queue")}
           onClear={() => {
             setSelectedQueues([]);
             setPage(1);
@@ -395,8 +392,8 @@ export function QueueJobsSection() {
           selected={selectedQueues}
         />
         <FacetChipGroup
-          allLabel={t("queue.facets.allStatuses", "All statuses")}
-          legend={t("queue.facets.status", "Status")}
+          allLabel={t("queue.facets.allStatuses")}
+          legend={t("queue.facets.status")}
           onClear={() => {
             setSelectedStatuses([]);
             setPage(1);
@@ -410,11 +407,11 @@ export function QueueJobsSection() {
         />
         <div className={styles["jobsToolbar"]}>
           <label>
-            <span>{t("queue.jobs.orderBy", "Order by")}</span>
+            <span>{t("queue.jobs.orderBy")}</span>
             <select onChange={handleOrderFieldChange} value={order.field}>
               {QUEUE_ORDER_OPTIONS.map((option) => (
                 <option key={option.field} value={option.field}>
-                  {t(`queue.order.${option.field}`, option.field)}
+                  {t(`queue.order.${option.field}`)}
                 </option>
               ))}
             </select>
@@ -429,9 +426,7 @@ export function QueueJobsSection() {
             }
             type="button"
           >
-            {order.descending
-              ? t("queue.jobs.descending", "Descending")
-              : t("queue.jobs.ascending", "Ascending")}
+            {order.descending ? t("queue.jobs.descending") : t("queue.jobs.ascending")}
           </button>
           <button
             className={styles["secondaryButton"]}
@@ -441,7 +436,7 @@ export function QueueJobsSection() {
             }}
             type="button"
           >
-            {t("queue.jobs.refresh", "Refresh")}
+            {t("queue.jobs.refresh")}
           </button>
         </div>
       </div>
@@ -451,11 +446,11 @@ export function QueueJobsSection() {
       {isJobsError ? <QueryError error={jobsError} onRetry={() => void refetchJobs()} /> : null}
 
       {isJobsPending ? (
-        <ListSkeleton ariaLabel={t("queue.jobs.loading", "Loading queue jobs")} rows={6} />
+        <ListSkeleton ariaLabel={t("queue.jobs.loading")} rows={6} />
       ) : jobs.length === 0 ? (
         <div className={styles["emptyState"]} role="status">
-          <h3>{t("queue.jobs.emptyTitle", "No jobs found")}</h3>
-          <p>{t("queue.jobs.emptyBody", "Adjust facets or refresh the queue.")}</p>
+          <h3>{t("queue.jobs.emptyTitle")}</h3>
+          <p>{t("queue.jobs.emptyBody")}</p>
         </div>
       ) : (
         <div className={styles["tableScroll"]}>
@@ -474,7 +469,7 @@ export function QueueJobsSection() {
             <tbody>
               {jobs.map((job) => {
                 const expanded = expandedJobId === job.id;
-                const statusLabel = t(`queue.status.${job.status}`, job.status);
+                const statusLabel = t(`queue.status.${job.status}`);
 
                 return (
                   <Fragment key={job.id}>
@@ -487,9 +482,7 @@ export function QueueJobsSection() {
                         <button
                           aria-expanded={expanded}
                           aria-label={
-                            expanded
-                              ? t("queue.jobs.collapseJob", "Collapse job")
-                              : t("queue.jobs.expandJob", "Expand job")
+                            expanded ? t("queue.jobs.collapseJob") : t("queue.jobs.expandJob")
                           }
                           className={styles["expandButton"]}
                           onClick={(event) => {
@@ -546,7 +539,7 @@ export function QueueJobsSection() {
 
       <div className={styles["pagination"]}>
         <label>
-          <span>{t("queue.jobs.pageSize", "Page size")}</span>
+          <span>{t("queue.jobs.pageSize")}</span>
           <select onChange={handleLimitChange} value={limit}>
             {QUEUE_PAGE_SIZES.map((pageSize) => (
               <option key={pageSize} value={pageSize}>
@@ -562,10 +555,10 @@ export function QueueJobsSection() {
             onClick={() => setPage((current) => Math.max(1, current - 1))}
             type="button"
           >
-            {t("queue.jobs.previous", "Previous")}
+            {t("queue.jobs.previous")}
           </button>
           <span>
-            {t("queue.jobs.pageStatus", "Page {{page}} of {{totalPages}}", {
+            {t("queue.jobs.pageStatus", {
               page,
               totalPages,
             })}
@@ -576,7 +569,7 @@ export function QueueJobsSection() {
             onClick={() => setPage((current) => current + 1)}
             type="button"
           >
-            {t("queue.jobs.next", "Next")}
+            {t("queue.jobs.next")}
           </button>
         </div>
       </div>

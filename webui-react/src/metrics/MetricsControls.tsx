@@ -45,31 +45,6 @@ export type MetricsFilterProps = {
   value: string | null;
 };
 
-const metricTimeframeLabels: Record<MetricTimeframe, string> = {
-  all: "All time",
-  days_1: "1 day",
-  hours_1: "1 hour",
-  hours_6: "6 hours",
-  hours_12: "12 hours",
-  minutes_15: "15 minutes",
-  minutes_30: "30 minutes",
-  weeks_1: "1 week",
-};
-
-const metricBucketDurationLabels: Record<MetricsBucketDuration, string> = {
-  day: "Days",
-  hour: "Hours",
-  minute: "Minutes",
-};
-
-const metricAutoRefreshLabels: Record<MetricAutoRefreshInterval, string> = {
-  minutes_1: "1m",
-  minutes_5: "5m",
-  off: "Off",
-  seconds_10: "10s",
-  seconds_30: "30s",
-};
-
 export function MetricsControls({
   autoRefresh,
   bucketDuration,
@@ -92,7 +67,7 @@ export function MetricsControls({
   const timeframeOptions = useMemo(
     () =>
       timeframes.map((value) => ({
-        label: t(`metrics.timeframes.${value}`, metricTimeframeLabels[value]),
+        label: t(`metrics.timeframes.${value}`),
         value,
       })),
     [t, timeframes],
@@ -100,7 +75,7 @@ export function MetricsControls({
   const bucketDurationOptions = useMemo(
     () =>
       metricBucketDurations.map((value) => ({
-        label: t(`metrics.bucketDurations.${value}`, metricBucketDurationLabels[value]),
+        label: t(`metrics.bucketDurations.${value}`),
         value,
       })),
     [t],
@@ -108,7 +83,7 @@ export function MetricsControls({
   const autoRefreshOptions = useMemo(
     () =>
       metricAutoRefreshIntervals.map((value) => ({
-        label: t(`metrics.autoRefresh.${value}`, metricAutoRefreshLabels[value]),
+        label: t(`metrics.autoRefresh.${value}`),
         value,
       })),
     [t],
@@ -124,10 +99,10 @@ export function MetricsControls({
     [eventFilter],
   );
   const lastUpdated = lastUpdatedAt
-    ? t("metrics.controls.lastUpdated", "Updated {{time}}", {
+    ? t("metrics.controls.lastUpdated", {
         time: formatRelativeTime(lastUpdatedAt.toISOString(), new Date(), i18n.language),
       })
-    : t("metrics.controls.waiting", "Waiting for data");
+    : t("metrics.controls.waiting");
   const effectiveBucketMultiplier =
     typeof bucketMultiplier === "number" ? bucketMultiplier : (bucketMultiplierPlaceholder ?? 1);
   const multiplierValue = typeof bucketMultiplier === "number" ? `${bucketMultiplier}` : "";
@@ -138,7 +113,7 @@ export function MetricsControls({
         allowDeselect={false}
         data={timeframeOptions}
         disabled={disabled}
-        label={t("metrics.controls.timeframe", "Timeframe")}
+        label={t("metrics.controls.timeframe")}
         onChange={(value) => {
           if (value) {
             onTimeframeChange(value);
@@ -150,7 +125,7 @@ export function MetricsControls({
         allowDeselect={false}
         data={bucketDurationOptions}
         disabled={disabled}
-        label={t("metrics.controls.bucketDuration", "Bucket")}
+        label={t("metrics.controls.bucketDuration")}
         onChange={(value) => {
           if (value) {
             onBucketDurationChange(value as MetricsBucketDuration);
@@ -160,7 +135,7 @@ export function MetricsControls({
       />
       {onBucketMultiplierChange ? (
         <label className={styles["numberField"]}>
-          <span>{t("metrics.controls.bucketMultiplier", "Multiplier")}</span>
+          <span>{t("metrics.controls.bucketMultiplier")}</span>
           <div className={styles["numberInputRow"]}>
             <button
               disabled={disabled || effectiveBucketMultiplier <= 1}
@@ -223,7 +198,7 @@ export function MetricsControls({
       />
       <div className={styles["status"]}>
         <Text component="span" size="sm">
-          {loading ? t("metrics.controls.loading", "Loading metrics") : lastUpdated}
+          {loading ? t("metrics.controls.loading") : lastUpdated}
         </Text>
       </div>
       {onRefresh ? (
@@ -234,7 +209,7 @@ export function MetricsControls({
           type="button"
           variant="light"
         >
-          {t("metrics.controls.refresh", "Refresh")}
+          {t("metrics.controls.refresh")}
         </Button>
       ) : null}
     </div>

@@ -118,7 +118,7 @@ export function TorrentMetricsSection() {
           value: "updated",
         },
       ].map((event) => ({
-        label: t(`metrics.events.${event.value}`, event.defaultLabel),
+        label: t(`metrics.events.${event.value}`),
         value: event.value,
       })),
     [t],
@@ -149,11 +149,9 @@ export function TorrentMetricsSection() {
     <section aria-labelledby="dashboard-torrent-metrics-title" className={styles["metricsPanel"]}>
       <div className={styles["sectionHeader"]}>
         <div>
-          <h2 id="dashboard-torrent-metrics-title">
-            {t("dash.torrentMetrics.title", "Torrent throughput")}
-          </h2>
+          <h2 id="dashboard-torrent-metrics-title">{t("dash.torrentMetrics.title")}</h2>
           <p>
-            {t("dash.torrentMetrics.eventsInRange", "{{count}} events in range", {
+            {t("dash.torrentMetrics.eventsInRange", {
               count: normalizedMetrics.total,
             })}
           </p>
@@ -167,8 +165,8 @@ export function TorrentMetricsSection() {
         bucketMultiplierPlaceholder={normalizedMetrics.bucketParams.multiplier}
         disabled={isMetricsPending && !metricsData}
         eventFilter={{
-          allLabel: t("metrics.controls.allEvents", "All events"),
-          label: t("metrics.controls.event", "Event"),
+          allLabel: t("metrics.controls.allEvents"),
+          label: t("metrics.controls.event"),
           onChange: (value) => setSelectedEvent(value as TorrentMetricEvent | null),
           options: eventOptions,
           value: selectedEvent,
@@ -186,8 +184,8 @@ export function TorrentMetricsSection() {
         }}
         onTimeframeChange={setTimeframe}
         scopeFilter={{
-          allLabel: t("metrics.controls.allSources", "All sources"),
-          label: t("metrics.controls.source", "Source"),
+          allLabel: t("metrics.controls.allSources"),
+          label: t("metrics.controls.source"),
           onChange: setSelectedSource,
           options: sourceOptions,
           value: selectedSource,
@@ -198,24 +196,22 @@ export function TorrentMetricsSection() {
 
       {isMetricsError ? (
         <div className={styles["inlineError"]} role="alert">
-          <strong>{t("dash.torrentMetrics.errorTitle", "Torrent metrics failed")}</strong>
-          <span>{getErrorMessage(metricsError) ?? t("dash.errorBody", "Try again.")}</span>
+          <strong>{t("dash.torrentMetrics.errorTitle")}</strong>
+          <span>{getErrorMessage(metricsError) ?? t("dash.errorBody")}</span>
           <button
             onClick={() => {
               void refetchMetrics();
             }}
             type="button"
           >
-            {t("dash.retry", "Retry")}
+            {t("dash.retry")}
           </button>
         </div>
       ) : null}
 
       <Suspense
         fallback={
-          <div className={styles["chartFallback"]}>
-            {t("dash.torrentMetrics.loadingCharts", "Loading charts")}
-          </div>
+          <div className={styles["chartFallback"]}>{t("dash.torrentMetrics.loadingCharts")}</div>
         }
       >
         <TimelineChart points={normalizedMetrics.points} series={normalizedMetrics.eventSeries} />

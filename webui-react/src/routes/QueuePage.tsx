@@ -12,18 +12,13 @@ export default function QueuePage() {
     <div className={styles["root"]}>
       <header className={styles["header"]}>
         <div>
-          <h1>{t("queue.title", "Queue")}</h1>
-          <p>
-            {t(
-              "queue.body",
-              "Monitor queue throughput, inspect jobs, and run scoped purge actions.",
-            )}
-          </p>
+          <h1>{t("queue.title")}</h1>
+          <p>{t("queue.body")}</p>
         </div>
-        <nav aria-label={t("queue.sections", "Queue sections")} className={styles["sectionNav"]}>
-          <a href="#queue-visualize">{t("queue.nav.visualize", "Visualize")}</a>
-          <a href="#queue-jobs">{t("queue.nav.jobs", "Jobs")}</a>
-          <a href="#queue-admin">{t("queue.nav.admin", "Admin")}</a>
+        <nav aria-label={t("queue.sections")} className={styles["sectionNav"]}>
+          <a href="#queue-visualize">{t("queue.nav.visualize")}</a>
+          <a href="#queue-jobs">{t("queue.nav.jobs")}</a>
+          <a href="#queue-admin">{t("queue.nav.admin")}</a>
         </nav>
       </header>
 

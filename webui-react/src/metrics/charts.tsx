@@ -65,11 +65,7 @@ export function TimelineChart({
   const { t } = useTranslation();
 
   if (!points.length || !series.length) {
-    return (
-      <div className={styles["empty"]}>
-        {t("metrics.charts.empty", "No metric buckets to show.")}
-      </div>
-    );
+    return <div className={styles["empty"]}>{t("metrics.charts.empty")}</div>;
   }
 
   return (
@@ -83,7 +79,7 @@ export function TimelineChart({
             <YAxis
               orientation="right"
               stroke="var(--mantine-color-dimmed)"
-              tickFormatter={(value) => t("metrics.charts.seconds", "{{value}}s", { value })}
+              tickFormatter={(value) => t("metrics.charts.seconds", { value })}
               yAxisId="latency"
             />
           ) : null}
@@ -135,11 +131,7 @@ export function TotalsChart({
   const { t } = useTranslation();
 
   if (!totals.length) {
-    return (
-      <div className={styles["empty"]}>
-        {t("metrics.charts.empty", "No metric buckets to show.")}
-      </div>
-    );
+    return <div className={styles["empty"]}>{t("metrics.charts.empty")}</div>;
   }
 
   return (
@@ -162,7 +154,7 @@ export function TotalsChart({
               dataKey={status}
               fill={statusColors[status]}
               key={status}
-              name={t(`metrics.statuses.${status}`, status)}
+              name={t(`metrics.statuses.${status}`)}
               stackId="total"
             />
           ))}

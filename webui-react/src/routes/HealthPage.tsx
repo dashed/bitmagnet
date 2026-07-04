@@ -17,37 +17,20 @@ type WorkerItem = HealthCheckQuery["workers"]["listAll"]["workers"][number];
 type OverallTone = "degraded" | "ok";
 type WorkerState = "started" | "stopped";
 
-const HEALTH_STATUS_LABELS = {
-  down: "Down",
-  inactive: "Inactive",
-  unknown: "Pending",
-  up: "Up",
-} satisfies Record<HealthStatus, string>;
-
-const OVERALL_STATUS_LABELS = {
-  degraded: "Degraded",
-  ok: "OK",
-} satisfies Record<OverallTone, string>;
-
-const WORKER_STATE_LABELS = {
-  started: "Started",
-  stopped: "Stopped",
-} satisfies Record<WorkerState, string>;
-
 function getOverallTone(status: HealthStatus): OverallTone {
   return status === "up" ? "ok" : "degraded";
 }
 
 function getHealthStatusLabel(status: HealthStatus, t: TFunction) {
-  return t(`health.statuses.${status}`, HEALTH_STATUS_LABELS[status]);
+  return t(`health.statuses.${status}`);
 }
 
 function getOverallStatusLabel(tone: OverallTone, t: TFunction) {
-  return t(`health.overallStatuses.${tone}`, OVERALL_STATUS_LABELS[tone]);
+  return t(`health.overallStatuses.${tone}`);
 }
 
 function getWorkerStateLabel(state: WorkerState, t: TFunction) {
-  return t(`health.workerStates.${state}`, WORKER_STATE_LABELS[state]);
+  return t(`health.workerStates.${state}`);
 }
 
 function getFormattedTimestamp(value: string, locale: string, now: Date) {
@@ -83,13 +66,13 @@ function ChecksTable({
   t: TFunction;
 }) {
   if (checks.length === 0) {
-    return <p className={styles["emptyText"]}>{t("health.noChecks", "No checks reported.")}</p>;
+    return <p className={styles["emptyText"]}>{t("health.noChecks")}</p>;
   }
 
-  const keyLabel = t("health.key", "Key");
-  const statusLabel = t("health.status", "Status");
-  const checkedLabel = t("health.lastChecked", "Last checked");
-  const errorLabel = t("health.error", "Error");
+  const keyLabel = t("health.key");
+  const statusLabel = t("health.status");
+  const checkedLabel = t("health.lastChecked");
+  const errorLabel = t("health.error");
 
   return (
     <div className={styles["tableScroll"]}>
@@ -125,7 +108,7 @@ function ChecksTable({
                   {check.error ? (
                     <span className={styles["errorText"]}>{check.error}</span>
                   ) : (
-                    <span className={styles["mutedText"]}>{t("health.noError", "None")}</span>
+                    <span className={styles["mutedText"]}>{t("health.noError")}</span>
                   )}
                 </td>
               </tr>
@@ -139,7 +122,7 @@ function ChecksTable({
 
 function WorkersList({ t, workers }: { t: TFunction; workers: WorkerItem[] }) {
   if (workers.length === 0) {
-    return <p className={styles["emptyText"]}>{t("health.noWorkers", "No workers reported.")}</p>;
+    return <p className={styles["emptyText"]}>{t("health.noWorkers")}</p>;
   }
 
   return (
@@ -162,38 +145,30 @@ export default function HealthPage() {
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const now = new Date();
-  const {
-    data,
-    dataUpdatedAt,
-    error,
-    isError,
-    isFetching,
-    isPending,
-    refetch,
-  } = useQuery({
+  const { data, dataUpdatedAt, error, isError, isFetching, isPending, refetch } = useQuery({
     queryFn: ({ signal }) => execute(HealthCheckDocument, {}, signal),
     queryKey: ["healthCheck"],
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 
   if (isPending) {
-    return <ListSkeleton ariaLabel={t("health.loading", "Loading health status")} rows={5} />;
+    return <ListSkeleton ariaLabel={t("health.loading")} rows={5} />;
   }
 
   if (isError) {
-    const message = error instanceof Error ? error.message : t("health.errorFallback", "Unknown error");
+    const message = error instanceof Error ? error.message : t("health.errorFallback");
 
     return (
       <section className={styles["root"]}>
         <div className={styles["header"]}>
-          <h1>{t("health.title", "Health")}</h1>
-          <p>{t("health.description", "Service checks and worker state.")}</p>
+          <h1>{t("health.title")}</h1>
+          <p>{t("health.description")}</p>
         </div>
         <div className={styles["errorPanel"]} role="alert">
-          <h2>{t("health.loadFailed", "Health check failed")}</h2>
+          <h2>{t("health.loadFailed")}</h2>
           <p>{message}</p>
           <button className={styles["refreshButton"]} onClick={() => void refetch()} type="button">
-            {t("health.retry", "Retry")}
+            {t("health.retry")}
           </button>
         </div>
       </section>
@@ -211,8 +186,8 @@ export default function HealthPage() {
     <section className={styles["root"]}>
       <div className={styles["header"]}>
         <div>
-          <h1>{t("health.title", "Health")}</h1>
-          <p>{t("health.description", "Service checks and worker state.")}</p>
+          <h1>{t("health.title")}</h1>
+          <p>{t("health.description")}</p>
         </div>
         <button
           className={styles["refreshButton"]}
@@ -220,22 +195,22 @@ export default function HealthPage() {
           onClick={() => void refetch()}
           type="button"
         >
-          {isFetching ? t("health.refreshing", "Refreshing...") : t("health.refresh", "Refresh")}
+          {isFetching ? t("health.refreshing") : t("health.refresh")}
         </button>
       </div>
 
       <div className={styles["statusBanner"]} data-tone={overallTone}>
         <div className={styles["statusMarker"]} aria-hidden="true" />
         <div className={styles["statusCopy"]}>
-          <p className={styles["eyebrow"]}>{t("health.overallStatus", "Overall status")}</p>
+          <p className={styles["eyebrow"]}>{t("health.overallStatus")}</p>
           <h2>
-            {t("health.bitmagnet_is_status", "bitmagnet is {{status}}", {
+            {t("health.bitmagnet_is_status", {
               status: overallStatusLabel,
             })}
           </h2>
           {updatedTimestamp ? (
             <p className={styles["updatedText"]}>
-              {t("health.lastUpdated", "Updated {{time}}", {
+              {t("health.lastUpdated", {
                 time: updatedTimestamp.relative,
               })}
             </p>
@@ -245,14 +220,14 @@ export default function HealthPage() {
 
       <section className={styles["panel"]}>
         <div className={styles["sectionHeader"]}>
-          <h2>{t("health.checks", "Checks")}</h2>
+          <h2>{t("health.checks")}</h2>
         </div>
         <ChecksTable checks={health.checks} locale={locale} now={now} t={t} />
       </section>
 
       <section className={styles["panel"]}>
         <div className={styles["sectionHeader"]}>
-          <h2>{t("health.workers", "Workers")}</h2>
+          <h2>{t("health.workers")}</h2>
         </div>
         <WorkersList t={t} workers={workers} />
       </section>

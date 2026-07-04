@@ -27,52 +27,52 @@ const CONTENT_TYPE_OPTIONS: ReadonlyArray<{
 }> = [
   {
     defaultLabel: "Movies",
-    labelKey: "contentTypes.movie",
+    labelKey: "contentTypesPlural.movie",
     value: "movie",
   },
   {
     defaultLabel: "TV shows",
-    labelKey: "contentTypes.tv_show",
+    labelKey: "contentTypesPlural.tv_show",
     value: "tv_show",
   },
   {
     defaultLabel: "Music",
-    labelKey: "contentTypes.music",
+    labelKey: "contentTypesPlural.music",
     value: "music",
   },
   {
     defaultLabel: "Ebooks",
-    labelKey: "contentTypes.ebook",
+    labelKey: "contentTypesPlural.ebook",
     value: "ebook",
   },
   {
     defaultLabel: "Comics",
-    labelKey: "contentTypes.comic",
+    labelKey: "contentTypesPlural.comic",
     value: "comic",
   },
   {
     defaultLabel: "Audiobooks",
-    labelKey: "contentTypes.audiobook",
+    labelKey: "contentTypesPlural.audiobook",
     value: "audiobook",
   },
   {
     defaultLabel: "Software",
-    labelKey: "contentTypes.software",
+    labelKey: "contentTypesPlural.software",
     value: "software",
   },
   {
     defaultLabel: "Games",
-    labelKey: "contentTypes.game",
+    labelKey: "contentTypesPlural.game",
     value: "game",
   },
   {
     defaultLabel: "XXX",
-    labelKey: "contentTypes.xxx",
+    labelKey: "contentTypesPlural.xxx",
     value: "xxx",
   },
   {
     defaultLabel: "Unknown",
-    labelKey: "contentTypes.unknown",
+    labelKey: "contentTypesPlural.unknown",
     value: "null",
   },
 ];
@@ -192,14 +192,9 @@ export function QueueReprocessBatchDialog({
         role="dialog"
         tabIndex={-1}
       >
-        <h3 id="queue-reprocess-batch-dialog-title">
-          {t("queue.admin.reprocessDialogTitle", "Enqueue torrent processing batch")}
-        </h3>
+        <h3 id="queue-reprocess-batch-dialog-title">{t("queue.admin.reprocessDialogTitle")}</h3>
         <p className={styles["panelText"]} id="queue-reprocess-batch-dialog-body">
-          {t(
-            "queue.admin.reprocessDialogBody",
-            "This will enqueue a batch reprocess job using the selected classifier and content scope.",
-          )}
+          {t("queue.admin.reprocessDialogBody")}
         </p>
 
         <div className={styles["dialogForm"]}>
@@ -210,7 +205,7 @@ export function QueueReprocessBatchDialog({
               onChange={(event) => setPurge(event.target.checked)}
               type="checkbox"
             />
-            <span>{t("queue.admin.reprocessPurge", "Purge queue jobs")}</span>
+            <span>{t("queue.admin.reprocessPurge")}</span>
           </label>
           <label className={styles["checkboxRow"]}>
             <input
@@ -225,7 +220,7 @@ export function QueueReprocessBatchDialog({
               }}
               type="checkbox"
             />
-            <span>{t("queue.admin.reprocessLocalSearch", "Match content by local search")}</span>
+            <span>{t("queue.admin.reprocessLocalSearch")}</span>
           </label>
           <label className={styles["checkboxRow"]}>
             <input
@@ -234,9 +229,7 @@ export function QueueReprocessBatchDialog({
               onChange={(event) => setApisDisabled(!event.target.checked)}
               type="checkbox"
             />
-            <span>
-              {t("queue.admin.reprocessApiSearch", "Match content by external API search")}
-            </span>
+            <span>{t("queue.admin.reprocessApiSearch")}</span>
           </label>
           <label className={styles["checkboxRow"]}>
             <input
@@ -245,7 +238,7 @@ export function QueueReprocessBatchDialog({
               onChange={(event) => setClassifierRematch(event.target.checked)}
               type="checkbox"
             />
-            <span>{t("queue.admin.reprocessForceRematch", "Force rematch")}</span>
+            <span>{t("queue.admin.reprocessForceRematch")}</span>
           </label>
           <label className={styles["checkboxRow"]}>
             <input
@@ -260,11 +253,11 @@ export function QueueReprocessBatchDialog({
               }}
               type="checkbox"
             />
-            <span>{t("queue.admin.reprocessOrphansOnly", "Process orphaned torrents only")}</span>
+            <span>{t("queue.admin.reprocessOrphansOnly")}</span>
           </label>
 
           <div className={styles["facetGroup"]}>
-            <span>{t("queue.admin.reprocessContentTypes", "Content types")}</span>
+            <span>{t("queue.admin.reprocessContentTypes")}</span>
             <div className={styles["chipRow"]}>
               <button
                 className={styles["chip"]}
@@ -273,7 +266,7 @@ export function QueueReprocessBatchDialog({
                 onClick={() => setContentTypeScope(resetContentTypeScope())}
                 type="button"
               >
-                <span>{t("queue.admin.reprocessAllContentTypes", "All")}</span>
+                <span>{t("queue.admin.reprocessAllContentTypes")}</span>
               </button>
               {CONTENT_TYPE_OPTIONS.map((option) => (
                 <button
@@ -289,7 +282,7 @@ export function QueueReprocessBatchDialog({
                   }}
                   type="button"
                 >
-                  <span>{t(option.labelKey, option.defaultLabel)}</span>
+                  <span>{t(option.labelKey)}</span>
                 </button>
               ))}
             </div>
@@ -298,12 +291,12 @@ export function QueueReprocessBatchDialog({
 
         {isPending ? (
           <p className={styles["panelText"]} role="status">
-            {t("queue.admin.reprocessPending", "Enqueuing jobs")}
+            {t("queue.admin.reprocessPending")}
           </p>
         ) : null}
         {error ? (
           <p className={styles["warningText"]} role="alert">
-            {t("queue.admin.reprocessDialogError", "Enqueue failed: {{error}}", {
+            {t("queue.admin.reprocessDialogError", {
               error: getErrorMessage(error),
             })}
           </p>
@@ -316,12 +309,7 @@ export function QueueReprocessBatchDialog({
             onChange={(event) => setAcknowledged(event.target.checked)}
             type="checkbox"
           />
-          <span>
-            {t(
-              "queue.admin.reprocessAcknowledge",
-              "I understand this will enqueue jobs for the selected torrent scope.",
-            )}
-          </span>
+          <span>{t("queue.admin.reprocessAcknowledge")}</span>
         </label>
         <div className={styles["dialogActions"]}>
           <button
@@ -330,7 +318,7 @@ export function QueueReprocessBatchDialog({
             onClick={onClose}
             type="button"
           >
-            {t("queue.admin.cancel", "Cancel")}
+            {t("queue.admin.cancel")}
           </button>
           <button
             className={styles["dangerButton"]}
@@ -338,9 +326,7 @@ export function QueueReprocessBatchDialog({
             onClick={confirm}
             type="button"
           >
-            {isPending
-              ? t("queue.admin.reprocessEnqueuing", "Enqueuing")
-              : t("queue.admin.reprocessConfirm", "Enqueue jobs")}
+            {isPending ? t("queue.admin.reprocessEnqueuing") : t("queue.admin.reprocessConfirm")}
           </button>
         </div>
       </div>

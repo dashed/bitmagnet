@@ -92,7 +92,7 @@ export function QueueMetricsSection() {
           value: "failed",
         },
       ].map((event) => ({
-        label: t(`metrics.events.${event.value}`, event.defaultLabel),
+        label: t(`metrics.events.${event.value}`),
         value: event.value,
       })),
     [t],
@@ -122,16 +122,11 @@ export function QueueMetricsSection() {
     <section className={styles["section"]} id="queue-visualize">
       <div className={styles["sectionHeader"]}>
         <div>
-          <h2>{t("queue.visualize.title", "Visualize")}</h2>
-          <p>
-            {t(
-              "queue.visualize.body",
-              "Queue throughput, job status, and latency over the selected window.",
-            )}
-          </p>
+          <h2>{t("queue.visualize.title")}</h2>
+          <p>{t("queue.visualize.body")}</p>
         </div>
         <span className={styles["sectionKicker"]}>
-          {t("queue.visualize.total", "{{count}} jobs", {
+          {t("queue.visualize.total", {
             count: normalizedMetrics.totals.total,
           })}
         </span>
@@ -143,8 +138,8 @@ export function QueueMetricsSection() {
         bucketMultiplier={bucketMultiplier}
         bucketMultiplierPlaceholder={normalizedMetrics.bucketParams.multiplier}
         eventFilter={{
-          allLabel: t("metrics.controls.allEvents", "All events"),
-          label: t("metrics.controls.event", "Event"),
+          allLabel: t("metrics.controls.allEvents"),
+          label: t("metrics.controls.event"),
           onChange: (value) => setSelectedEvent(value as QueueMetricEvent | null),
           options: eventOptions,
           value: selectedEvent,
@@ -162,8 +157,8 @@ export function QueueMetricsSection() {
         }}
         onTimeframeChange={setTimeframe}
         scopeFilter={{
-          allLabel: t("metrics.controls.allQueues", "All queues"),
-          label: t("metrics.controls.queue", "Queue"),
+          allLabel: t("metrics.controls.allQueues"),
+          label: t("metrics.controls.queue"),
           onChange: setSelectedQueue,
           options: queueOptions,
           value: selectedQueue,
@@ -178,13 +173,13 @@ export function QueueMetricsSection() {
       <Suspense
         fallback={
           <div className={styles["chartFallback"]} role="status">
-            {t("queue.visualize.loadingCharts", "Loading charts")}
+            {t("queue.visualize.loadingCharts")}
           </div>
         }
       >
         <div className={styles["chartGrid"]}>
           <article className={styles["chartPanel"]}>
-            <h3>{t("queue.visualize.eventsTitle", "Events and latency")}</h3>
+            <h3>{t("queue.visualize.eventsTitle")}</h3>
             <TimelineChart
               latencySeries={normalizedMetrics.latencySeries}
               points={normalizedMetrics.points}
@@ -192,14 +187,14 @@ export function QueueMetricsSection() {
             />
           </article>
           <article className={styles["chartPanel"]}>
-            <h3>{t("queue.visualize.statusTitle", "Statuses")}</h3>
+            <h3>{t("queue.visualize.statusTitle")}</h3>
             <TimelineChart
               points={normalizedMetrics.statusPoints}
               series={normalizedMetrics.statusSeries}
             />
           </article>
           <article className={styles["chartPanel"]}>
-            <h3>{t("queue.visualize.totalsTitle", "Totals by queue")}</h3>
+            <h3>{t("queue.visualize.totalsTitle")}</h3>
             <TotalsChart totals={normalizedMetrics.totals.byQueue} />
           </article>
         </div>

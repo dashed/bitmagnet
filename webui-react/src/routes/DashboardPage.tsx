@@ -39,20 +39,6 @@ import styles from "./DashboardPage.module.css";
 
 const EMPTY_METRIC_BUCKETS: RawQueueMetricsBucket[] = [];
 
-const QUEUE_STATUS_LABELS: Record<QueueJobStatus, string> = {
-  failed: "Failed",
-  pending: "Pending",
-  processed: "Processed",
-  retry: "Retry",
-};
-
-const HEALTH_STATUS_LABELS: Record<HealthStatus, string> = {
-  down: "Down",
-  inactive: "Inactive",
-  unknown: "Unknown",
-  up: "Up",
-};
-
 const TORRENT_TOTAL_VARIABLES: TorrentContentSearchQueryVariables = {
   cached: true,
   hasNextPage: false,
@@ -210,8 +196,8 @@ export default function DashboardPage() {
   const [selectedEvent, setSelectedEvent] = useState<QueueMetricEvent | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<MetricAutoRefreshInterval>("off");
   const locale = i18n.language;
-  const loadingLabel = t("dash.loading", "Loading");
-  const unavailableLabel = t("dash.unavailable", "Unavailable");
+  const loadingLabel = t("dash.loading");
+  const unavailableLabel = t("dash.unavailable");
 
   const {
     data: torrentTotalData,
@@ -286,7 +272,7 @@ export default function DashboardPage() {
           value: "failed",
         },
       ].map((event) => ({
-        label: t(`metrics.events.${event.value}`, event.defaultLabel),
+        label: t(`metrics.events.${event.value}`),
         value: event.value,
       })),
     [t],
@@ -331,15 +317,15 @@ export default function DashboardPage() {
     ? loadingLabel
     : isHealthError || !health
       ? unavailableLabel
-      : t(`dash.health.status.${health.status}`, HEALTH_STATUS_LABELS[health.status]);
+      : t(`dash.health.status.${health.status}`);
   const metricEventCount = normalizedMetrics.totals.total;
 
   return (
     <section aria-labelledby="dashboard-title" className={styles["root"]}>
       <div className={styles["header"]}>
-        <span className={styles["eyebrow"]}>{t("dash.eyebrow", "Operations")}</span>
-        <h1 id="dashboard-title">{t("dash.title", "Dashboard")}</h1>
-        <p>{t("dash.body", "At-a-glance torrent, queue, and service health status.")}</p>
+        <span className={styles["eyebrow"]}>{t("dash.eyebrow")}</span>
+        <h1 id="dashboard-title">{t("dash.title")}</h1>
+        <p>{t("dash.body")}</p>
       </div>
 
       <div className={styles["summaryGrid"]}>
@@ -347,26 +333,23 @@ export default function DashboardPage() {
           busy={isTorrentTotalFetching}
           meta={
             searchResult?.totalCountIsEstimate
-              ? t("dash.torrents.estimateMeta", "Estimated indexed torrent records")
-              : t("dash.torrents.meta", "Indexed torrent records")
+              ? t("dash.torrents.estimateMeta")
+              : t("dash.torrents.meta")
           }
-          title={t("dash.torrents.title", "Torrents")}
+          title={t("dash.torrents.title")}
           value={torrentTotalValue}
         />
 
         <SummaryCard
           busy={isQueueJobsFetching}
-          meta={t("dash.queue.meta", "Jobs across all queues")}
-          title={t("dash.queue.title", "Queue jobs")}
+          meta={t("dash.queue.meta")}
+          title={t("dash.queue.title")}
           value={queueJobsValue}
         >
-          <ul
-            aria-label={t("dash.queue.statusesLabel", "Queue status counts")}
-            className={styles["statusList"]}
-          >
+          <ul aria-label={t("dash.queue.statusesLabel")} className={styles["statusList"]}>
             {queueStatusCounts.map(({ count, status }) => (
               <li className={styles["statusRow"]} data-tone={getStatusTone(status)} key={status}>
-                <span>{t(`dash.queue.status.${status}`, QUEUE_STATUS_LABELS[status])}</span>
+                <span>{t(`dash.queue.status.${status}`)}</span>
                 <strong>{formatCount(count, locale)}</strong>
               </li>
             ))}
@@ -379,14 +362,12 @@ export default function DashboardPage() {
             health
               ? `${formatCount(health.checks.length, locale)} ${t(
                   "dash.health.checksLabel",
-                  "checks",
                 )}, ${formatCount(startedWorkers, locale)}/${formatCount(workers.length, locale)} ${t(
                   "dash.health.workersStartedLabel",
-                  "workers started",
                 )}`
-              : t("dash.health.meta", "Health checks and worker status")
+              : t("dash.health.meta")
           }
-          title={t("dash.health.title", "Health")}
+          title={t("dash.health.title")}
           tone={getHealthTone(health?.status)}
           value={healthValue}
         />
@@ -395,10 +376,9 @@ export default function DashboardPage() {
       <section aria-labelledby="dashboard-metrics-title" className={styles["metricsPanel"]}>
         <div className={styles["sectionHeader"]}>
           <div>
-            <h2 id="dashboard-metrics-title">{t("dash.metrics.title", "Queue throughput")}</h2>
+            <h2 id="dashboard-metrics-title">{t("dash.metrics.title")}</h2>
             <p>
-              {formatCount(metricEventCount, locale)}{" "}
-              {t("dash.metrics.eventsInRange", "events in range")}
+              {formatCount(metricEventCount, locale)} {t("dash.metrics.eventsInRange")}
             </p>
           </div>
         </div>
@@ -410,8 +390,8 @@ export default function DashboardPage() {
           bucketMultiplierPlaceholder={normalizedMetrics.bucketParams.multiplier}
           disabled={isQueueMetricsPending && !queueMetricsData}
           eventFilter={{
-            allLabel: t("metrics.controls.allEvents", "All events"),
-            label: t("metrics.controls.event", "Event"),
+            allLabel: t("metrics.controls.allEvents"),
+            label: t("metrics.controls.event"),
             onChange: (value) => setSelectedEvent(value as QueueMetricEvent | null),
             options: eventOptions,
             value: selectedEvent,
@@ -429,8 +409,8 @@ export default function DashboardPage() {
           }}
           onTimeframeChange={setTimeframe}
           scopeFilter={{
-            allLabel: t("metrics.controls.allQueues", "All queues"),
-            label: t("metrics.controls.queue", "Queue"),
+            allLabel: t("metrics.controls.allQueues"),
+            label: t("metrics.controls.queue"),
             onChange: setSelectedQueue,
             options: queueOptions,
             value: selectedQueue,
@@ -440,15 +420,15 @@ export default function DashboardPage() {
 
         {isQueueMetricsError ? (
           <div className={styles["inlineError"]} role="alert">
-            <strong>{t("dash.metrics.errorTitle", "Queue metrics failed")}</strong>
-            <span>{getErrorMessage(queueMetricsError) ?? t("dash.errorBody", "Try again.")}</span>
+            <strong>{t("dash.metrics.errorTitle")}</strong>
+            <span>{getErrorMessage(queueMetricsError) ?? t("dash.errorBody")}</span>
             <button
               onClick={() => {
                 void refetchQueueMetrics();
               }}
               type="button"
             >
-              {t("dash.retry", "Retry")}
+              {t("dash.retry")}
             </button>
           </div>
         ) : null}
@@ -466,16 +446,16 @@ export default function DashboardPage() {
 
       <section aria-labelledby="dashboard-links-title" className={styles["linksSection"]}>
         <div className={styles["sectionHeader"]}>
-          <h2 id="dashboard-links-title">{t("dash.links.title", "Quick links")}</h2>
+          <h2 id="dashboard-links-title">{t("dash.links.title")}</h2>
         </div>
         <div className={styles["linkGrid"]}>
           <Link className={styles["quickLink"]} to="/queue">
-            <strong>{t("dash.links.queue.title", "Queue")}</strong>
-            <span>{t("dash.links.queue.body", "Inspect queue jobs and processing state.")}</span>
+            <strong>{t("dash.links.queue.title")}</strong>
+            <span>{t("dash.links.queue.body")}</span>
           </Link>
           <Link className={styles["quickLink"]} to="/health">
-            <strong>{t("dash.links.health.title", "Health")}</strong>
-            <span>{t("dash.links.health.body", "Open service checks and worker status.")}</span>
+            <strong>{t("dash.links.health.title")}</strong>
+            <span>{t("dash.links.health.body")}</span>
           </Link>
         </div>
       </section>
