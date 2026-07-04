@@ -456,6 +456,7 @@
   color: var(--mantine-color-dimmed);
   font-size: 11px;
   font-weight: 700;
+  letter-spacing: 0.03em;
   line-height: 1.2;
   text-transform: uppercase;
 }
@@ -632,57 +633,6 @@
   text-align: center;
 }
 
-.filters {
-  margin-block-end: 1rem;
-}
-
-.filters > summary {
-  cursor: pointer;
-  font-weight: 600;
-  padding-block: 0.5rem;
-}
-
-.filtersBody {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-  padding-block-start: 0.75rem;
-}
-
-.facetGroups {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-}
-
-/* Result metadata: aligned label/value pairs with breathing room. */
-.resultMeta {
-  column-gap: 1.5rem;
-  display: flex;
-  flex-wrap: wrap;
-  margin-block: 0.5rem 0;
-  row-gap: 0.5rem;
-}
-
-.resultMeta > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  min-width: 6rem;
-}
-
-.resultMeta dt {
-  color: var(--mantine-color-dimmed);
-  font-size: 0.7rem;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-}
-
-.resultMeta dd {
-  font-size: 0.85rem;
-  margin: 0;
-}
-
 /* The full info hash gets its own full-width row; wraps on narrow screens. */
 .resultMeta > div:has(.hashButton) {
   flex-basis: 100%;
@@ -693,4 +643,15 @@
   font-size: 0.72rem;
   overflow-wrap: anywhere;
   word-break: break-all;
+}
+
+.srOnly {
+  block-size: 1px;
+  clip: rect(0 0 0 0);
+  inline-size: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
 }

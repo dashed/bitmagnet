@@ -124,9 +124,11 @@ function getDhtSeenTooltip(
     return "";
   }
 
+  const fmt = (iso: string) => new Date(iso).toLocaleString();
+
   return [
-    item.dhtFirstSeenAt ? `${labels.first}: ${item.dhtFirstSeenAt}` : undefined,
-    `${labels.last}: ${item.dhtLastSeenAt}`,
+    item.dhtFirstSeenAt ? `${labels.first}: ${fmt(item.dhtFirstSeenAt)}` : undefined,
+    `${labels.last}: ${fmt(item.dhtLastSeenAt)}`,
     `${labels.count}: ${item.dhtSeenCount.toLocaleString()}`,
   ]
     .filter(Boolean)
@@ -576,18 +578,22 @@ export function SearchPage() {
   }, []);
   const searchQuery = useQuery({
     placeholderData: keepPreviousData,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const startedAt = performance.now();
-      const response = await execute(TorrentContentSearchDocument, {
-        cached: refresh.uncachedSearchKey === searchKey ? false : true,
-        facets: getTorrentSearchFacets(search, activeFacetKeys),
-        hasNextPage: true,
-        limit: search.limit,
-        orderBy: getTorrentSearchOrderBy(search),
-        page: search.page,
-        queryString: search.query || undefined,
-        totalCount: true,
-      });
+      const response = await execute(
+        TorrentContentSearchDocument,
+        {
+          cached: refresh.uncachedSearchKey === searchKey ? false : true,
+          facets: getTorrentSearchFacets(search, activeFacetKeys),
+          hasNextPage: true,
+          limit: search.limit,
+          orderBy: getTorrentSearchOrderBy(search),
+          page: search.page,
+          queryString: search.query || undefined,
+          totalCount: true,
+        },
+        signal,
+      );
 
       fetchMsRef.current = Math.round(performance.now() - startedAt);
 
@@ -624,6 +630,7 @@ export function SearchPage() {
 
   return (
     <section className={styles["root"]}>
+      <h1 className={styles["srOnly"]}>{t("search.pageTitle")}</h1>
       <form className={styles["searchForm"]} onSubmit={handleSubmit} role="search">
         <label className={styles["label"]} htmlFor="torrent-search">
           {t("search.inputLabel")}
@@ -897,7 +904,7 @@ export function SearchPage() {
               <p className={styles["resultsEyebrow"]}>
                 {isBrowse ? t("search.browseEyebrow") : search.query}
               </p>
-              <h1 className={styles["resultsTitle"]}>{totalCountLabel}</h1>
+              <h2 className={styles["resultsTitle"]}>{totalCountLabel}</h2>
               {fetchMsRef.current !== null && result ? (
                 <p className={styles["latency"]}>
                   {t("search.fetchedIn", { ms: fetchMsRef.current.toLocaleString(locale) })}

@@ -170,6 +170,7 @@ const en = {
     fetchedIn: "fetched in {{ms}} ms",
     files: "Files",
     infoHash: "Info hash",
+    pageTitle: "Torrent search",
     peers: "Seeders / Leechers",
     placeholder: "Search torrents by name or hash",
     previousPage: "Previous",

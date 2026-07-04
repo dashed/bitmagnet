@@ -39,6 +39,12 @@ sponsor/document-title chrome).
   equivalent) with tests. TanStack Router's JSON search-param encoding must
   not silently change public URLs.
 
+  **Recorded waivers (P1a gate, 2026-07-04):** (1) the legacy `?facets=`
+  active-panel-list param is not preserved — panel open/closed state is
+  ephemeral component state in React; selected filter _values_ fully
+  round-trip. (2) Angular pre-checks all facet checkboxes when nothing is
+  selected; React shows them unchecked (clearer signifier of "no filter").
+
 ## 2. Stack (reaffirmed from v1 where still current — boring on purpose)
 
 | Layer     | Choice                                                             | Notes                                                                                                                                                                                                                                          |
