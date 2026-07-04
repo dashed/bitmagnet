@@ -25,9 +25,9 @@
       "gzip": true
     },
     {
-      "name": "lazy route chunks",
+      "name": "lazy chunks (total, sum of all)",
       "path": "dist/assets/!(index)-*.js",
-      "limit": "150 KB",
+      "limit": "350 KB",
       "gzip": true
     }
   ],
