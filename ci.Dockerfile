@@ -61,7 +61,10 @@ ARG REVISION=dev
 ARG BUILDTIME
 ARG TARGETOS TARGETARCH TARGETVARIANT
 
-RUN --network=none --mount=target=. \
+# NO --mount=target=. here (unlike app-builder-false): the bind mount overlays
+# the raw build context onto /src, SHADOWING the COPY'd webui-react/dist from
+# the builder stage — go:embed then fails with 'no matching files found'.
+RUN --network=none \
 export GOOS=$TARGETOS; \
 export GOARCH=$TARGETARCH; \
 [[ "$GOARCH" == "amd64" ]] && export GOAMD64=$TARGETVARIANT; \
