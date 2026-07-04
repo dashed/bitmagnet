@@ -13,6 +13,7 @@ import type {
 
 export const DEFAULT_SEARCH_LIMIT = 20;
 export const DEFAULT_SIZE_UNIT = "MiB";
+export const INFO_HASH_PATTERN = /^[0-9a-fA-F]{40}$/;
 
 export const SIZE_UNITS = ["KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"] as const;
 export type SizeUnit = (typeof SIZE_UNITS)[number];
@@ -205,6 +206,23 @@ export type TorrentSearchState = {
   query: string;
 };
 
+export type LegacyTorrentSearchNormalization =
+  | {
+      infoHash: string;
+      kind: "detail";
+    }
+  | {
+      kind: "search";
+      search: TorrentSearchUrlParams;
+    }
+  | {
+      kind: "none";
+    };
+
+function searchInput(input: unknown): SearchInput {
+  return (input && typeof input === "object" ? input : {}) as SearchInput;
+}
+
 function firstValue(value: unknown): unknown {
   if (Array.isArray(value)) {
     const values = value as unknown[];
@@ -233,6 +251,20 @@ function stringValue(value: unknown) {
   const decoded = safeDecode(candidate).trim();
 
   return decoded || undefined;
+}
+
+function hasSearchParam(params: SearchInput, key: string) {
+  return Object.prototype.hasOwnProperty.call(params, key);
+}
+
+function legacyTorrentValue(params: SearchInput) {
+  const candidate = firstValue(params["torrent"]);
+
+  if (typeof candidate !== "string") {
+    return "";
+  }
+
+  return safeDecode(candidate).trim();
 }
 
 function stringListValue(value: unknown) {
@@ -406,7 +438,7 @@ export function isDefaultOrdering(search: TorrentSearchState) {
 }
 
 export function parseTorrentSearchParams(input: unknown): TorrentSearchState {
-  const params = (input && typeof input === "object" ? input : {}) as SearchInput;
+  const params = searchInput(input);
   const query = stringValue(params["query"]) ?? stringValue(params["q"]) ?? "";
   const contentType = contentTypeValue(params["content_type"]) ?? contentTypeValue(params["type"]);
   const requestedOrder = orderValue(params["order"]);
@@ -485,6 +517,28 @@ export function stringifyTorrentSearchParams(search: TorrentSearchState): Torren
 
 export function validateTorrentSearchParams(input: unknown): TorrentSearchUrlParams {
   return stringifyTorrentSearchParams(parseTorrentSearchParams(input));
+}
+
+export function normalizeLegacyTorrentSearch(input: unknown): LegacyTorrentSearchNormalization {
+  const params = searchInput(input);
+
+  if (!hasSearchParam(params, "torrent")) {
+    return { kind: "none" };
+  }
+
+  const torrent = legacyTorrentValue(params);
+
+  if (INFO_HASH_PATTERN.test(torrent)) {
+    return {
+      infoHash: torrent.toLowerCase(),
+      kind: "detail",
+    };
+  }
+
+  return {
+    kind: "search",
+    search: validateTorrentSearchParams(params),
+  };
 }
 
 export const stripTorrentSearchDefaults: SearchMiddleware<TorrentSearchUrlParams> = ({

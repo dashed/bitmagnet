@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   getTorrentSearchFacets,
+  normalizeLegacyTorrentSearch,
   parseTorrentSearchParams,
   stringifyTorrentSearchParams,
+  validateTorrentSearchParams,
 } from "./searchParams";
 
 describe("torrent search params", () => {
@@ -133,6 +135,43 @@ describe("torrent search params", () => {
       ),
     ).toEqual({
       content_type: "music",
+    });
+  });
+
+  it("classifies valid legacy torrent search params for detail redirects", () => {
+    const infoHash = "ABCDEFabcdef0123456789abcdef0123456789ab";
+
+    expect(
+      normalizeLegacyTorrentSearch({
+        content_type: "movie",
+        query: "matrix",
+        tab: "files",
+        torrent: infoHash,
+      }),
+    ).toEqual({
+      infoHash: infoHash.toLowerCase(),
+      kind: "detail",
+    });
+  });
+
+  it("strips malformed legacy torrent search params", () => {
+    const legacySearch = {
+      content_type: "movie",
+      query: "matrix",
+      tab: "files",
+      torrent: "not-a-hash",
+    };
+
+    expect(normalizeLegacyTorrentSearch(legacySearch)).toEqual({
+      kind: "search",
+      search: {
+        content_type: "movie",
+        query: "matrix",
+      },
+    });
+    expect(validateTorrentSearchParams(legacySearch)).toEqual({
+      content_type: "movie",
+      query: "matrix",
     });
   });
 });
