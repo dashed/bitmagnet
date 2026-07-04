@@ -2,6 +2,7 @@ import type { SearchMiddleware } from "@tanstack/react-router";
 
 import type {
   ContentType,
+  FileSearchSortInput,
   FileType,
   Language,
   TorrentContentFacetsInput,
@@ -167,6 +168,18 @@ export const ORDER_OPTIONS = [
   field: TorrentContentOrderByField;
 }>;
 
+export const FILE_ORDER_OPTIONS = [
+  { defaultDescending: true, field: "size" },
+  { defaultDescending: true, field: "last_seen", requiresQuery: true },
+  { defaultDescending: true, field: "seeders", requiresQuery: true },
+  { defaultDescending: true, field: "published_at", requiresQuery: true },
+  { defaultDescending: true, field: "updated_at", requiresQuery: true },
+  { defaultDescending: false, field: "path" },
+] as const;
+
+export type FileSearchOrderField = (typeof FILE_ORDER_OPTIONS)[number]["field"];
+export type SearchOrderField = TorrentContentOrderByField | FileSearchOrderField;
+
 export const PUBLISHED_PRESETS = [
   { labelKey: "search.publishedLastDay", value: "24h" },
   { labelKey: "search.publishedLastWeek", value: "7d" },
@@ -188,7 +201,7 @@ export type TorrentSearchUrlParams = {
   min_size?: number;
   min_size_unit?: SizeUnit;
   mode?: Exclude<SearchMode, "torrents">;
-  order?: TorrentContentOrderByField;
+  order?: SearchOrderField;
   page?: number;
   published_at?: PublishedPreset;
   query?: string;
@@ -204,7 +217,7 @@ export type TorrentSearchState = {
   minSize?: number;
   minSizeUnit: SizeUnit;
   mode: SearchMode;
-  order: TorrentContentOrderByField;
+  order: SearchOrderField;
   page: number;
   publishedAt?: PublishedPreset;
   query: string;
@@ -336,11 +349,47 @@ function contentTypeValue(value: unknown): ContentTypeSelection | undefined {
     : undefined;
 }
 
-function orderValue(value: unknown): TorrentContentOrderByField | undefined {
+function isTorrentOrderField(value: string): value is TorrentContentOrderByField {
+  return ORDER_OPTIONS.some((option) => option.field === value);
+}
+
+export function isFileOrderField(value: string): value is FileSearchOrderField {
+  return FILE_ORDER_OPTIONS.some((option) => option.field === value);
+}
+
+function fileOrderRequiresQuery(field: FileSearchOrderField) {
+  const option = FILE_ORDER_OPTIONS.find((candidate) => candidate.field === field);
+
+  return option ? "requiresQuery" in option && option.requiresQuery : false;
+}
+
+function isFileOrderAllowedForQuery(field: FileSearchOrderField, query: string) {
+  return !fileOrderRequiresQuery(field) || query.length > 0;
+}
+
+function isOrderAllowedForMode(mode: SearchMode, field: SearchOrderField, query: string) {
+  if (mode === "files") {
+    return isFileOrderField(field) && isFileOrderAllowedForQuery(field, query);
+  }
+
+  return isTorrentOrderField(field) && (field !== "relevance" || query.length > 0);
+}
+
+function orderValue(value: unknown, mode: SearchMode, query: string): SearchOrderField | undefined {
   const candidate = stringValue(value);
 
-  return ORDER_OPTIONS.some((option) => option.field === candidate)
-    ? (candidate as TorrentContentOrderByField)
+  if (!candidate) {
+    return undefined;
+  }
+
+  if (mode === "files") {
+    return isFileOrderField(candidate) && isFileOrderAllowedForQuery(candidate, query)
+      ? candidate
+      : undefined;
+  }
+
+  return isTorrentOrderField(candidate) && (candidate !== "relevance" || query)
+    ? candidate
     : undefined;
 }
 
@@ -436,39 +485,51 @@ function parseFacetSelections(params: SearchInput, contentType: ContentTypeSelec
   return sanitizeFacetSelections(selections, contentType);
 }
 
-export function getDefaultOrderField(query: string): TorrentContentOrderByField {
+function getDefaultTorrentOrderField(query: string): TorrentContentOrderByField {
   return query ? "relevance" : "published_at";
 }
 
-export function getDefaultDescending(field: TorrentContentOrderByField) {
-  return ORDER_OPTIONS.find((option) => option.field === field)?.defaultDescending ?? true;
+export function getDefaultOrderField(
+  query: string,
+  mode: SearchMode = "torrents",
+): SearchOrderField {
+  return mode === "files" ? "size" : getDefaultTorrentOrderField(query);
+}
+
+export function getDefaultDescending(field: SearchOrderField) {
+  return (
+    FILE_ORDER_OPTIONS.find((option) => option.field === field)?.defaultDescending ??
+    ORDER_OPTIONS.find((option) => option.field === field)?.defaultDescending ??
+    true
+  );
 }
 
 export function isDefaultOrdering(search: TorrentSearchState) {
-  return search.order === getDefaultOrderField(search.query) && search.descending;
+  return (
+    search.order === getDefaultOrderField(search.query, search.mode) &&
+    search.descending === getDefaultDescending(search.order)
+  );
 }
 
 export function parseTorrentSearchParams(input: unknown): TorrentSearchState {
   const params = searchInput(input);
   const query = stringValue(params["query"]) ?? stringValue(params["q"]) ?? "";
+  const mode = searchModeValue(params["mode"]);
   const contentType = contentTypeValue(params["content_type"]) ?? contentTypeValue(params["type"]);
-  const requestedOrder = orderValue(params["order"]);
-  const order =
-    requestedOrder && (requestedOrder !== "relevance" || query)
-      ? requestedOrder
-      : getDefaultOrderField(query);
+  const requestedOrder = orderValue(params["order"], mode, query);
+  const order = requestedOrder ?? getDefaultOrderField(query, mode);
   const requestedDescending = booleanValue(params["desc"]);
 
   return {
     contentType,
-    descending: requestedDescending ?? (requestedOrder ? getDefaultDescending(order) : true),
+    descending: requestedDescending ?? getDefaultDescending(order),
     facets: parseFacetSelections(params, contentType),
     limit: integerValue(params["limit"], 1) ?? DEFAULT_SEARCH_LIMIT,
     maxSize: integerValue(params["max_size"], 1),
     maxSizeUnit: sizeUnitValue(params["max_size_unit"]),
     minSize: integerValue(params["min_size"], 1),
     minSizeUnit: sizeUnitValue(params["min_size_unit"]),
-    mode: searchModeValue(params["mode"]),
+    mode,
     order,
     page: integerValue(params["page"], 1) ?? 1,
     publishedAt:
@@ -588,10 +649,28 @@ export function sizeToBytes(size: number | undefined, unit: SizeUnit): number | 
 }
 
 export function getTorrentSearchOrderBy(search: TorrentSearchState): TorrentContentOrderByInput[] {
+  const field = isTorrentOrderField(search.order)
+    ? search.order
+    : getDefaultTorrentOrderField(search.query);
+
   return [
     {
       descending: search.descending,
-      field: search.order,
+      field,
+    },
+  ];
+}
+
+export function getFileSearchSort(search: TorrentSearchState): FileSearchSortInput[] {
+  const field =
+    isFileOrderField(search.order) && isFileOrderAllowedForQuery(search.order, search.query)
+      ? search.order
+      : "size";
+
+  return [
+    {
+      descending: search.descending,
+      field,
     },
   ];
 }
@@ -695,13 +774,13 @@ export function updateQuery(search: TorrentSearchState, query: string): TorrentS
   const trimmedQuery = query.trim();
   const currentOrderIsDefault = isDefaultOrdering(search);
   const order =
-    currentOrderIsDefault || (!trimmedQuery && search.order === "relevance")
-      ? getDefaultOrderField(trimmedQuery)
+    currentOrderIsDefault || !isOrderAllowedForMode(search.mode, search.order, trimmedQuery)
+      ? getDefaultOrderField(trimmedQuery, search.mode)
       : search.order;
 
   return {
     ...search,
-    descending: order === search.order ? search.descending : true,
+    descending: order === search.order ? search.descending : getDefaultDescending(order),
     order,
     page: 1,
     query: trimmedQuery,
@@ -709,9 +788,17 @@ export function updateQuery(search: TorrentSearchState, query: string): TorrentS
 }
 
 export function updateSearchMode(search: TorrentSearchState, mode: SearchMode): TorrentSearchState {
+  const currentOrderIsDefault = isDefaultOrdering(search);
+  const order =
+    currentOrderIsDefault || !isOrderAllowedForMode(mode, search.order, search.query)
+      ? getDefaultOrderField(search.query, mode)
+      : search.order;
+
   return {
     ...search,
+    descending: order === search.order ? search.descending : getDefaultDescending(order),
     mode,
+    order,
     page: 1,
   };
 }

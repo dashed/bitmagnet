@@ -13,7 +13,9 @@ package filesearch
 import (
 	"context"
 	"errors"
+	"strings"
 
+	dbsearch "github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 )
 
@@ -32,6 +34,27 @@ var (
 	// ErrPathTypeaheadUnsupported is returned by the real sidecar-backed client
 	// until the proto grows a path-typeahead RPC.
 	ErrPathTypeaheadUnsupported = errors.New("path typeahead is not supported by the sidecar")
+	// ErrTorrentSortRequiresTextQuery is returned when a torrent-content sort is
+	// requested for the L2 empty-query path, which only understands file fields.
+	ErrTorrentSortRequiresTextQuery = errors.New("file search torrent-field sorts require a non-empty text query")
+	// ErrTorrentSortRequiresRoutedPath is returned when a torrent-content sort
+	// cannot be served by the L3 routed text path and would otherwise hit L2.
+	ErrTorrentSortRequiresRoutedPath = errors.New(
+		"file search torrent-field sorts require the routed text-search path",
+	)
+)
+
+const (
+	FileSortSize          = "size"
+	FileSortPath          = "path"
+	FileSortExtension     = "extension"
+	FileSortIndex         = "index"
+	FileSortInfoHash      = "info_hash"
+	FileSortLastSeen      = "last_seen"
+	FileSortDHTLastSeenAt = "dht_last_seen_at"
+	FileSortSeeders       = "seeders"
+	FileSortPublishedAt   = "published_at"
+	FileSortUpdatedAt     = "updated_at"
 )
 
 // FileSearchInput is the validated input to a file-grained search. Build it with
@@ -66,7 +89,8 @@ type FileSearchInput struct {
 
 // FileSort is one optional file-search sort key. Supported fields are backend
 // dependent; common fields are "size", "path", "extension", "index", and
-// "info_hash".
+// "info_hash". Torrent-content fields ("last_seen", "seeders",
+// "published_at", "updated_at") are served only by the routed text-search path.
 type FileSort struct {
 	Field      string
 	Descending bool
@@ -74,11 +98,12 @@ type FileSort struct {
 
 // FileSearchItem is a single matched file.
 type FileSearchItem struct {
-	InfoHash  protocol.ID
-	Index     uint
-	Path      string
-	Extension string
-	Size      uint64
+	InfoHash       protocol.ID
+	Index          uint
+	Path           string
+	Extension      string
+	Size           uint64
+	TorrentContent dbsearch.TorrentContentResultItem
 }
 
 // FileSearchResult is a page of matched files.
@@ -125,4 +150,25 @@ func (disabledClient) FileSearch(context.Context, FileSearchInput) (FileSearchRe
 
 func (disabledClient) PathTypeahead(context.Context, PathTypeaheadInput) (PathTypeaheadResult, error) {
 	return PathTypeaheadResult{}, ErrDisabled
+}
+
+func NormalizeFileSortField(field string) string {
+	field = strings.ToLower(strings.TrimSpace(field))
+	switch field {
+	case "infohash":
+		return FileSortInfoHash
+	case "dhtlastseenat":
+		return FileSortDHTLastSeenAt
+	default:
+		return field
+	}
+}
+
+func IsTorrentFieldSort(field string) bool {
+	switch NormalizeFileSortField(field) {
+	case FileSortLastSeen, FileSortDHTLastSeenAt, FileSortSeeders, FileSortPublishedAt, FileSortUpdatedAt:
+		return true
+	default:
+		return false
+	}
 }

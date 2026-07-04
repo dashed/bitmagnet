@@ -12,6 +12,37 @@
   min-width: 0;
 }
 
+.sortBar {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sortBar label {
+  display: grid;
+  gap: 5px;
+  min-width: min(100%, 220px);
+}
+
+.sortBar label span {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.sortBar select {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  font: inherit;
+  font-weight: 700;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
 .toolbarText {
   display: grid;
   gap: 4px;
@@ -78,6 +109,20 @@
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.fileText {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fileActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .pathButton {
   appearance: none;
   background: transparent;
@@ -124,6 +169,38 @@
   padding: 0 8px;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+.copyButton {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.copyButton:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.metaLine {
+  color: var(--mantine-color-dimmed);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 650;
+  gap: 6px;
+  margin: 0;
+}
+
+.metaLine span:not(:last-child)::after {
+  content: "·";
+  margin-left: 6px;
 }
 
 .metaGrid {
@@ -279,6 +356,7 @@
 
 @media (max-width: 47.999em) {
   .toolbar,
+  .sortBar,
   .pagination {
     align-items: stretch;
     flex-direction: column;
@@ -288,6 +366,10 @@
   .pathMain,
   .metaGrid {
     grid-template-columns: 1fr;
+  }
+
+  .fileActions {
+    justify-content: flex-start;
   }
 
   .pagination > button {

@@ -4,6 +4,7 @@ input FileSearchInput {
   minSize: Int
   maxSize: Int
   infoHash: Hash20
+  sort: [FileSearchSortInput!]
   limit: Int
   offset: Int
   """
@@ -13,12 +14,18 @@ input FileSearchInput {
   totalCount: Boolean
 }
 
+input FileSearchSortInput {
+  field: String!
+  descending: Boolean
+}
+
 type FileSearchItem {
   infoHash: Hash20!
   index: Int!
   path: String!
   extension: String!
   size: Int!
+  torrentContent: TorrentContent!
 }
 
 type FileSearchResult {

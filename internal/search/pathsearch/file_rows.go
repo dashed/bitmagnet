@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
@@ -17,6 +18,10 @@ const (
 	FileRowSortExtension = "extension"
 	FileRowSortIndex     = "index"
 	FileRowSortInfoHash  = "info_hash"
+	FileRowSortLastSeen  = "last_seen"
+	FileRowSortSeeders   = "seeders"
+	FileRowSortPublished = "published_at"
+	FileRowSortUpdated   = "updated_at"
 )
 
 // FileRowSort is a file-level ordering requested by a fileSearch caller. The
@@ -28,11 +33,12 @@ type FileRowSort struct {
 
 // FileRow is one exact-refined matching file row.
 type FileRow struct {
-	InfoHash  protocol.ID
-	Index     uint
-	Path      string
-	Extension string
-	Size      uint64
+	InfoHash       protocol.ID
+	Index          uint
+	Path           string
+	Extension      string
+	Size           uint64
+	TorrentContent search.TorrentContentResultItem
 }
 
 // FileRowsResult is the fileSearch-shaped result produced from the pathsearch
@@ -267,11 +273,12 @@ func (c *Composer) SearchFileRows(
 		nil,
 		func(item search.TorrentContentResultItem, file model.TorrentFile) bool {
 			rows = append(rows, FileRow{
-				InfoHash:  item.InfoHash,
-				Index:     file.Index,
-				Path:      file.Path,
-				Extension: fileExtension(file),
-				Size:      uint64(file.Size),
+				InfoHash:       item.InfoHash,
+				Index:          file.Index,
+				Path:           file.Path,
+				Extension:      fileExtension(file),
+				Size:           uint64(file.Size),
+				TorrentContent: item,
 			})
 
 			retained++
@@ -384,6 +391,9 @@ func sortFileRows(rows []FileRow, sortBy []FileRowSort) {
 		sortBy = []FileRowSort{{Field: FileRowSortSize, Descending: true}}
 	}
 
+	// File rows are collected after exact-refine over the candidate page, so
+	// torrent-field ordering is intentionally local to that refined candidate
+	// window. The recall semantics remain the same as the L3 pipeline.
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 
@@ -413,6 +423,14 @@ func compareFileRow(a, b FileRow, s FileRowSort) (int, bool) {
 		return cmpUint(a.Index, b.Index), true
 	case FileRowSortInfoHash, "infohash":
 		return strings.Compare(a.InfoHash.String(), b.InfoHash.String()), true
+	case FileRowSortLastSeen, "dht_last_seen_at", "dhtlastseenat":
+		return cmpTimePtr(dhtLastSeenAt(a.TorrentContent), dhtLastSeenAt(b.TorrentContent)), true
+	case FileRowSortSeeders:
+		return cmpNullUint(a.TorrentContent.Seeders, b.TorrentContent.Seeders), true
+	case FileRowSortPublished:
+		return cmpTime(a.TorrentContent.PublishedAt, b.TorrentContent.PublishedAt), true
+	case FileRowSortUpdated:
+		return cmpTime(a.TorrentContent.UpdatedAt, b.TorrentContent.UpdatedAt), true
 	default:
 		return 0, false
 	}
@@ -450,6 +468,57 @@ func cmpUint64(a, b uint64) int {
 	default:
 		return 0
 	}
+}
+
+func cmpNullUint(a, b model.NullUint) int {
+	switch {
+	case !a.Valid && !b.Valid:
+		return 0
+	case !a.Valid:
+		return -1
+	case !b.Valid:
+		return 1
+	default:
+		return cmpUint(a.Uint, b.Uint)
+	}
+}
+
+func cmpTime(a, b time.Time) int {
+	switch {
+	case a.Before(b):
+		return -1
+	case a.After(b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cmpTimePtr(a, b *time.Time) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	default:
+		return cmpTime(*a, *b)
+	}
+}
+
+func dhtLastSeenAt(item search.TorrentContentResultItem) *time.Time {
+	for _, source := range item.Torrent.Sources {
+		if source.Source != "dht" {
+			continue
+		}
+
+		lastSeenAt := source.UpdatedAt
+
+		return &lastSeenAt
+	}
+
+	return nil
 }
 
 func sortSuggestionBuckets(buckets []*typeaheadBucket) {

@@ -168,6 +168,12 @@ models:
   FileSearchItem:
     model:
       - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.FileSearchItem
+    fields:
+      torrentContent:
+        resolver: true
+  FileSearchSortInput:
+    model:
+      - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.FileSort
   PathTypeaheadResult:
     model:
       - github.com/bitmagnet-io/bitmagnet/internal/search/filesearch.PathTypeaheadResult

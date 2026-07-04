@@ -118,6 +118,7 @@ export type FileSearchInput = {
   minSize?: InputMaybe<Scalars["Int"]["input"]>;
   offset?: InputMaybe<Scalars["Int"]["input"]>;
   query?: InputMaybe<Scalars["String"]["input"]>;
+  sort?: InputMaybe<Array<FileSearchSortInput>>;
   /**
    * When false, skip the exact L2 count RPC and return totalCount as 0.
    * Omitted defaults to true for compatibility with existing callers.
@@ -132,6 +133,7 @@ export type FileSearchItem = {
   infoHash: Scalars["Hash20"]["output"];
   path: Scalars["String"]["output"];
   size: Scalars["Int"]["output"];
+  torrentContent: TorrentContent;
 };
 
 export type FileSearchResult = {
@@ -139,6 +141,11 @@ export type FileSearchResult = {
   hasNextPage: Scalars["Boolean"]["output"];
   items: Array<FileSearchItem>;
   totalCount: Scalars["Int"]["output"];
+};
+
+export type FileSearchSortInput = {
+  descending?: InputMaybe<Scalars["Boolean"]["input"]>;
+  field: Scalars["String"]["input"];
 };
 
 export type FileType =
@@ -948,6 +955,18 @@ export type FileSearchQuery = {
         path: string;
         extension: string;
         size: number;
+        torrentContent: {
+          __typename?: "TorrentContent";
+          infoHash: string;
+          seeders?: number | null;
+          leechers?: number | null;
+          publishedAt: string;
+          updatedAt: string;
+          dhtLastSeenAt?: string | null;
+          dhtSeenCount: number;
+          title: string;
+          torrent: { __typename?: "Torrent"; name: string; magnetUri: string };
+        };
       }>;
     };
   };
@@ -1408,6 +1427,20 @@ export const FileSearchDocument = new TypedDocumentString(`
         path
         extension
         size
+        torrentContent {
+          infoHash
+          seeders
+          leechers
+          publishedAt
+          updatedAt
+          dhtLastSeenAt
+          dhtSeenCount
+          title
+          torrent {
+            name
+            magnetUri
+          }
+        }
       }
     }
   }

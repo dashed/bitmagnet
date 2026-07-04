@@ -2,6 +2,7 @@ package gqlmodel
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	q "github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -53,13 +54,16 @@ func (f *fileRouteL3) PathCandidates(
 }
 
 type fileRoutePG struct {
-	result dbsearch.TorrentContentResult
+	result    dbsearch.TorrentContentResult
+	callCount int
 }
 
 func (f *fileRoutePG) TorrentContent(
 	context.Context,
 	...q.Option,
 ) (dbsearch.TorrentContentResult, error) {
+	f.callCount++
+
 	return f.result, nil
 }
 
@@ -89,8 +93,10 @@ func fileRouteItem(b byte, path string, size uint) dbsearch.TorrentContentResult
 	return dbsearch.TorrentContentResultItem{
 		TorrentContent: model.TorrentContent{
 			InfoHash: fileRouteID(b),
+			Seeders:  model.NewNullUint(uint(b)),
 			Torrent: model.Torrent{
 				InfoHash:    fileRouteID(b),
+				Name:        path,
 				FilesStatus: model.FilesStatusMulti,
 				Files: []model.TorrentFile{{
 					Index:     7,
@@ -168,6 +174,10 @@ func TestFileSearchRouteDecision_TextUsesPathsearch(t *testing.T) {
 	if result.TotalCount != 11 || len(result.Items) != 1 || result.Items[0].Path != "Movies/Inception.2010.mkv" {
 		t.Fatalf("pathsearch result = %+v, want candidate_total=11 and refined file row", result)
 	}
+
+	if !result.Items[0].TorrentContent.Seeders.Valid || result.Items[0].TorrentContent.Seeders.Uint != 1 {
+		t.Fatalf("pathsearch row torrent seeders = %+v, want 1", result.Items[0].TorrentContent.Seeders)
+	}
 }
 
 func TestFileSearchRouteDecision_EmptyQueryUsesL2(t *testing.T) {
@@ -175,17 +185,21 @@ func TestFileSearchRouteDecision_EmptyQueryUsesL2(t *testing.T) {
 
 	enableFileSearchFeature(t)
 
+	l2ID := fileRouteID(4)
 	l2 := &recordingFileSearchClient{fileSearchResult: filesearch.FileSearchResult{
-		Items: []filesearch.FileSearchItem{{Path: "l2.mkv"}},
+		Items: []filesearch.FileSearchItem{{InfoHash: l2ID, Path: "l2.mkv"}},
 	}}
 	l3 := &fileRouteL3{resp: &pb.PathCandidatesResponse{
 		Candidates: []*pb.PathCandidate{fileRouteCandidate(1)},
 	}}
-	pg := &fileRoutePG{}
+	pg := &fileRoutePG{result: dbsearch.TorrentContentResult{
+		Items: []dbsearch.TorrentContentResultItem{fileRouteItem(4, "l2.mkv", 99)},
+	}}
 
 	result, err := (FileSearchQuery{
-		Client:     l2,
-		Pathsearch: fileRouteComposer(true, l3, pg),
+		Client:               l2,
+		Pathsearch:           fileRouteComposer(true, l3, pg),
+		TorrentContentSearch: pg,
 	}).Search(context.Background(), FileSearchInput{Extensions: []string{"mkv"}, Limit: 10})
 	if err != nil {
 		t.Fatalf("FileSearch: %v", err)
@@ -202,6 +216,50 @@ func TestFileSearchRouteDecision_EmptyQueryUsesL2(t *testing.T) {
 	if len(result.Items) != 1 || result.Items[0].Path != "l2.mkv" {
 		t.Fatalf("result = %+v, want L2 marker row", result)
 	}
+
+	if pg.callCount != 1 {
+		t.Fatalf("L2 result must be hydrated with one TorrentContent query, calls=%d", pg.callCount)
+	}
+
+	if !result.Items[0].TorrentContent.Seeders.Valid || result.Items[0].TorrentContent.Seeders.Uint != 4 {
+		t.Fatalf("L2 row torrent seeders = %+v, want 4", result.Items[0].TorrentContent.Seeders)
+	}
+}
+
+func TestFileSearchRouteDecision_EmptyQueryRejectsTorrentSort(t *testing.T) {
+	t.Parallel()
+
+	enableFileSearchFeature(t)
+
+	l2 := &recordingFileSearchClient{}
+	l3 := &fileRouteL3{resp: &pb.PathCandidatesResponse{
+		Candidates: []*pb.PathCandidate{fileRouteCandidate(1)},
+	}}
+	pg := &fileRoutePG{}
+
+	_, err := (FileSearchQuery{
+		Client:               l2,
+		Pathsearch:           fileRouteComposer(true, l3, pg),
+		TorrentContentSearch: pg,
+	}).Search(context.Background(), FileSearchInput{
+		Extensions: []string{"mkv"},
+		Limit:      10,
+		Sort: []filesearch.FileSort{{
+			Descending: true,
+			Field:      filesearch.FileSortLastSeen,
+		}},
+	})
+	if !errors.Is(err, filesearch.ErrTorrentSortRequiresTextQuery) {
+		t.Fatalf("FileSearch err = %v, want ErrTorrentSortRequiresTextQuery", err)
+	}
+
+	if l2.fileSearchCalls != 0 {
+		t.Fatalf("rejected torrent sort must not call L2, calls=%d", l2.fileSearchCalls)
+	}
+
+	if l3.calls != 0 {
+		t.Fatalf("empty text must not call pathsearch, calls=%d", l3.calls)
+	}
 }
 
 func TestFileSearchRouteDecision_FlagOffUsesL2(t *testing.T) {
@@ -209,17 +267,21 @@ func TestFileSearchRouteDecision_FlagOffUsesL2(t *testing.T) {
 
 	enableFileSearchFeature(t)
 
+	l2ID := fileRouteID(5)
 	l2 := &recordingFileSearchClient{fileSearchResult: filesearch.FileSearchResult{
-		Items: []filesearch.FileSearchItem{{Path: "l2-text.mkv"}},
+		Items: []filesearch.FileSearchItem{{InfoHash: l2ID, Path: "l2-text.mkv"}},
 	}}
 	l3 := &fileRouteL3{resp: &pb.PathCandidatesResponse{
 		Candidates: []*pb.PathCandidate{fileRouteCandidate(1)},
 	}}
-	pg := &fileRoutePG{}
+	pg := &fileRoutePG{result: dbsearch.TorrentContentResult{
+		Items: []dbsearch.TorrentContentResultItem{fileRouteItem(5, "l2-text.mkv", 101)},
+	}}
 
 	result, err := (FileSearchQuery{
-		Client:     l2,
-		Pathsearch: fileRouteComposer(false, l3, pg),
+		Client:               l2,
+		Pathsearch:           fileRouteComposer(false, l3, pg),
+		TorrentContentSearch: pg,
 	}).Search(context.Background(), FileSearchInput{Query: "inception", Limit: 10})
 	if err != nil {
 		t.Fatalf("FileSearch: %v", err)

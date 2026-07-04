@@ -133,6 +133,10 @@ func NewFileSearchInput(p FileSearchParams) (FileSearchInput, error) {
 	query := capRunes(strings.TrimSpace(p.Query), MaxQueryLen)
 	exts := normalizeExtensions(p.Extensions)
 
+	if err := validateFileSorts(p.Sort, query); err != nil {
+		return FileSearchInput{}, err
+	}
+
 	if query == "" && len(exts) == 0 && p.MinSize == 0 && p.MaxSize == 0 && p.InfoHash == nil {
 		return FileSearchInput{}, ErrEmptyQuery
 	}
@@ -149,6 +153,16 @@ func NewFileSearchInput(p FileSearchParams) (FileSearchInput, error) {
 		Offset:           p.Offset,
 		SkipTotalCount:   p.TotalCount != nil && !*p.TotalCount,
 	}, nil
+}
+
+func validateFileSorts(sorts []FileSort, query string) error {
+	for _, sort := range sorts {
+		if query == "" && IsTorrentFieldSort(sort.Field) {
+			return ErrTorrentSortRequiresTextQuery
+		}
+	}
+
+	return nil
 }
 
 // NewPathTypeaheadInput validates and normalises a typeahead prefix. It enforces

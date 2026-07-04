@@ -6,11 +6,17 @@ import { useTranslation } from "react-i18next";
 
 import { ListSkeleton } from "../../components/ListSkeleton";
 import { QueryError } from "../../components/QueryError";
+import { useToast } from "../../components/toast";
 import { execute } from "../../graphql/client";
 import { FileSearchDocument } from "../../graphql/generated/graphql";
 import type { FileSearchInput, FileSearchQuery } from "../../graphql/generated/graphql";
 import { formatFileSize } from "../../utils/filesize";
+import { formatRelativeTime } from "../../utils/relativeTime";
 import {
+  FILE_ORDER_OPTIONS,
+  getDefaultDescending,
+  getFileSearchSort,
+  isFileOrderField,
   parseTorrentSearchParams,
   sizeToBytes,
   stringifyTorrentSearchParams,
@@ -23,6 +29,10 @@ import styles from "./SearchModeViews.module.css";
 type FileSearchItem = FileSearchQuery["torrentContent"]["fileSearch"]["items"][number];
 
 const EMPTY_FILE_ITEMS: FileSearchItem[] = [];
+
+function fileOptionRequiresQuery(option: (typeof FILE_ORDER_OPTIONS)[number]) {
+  return "requiresQuery" in option && option.requiresQuery;
+}
 
 function getOffset(page: number, limit: number) {
   return Math.max(0, page - 1) * limit;
@@ -45,8 +55,17 @@ function getFileSearchInput(search: TorrentSearchState): FileSearchInput {
     minSize: sizeToBytes(search.minSize, search.minSizeUnit),
     offset: getOffset(search.page, search.limit),
     query: search.query || undefined,
+    sort: getFileSearchSort(search),
     totalCount: true,
   };
+}
+
+function getPeerCount(value: number | null | undefined) {
+  return value ?? 0;
+}
+
+function getTorrentTitle(item: FileSearchItem) {
+  return item.torrentContent.title.trim() || item.torrentContent.torrent.name;
 }
 
 export default function FileSearchView() {
@@ -55,6 +74,7 @@ export default function FileSearchView() {
   const [draftQuery, setDraftQuery] = useState(search.query);
   const fetchMsRef = useRef<number | null>(null);
   const navigate = useNavigate({ from: "/" });
+  const notify = useToast();
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const appLoadMs = useMemo(() => getAppLoadMs(), []);
@@ -91,6 +111,39 @@ export default function FileSearchView() {
     navigateSearch({ ...search, page }, false);
   }
 
+  function handleOrderChange(event: ChangeEvent<HTMLSelectElement>) {
+    const field = event.target.value;
+    const option = FILE_ORDER_OPTIONS.find((candidate) => candidate.field === field);
+
+    if (!option || !isFileOrderField(field) || (fileOptionRequiresQuery(option) && !search.query)) {
+      return;
+    }
+
+    navigateSearch({
+      ...search,
+      descending: getDefaultDescending(field),
+      order: field,
+      page: 1,
+    });
+  }
+
+  function handleDirectionToggle() {
+    navigateSearch({
+      ...search,
+      descending: !search.descending,
+      page: 1,
+    });
+  }
+
+  async function handleCopyMagnet(magnetUri: string) {
+    try {
+      await navigator.clipboard.writeText(magnetUri);
+      notify({ message: t("toast.magnetCopied") });
+    } catch {
+      notify({ message: t("toast.magnetCopyFailed"), tone: "error" });
+    }
+  }
+
   const { data, error, isError, isFetching, isPending, isSuccess, refetch } = useQuery({
     placeholderData: keepPreviousData,
     queryFn: async ({ signal }) => {
@@ -108,6 +161,7 @@ export default function FileSearchView() {
   const items = result?.items ?? EMPTY_FILE_ITEMS;
   const hasResults = items.length > 0;
   const isBusy = isPending || isFetching;
+  const selectedOrder = isFileOrderField(search.order) ? search.order : "size";
 
   return (
     <div className={styles["modeView"]}>
@@ -130,6 +184,31 @@ export default function FileSearchView() {
           </button>
         </div>
       </form>
+
+      <section className={styles["sortBar"]} aria-label={t("fileSearch.sort")}>
+        <label>
+          <span>{t("fileSearch.orderBy")}</span>
+          <select onChange={handleOrderChange} value={selectedOrder}>
+            {FILE_ORDER_OPTIONS.map((option) => (
+              <option
+                disabled={fileOptionRequiresQuery(option) && !search.query}
+                key={option.field}
+                value={option.field}
+              >
+                {t(`search.ordering.${option.field}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          aria-label={t("search.toggleSortDirection")}
+          className={searchStyles["secondaryButton"]}
+          onClick={handleDirectionToggle}
+          type="button"
+        >
+          {search.descending ? t("search.descending") : t("search.ascending")}
+        </button>
+      </section>
 
       {isPending ? <ListSkeleton ariaLabel={t("fileSearch.loading")} rows={6} /> : null}
 
@@ -158,44 +237,61 @@ export default function FileSearchView() {
 
           {hasResults ? (
             <ul className={styles["resultList"]}>
-              {items.map((item) => (
-                <li className={styles["fileRow"]} key={`${item.infoHash}:${item.index}`}>
-                  <div className={styles["fileMain"]}>
-                    <Link
-                      className={styles["torrentLink"]}
-                      params={{ infoHash: item.infoHash }}
-                      to="/torrents/$infoHash"
-                    >
-                      {item.path}
-                    </Link>
-                    <span className={styles["badge"]}>
-                      {item.extension || t("fileSearch.noExtension")}
-                    </span>
-                  </div>
-                  <dl className={styles["metaGrid"]}>
-                    <div>
-                      <dt>{t("fileSearch.size")}</dt>
-                      <dd>{formatFileSize(item.size)}</dd>
-                    </div>
-                    <div>
-                      <dt>{t("fileSearch.fileIndex")}</dt>
-                      <dd>{t("fileSearch.fileIndexValue", { index: item.index })}</dd>
-                    </div>
-                    <div>
-                      <dt>{t("fileSearch.torrent")}</dt>
-                      <dd>
+              {items.map((item) => {
+                const title = getTorrentTitle(item);
+                const seeders = getPeerCount(item.torrentContent.seeders).toLocaleString(locale);
+                const leechers = getPeerCount(item.torrentContent.leechers).toLocaleString(locale);
+                const updated = formatRelativeTime(
+                  item.torrentContent.updatedAt,
+                  undefined,
+                  locale,
+                );
+                const lastSeen = item.torrentContent.dhtLastSeenAt
+                  ? formatRelativeTime(item.torrentContent.dhtLastSeenAt, undefined, locale)
+                  : null;
+
+                return (
+                  <li className={styles["fileRow"]} key={`${item.infoHash}:${item.index}`}>
+                    <div className={styles["fileMain"]}>
+                      <div className={styles["fileText"]}>
+                        <p className={styles["pathText"]}>{item.path}</p>
                         <Link
                           className={styles["torrentLink"]}
-                          params={{ infoHash: item.infoHash }}
+                          params={{ infoHash: item.torrentContent.infoHash }}
                           to="/torrents/$infoHash"
                         >
-                          <code>{item.infoHash}</code>
+                          {title}
                         </Link>
-                      </dd>
+                      </div>
+                      <div className={styles["fileActions"]}>
+                        <span className={styles["badge"]}>
+                          {item.extension || t("fileSearch.noExtension")}
+                        </span>
+                        <button
+                          aria-label={t("search.copyMagnetLink", { title })}
+                          className={styles["copyButton"]}
+                          onClick={() =>
+                            void handleCopyMagnet(item.torrentContent.torrent.magnetUri)
+                          }
+                          type="button"
+                        >
+                          {t("search.copyMagnet")}
+                        </button>
+                      </div>
                     </div>
-                  </dl>
-                </li>
-              ))}
+                    <p className={styles["metaLine"]}>
+                      <span>{formatFileSize(item.size)}</span>
+                      <span>{t("fileSearch.peerSummary", { leechers, seeders })}</span>
+                      <span>{t("fileSearch.updated", { time: updated })}</span>
+                      <span>
+                        {lastSeen
+                          ? t("fileSearch.lastSeen", { time: lastSeen })
+                          : t("fileSearch.lastSeenUnknown")}
+                      </span>
+                    </p>
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <div className={styles["emptyState"]}>

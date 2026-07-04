@@ -9,6 +9,20 @@ query FileSearch($input: FileSearchInput!) {
         path
         extension
         size
+        torrentContent {
+          infoHash
+          seeders
+          leechers
+          publishedAt
+          updatedAt
+          dhtLastSeenAt
+          dhtSeenCount
+          title
+          torrent {
+            name
+            magnetUri
+          }
+        }
       }
     }
   }

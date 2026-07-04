@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getFileSearchSort,
   getTorrentSearchFacets,
   normalizeLegacyTorrentSearch,
   parseTorrentSearchParams,
@@ -130,6 +131,51 @@ describe("torrent search params", () => {
       mode: "paths",
       page: 2,
       query: "movies",
+    });
+  });
+
+  it("normalizes file-mode sort params and builds fileSearch sort input", () => {
+    const lastSeenSearch = parseTorrentSearchParams({
+      mode: "files",
+      order: "last_seen",
+      query: "sample",
+    });
+
+    expect(stringifyTorrentSearchParams(lastSeenSearch)).toEqual({
+      desc: 1,
+      mode: "files",
+      order: "last_seen",
+      query: "sample",
+    });
+    expect(getFileSearchSort(lastSeenSearch)).toEqual([
+      {
+        descending: true,
+        field: "last_seen",
+      },
+    ]);
+
+    expect(
+      stringifyTorrentSearchParams(
+        parseTorrentSearchParams({
+          mode: "files",
+          order: "last_seen",
+        }),
+      ),
+    ).toEqual({
+      mode: "files",
+    });
+
+    expect(
+      stringifyTorrentSearchParams(
+        parseTorrentSearchParams({
+          mode: "files",
+          order: "path",
+        }),
+      ),
+    ).toEqual({
+      desc: 0,
+      mode: "files",
+      order: "path",
     });
   });
 

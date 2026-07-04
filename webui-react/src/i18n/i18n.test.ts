@@ -182,8 +182,10 @@ describe("i18n infrastructure", () => {
     expectCatalogKeys("search.ordering", [
       "files_count",
       "info_hash",
+      "last_seen",
       "leechers",
       "name",
+      "path",
       "published_at",
       "relevance",
       "seeders",

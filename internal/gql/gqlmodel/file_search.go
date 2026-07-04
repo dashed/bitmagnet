@@ -2,6 +2,8 @@ package gqlmodel
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	q "github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -21,8 +23,9 @@ import (
 // every call returns filesearch.ErrDisabled — the feature is dark until both the
 // sidecar is deployed and the flag is flipped.
 type FileSearchQuery struct {
-	Client     filesearch.Client
-	Pathsearch *pathsearch.Composer
+	Client               filesearch.Client
+	Pathsearch           *pathsearch.Composer
+	TorrentContentSearch search.TorrentContentSearch
 }
 
 // FileSearchInput is the GraphQL-facing input (loosely typed). Validation,
@@ -74,6 +77,8 @@ func (q FileSearchQuery) Search(ctx context.Context, in FileSearchInput) (filese
 		return filesearch.FileSearchResult{}, err
 	}
 
+	hasTorrentSort := hasTorrentFieldSort(validated.Sort)
+
 	if q.shouldRouteFileSearchText(validated) {
 		result, served, routeErr := q.Pathsearch.SearchFileRows(
 			ctx,
@@ -92,7 +97,16 @@ func (q FileSearchQuery) Search(ctx context.Context, in FileSearchInput) (filese
 		}
 	}
 
-	return q.client().FileSearch(ctx, validated)
+	if hasTorrentSort {
+		return filesearch.FileSearchResult{}, filesearch.ErrTorrentSortRequiresRoutedPath
+	}
+
+	result, err := q.client().FileSearch(ctx, validated)
+	if err != nil {
+		return filesearch.FileSearchResult{}, err
+	}
+
+	return hydrateFileSearchResult(ctx, q.TorrentContentSearch, result)
 }
 
 // PathTypeahead returns path completions for a prefix. Returns
@@ -135,7 +149,11 @@ func (q FileSearchQuery) PathTypeahead(
 }
 
 func (t TorrentContentQuery) FileSearch(ctx context.Context, in FileSearchInput) (filesearch.FileSearchResult, error) {
-	return FileSearchQuery{Client: t.FileSearchClient, Pathsearch: t.Pathsearch}.Search(ctx, in)
+	return FileSearchQuery{
+		Client:               t.FileSearchClient,
+		Pathsearch:           t.Pathsearch,
+		TorrentContentSearch: t.TorrentContentSearch,
+	}.Search(ctx, in)
 }
 
 func (t TorrentContentQuery) PathTypeahead(
@@ -192,11 +210,12 @@ func fileRowsResult(result pathsearch.FileRowsResult) filesearch.FileSearchResul
 	items := make([]filesearch.FileSearchItem, 0, len(result.Rows))
 	for _, row := range result.Rows {
 		items = append(items, filesearch.FileSearchItem{
-			InfoHash:  row.InfoHash,
-			Index:     row.Index,
-			Path:      row.Path,
-			Extension: row.Extension,
-			Size:      row.Size,
+			InfoHash:       row.InfoHash,
+			Index:          row.Index,
+			Path:           row.Path,
+			Extension:      row.Extension,
+			Size:           row.Size,
+			TorrentContent: row.TorrentContent,
 		})
 	}
 
@@ -205,6 +224,80 @@ func fileRowsResult(result pathsearch.FileRowsResult) filesearch.FileSearchResul
 		TotalCount:  result.TotalCount,
 		HasNextPage: result.HasNextPage,
 	}
+}
+
+func hasTorrentFieldSort(sorts []filesearch.FileSort) bool {
+	for _, sort := range sorts {
+		if filesearch.IsTorrentFieldSort(sort.Field) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hydrateFileSearchResult(
+	ctx context.Context,
+	searcher search.TorrentContentSearch,
+	result filesearch.FileSearchResult,
+) (filesearch.FileSearchResult, error) {
+	if len(result.Items) == 0 {
+		return result, nil
+	}
+
+	if searcher == nil {
+		return filesearch.FileSearchResult{}, errors.New(
+			"file search torrent content hydrator is not configured",
+		)
+	}
+
+	infoHashes := fileSearchInfoHashes(result.Items)
+
+	content, err := searcher.TorrentContent(ctx,
+		search.TorrentContentCoreJoins(),
+		search.HydrateTorrentContentContent(),
+		search.HydrateTorrentContentTorrent(),
+		q.Where(search.TorrentContentInfoHashCriteria(infoHashes...)),
+	)
+	if err != nil {
+		return filesearch.FileSearchResult{}, err
+	}
+
+	byInfoHash := make(map[protocol.ID]search.TorrentContentResultItem, len(content.Items))
+	for _, item := range content.Items {
+		byInfoHash[item.InfoHash] = item
+	}
+
+	for i := range result.Items {
+		item, ok := byInfoHash[result.Items[i].InfoHash]
+		if !ok {
+			return filesearch.FileSearchResult{}, fmt.Errorf(
+				"file search torrent content missing for info_hash %s",
+				result.Items[i].InfoHash,
+			)
+		}
+
+		result.Items[i].TorrentContent = item
+	}
+
+	return result, nil
+}
+
+func fileSearchInfoHashes(items []filesearch.FileSearchItem) []protocol.ID {
+	seen := make(map[protocol.ID]struct{}, len(items))
+	out := make([]protocol.ID, 0, len(items))
+
+	for _, item := range items {
+		if _, ok := seen[item.InfoHash]; ok {
+			continue
+		}
+
+		seen[item.InfoHash] = struct{}{}
+
+		out = append(out, item.InfoHash)
+	}
+
+	return out
 }
 
 func uint64ToUint(v uint64) uint {
