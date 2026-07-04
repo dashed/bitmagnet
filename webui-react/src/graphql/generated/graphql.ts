@@ -912,6 +912,7 @@ export type WorkersQuery = {
 
 export type TorrentContentSearchQueryVariables = Exact<{
   cached?: InputMaybe<Scalars["Boolean"]["input"]>;
+  facets?: InputMaybe<TorrentContentFacetsInput>;
   hasNextPage?: InputMaybe<Scalars["Boolean"]["input"]>;
   limit?: InputMaybe<Scalars["Int"]["input"]>;
   orderBy?: InputMaybe<Array<TorrentContentOrderByInput> | TorrentContentOrderByInput>;
@@ -933,11 +934,31 @@ export type TorrentContentSearchQuery = {
         __typename?: "TorrentContent";
         infoHash: string;
         title: string;
+        contentType?: ContentType | null;
         seeders?: number | null;
         leechers?: number | null;
+        dhtSeenCount: number;
+        dhtFirstSeenAt?: string | null;
+        dhtLastSeenAt?: string | null;
         publishedAt: string;
-        torrent: { __typename?: "Torrent"; magnetUri: string; name: string; size: number };
+        torrent: {
+          __typename?: "Torrent";
+          filesCount?: number | null;
+          magnetUri: string;
+          name: string;
+          size: number;
+        };
       }>;
+      aggregations: {
+        __typename?: "TorrentContentAggregations";
+        contentType?: Array<{
+          __typename?: "ContentTypeAgg";
+          value?: ContentType | null;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+      };
     };
   };
 };
@@ -960,6 +981,9 @@ export type TorrentDetailQuery = {
         contentType?: ContentType | null;
         seeders?: number | null;
         leechers?: number | null;
+        dhtSeenCount: number;
+        dhtFirstSeenAt?: string | null;
+        dhtLastSeenAt?: string | null;
         publishedAt: string;
         languages?: Array<{ __typename?: "LanguageInfo"; id: string; name: string }> | null;
         episodes?: { __typename?: "Episodes"; label: string } | null;
@@ -1059,10 +1083,10 @@ export class TypedDocumentString<TResult, TVariables>
 }
 
 export const TorrentContentSearchDocument = new TypedDocumentString(`
-    query TorrentContentSearch($cached: Boolean, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
+    query TorrentContentSearch($cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
   torrentContent {
     search(
-      input: {cached: $cached, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}
+      input: {cached: $cached, facets: $facets, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}
     ) {
       totalCount
       totalCountIsEstimate
@@ -1070,13 +1094,26 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
       items {
         infoHash
         title
+        contentType
         seeders
         leechers
+        dhtSeenCount
+        dhtFirstSeenAt
+        dhtLastSeenAt
         publishedAt
         torrent {
+          filesCount
           magnetUri
           name
           size
+        }
+      }
+      aggregations {
+        contentType {
+          value
+          label
+          count
+          isEstimate
         }
       }
     }
@@ -1096,6 +1133,9 @@ export const TorrentDetailDocument = new TypedDocumentString(`
         contentType
         seeders
         leechers
+        dhtSeenCount
+        dhtFirstSeenAt
+        dhtLastSeenAt
         publishedAt
         languages {
           id

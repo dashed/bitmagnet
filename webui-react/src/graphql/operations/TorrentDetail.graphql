@@ -7,6 +7,9 @@ query TorrentDetail($infoHashes: [Hash20!]!, $limit: Int) {
         contentType
         seeders
         leechers
+        dhtSeenCount
+        dhtFirstSeenAt
+        dhtLastSeenAt
         publishedAt
         languages {
           id

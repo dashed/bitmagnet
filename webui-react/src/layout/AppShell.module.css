@@ -1,5 +1,6 @@
 .root {
-  background: linear-gradient(
+  background:
+    linear-gradient(
       180deg,
       color-mix(in srgb, var(--mantine-color-blue-0), transparent 70%),
       transparent 260px
@@ -10,7 +11,8 @@
 }
 
 :global([data-mantine-color-scheme="dark"]) .root {
-  background: linear-gradient(
+  background:
+    linear-gradient(
       180deg,
       color-mix(in srgb, var(--mantine-color-dark-5), transparent 72%),
       transparent 260px

@@ -85,6 +85,24 @@ function getPeerLabel(item: Pick<TorrentDetail, "leechers" | "seeders">, locale:
   return `${seeders} / ${leechers}`;
 }
 
+function getDhtSeenTooltip(
+  item: Pick<TorrentDetail, "dhtFirstSeenAt" | "dhtLastSeenAt" | "dhtSeenCount">,
+  labels: { count: string; first: string; last: string },
+  locale: string,
+) {
+  if (!item.dhtLastSeenAt) {
+    return "";
+  }
+
+  return [
+    item.dhtFirstSeenAt ? `${labels.first}: ${item.dhtFirstSeenAt}` : undefined,
+    `${labels.last}: ${item.dhtLastSeenAt}`,
+    `${labels.count}: ${item.dhtSeenCount.toLocaleString(locale)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function getFilesFetchLimit(torrent: DetailTorrent) {
   return Math.max(torrent.filesCount ?? FILES_PAGE_SIZE, FILES_PAGE_SIZE);
 }
@@ -427,6 +445,29 @@ export default function TorrentDetailPage() {
               }
             />
             <MetadataItem label={t("detail.peers")} value={getPeerLabel(item, locale)} />
+            {item.dhtLastSeenAt ? (
+              <MetadataItem
+                label={t("detail.dhtSeen")}
+                value={
+                  <span
+                    title={getDhtSeenTooltip(
+                      item,
+                      {
+                        count: t("detail.dhtSeenCount"),
+                        first: t("detail.dhtFirstSeen"),
+                        last: t("detail.dhtLastSeen"),
+                      },
+                      locale,
+                    )}
+                  >
+                    {t("detail.dhtSeenSummary", {
+                      seenCount: item.dhtSeenCount.toLocaleString(locale),
+                      time: formatRelativeTime(item.dhtLastSeenAt, undefined, locale),
+                    })}
+                  </span>
+                }
+              />
+            ) : null}
             {releaseDate ? (
               <MetadataItem label={t("detail.releaseDate")} value={releaseDate} />
             ) : null}

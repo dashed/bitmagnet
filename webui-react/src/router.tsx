@@ -14,6 +14,7 @@ import { ListSkeleton } from "./components/ListSkeleton";
 import { QueryError } from "./components/QueryError";
 import { AppShell } from "./layout/AppShell";
 import { SearchPage } from "./routes/SearchPage";
+import { stripTorrentSearchDefaults, validateTorrentSearchParams } from "./routes/searchParams";
 
 const DashboardPage = lazy(() => import("./routes/DashboardPage"));
 const TorrentDetailPage = lazy(() => import("./routes/TorrentDetailPage"));
@@ -67,6 +68,10 @@ const searchRoute = createRoute({
   component: SearchPage,
   getParentRoute: () => rootRoute,
   path: "/",
+  search: {
+    middlewares: [stripTorrentSearchDefaults],
+  },
+  validateSearch: validateTorrentSearchParams,
 });
 
 const dashboardRoute = createRoute({

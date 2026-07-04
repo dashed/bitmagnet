@@ -1,5 +1,6 @@
 query TorrentContentSearch(
   $cached: Boolean
+  $facets: TorrentContentFacetsInput
   $hasNextPage: Boolean
   $limit: Int
   $orderBy: [TorrentContentOrderByInput!]
@@ -11,6 +12,7 @@ query TorrentContentSearch(
     search(
       input: {
         cached: $cached
+        facets: $facets
         hasNextPage: $hasNextPage
         limit: $limit
         orderBy: $orderBy
@@ -25,13 +27,26 @@ query TorrentContentSearch(
       items {
         infoHash
         title
+        contentType
         seeders
         leechers
+        dhtSeenCount
+        dhtFirstSeenAt
+        dhtLastSeenAt
         publishedAt
         torrent {
+          filesCount
           magnetUri
           name
           size
+        }
+      }
+      aggregations {
+        contentType {
+          value
+          label
+          count
+          isEstimate
         }
       }
     }
