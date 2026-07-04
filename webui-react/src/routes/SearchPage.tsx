@@ -9,7 +9,17 @@ import { QueryError } from "../components/QueryError";
 import { useToast } from "../components/toast";
 import { execute } from "../graphql/client";
 import { TorrentContentSearchDocument } from "../graphql/generated/graphql";
-import type { ContentTypeAgg, TorrentContentSearchQuery } from "../graphql/generated/graphql";
+import type {
+  ContentTypeAgg,
+  GenreAgg,
+  LanguageAgg,
+  TorrentContentSearchQuery,
+  TorrentFileTypeAgg,
+  TorrentSourceAgg,
+  TorrentTagAgg,
+  VideoResolutionAgg,
+  VideoSourceAgg,
+} from "../graphql/generated/graphql";
 import { formatFileSize } from "../utils/filesize";
 import { formatIntEstimate } from "../utils/intEstimate";
 import { formatRelativeTime } from "../utils/relativeTime";
@@ -18,18 +28,28 @@ import {
   ORDER_OPTIONS,
   PUBLISHED_PRESETS,
   SIZE_UNITS,
+  TORRENT_SEARCH_FACET_KEYS,
   getDefaultDescending,
   getTorrentSearchFacets,
   getTorrentSearchOrderBy,
+  isTorrentSearchFacetRelevant,
   parseTorrentSearchParams,
+  sanitizeFacetSelections,
   stringifyTorrentSearchParams,
   updateQuery,
 } from "./searchParams";
-import type { ContentTypeSelection, SizeUnit, TorrentSearchState } from "./searchParams";
+import type {
+  ContentTypeSelection,
+  SizeUnit,
+  TorrentSearchFacetKey,
+  TorrentSearchFacetSelections,
+  TorrentSearchState,
+} from "./searchParams";
 import styles from "./SearchPage.module.css";
 
 type SearchResult = TorrentContentSearchQuery["torrentContent"]["search"];
 type SearchItem = SearchResult["items"][number];
+type SearchAggregations = SearchResult["aggregations"];
 type SizeDraft = {
   max: string;
   maxUnit: SizeUnit;
@@ -41,6 +61,20 @@ type ContentTypeOption = {
   isEstimate: boolean;
   label: string;
   value: ContentTypeSelection;
+};
+type DynamicFacetAgg =
+  | GenreAgg
+  | LanguageAgg
+  | TorrentFileTypeAgg
+  | TorrentSourceAgg
+  | TorrentTagAgg
+  | VideoResolutionAgg
+  | VideoSourceAgg;
+type DynamicFacetOption = {
+  count: number;
+  isEstimate: boolean;
+  label: string;
+  value: string;
 };
 
 function getPeerCount(value: number | null | undefined) {
@@ -107,6 +141,146 @@ function getContentTypeAggKey(agg: ContentTypeAgg): ContentTypeSelection {
   return agg.value ?? "null";
 }
 
+function getSelectedFacetKeys(selections: TorrentSearchFacetSelections) {
+  return TORRENT_SEARCH_FACET_KEYS.filter((key) => (selections[key]?.length ?? 0) > 0);
+}
+
+function areFacetKeySetsEqual(
+  left: ReadonlySet<TorrentSearchFacetKey>,
+  right: ReadonlySet<TorrentSearchFacetKey>,
+) {
+  if (left.size !== right.size) {
+    return false;
+  }
+
+  for (const key of left) {
+    if (!right.has(key)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getDynamicFacetAggregations(
+  aggregations: SearchAggregations | undefined,
+  key: TorrentSearchFacetKey,
+): DynamicFacetAgg[] {
+  if (!aggregations) {
+    return [];
+  }
+
+  switch (key) {
+    case "file_type":
+      return aggregations.torrentFileType ?? [];
+    case "genre":
+      return aggregations.genre ?? [];
+    case "language":
+      return aggregations.language ?? [];
+    case "torrent_source":
+      return aggregations.torrentSource ?? [];
+    case "torrent_tag":
+      return aggregations.torrentTag ?? [];
+    case "video_resolution":
+      return aggregations.videoResolution ?? [];
+    case "video_source":
+      return aggregations.videoSource ?? [];
+  }
+}
+
+function getFacetValue(agg: DynamicFacetAgg) {
+  return agg.value === null || agg.value === undefined ? "null" : String(agg.value);
+}
+
+function getFacetValueLabel(key: TorrentSearchFacetKey, value: string, t: (key: string) => string) {
+  if (value === "null" && (key === "video_resolution" || key === "video_source")) {
+    return t("facets.unknown");
+  }
+
+  if (key === "file_type") {
+    return t(`fileTypes.${value}`);
+  }
+
+  if (key === "video_resolution" && value.startsWith("V")) {
+    return value.slice(1);
+  }
+
+  return value;
+}
+
+function getFacetAggLabel(
+  key: TorrentSearchFacetKey,
+  agg: DynamicFacetAgg,
+  t: (key: string) => string,
+) {
+  if (getFacetValue(agg) === "null" && (key === "video_resolution" || key === "video_source")) {
+    return t("facets.unknown");
+  }
+
+  if (key === "file_type") {
+    return t(`fileTypes.${agg.value}`);
+  }
+
+  if (key === "torrent_tag") {
+    return String(agg.value);
+  }
+
+  return agg.label;
+}
+
+function getDynamicFacetOptions(
+  aggregations: SearchAggregations | undefined,
+  key: TorrentSearchFacetKey,
+  selectedValues: readonly string[],
+  t: (key: string) => string,
+) {
+  const options = new Map<string, DynamicFacetOption>();
+
+  for (const agg of getDynamicFacetAggregations(aggregations, key)) {
+    const value = getFacetValue(agg);
+    options.set(value, {
+      count: agg.count,
+      isEstimate: agg.isEstimate,
+      label: getFacetAggLabel(key, agg, t),
+      value,
+    });
+  }
+
+  for (const value of selectedValues) {
+    if (!options.has(value)) {
+      options.set(value, {
+        count: 0,
+        isEstimate: false,
+        label: getFacetValueLabel(key, value, t),
+        value,
+      });
+    }
+  }
+
+  return Array.from(options.values());
+}
+
+function updateFacetSelection(
+  selections: TorrentSearchFacetSelections,
+  key: TorrentSearchFacetKey,
+  value: string,
+  checked: boolean,
+) {
+  const next: TorrentSearchFacetSelections = { ...selections };
+  const currentValues = selections[key] ?? [];
+  const nextValues = checked
+    ? Array.from(new Set([...currentValues, value])).sort()
+    : currentValues.filter((currentValue) => currentValue !== value);
+
+  if (nextValues.length) {
+    next[key] = nextValues;
+  } else {
+    delete next[key];
+  }
+
+  return next;
+}
+
 function getContentTypeOptions(
   aggregations: ContentTypeAgg[],
   selected: ContentTypeSelection | undefined,
@@ -137,7 +311,41 @@ export function SearchPage() {
   const routeSearch = useSearch({ from: "/" });
   const search = useMemo(() => parseTorrentSearchParams(routeSearch), [routeSearch]);
   const searchParams = useMemo(() => stringifyTorrentSearchParams(search), [search]);
-  const searchKey = useMemo(() => JSON.stringify(searchParams), [searchParams]);
+  const sanitizedFacetSelections = useMemo(
+    () => sanitizeFacetSelections(search.facets, search.contentType),
+    [search.contentType, search.facets],
+  );
+  const selectedFacetKeys = useMemo(
+    () => getSelectedFacetKeys(sanitizedFacetSelections),
+    [sanitizedFacetSelections],
+  );
+  const [expandedFacets, setExpandedFacets] = useState<Set<TorrentSearchFacetKey>>(
+    () => new Set(selectedFacetKeys),
+  );
+  const activeFacetKeys = useMemo(
+    () =>
+      TORRENT_SEARCH_FACET_KEYS.filter(
+        (key) =>
+          isTorrentSearchFacetRelevant(key, search.contentType) &&
+          (expandedFacets.has(key) || selectedFacetKeys.includes(key)),
+      ),
+    [expandedFacets, search.contentType, selectedFacetKeys],
+  );
+  const relevantFacetKeys = useMemo(
+    () =>
+      TORRENT_SEARCH_FACET_KEYS.filter((key) =>
+        isTorrentSearchFacetRelevant(key, search.contentType),
+      ),
+    [search.contentType],
+  );
+  const searchKey = useMemo(
+    () =>
+      JSON.stringify({
+        activeFacetKeys,
+        searchParams,
+      }),
+    [activeFacetKeys, searchParams],
+  );
   const [draftQuery, setDraftQuery] = useState(search.query);
   const [sizeDraft, setSizeDraft] = useState<SizeDraft>(() => getSizeDraft(search));
   const [refresh, setRefresh] = useState<{ nonce: number; uncachedSearchKey: string | null }>({
@@ -156,6 +364,24 @@ export function SearchPage() {
   useEffect(() => {
     setSizeDraft(getSizeDraft(search));
   }, [search]);
+
+  useEffect(() => {
+    setExpandedFacets((currentFacets) => {
+      const nextFacets = new Set<TorrentSearchFacetKey>();
+
+      for (const key of currentFacets) {
+        if (isTorrentSearchFacetRelevant(key, search.contentType)) {
+          nextFacets.add(key);
+        }
+      }
+
+      for (const key of selectedFacetKeys) {
+        nextFacets.add(key);
+      }
+
+      return areFacetKeySetsEqual(currentFacets, nextFacets) ? currentFacets : nextFacets;
+    });
+  }, [search.contentType, selectedFacetKeys]);
 
   function navigateSearch(nextSearch: TorrentSearchState, replace = true) {
     void navigate({
@@ -195,6 +421,7 @@ export function SearchPage() {
     navigateSearch({
       ...search,
       contentType,
+      facets: sanitizeFacetSelections(search.facets, contentType),
       page: 1,
     });
   }
@@ -260,6 +487,60 @@ export function SearchPage() {
     });
   }
 
+  function handleFacetExpandedChange(key: TorrentSearchFacetKey, expanded: boolean) {
+    setExpandedFacets((currentFacets) => {
+      const nextFacets = new Set(currentFacets);
+
+      if (expanded) {
+        nextFacets.add(key);
+      } else {
+        nextFacets.delete(key);
+      }
+
+      return areFacetKeySetsEqual(currentFacets, nextFacets) ? currentFacets : nextFacets;
+    });
+  }
+
+  function handleFacetValueChange(key: TorrentSearchFacetKey, value: string, checked: boolean) {
+    navigateSearch({
+      ...search,
+      facets: updateFacetSelection(sanitizedFacetSelections, key, value, checked),
+      page: 1,
+    });
+  }
+
+  function handleFacetClear(key: TorrentSearchFacetKey) {
+    const nextFacets: TorrentSearchFacetSelections = { ...sanitizedFacetSelections };
+    delete nextFacets[key];
+
+    navigateSearch({
+      ...search,
+      facets: nextFacets,
+      page: 1,
+    });
+  }
+
+  function handleResetFilters() {
+    setExpandedFacets(new Set());
+    setSizeDraft({
+      max: "",
+      maxUnit: DEFAULT_SIZE_UNIT,
+      min: "",
+      minUnit: DEFAULT_SIZE_UNIT,
+    });
+    navigateSearch({
+      ...search,
+      contentType: undefined,
+      facets: {},
+      maxSize: undefined,
+      maxSizeUnit: DEFAULT_SIZE_UNIT,
+      minSize: undefined,
+      minSizeUnit: DEFAULT_SIZE_UNIT,
+      page: 1,
+      publishedAt: undefined,
+    });
+  }
+
   async function handleCopyHash(infoHash: string) {
     try {
       await navigator.clipboard.writeText(infoHash);
@@ -299,7 +580,7 @@ export function SearchPage() {
       const startedAt = performance.now();
       const response = await execute(TorrentContentSearchDocument, {
         cached: refresh.uncachedSearchKey === searchKey ? false : true,
-        facets: getTorrentSearchFacets(search),
+        facets: getTorrentSearchFacets(search, activeFacetKeys),
         hasNextPage: true,
         limit: search.limit,
         orderBy: getTorrentSearchOrderBy(search),
@@ -334,6 +615,12 @@ export function SearchPage() {
       : Boolean(result?.totalCountIsEstimate);
   const contentTypeOptions = getContentTypeOptions(contentTypeAggregations, search.contentType, t);
   const hasSizeFilter = Boolean(search.minSize || search.maxSize);
+  const hasDynamicFacetFilters = selectedFacetKeys.length > 0;
+  const hasActiveFilters = Boolean(
+    search.contentType || hasSizeFilter || search.publishedAt || hasDynamicFacetFilters,
+  );
+  const activeFilterCount =
+    (hasSizeFilter ? 1 : 0) + (search.publishedAt ? 1 : 0) + selectedFacetKeys.length;
 
   return (
     <section className={styles["root"]}>
@@ -357,65 +644,83 @@ export function SearchPage() {
         </div>
       </form>
 
-      <details className={styles["filters"]} open>
-        <summary>{t("search.filtersSummary")}</summary>
-        <div className={styles["filtersBody"]}>
-          <section className={styles["filterBlock"]}>
-            <h2>{t("search.contentType")}</h2>
-            <div className={styles["chipRow"]}>
+      <div className={styles["primaryControls"]}>
+        <section className={styles["filterBlock"]}>
+          <h2>{t("search.contentType")}</h2>
+          <div className={styles["chipRow"]}>
+            <button
+              aria-pressed={!search.contentType}
+              className={styles["chip"]}
+              data-active={!search.contentType ? "true" : undefined}
+              onClick={() => handleContentTypeChange(undefined)}
+              type="button"
+            >
+              <span>{t("search.contentTypeAll")}</span>
+              <small>
+                {formatIntEstimate(totalContentTypeCount, totalContentTypeIsEstimate, 2, locale)}
+              </small>
+            </button>
+            {contentTypeOptions.map((option) => (
               <button
-                aria-pressed={!search.contentType}
+                aria-pressed={search.contentType === option.value}
                 className={styles["chip"]}
-                data-active={!search.contentType ? "true" : undefined}
-                onClick={() => handleContentTypeChange(undefined)}
+                data-active={search.contentType === option.value ? "true" : undefined}
+                key={option.value}
+                onClick={() => handleContentTypeChange(option.value)}
                 type="button"
               >
-                <span>{t("search.contentTypeAll")}</span>
-                <small>
-                  {formatIntEstimate(totalContentTypeCount, totalContentTypeIsEstimate, 2, locale)}
-                </small>
+                <span>{option.label}</span>
+                <small>{formatIntEstimate(option.count, option.isEstimate, 2, locale)}</small>
               </button>
-              {contentTypeOptions.map((option) => (
-                <button
-                  aria-pressed={search.contentType === option.value}
-                  className={styles["chip"]}
-                  data-active={search.contentType === option.value ? "true" : undefined}
-                  key={option.value}
-                  onClick={() => handleContentTypeChange(option.value)}
-                  type="button"
-                >
-                  <span>{option.label}</span>
-                  <small>{formatIntEstimate(option.count, option.isEstimate, 2, locale)}</small>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className={styles["filterBlock"]}>
-            <h2>{t("search.sort")}</h2>
-            <div className={styles["sortBar"]}>
-              <label>
-                <span>{t("search.orderBy")}</span>
-                <select onChange={handleOrderChange} value={search.order}>
-                  {ORDER_OPTIONS.filter(
-                    (option) => option.field !== "relevance" || search.query,
-                  ).map((option) => (
+            ))}
+          </div>
+        </section>
+        <section className={styles["filterBlock"]}>
+          <h2>{t("search.sort")}</h2>
+          <div className={styles["sortBar"]}>
+            <label>
+              <span>{t("search.orderBy")}</span>
+              <select onChange={handleOrderChange} value={search.order}>
+                {ORDER_OPTIONS.filter((option) => option.field !== "relevance" || search.query).map(
+                  (option) => (
                     <option key={option.field} value={option.field}>
                       {t(`search.ordering.${option.field}`)}
                     </option>
-                  ))}
-                </select>
-              </label>
+                  ),
+                )}
+              </select>
+            </label>
+            <button
+              aria-label={t("search.toggleSortDirection")}
+              className={styles["secondaryButton"]}
+              onClick={handleDirectionToggle}
+              type="button"
+            >
+              {search.descending ? t("search.descending") : t("search.ascending")}
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <details className={styles["filters"]}>
+        <summary>
+          {t("search.filtersSummary")}
+          {activeFilterCount > 0 ? (
+            <span className={styles["filterBadge"]}>{activeFilterCount}</span>
+          ) : null}
+        </summary>
+        <div className={styles["filtersBody"]}>
+          {hasActiveFilters ? (
+            <div className={styles["filtersToolbar"]}>
               <button
-                aria-label={t("search.toggleSortDirection")}
                 className={styles["secondaryButton"]}
-                onClick={handleDirectionToggle}
+                onClick={handleResetFilters}
                 type="button"
               >
-                {search.descending ? t("search.descending") : t("search.ascending")}
+                {t("facets.reset")}
               </button>
             </div>
-          </section>
+          ) : null}
 
           <section className={styles["filterBlock"]}>
             <h2>{t("search.sizeFilter")}</h2>
@@ -508,6 +813,68 @@ export function SearchPage() {
               </select>
             </label>
           </section>
+
+          <div className={styles["facetGroups"]}>
+            {relevantFacetKeys.map((key) => {
+              const selectedValues = sanitizedFacetSelections[key] ?? [];
+              const options = getDynamicFacetOptions(result?.aggregations, key, selectedValues, t);
+              const isExpanded = expandedFacets.has(key);
+              const hasSelections = selectedValues.length > 0;
+
+              return (
+                <details
+                  className={styles["facetGroup"]}
+                  data-selected={hasSelections ? "true" : undefined}
+                  key={key}
+                  onToggle={(event) => handleFacetExpandedChange(key, event.currentTarget.open)}
+                  open={isExpanded}
+                >
+                  <summary>
+                    <span>{t(`facets.${key}`)}</span>
+                    {hasSelections ? (
+                      <small>{selectedValues.length.toLocaleString(locale)}</small>
+                    ) : null}
+                  </summary>
+                  <div className={styles["facetGroupBody"]}>
+                    {hasSelections ? (
+                      <div className={styles["facetActions"]}>
+                        <button
+                          className={styles["secondaryButton"]}
+                          onClick={() => handleFacetClear(key)}
+                          type="button"
+                        >
+                          {t("facets.clear")}
+                        </button>
+                      </div>
+                    ) : null}
+                    {options.length ? (
+                      <ul className={styles["facetOptionList"]}>
+                        {options.map((option) => (
+                          <li key={option.value}>
+                            <label className={styles["facetOption"]}>
+                              <input
+                                checked={selectedValues.includes(option.value)}
+                                onChange={(event) =>
+                                  handleFacetValueChange(key, option.value, event.target.checked)
+                                }
+                                type="checkbox"
+                              />
+                              <span>{option.label}</span>
+                              <small>
+                                {formatIntEstimate(option.count, option.isEstimate, 2, locale)}
+                              </small>
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className={styles["facetEmpty"]}>{t("facets.none")}</p>
+                    )}
+                  </div>
+                </details>
+              );
+            })}
+          </div>
         </div>
       </details>
 
@@ -619,7 +986,7 @@ export function SearchPage() {
                             title={item.infoHash}
                             type="button"
                           >
-                            <code>{item.infoHash.slice(0, 8)}\u2026</code>
+                            <code>{item.infoHash}</code>
                           </button>
                         </dd>
                       </div>

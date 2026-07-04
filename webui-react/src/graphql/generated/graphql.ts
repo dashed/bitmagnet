@@ -958,6 +958,55 @@ export type TorrentContentSearchQuery = {
           count: number;
           isEstimate: boolean;
         }> | null;
+        torrentSource?: Array<{
+          __typename?: "TorrentSourceAgg";
+          value: string;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        torrentTag?: Array<{
+          __typename?: "TorrentTagAgg";
+          value: string;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        torrentFileType?: Array<{
+          __typename?: "TorrentFileTypeAgg";
+          value: FileType;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        language?: Array<{
+          __typename?: "LanguageAgg";
+          value: Language;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        genre?: Array<{
+          __typename?: "GenreAgg";
+          value: string;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        videoResolution?: Array<{
+          __typename?: "VideoResolutionAgg";
+          value?: VideoResolution | null;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        videoSource?: Array<{
+          __typename?: "VideoSourceAgg";
+          value?: VideoSource | null;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
       };
     };
   };
@@ -1110,6 +1159,48 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
       }
       aggregations {
         contentType {
+          value
+          label
+          count
+          isEstimate
+        }
+        torrentSource {
+          value
+          label
+          count
+          isEstimate
+        }
+        torrentTag {
+          value
+          label
+          count
+          isEstimate
+        }
+        torrentFileType {
+          value
+          label
+          count
+          isEstimate
+        }
+        language {
+          value
+          label
+          count
+          isEstimate
+        }
+        genre {
+          value
+          label
+          count
+          isEstimate
+        }
+        videoResolution {
+          value
+          label
+          count
+          isEstimate
+        }
+        videoSource {
           value
           label
           count
