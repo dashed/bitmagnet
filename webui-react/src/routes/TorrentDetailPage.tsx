@@ -1,11 +1,12 @@
 import type { ChangeEvent, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 import { ListSkeleton } from "../components/ListSkeleton";
 import { QueryError } from "../components/QueryError";
+import { TorrentMutationActions } from "../components/TorrentMutationActions";
 import { useToast } from "../components/toast";
 import { execute } from "../graphql/client";
 import { TorrentDetailDocument, TorrentFilesDocument } from "../graphql/generated/graphql";
@@ -511,6 +512,7 @@ export default function TorrentDetailPage() {
   const rawInfoHash = useParamInfoHash();
   const infoHash = rawInfoHash.toLowerCase();
   const isValidInfoHash = INFO_HASH_PATTERN.test(rawInfoHash);
+  const navigate = useNavigate({ from: "/torrents/$infoHash" });
   const notify = useToast();
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
@@ -677,6 +679,14 @@ export default function TorrentDetailPage() {
             {t("detail.copyInfoHash")}
           </button>
         </div>
+      </section>
+
+      <section className={styles["section"]}>
+        <h2>{t("actions.title")}</h2>
+        <TorrentMutationActions
+          infoHashes={[item.infoHash]}
+          onDeleteSuccess={() => void navigate({ to: "/" })}
+        />
       </section>
 
       {item.torrent.sources.length > 0 ? (

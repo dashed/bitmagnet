@@ -348,6 +348,43 @@
   justify-content: space-between;
 }
 
+.resultsActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.selectAllControl {
+  align-items: center;
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  gap: 8px;
+  min-height: 38px;
+}
+
+.selectAllControl input,
+.resultSelect input {
+  accent-color: var(--mantine-primary-color-filled);
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
+.bulkActionsFallback {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  padding: 12px;
+}
+
 .resultsEyebrow {
   color: var(--mantine-color-dimmed);
   font-size: var(--mantine-font-size-sm);
@@ -400,13 +437,24 @@
   border-radius: var(--mantine-radius-sm);
   display: grid;
   gap: 12px;
-  grid-template-columns: 1fr;
+  grid-template-columns: 24px minmax(0, 1fr);
   padding: 16px;
+}
+
+.resultItem[data-selected="true"] {
+  border-color: color-mix(in srgb, var(--mantine-primary-color-filled), transparent 35%);
+}
+
+.resultSelect {
+  align-items: center;
+  display: inline-flex;
+  min-height: 24px;
 }
 
 .resultMain {
   display: grid;
   gap: 4px;
+  grid-column: 2;
   min-width: 0;
 }
 
@@ -442,6 +490,7 @@
 .resultMeta {
   display: grid;
   gap: 10px;
+  grid-column: 1 / -1;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 0;
 }
@@ -474,6 +523,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  grid-column: 1 / -1;
 }
 
 .magnetLink,
@@ -547,6 +597,7 @@
   }
 
   .resultsToolbar,
+  .resultsActions,
   .pagination {
     align-items: stretch;
     flex-direction: column;
@@ -577,15 +628,21 @@
   }
 
   .resultItem {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+  }
+
+  .resultMain {
+    grid-column: 2;
   }
 
   .resultMeta {
-    grid-column: 1 / -1;
+    grid-column: 2 / -1;
     grid-template-columns: repeat(4, minmax(96px, max-content));
   }
 
   .magnetActions {
+    grid-column: 3;
+    grid-row: 1;
     justify-content: flex-end;
   }
 }

@@ -1012,6 +1012,25 @@ export type TorrentContentSearchQuery = {
   };
 };
 
+export type TorrentDeleteMutationVariables = Exact<{
+  infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
+}>;
+
+export type TorrentDeleteMutation = {
+  __typename?: "Mutation";
+  torrent: { __typename?: "TorrentMutation"; delete?: null | undefined | null };
+};
+
+export type TorrentDeleteTagsMutationVariables = Exact<{
+  infoHashes?: InputMaybe<Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"]>;
+  tagNames?: InputMaybe<Array<Scalars["String"]["input"]> | Scalars["String"]["input"]>;
+}>;
+
+export type TorrentDeleteTagsMutation = {
+  __typename?: "Mutation";
+  torrent: { __typename?: "TorrentMutation"; deleteTags?: null | undefined | null };
+};
+
 export type TorrentDetailQueryVariables = Exact<{
   infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
   limit?: InputMaybe<Scalars["Int"]["input"]>;
@@ -1104,6 +1123,50 @@ export type TorrentFilesQuery = {
         fileType?: FileType | null;
         size: number;
       }>;
+    };
+  };
+};
+
+export type TorrentPutTagsMutationVariables = Exact<{
+  infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
+  tagNames: Array<Scalars["String"]["input"]> | Scalars["String"]["input"];
+}>;
+
+export type TorrentPutTagsMutation = {
+  __typename?: "Mutation";
+  torrent: { __typename?: "TorrentMutation"; putTags?: null | undefined | null };
+};
+
+export type TorrentReprocessMutationVariables = Exact<{
+  input: TorrentReprocessInput;
+}>;
+
+export type TorrentReprocessMutation = {
+  __typename?: "Mutation";
+  torrent: { __typename?: "TorrentMutation"; reprocess?: null | undefined | null };
+};
+
+export type TorrentSetTagsMutationVariables = Exact<{
+  infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
+  tagNames: Array<Scalars["String"]["input"]> | Scalars["String"]["input"];
+}>;
+
+export type TorrentSetTagsMutation = {
+  __typename?: "Mutation";
+  torrent: { __typename?: "TorrentMutation"; setTags?: null | undefined | null };
+};
+
+export type TorrentSuggestTagsQueryVariables = Exact<{
+  input: SuggestTagsQueryInput;
+}>;
+
+export type TorrentSuggestTagsQuery = {
+  __typename?: "Query";
+  torrent: {
+    __typename?: "TorrentQuery";
+    suggestTags: {
+      __typename?: "TorrentSuggestTagsResult";
+      suggestions: Array<{ __typename?: "SuggestedTag"; name: string; count: number }>;
     };
   };
 };
@@ -1214,6 +1277,23 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
   TorrentContentSearchQuery,
   TorrentContentSearchQueryVariables
 >;
+export const TorrentDeleteDocument = new TypedDocumentString(`
+    mutation TorrentDelete($infoHashes: [Hash20!]!) {
+  torrent {
+    delete(infoHashes: $infoHashes)
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentDeleteMutation, TorrentDeleteMutationVariables>;
+export const TorrentDeleteTagsDocument = new TypedDocumentString(`
+    mutation TorrentDeleteTags($infoHashes: [Hash20!], $tagNames: [String!]) {
+  torrent {
+    deleteTags(infoHashes: $infoHashes, tagNames: $tagNames)
+  }
+}
+    `) as unknown as TypedDocumentString<
+  TorrentDeleteTagsMutation,
+  TorrentDeleteTagsMutationVariables
+>;
 export const TorrentDetailDocument = new TypedDocumentString(`
     query TorrentDetail($infoHashes: [Hash20!]!, $limit: Int) {
   torrentContent {
@@ -1302,6 +1382,42 @@ export const TorrentFilesDocument = new TypedDocumentString(`
   }
 }
     `) as unknown as TypedDocumentString<TorrentFilesQuery, TorrentFilesQueryVariables>;
+export const TorrentPutTagsDocument = new TypedDocumentString(`
+    mutation TorrentPutTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {
+  torrent {
+    putTags(infoHashes: $infoHashes, tagNames: $tagNames)
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentPutTagsMutation, TorrentPutTagsMutationVariables>;
+export const TorrentReprocessDocument = new TypedDocumentString(`
+    mutation TorrentReprocess($input: TorrentReprocessInput!) {
+  torrent {
+    reprocess(input: $input)
+  }
+}
+    `) as unknown as TypedDocumentString<
+  TorrentReprocessMutation,
+  TorrentReprocessMutationVariables
+>;
+export const TorrentSetTagsDocument = new TypedDocumentString(`
+    mutation TorrentSetTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {
+  torrent {
+    setTags(infoHashes: $infoHashes, tagNames: $tagNames)
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentSetTagsMutation, TorrentSetTagsMutationVariables>;
+export const TorrentSuggestTagsDocument = new TypedDocumentString(`
+    query TorrentSuggestTags($input: SuggestTagsQueryInput!) {
+  torrent {
+    suggestTags(input: $input) {
+      suggestions {
+        name
+        count
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentSuggestTagsQuery, TorrentSuggestTagsQueryVariables>;
 export const VersionDocument = new TypedDocumentString(`
     query Version {
   version

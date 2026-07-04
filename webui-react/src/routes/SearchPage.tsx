@@ -1,11 +1,12 @@
-import type { ChangeEvent, FormEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent, InputHTMLAttributes } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 import { ListSkeleton } from "../components/ListSkeleton";
 import { QueryError } from "../components/QueryError";
+import type { TorrentActionItem } from "../components/TorrentMutationActions";
 import { useToast } from "../components/toast";
 import { execute } from "../graphql/client";
 import { TorrentContentSearchDocument } from "../graphql/generated/graphql";
@@ -45,10 +46,23 @@ import type {
   TorrentSearchFacetSelections,
   TorrentSearchState,
 } from "./searchParams";
+import {
+  clearSelectionOnSearchParamsChange,
+  getPageSelectionState,
+  toggleInfoHashSelection,
+  togglePageSelection,
+} from "./searchSelection";
 import styles from "./SearchPage.module.css";
+
+const LazyTorrentBulkActionsBar = lazy(async () => {
+  const module = await import("../components/TorrentMutationActions");
+
+  return { default: module.TorrentBulkActionsBar };
+});
 
 type SearchResult = TorrentContentSearchQuery["torrentContent"]["search"];
 type SearchItem = SearchResult["items"][number];
+const EMPTY_SEARCH_ITEMS: SearchItem[] = [];
 type SearchAggregations = SearchResult["aggregations"];
 type SizeDraft = {
   max: string;
@@ -76,6 +90,21 @@ type DynamicFacetOption = {
   label: string;
   value: string;
 };
+
+function IndeterminateCheckbox({
+  indeterminate,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { indeterminate: boolean }) {
+  const checkboxRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (checkboxRef.current) {
+      checkboxRef.current.indeterminate = indeterminate;
+    }
+  }, [indeterminate]);
+
+  return <input {...props} ref={checkboxRef} type="checkbox" />;
+}
 
 function getPeerCount(value: number | null | undefined) {
   return value ?? 0;
@@ -313,6 +342,7 @@ export function SearchPage() {
   const routeSearch = useSearch({ from: "/" });
   const search = useMemo(() => parseTorrentSearchParams(routeSearch), [routeSearch]);
   const searchParams = useMemo(() => stringifyTorrentSearchParams(search), [search]);
+  const searchParamsKey = useMemo(() => JSON.stringify(searchParams), [searchParams]);
   const sanitizedFacetSelections = useMemo(
     () => sanitizeFacetSelections(search.facets, search.contentType),
     [search.contentType, search.facets],
@@ -354,6 +384,8 @@ export function SearchPage() {
     nonce: 0,
     uncachedSearchKey: null,
   });
+  const [selectedInfoHashes, setSelectedInfoHashes] = useState<Set<string>>(() => new Set());
+  const previousSearchParamsRef = useRef(searchParamsKey);
   const navigate = useNavigate({ from: "/" });
   const notify = useToast();
   const { i18n, t } = useTranslation();
@@ -366,6 +398,17 @@ export function SearchPage() {
   useEffect(() => {
     setSizeDraft(getSizeDraft(search));
   }, [search]);
+
+  useEffect(() => {
+    setSelectedInfoHashes((currentSelection) =>
+      clearSelectionOnSearchParamsChange(
+        currentSelection,
+        previousSearchParamsRef.current,
+        searchParamsKey,
+      ),
+    );
+    previousSearchParamsRef.current = searchParamsKey;
+  }, [searchParamsKey]);
 
   useEffect(() => {
     setExpandedFacets((currentFacets) => {
@@ -543,6 +586,22 @@ export function SearchPage() {
     });
   }
 
+  function handleResultSelectionChange(infoHash: string, checked: boolean) {
+    setSelectedInfoHashes((currentSelection) =>
+      toggleInfoHashSelection(currentSelection, infoHash, checked),
+    );
+  }
+
+  function handlePageSelectionToggle() {
+    setSelectedInfoHashes((currentSelection) =>
+      togglePageSelection(currentSelection, pageInfoHashes),
+    );
+  }
+
+  function handleClearSelection() {
+    setSelectedInfoHashes(new Set());
+  }
+
   async function handleCopyHash(infoHash: string) {
     try {
       await navigator.clipboard.writeText(infoHash);
@@ -603,6 +662,22 @@ export function SearchPage() {
   });
 
   const result = searchQuery.data?.torrentContent.search;
+  const pageItems = result?.items ?? EMPTY_SEARCH_ITEMS;
+  const pageInfoHashes = useMemo(() => pageItems.map((item) => item.infoHash), [pageItems]);
+  const pageSelection = useMemo(
+    () => getPageSelectionState(selectedInfoHashes, pageInfoHashes),
+    [pageInfoHashes, selectedInfoHashes],
+  );
+  const selectedItems = useMemo<TorrentActionItem[]>(
+    () =>
+      pageItems
+        .filter((item) => selectedInfoHashes.has(item.infoHash))
+        .map((item) => ({
+          infoHash: item.infoHash,
+          magnetUri: item.torrent.magnetUri,
+        })),
+    [pageItems, selectedInfoHashes],
+  );
   const resultCount = result?.totalCount ?? 0;
   const isBrowse = search.query.length === 0;
   const totalCountLabel = result?.totalCountIsEstimate
@@ -914,15 +989,48 @@ export function SearchPage() {
                 </p>
               ) : null}
             </div>
-            <button
-              className={styles["secondaryButton"]}
-              disabled={isBusy}
-              onClick={handleRefresh}
-              type="button"
-            >
-              {t("search.refresh")}
-            </button>
+            <div className={styles["resultsActions"]}>
+              <label className={styles["selectAllControl"]}>
+                <IndeterminateCheckbox
+                  aria-label={
+                    pageSelection.allSelected ? t("actions.deselectPage") : t("actions.selectPage")
+                  }
+                  checked={pageSelection.allSelected}
+                  disabled={!hasResults}
+                  indeterminate={pageSelection.partiallySelected}
+                  onChange={handlePageSelectionToggle}
+                />
+                <span>
+                  {selectedInfoHashes.size > 0
+                    ? t("actions.selectedCount", { count: selectedInfoHashes.size })
+                    : t("actions.selectPage")}
+                </span>
+              </label>
+              <button
+                className={styles["secondaryButton"]}
+                disabled={isBusy}
+                onClick={handleRefresh}
+                type="button"
+              >
+                {t("search.refresh")}
+              </button>
+            </div>
           </div>
+
+          {selectedItems.length > 0 ? (
+            <Suspense
+              fallback={
+                <div className={styles["bulkActionsFallback"]} role="status">
+                  {t("actions.loading")}
+                </div>
+              }
+            >
+              <LazyTorrentBulkActionsBar
+                items={selectedItems}
+                onClearSelection={handleClearSelection}
+              />
+            </Suspense>
+          ) : null}
 
           {hasResults && result ? (
             <ul className={styles["resultsList"]}>
@@ -930,6 +1038,7 @@ export function SearchPage() {
                 const title = getResultTitle(item);
                 const torrentName = item.torrent.name.trim();
                 const showTorrentName = torrentName !== title;
+                const selected = selectedInfoHashes.has(item.infoHash);
                 const dhtSeenTooltip = getDhtSeenTooltip(item, {
                   count: t("search.dhtSeenCount"),
                   first: t("search.dhtFirstSeen"),
@@ -937,7 +1046,25 @@ export function SearchPage() {
                 });
 
                 return (
-                  <li className={styles["resultItem"]} key={item.infoHash}>
+                  <li
+                    className={styles["resultItem"]}
+                    data-selected={selected ? "true" : undefined}
+                    key={item.infoHash}
+                  >
+                    <label className={styles["resultSelect"]}>
+                      <input
+                        aria-label={
+                          selected
+                            ? t("actions.deselectResult", { title })
+                            : t("actions.selectResult", { title })
+                        }
+                        checked={selected}
+                        onChange={(event) =>
+                          handleResultSelectionChange(item.infoHash, event.target.checked)
+                        }
+                        type="checkbox"
+                      />
+                    </label>
                     <div className={styles["resultMain"]}>
                       <h2>
                         <Link
