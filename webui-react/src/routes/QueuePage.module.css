@@ -530,6 +530,11 @@
   font-size: 18px;
 }
 
+.dialogForm {
+  display: grid;
+  gap: 10px;
+}
+
 .checkboxRow {
   align-items: center;
   color: var(--mantine-color-text);

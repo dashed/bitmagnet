@@ -26,10 +26,14 @@ import {
   normalizeQueueMetrics,
   queueMetricStatuses,
   type MetricAutoRefreshInterval,
+  type MetricBucketMultiplier,
   type MetricTimeframe,
+  type QueueMetricEvent,
   type RawQueueMetricsBucket,
 } from "../metrics/normalize";
 import { formatIntEstimate } from "../utils/intEstimate";
+import { TorrentMetricsSection } from "./dashboard/TorrentMetricsSection";
+import { QUEUE_NAMES } from "./queue/constants";
 
 import styles from "./DashboardPage.module.css";
 
@@ -158,12 +162,17 @@ function getStatusTone(status: QueueJobStatus): CardTone {
   }
 }
 
-function createMetricsVariables(timeframe: MetricTimeframe, bucketDuration: MetricsBucketDuration) {
+function createMetricsVariables(
+  timeframe: MetricTimeframe,
+  bucketDuration: MetricsBucketDuration,
+  queue: string | null,
+) {
   const timeframeSeconds = metricTimeframeSeconds[timeframe];
 
   return {
     input: {
       bucketDuration,
+      queues: queue ? [queue] : undefined,
       startTime: Number.isFinite(timeframeSeconds)
         ? new Date(Date.now() - timeframeSeconds * 1000).toISOString()
         : undefined,
@@ -196,61 +205,131 @@ export default function DashboardPage() {
   const { i18n, t } = useTranslation();
   const [timeframe, setTimeframe] = useState<MetricTimeframe>("hours_1");
   const [bucketDuration, setBucketDuration] = useState<MetricsBucketDuration>("hour");
+  const [bucketMultiplier, setBucketMultiplier] = useState<MetricBucketMultiplier>("AUTO");
+  const [selectedQueue, setSelectedQueue] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<QueueMetricEvent | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<MetricAutoRefreshInterval>("off");
   const locale = i18n.language;
   const loadingLabel = t("dash.loading", "Loading");
   const unavailableLabel = t("dash.unavailable", "Unavailable");
 
-  const torrentTotalQuery = useQuery({
+  const {
+    data: torrentTotalData,
+    isError: isTorrentTotalError,
+    isFetching: isTorrentTotalFetching,
+    isPending: isTorrentTotalPending,
+  } = useQuery({
     queryFn: ({ signal }) => execute(TorrentContentSearchDocument, TORRENT_TOTAL_VARIABLES, signal),
     queryKey: ["dashboard", "torrentTotal"],
   });
-  const queueJobsQuery = useQuery({
+  const {
+    data: queueJobsData,
+    isError: isQueueJobsError,
+    isFetching: isQueueJobsFetching,
+    isPending: isQueueJobsPending,
+  } = useQuery({
     queryFn: ({ signal }) => execute(QueueJobsDocument, { input: QUEUE_JOB_SUMMARY_INPUT }, signal),
     queryKey: ["dashboard", "queueJobsSummary"],
   });
-  const healthQuery = useQuery({
+  const {
+    data: healthData,
+    isError: isHealthError,
+    isFetching: isHealthFetching,
+    isPending: isHealthPending,
+  } = useQuery({
     queryFn: ({ signal }) => execute(HealthCheckDocument, {}, signal),
     queryKey: ["dashboard", "health"],
   });
   const metricsRefreshSeconds = metricAutoRefreshSeconds[autoRefresh];
-  const metricsQuery = useQuery({
+  const {
+    data: queueMetricsData,
+    dataUpdatedAt: queueMetricsDataUpdatedAt,
+    error: queueMetricsError,
+    isError: isQueueMetricsError,
+    isFetching: isQueueMetricsFetching,
+    isPending: isQueueMetricsPending,
+    refetch: refetchQueueMetrics,
+  } = useQuery({
     queryFn: ({ signal }) =>
-      execute(QueueMetricsDocument, createMetricsVariables(timeframe, bucketDuration), signal),
-    queryKey: ["dashboard", "queueMetrics", timeframe, bucketDuration],
+      execute(
+        QueueMetricsDocument,
+        createMetricsVariables(timeframe, bucketDuration, selectedQueue),
+        signal,
+      ),
+    queryKey: ["dashboard", "queueMetrics", timeframe, bucketDuration, selectedQueue],
     refetchInterval: metricsRefreshSeconds ? metricsRefreshSeconds * 1000 : false,
   });
 
-  const metricsUpdatedAt = metricsQuery.dataUpdatedAt > 0 ? metricsQuery.dataUpdatedAt : undefined;
+  const metricsUpdatedAt = queueMetricsDataUpdatedAt > 0 ? queueMetricsDataUpdatedAt : undefined;
   const lastUpdatedAt = metricsUpdatedAt ? new Date(metricsUpdatedAt) : undefined;
+  const queueOptions = useMemo(
+    () =>
+      QUEUE_NAMES.map((queue) => ({
+        label: queue,
+        value: queue,
+      })),
+    [],
+  );
+  const eventOptions = useMemo(
+    () =>
+      [
+        {
+          defaultLabel: "Created",
+          value: "created",
+        },
+        {
+          defaultLabel: "Processed",
+          value: "processed",
+        },
+        {
+          defaultLabel: "Failed",
+          value: "failed",
+        },
+      ].map((event) => ({
+        label: t(`metrics.events.${event.value}`, event.defaultLabel),
+        value: event.value,
+      })),
+    [t],
+  );
   const normalizedMetrics = useMemo(
     () =>
-      normalizeQueueMetrics(metricsQuery.data?.queue.metrics.buckets ?? EMPTY_METRIC_BUCKETS, {
+      normalizeQueueMetrics(queueMetricsData?.queue.metrics.buckets ?? EMPTY_METRIC_BUCKETS, {
         duration: bucketDuration,
+        event: selectedEvent,
+        multiplier: bucketMultiplier,
         now: metricsUpdatedAt ?? new Date(),
+        queues: selectedQueue ? [selectedQueue] : undefined,
         timeframe,
       }),
-    [bucketDuration, metricsQuery.data, metricsUpdatedAt, timeframe],
+    [
+      bucketDuration,
+      bucketMultiplier,
+      metricsUpdatedAt,
+      queueMetricsData,
+      selectedEvent,
+      selectedQueue,
+      timeframe,
+    ],
   );
-  const searchResult = torrentTotalQuery.data?.torrentContent.search;
-  const torrentTotalValue = torrentTotalQuery.isPending
+  const searchResult = torrentTotalData?.torrentContent.search;
+  const torrentTotalValue = isTorrentTotalPending
     ? loadingLabel
-    : torrentTotalQuery.isError || !searchResult
+    : isTorrentTotalError || !searchResult
       ? unavailableLabel
       : formatIntEstimate(searchResult.totalCount, searchResult.totalCountIsEstimate, 2, locale);
-  const queueJobs = queueJobsQuery.data?.queue.jobs;
+  const queueJobs = queueJobsData?.queue.jobs;
   const queueStatusCounts = getQueueStatusCounts(queueJobs?.aggregations);
-  const queueJobsValue = queueJobsQuery.isPending
+  const queueJobsValue = isQueueJobsPending
     ? loadingLabel
-    : queueJobsQuery.isError || !queueJobs
+    : isQueueJobsError || !queueJobs
       ? unavailableLabel
       : formatCount(queueJobs.totalCount, locale);
-  const health = healthQuery.data?.health;
-  const workers = healthQuery.data?.workers.listAll.workers ?? [];
+  const health = healthData?.health;
+  const workers = healthData?.workers.listAll.workers ?? [];
   const startedWorkers = workers.filter((worker) => worker.started).length;
-  const healthValue = healthQuery.isPending
+  const healthValue = isHealthPending
     ? loadingLabel
-    : healthQuery.isError || !health
+    : isHealthError || !health
       ? unavailableLabel
       : t(`dash.health.status.${health.status}`, HEALTH_STATUS_LABELS[health.status]);
   const metricEventCount = normalizedMetrics.totals.total;
@@ -265,7 +344,7 @@ export default function DashboardPage() {
 
       <div className={styles["summaryGrid"]}>
         <SummaryCard
-          busy={torrentTotalQuery.isFetching}
+          busy={isTorrentTotalFetching}
           meta={
             searchResult?.totalCountIsEstimate
               ? t("dash.torrents.estimateMeta", "Estimated indexed torrent records")
@@ -276,7 +355,7 @@ export default function DashboardPage() {
         />
 
         <SummaryCard
-          busy={queueJobsQuery.isFetching}
+          busy={isQueueJobsFetching}
           meta={t("dash.queue.meta", "Jobs across all queues")}
           title={t("dash.queue.title", "Queue jobs")}
           value={queueJobsValue}
@@ -295,7 +374,7 @@ export default function DashboardPage() {
         </SummaryCard>
 
         <SummaryCard
-          busy={healthQuery.isFetching}
+          busy={isHealthFetching}
           meta={
             health
               ? `${formatCount(health.checks.length, locale)} ${t(
@@ -327,25 +406,45 @@ export default function DashboardPage() {
         <MetricsControls
           autoRefresh={autoRefresh}
           bucketDuration={bucketDuration}
-          disabled={metricsQuery.isPending && !metricsQuery.data}
+          bucketMultiplier={bucketMultiplier}
+          bucketMultiplierPlaceholder={normalizedMetrics.bucketParams.multiplier}
+          disabled={isQueueMetricsPending && !queueMetricsData}
+          eventFilter={{
+            allLabel: t("metrics.controls.allEvents", "All events"),
+            label: t("metrics.controls.event", "Event"),
+            onChange: (value) => setSelectedEvent(value as QueueMetricEvent | null),
+            options: eventOptions,
+            value: selectedEvent,
+          }}
           lastUpdatedAt={lastUpdatedAt}
-          loading={metricsQuery.isFetching}
+          loading={isQueueMetricsFetching}
           onAutoRefreshChange={setAutoRefresh}
-          onBucketDurationChange={setBucketDuration}
+          onBucketDurationChange={(value) => {
+            setBucketDuration(value);
+            setBucketMultiplier("AUTO");
+          }}
+          onBucketMultiplierChange={setBucketMultiplier}
           onRefresh={() => {
-            void metricsQuery.refetch();
+            void refetchQueueMetrics();
           }}
           onTimeframeChange={setTimeframe}
+          scopeFilter={{
+            allLabel: t("metrics.controls.allQueues", "All queues"),
+            label: t("metrics.controls.queue", "Queue"),
+            onChange: setSelectedQueue,
+            options: queueOptions,
+            value: selectedQueue,
+          }}
           timeframe={timeframe}
         />
 
-        {metricsQuery.isError ? (
+        {isQueueMetricsError ? (
           <div className={styles["inlineError"]} role="alert">
             <strong>{t("dash.metrics.errorTitle", "Queue metrics failed")}</strong>
-            <span>{getErrorMessage(metricsQuery.error) ?? t("dash.errorBody", "Try again.")}</span>
+            <span>{getErrorMessage(queueMetricsError) ?? t("dash.errorBody", "Try again.")}</span>
             <button
               onClick={() => {
-                void metricsQuery.refetch();
+                void refetchQueueMetrics();
               }}
               type="button"
             >
@@ -362,6 +461,8 @@ export default function DashboardPage() {
           />
         </Suspense>
       </section>
+
+      <TorrentMetricsSection />
 
       <section aria-labelledby="dashboard-links-title" className={styles["linksSection"]}>
         <div className={styles["sectionHeader"]}>

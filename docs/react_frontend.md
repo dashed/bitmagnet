@@ -44,6 +44,10 @@ sponsor/document-title chrome).
   ephemeral component state in React; selected filter _values_ fully
   round-trip. (2) Angular pre-checks all facet checkboxes when nothing is
   selected; React shows them unchecked (clearer signifier of "no filter").
+  (3) P2 gate 2026-07-04: the always-visible health toolbar widget is
+  waived — Health ships as a full page (content parity: checks, workers,
+  degraded banner) reachable from the dashboard; a nav status dot can be
+  revisited with P3 a11y work.
 
 ## 2. Stack (reaffirmed from v1 where still current — boring on purpose)
 

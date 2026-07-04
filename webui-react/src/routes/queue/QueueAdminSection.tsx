@@ -4,11 +4,18 @@ import { useTranslation } from "react-i18next";
 
 import { useToast } from "../../components/toast";
 import { execute } from "../../graphql/client";
-import { QueuePurgeJobsDocument, type QueueJobStatus, type QueuePurgeJobsInput } from "../../graphql/generated/graphql";
+import {
+  QueueEnqueueReprocessTorrentsBatchDocument,
+  QueuePurgeJobsDocument,
+  type QueueEnqueueReprocessTorrentsBatchInput,
+  type QueueJobStatus,
+  type QueuePurgeJobsInput,
+} from "../../graphql/generated/graphql";
 import { getErrorMessage } from "./format";
 import { QUEUE_NAMES, QUEUE_STATUSES, sortQueues, sortStatuses } from "./constants";
 import { createQueuePurgeInput, type QueueFilterSelection } from "./variables";
 import { QueuePurgeDialog } from "./QueuePurgeDialog";
+import { QueueReprocessBatchDialog } from "./QueueReprocessBatchDialog";
 import styles from "../QueuePage.module.css";
 
 function ScopeChips<TValue extends string>({
@@ -72,7 +79,8 @@ export function QueueAdminSection() {
   const queryClient = useQueryClient();
   const [selectedQueues, setSelectedQueues] = useState<string[]>([]);
   const [selectedStatuses, setSelectedStatuses] = useState<QueueJobStatus[]>([]);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [purgeDialogOpen, setPurgeDialogOpen] = useState(false);
+  const [reprocessDialogOpen, setReprocessDialogOpen] = useState(false);
   const filters = useMemo<QueueFilterSelection>(
     () => ({
       queues: selectedQueues,
@@ -113,25 +121,61 @@ export function QueueAdminSection() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["queueJobs"] });
       void queryClient.invalidateQueries({ queryKey: ["queueMetrics"] });
-      setDialogOpen(false);
+      setPurgeDialogOpen(false);
       notify({
         message: t("queue.admin.purgeSuccess", "Queue jobs purged"),
       });
     },
   });
+  const reprocessMutation = useMutation({
+    mutationFn: (input: QueueEnqueueReprocessTorrentsBatchInput) =>
+      execute(QueueEnqueueReprocessTorrentsBatchDocument, {
+        input,
+      }),
+    onError: (error) => {
+      notify({
+        message: t("queue.admin.reprocessError", "Failed to enqueue jobs: {{error}}", {
+          error: getErrorMessage(error),
+        }),
+        tone: "error",
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["queueJobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["queueMetrics"] });
+      setReprocessDialogOpen(false);
+      notify({
+        message: t("queue.admin.reprocessSuccess", "Torrent processing batch enqueued"),
+      });
+    },
+  });
 
-  function openDialog() {
+  function openPurgeDialog() {
     purgeMutation.reset();
-    setDialogOpen(true);
+    setPurgeDialogOpen(true);
   }
 
-  function closeDialog() {
+  function closePurgeDialog() {
     if (purgeMutation.isPending) {
       return;
     }
 
     purgeMutation.reset();
-    setDialogOpen(false);
+    setPurgeDialogOpen(false);
+  }
+
+  function openReprocessDialog() {
+    reprocessMutation.reset();
+    setReprocessDialogOpen(true);
+  }
+
+  function closeReprocessDialog() {
+    if (reprocessMutation.isPending) {
+      return;
+    }
+
+    reprocessMutation.reset();
+    setReprocessDialogOpen(false);
   }
 
   return (
@@ -142,7 +186,7 @@ export function QueueAdminSection() {
           <p>
             {t(
               "queue.admin.body",
-              "Purge queue jobs by queue and status after confirming the selected scope.",
+              "Purge queue jobs by queue and status, or enqueue a scoped torrent reprocess batch.",
             )}
           </p>
         </div>
@@ -175,9 +219,17 @@ export function QueueAdminSection() {
             )}
           </p>
           <button
+            className={styles["secondaryButton"]}
+            disabled={reprocessMutation.isPending}
+            onClick={openReprocessDialog}
+            type="button"
+          >
+            {t("queue.admin.openReprocess", "Enqueue reprocess batch")}
+          </button>
+          <button
             className={styles["dangerButton"]}
             disabled={purgeMutation.isPending}
-            onClick={openDialog}
+            onClick={openPurgeDialog}
             type="button"
           >
             {t("queue.admin.openPurge", "Purge jobs")}
@@ -189,9 +241,16 @@ export function QueueAdminSection() {
         error={purgeMutation.error}
         filters={filters}
         isPending={purgeMutation.isPending}
-        onClose={closeDialog}
+        onClose={closePurgeDialog}
         onConfirm={() => purgeMutation.mutate(purgeInput)}
-        open={dialogOpen}
+        open={purgeDialogOpen}
+      />
+      <QueueReprocessBatchDialog
+        error={reprocessMutation.error}
+        isPending={reprocessMutation.isPending}
+        onClose={closeReprocessDialog}
+        onConfirm={(input) => reprocessMutation.mutate(input)}
+        open={reprocessDialogOpen}
       />
     </section>
   );

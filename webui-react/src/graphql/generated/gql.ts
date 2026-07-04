@@ -23,6 +23,7 @@ type Documents = {
   "mutation TorrentDeleteTags($infoHashes: [Hash20!], $tagNames: [String!]) {\n  torrent {\n    deleteTags(infoHashes: $infoHashes, tagNames: $tagNames)\n  }\n}": typeof types.TorrentDeleteTagsDocument;
   "query TorrentDetail($infoHashes: [Hash20!]!, $limit: Int) {\n  torrentContent {\n    search(input: {infoHashes: $infoHashes, limit: $limit}) {\n      items {\n        infoHash\n        title\n        contentType\n        seeders\n        leechers\n        dhtSeenCount\n        dhtFirstSeenAt\n        dhtLastSeenAt\n        publishedAt\n        languages {\n          id\n          name\n        }\n        episodes {\n          label\n        }\n        torrent {\n          name\n          size\n          filesStatus\n          filesCount\n          fileType\n          magnetUri\n          sources {\n            key\n            name\n            seenCount\n            firstSeenAt\n            lastSeenAt\n          }\n        }\n        content {\n          title\n          originalTitle\n          releaseDate\n          releaseYear\n          overview\n          voteAverage\n          voteCount\n          originalLanguage {\n            id\n            name\n          }\n          attributes {\n            source\n            key\n            value\n          }\n          collections {\n            type\n            name\n          }\n          externalLinks {\n            metadataSource {\n              key\n              name\n            }\n            url\n          }\n        }\n      }\n    }\n  }\n}": typeof types.TorrentDetailDocument;
   "query TorrentFiles($hasNextPage: Boolean, $infoHashes: [Hash20!], $limit: Int, $orderBy: [TorrentFilesOrderByInput!], $totalCount: Boolean) {\n  torrent {\n    files(\n      input: {hasNextPage: $hasNextPage, infoHashes: $infoHashes, limit: $limit, orderBy: $orderBy, totalCount: $totalCount}\n    ) {\n      totalCount\n      hasNextPage\n      items {\n        index\n        path\n        fileType\n        size\n      }\n    }\n  }\n}": typeof types.TorrentFilesDocument;
+  "query TorrentMetrics($input: TorrentMetricsQueryInput!) {\n  torrent {\n    metrics(input: $input) {\n      buckets {\n        source\n        updated\n        bucket\n        count\n      }\n    }\n    listSources {\n      sources {\n        key\n        name\n      }\n    }\n  }\n}": typeof types.TorrentMetricsDocument;
   "mutation TorrentPutTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {\n  torrent {\n    putTags(infoHashes: $infoHashes, tagNames: $tagNames)\n  }\n}": typeof types.TorrentPutTagsDocument;
   "mutation TorrentReprocess($input: TorrentReprocessInput!) {\n  torrent {\n    reprocess(input: $input)\n  }\n}": typeof types.TorrentReprocessDocument;
   "mutation TorrentSetTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {\n  torrent {\n    setTags(infoHashes: $infoHashes, tagNames: $tagNames)\n  }\n}": typeof types.TorrentSetTagsDocument;
@@ -50,6 +51,8 @@ const documents: Documents = {
     types.TorrentDetailDocument,
   "query TorrentFiles($hasNextPage: Boolean, $infoHashes: [Hash20!], $limit: Int, $orderBy: [TorrentFilesOrderByInput!], $totalCount: Boolean) {\n  torrent {\n    files(\n      input: {hasNextPage: $hasNextPage, infoHashes: $infoHashes, limit: $limit, orderBy: $orderBy, totalCount: $totalCount}\n    ) {\n      totalCount\n      hasNextPage\n      items {\n        index\n        path\n        fileType\n        size\n      }\n    }\n  }\n}":
     types.TorrentFilesDocument,
+  "query TorrentMetrics($input: TorrentMetricsQueryInput!) {\n  torrent {\n    metrics(input: $input) {\n      buckets {\n        source\n        updated\n        bucket\n        count\n      }\n    }\n    listSources {\n      sources {\n        key\n        name\n      }\n    }\n  }\n}":
+    types.TorrentMetricsDocument,
   "mutation TorrentPutTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {\n  torrent {\n    putTags(infoHashes: $infoHashes, tagNames: $tagNames)\n  }\n}":
     types.TorrentPutTagsDocument,
   "mutation TorrentReprocess($input: TorrentReprocessInput!) {\n  torrent {\n    reprocess(input: $input)\n  }\n}":
@@ -121,6 +124,12 @@ export function graphql(
 export function graphql(
   source: "query TorrentFiles($hasNextPage: Boolean, $infoHashes: [Hash20!], $limit: Int, $orderBy: [TorrentFilesOrderByInput!], $totalCount: Boolean) {\n  torrent {\n    files(\n      input: {hasNextPage: $hasNextPage, infoHashes: $infoHashes, limit: $limit, orderBy: $orderBy, totalCount: $totalCount}\n    ) {\n      totalCount\n      hasNextPage\n      items {\n        index\n        path\n        fileType\n        size\n      }\n    }\n  }\n}",
 ): typeof import("./graphql").TorrentFilesDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query TorrentMetrics($input: TorrentMetricsQueryInput!) {\n  torrent {\n    metrics(input: $input) {\n      buckets {\n        source\n        updated\n        bucket\n        count\n      }\n    }\n    listSources {\n      sources {\n        key\n        name\n      }\n    }\n  }\n}",
+): typeof import("./graphql").TorrentMetricsDocument;
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */

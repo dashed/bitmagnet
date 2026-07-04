@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeBucket, normalizeQueueMetrics, type RawQueueMetricsBucket } from "./normalize";
+import {
+  normalizeBucket,
+  normalizeQueueMetrics,
+  normalizeTorrentMetrics,
+  type RawQueueMetricsBucket,
+  type RawTorrentMetricsBucket,
+} from "./normalize";
 
 const now = "2026-07-04T12:00:00.000Z";
 
@@ -12,6 +18,16 @@ function bucket(overrides: Partial<RawQueueMetricsBucket>): RawQueueMetricsBucke
     queue: "process_torrent",
     ranAtBucket: null,
     status: "pending",
+    ...overrides,
+  };
+}
+
+function torrentBucket(overrides: Partial<RawTorrentMetricsBucket>): RawTorrentMetricsBucket {
+  return {
+    bucket: "2026-07-04T11:00:00.000Z",
+    count: 1,
+    source: "dht",
+    updated: false,
     ...overrides,
   };
 }
@@ -334,5 +350,148 @@ describe("normalizeQueueMetrics", () => {
       "2026-07-04T12:00:00.000Z",
     ]);
     expect(value(result.points[0], "event:process_torrent:created")).toBe(6);
+  });
+
+  it("supports automatic bucket multipliers", () => {
+    const result = normalizeQueueMetrics([], {
+      duration: "minute",
+      multiplier: "AUTO",
+      now,
+      timeframe: "hours_6",
+    });
+
+    expect(result.bucketParams.multiplier).toBe(15);
+    expect(result.points.map((point) => point.bucketStart)).toEqual([
+      "2026-07-04T06:00:00.000Z",
+      "2026-07-04T06:15:00.000Z",
+      "2026-07-04T06:30:00.000Z",
+      "2026-07-04T06:45:00.000Z",
+      "2026-07-04T07:00:00.000Z",
+      "2026-07-04T07:15:00.000Z",
+      "2026-07-04T07:30:00.000Z",
+      "2026-07-04T07:45:00.000Z",
+      "2026-07-04T08:00:00.000Z",
+      "2026-07-04T08:15:00.000Z",
+      "2026-07-04T08:30:00.000Z",
+      "2026-07-04T08:45:00.000Z",
+      "2026-07-04T09:00:00.000Z",
+      "2026-07-04T09:15:00.000Z",
+      "2026-07-04T09:30:00.000Z",
+      "2026-07-04T09:45:00.000Z",
+      "2026-07-04T10:00:00.000Z",
+      "2026-07-04T10:15:00.000Z",
+      "2026-07-04T10:30:00.000Z",
+      "2026-07-04T10:45:00.000Z",
+      "2026-07-04T11:00:00.000Z",
+      "2026-07-04T11:15:00.000Z",
+      "2026-07-04T11:30:00.000Z",
+      "2026-07-04T11:45:00.000Z",
+      "2026-07-04T12:00:00.000Z",
+    ]);
+  });
+
+  it("filters event series by queue event", () => {
+    const result = normalizeQueueMetrics(
+      [
+        bucket({
+          count: 3,
+          createdAtBucket: "2026-07-04T10:00:00.000Z",
+          ranAtBucket: "2026-07-04T11:00:00.000Z",
+          status: "processed",
+        }),
+        bucket({
+          count: 5,
+          createdAtBucket: "2026-07-04T10:00:00.000Z",
+          ranAtBucket: "2026-07-04T11:00:00.000Z",
+          status: "failed",
+        }),
+      ],
+      {
+        duration: "hour",
+        event: "processed",
+        now,
+        timeframe: "hours_6",
+      },
+    );
+
+    expect(result.eventSeries.map((series) => series.dataKey)).toEqual([
+      "event:process_torrent:processed",
+    ]);
+    expect(value(result.points[5], "event:process_torrent:processed")).toBe(3);
+    expect(value(result.points[5], "event:process_torrent:failed")).toBeUndefined();
+  });
+});
+
+describe("normalizeTorrentMetrics", () => {
+  it("normalizes created and updated buckets by source", () => {
+    const result = normalizeTorrentMetrics(
+      [
+        torrentBucket({
+          bucket: "2026-07-04T11:05:00.000Z",
+          count: 2,
+          updated: false,
+        }),
+        torrentBucket({
+          bucket: "2026-07-04T11:20:00.000Z",
+          count: 3,
+          updated: true,
+        }),
+        torrentBucket({
+          bucket: "2026-07-04T11:40:00.000Z",
+          count: 4,
+          source: "rss",
+          updated: false,
+        }),
+      ],
+      {
+        duration: "hour",
+        now,
+        timeframe: "hours_1",
+      },
+    );
+
+    expect(result.eventSeries.map((series) => series.dataKey)).toEqual([
+      "torrent:dht:created",
+      "torrent:dht:updated",
+      "torrent:rss:created",
+    ]);
+    expect(value(result.points[0], "torrent:dht:created")).toBe(2);
+    expect(value(result.points[0], "torrent:dht:updated")).toBe(3);
+    expect(value(result.points[0], "torrent:rss:created")).toBe(4);
+    expect(result.total).toBe(9);
+  });
+
+  it("filters by source and event", () => {
+    const result = normalizeTorrentMetrics(
+      [
+        torrentBucket({
+          bucket: "2026-07-04T11:05:00.000Z",
+          count: 2,
+          updated: false,
+        }),
+        torrentBucket({
+          bucket: "2026-07-04T11:20:00.000Z",
+          count: 3,
+          updated: true,
+        }),
+        torrentBucket({
+          bucket: "2026-07-04T11:40:00.000Z",
+          count: 4,
+          source: "rss",
+          updated: true,
+        }),
+      ],
+      {
+        duration: "hour",
+        event: "updated",
+        now,
+        source: "dht",
+        timeframe: "hours_1",
+      },
+    );
+
+    expect(result.eventSeries.map((series) => series.dataKey)).toEqual(["torrent:dht:updated"]);
+    expect(value(result.points[0], "torrent:dht:updated")).toBe(3);
+    expect(result.total).toBe(3);
   });
 });

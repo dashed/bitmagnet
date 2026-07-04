@@ -10,9 +10,12 @@ import {
   metricAutoRefreshSeconds,
   normalizeQueueMetrics,
   type MetricAutoRefreshInterval,
+  type MetricBucketMultiplier,
   type MetricTimeframe,
+  type QueueMetricEvent,
   type RawQueueMetricsBucket,
 } from "../../metrics/normalize";
+import { QUEUE_NAMES } from "./constants";
 import { createQueueMetricsVariables } from "./variables";
 import styles from "../QueuePage.module.css";
 
@@ -33,6 +36,9 @@ export function QueueMetricsSection() {
   const { t } = useTranslation();
   const [timeframe, setTimeframe] = useState<MetricTimeframe>("hours_1");
   const [bucketDuration, setBucketDuration] = useState<MetricsBucketDuration>("hour");
+  const [bucketMultiplier, setBucketMultiplier] = useState<MetricBucketMultiplier>("AUTO");
+  const [selectedQueue, setSelectedQueue] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<QueueMetricEvent | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<MetricAutoRefreshInterval>("seconds_10");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date>();
   const autoRefreshSeconds = metricAutoRefreshSeconds[autoRefresh];
@@ -46,8 +52,12 @@ export function QueueMetricsSection() {
   } = useQuery({
     placeholderData: keepPreviousData,
     queryFn: ({ signal }) =>
-      execute(QueueMetricsDocument, createQueueMetricsVariables(bucketDuration, timeframe), signal),
-    queryKey: ["queueMetrics", bucketDuration, timeframe],
+      execute(
+        QueueMetricsDocument,
+        createQueueMetricsVariables(bucketDuration, timeframe, selectedQueue),
+        signal,
+      ),
+    queryKey: ["queueMetrics", bucketDuration, timeframe, selectedQueue],
     refetchInterval: autoRefreshSeconds ? autoRefreshSeconds * 1000 : false,
   });
 
@@ -58,14 +68,54 @@ export function QueueMetricsSection() {
   }, [dataUpdatedAt]);
 
   const rawBuckets = metricsData?.queue.metrics.buckets ?? EMPTY_QUEUE_METRIC_BUCKETS;
+  const queueOptions = useMemo(
+    () =>
+      QUEUE_NAMES.map((queue) => ({
+        label: queue,
+        value: queue,
+      })),
+    [],
+  );
+  const eventOptions = useMemo(
+    () =>
+      [
+        {
+          defaultLabel: "Created",
+          value: "created",
+        },
+        {
+          defaultLabel: "Processed",
+          value: "processed",
+        },
+        {
+          defaultLabel: "Failed",
+          value: "failed",
+        },
+      ].map((event) => ({
+        label: t(`metrics.events.${event.value}`, event.defaultLabel),
+        value: event.value,
+      })),
+    [t],
+  );
   const normalizedMetrics = useMemo(
     () =>
       normalizeQueueMetrics(rawBuckets, {
         duration: bucketDuration,
+        event: selectedEvent,
+        multiplier: bucketMultiplier,
         now: lastUpdatedAt ?? new Date(),
+        queues: selectedQueue ? [selectedQueue] : undefined,
         timeframe,
       }),
-    [bucketDuration, lastUpdatedAt, rawBuckets, timeframe],
+    [
+      bucketDuration,
+      bucketMultiplier,
+      lastUpdatedAt,
+      rawBuckets,
+      selectedEvent,
+      selectedQueue,
+      timeframe,
+    ],
   );
 
   return (
@@ -90,18 +140,40 @@ export function QueueMetricsSection() {
       <MetricsControls
         autoRefresh={autoRefresh}
         bucketDuration={bucketDuration}
+        bucketMultiplier={bucketMultiplier}
+        bucketMultiplierPlaceholder={normalizedMetrics.bucketParams.multiplier}
+        eventFilter={{
+          allLabel: t("metrics.controls.allEvents", "All events"),
+          label: t("metrics.controls.event", "Event"),
+          onChange: (value) => setSelectedEvent(value as QueueMetricEvent | null),
+          options: eventOptions,
+          value: selectedEvent,
+        }}
         lastUpdatedAt={lastUpdatedAt}
         loading={isMetricsFetching}
         onAutoRefreshChange={setAutoRefresh}
-        onBucketDurationChange={setBucketDuration}
+        onBucketDurationChange={(value) => {
+          setBucketDuration(value);
+          setBucketMultiplier("AUTO");
+        }}
+        onBucketMultiplierChange={setBucketMultiplier}
         onRefresh={() => {
           void refetchMetrics();
         }}
         onTimeframeChange={setTimeframe}
+        scopeFilter={{
+          allLabel: t("metrics.controls.allQueues", "All queues"),
+          label: t("metrics.controls.queue", "Queue"),
+          onChange: setSelectedQueue,
+          options: queueOptions,
+          value: selectedQueue,
+        }}
         timeframe={timeframe}
       />
 
-      {isMetricsError ? <QueryError error={metricsError} onRetry={() => void refetchMetrics()} /> : null}
+      {isMetricsError ? (
+        <QueryError error={metricsError} onRetry={() => void refetchMetrics()} />
+      ) : null}
 
       <Suspense
         fallback={

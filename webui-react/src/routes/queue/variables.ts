@@ -26,10 +26,12 @@ function nonEmptyArray<T>(values: readonly T[]) {
 export function createQueueMetricsVariables(
   bucketDuration: MetricsBucketDuration,
   timeframe: MetricTimeframe,
+  queue: string | null = null,
 ): QueueMetricsQueryVariables {
   return {
     input: {
       bucketDuration,
+      queues: queue ? [queue] : undefined,
       startTime:
         timeframe === "all"
           ? undefined

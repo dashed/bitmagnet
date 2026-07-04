@@ -9,6 +9,58 @@
   min-width: min(100%, 300px);
 }
 
+.numberField {
+  display: grid;
+  gap: 5px;
+}
+
+.numberField > span {
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 500;
+}
+
+.numberInputRow {
+  align-items: center;
+  display: grid;
+  grid-template-columns: 36px minmax(72px, 1fr) 36px;
+}
+
+.numberInputRow button,
+.numberInputRow input {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  color: var(--mantine-color-text);
+  min-height: 36px;
+}
+
+.numberInputRow button {
+  cursor: pointer;
+  font-weight: 800;
+  padding: 0;
+}
+
+.numberInputRow button:first-child {
+  border-radius: var(--mantine-radius-default) 0 0 var(--mantine-radius-default);
+}
+
+.numberInputRow button:last-child {
+  border-radius: 0 var(--mantine-radius-default) var(--mantine-radius-default) 0;
+}
+
+.numberInputRow button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.numberInputRow input {
+  border-left: 0;
+  border-radius: 0;
+  border-right: 0;
+  min-width: 0;
+  padding: 0 10px;
+}
+
 .status {
   align-items: center;
   color: var(--mantine-color-dimmed);

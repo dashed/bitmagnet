@@ -1237,6 +1237,31 @@ export type TorrentFilesQuery = {
   };
 };
 
+export type TorrentMetricsQueryVariables = Exact<{
+  input: TorrentMetricsQueryInput;
+}>;
+
+export type TorrentMetricsQuery = {
+  __typename?: "Query";
+  torrent: {
+    __typename?: "TorrentQuery";
+    metrics: {
+      __typename?: "TorrentMetricsQueryResult";
+      buckets: Array<{
+        __typename?: "TorrentMetricsBucket";
+        source: string;
+        updated: boolean;
+        bucket: string;
+        count: number;
+      }>;
+    };
+    listSources: {
+      __typename?: "TorrentListSourcesResult";
+      sources: Array<{ __typename?: "TorrentSource"; key: string; name: string }>;
+    };
+  };
+};
+
 export type TorrentPutTagsMutationVariables = Exact<{
   infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
   tagNames: Array<Scalars["String"]["input"]> | Scalars["String"]["input"];
@@ -1581,6 +1606,26 @@ export const TorrentFilesDocument = new TypedDocumentString(`
   }
 }
     `) as unknown as TypedDocumentString<TorrentFilesQuery, TorrentFilesQueryVariables>;
+export const TorrentMetricsDocument = new TypedDocumentString(`
+    query TorrentMetrics($input: TorrentMetricsQueryInput!) {
+  torrent {
+    metrics(input: $input) {
+      buckets {
+        source
+        updated
+        bucket
+        count
+      }
+    }
+    listSources {
+      sources {
+        key
+        name
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentMetricsQuery, TorrentMetricsQueryVariables>;
 export const TorrentPutTagsDocument = new TypedDocumentString(`
     mutation TorrentPutTags($infoHashes: [Hash20!]!, $tagNames: [String!]!) {
   torrent {

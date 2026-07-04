@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { QueueFilterSelection } from "./variables";
 import { getErrorMessage } from "./format";
-import { useDialogFocus } from "./dialogFocus";
+import { useDialogFocus } from "../../utils/dialogFocus";
 import styles from "../QueuePage.module.css";
 
 type QueuePurgeDialogProps = {
@@ -65,9 +65,7 @@ export function QueuePurgeDialog({
         role="dialog"
         tabIndex={-1}
       >
-        <h3 id="queue-purge-dialog-title">
-          {t("queue.admin.dialogTitle", "Purge queue jobs")}
-        </h3>
+        <h3 id="queue-purge-dialog-title">{t("queue.admin.dialogTitle", "Purge queue jobs")}</h3>
         <p className={styles["panelText"]} id="queue-purge-dialog-body">
           {t(
             "queue.admin.dialogBody",
