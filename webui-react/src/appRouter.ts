@@ -7,6 +7,8 @@ import {
   RootErrorComponent,
   RootRouteComponent,
   TorrentDetailRouteComponent,
+  QueueRouteComponent,
+  HealthRouteComponent,
 } from "./routeComponents";
 import { SearchPage } from "./routes/SearchPage";
 import {
@@ -104,12 +106,26 @@ const torrentDetailRoute = createRoute({
   path: "/torrents/$infoHash",
 });
 
+const queueRoute = createRoute({
+  component: QueueRouteComponent,
+  getParentRoute: () => rootRoute,
+  path: "/queue",
+});
+
+const healthRoute = createRoute({
+  component: HealthRouteComponent,
+  getParentRoute: () => rootRoute,
+  path: "/health",
+});
+
 const routeTree = rootRoute.addChildren([
   searchRoute,
   legacyTorrentsSearchRoute,
   dashboardRoute,
   torrentPermalinkRoute,
   torrentDetailRoute,
+  queueRoute,
+  healthRoute,
 ]);
 
 export function createAppRouter(options: AppRouterOptions = {}) {

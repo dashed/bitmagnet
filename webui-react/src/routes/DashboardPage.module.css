@@ -1,9 +1,14 @@
 .root {
-  border: 1px solid var(--mantine-color-default-border);
-  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 24px;
+  margin: 0 auto;
+  max-width: 1120px;
+  padding: 8px 0 32px;
+}
+
+.header {
   display: grid;
   gap: 8px;
-  padding: 24px;
 }
 
 .root h1 {
@@ -15,4 +20,26 @@
 .root p {
   color: var(--mantine-color-dimmed);
   margin: 0;
+}
+
+.charts {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.chartFallback {
+  align-items: center;
+  border: 1px dashed var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  display: grid;
+  min-height: 160px;
+  padding: 24px;
+}
+
+@media (min-width: 64em) {
+  .charts {
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  }
 }

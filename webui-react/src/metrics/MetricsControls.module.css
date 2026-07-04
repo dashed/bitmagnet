@@ -1,0 +1,37 @@
+.root {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.autoRefresh {
+  min-width: min(100%, 300px);
+}
+
+.status {
+  align-items: center;
+  color: var(--mantine-color-dimmed);
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  justify-content: flex-end;
+  min-height: 36px;
+}
+
+.refresh {
+  justify-self: end;
+}
+
+@media (max-width: 48em) {
+  .root {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .status,
+  .refresh {
+    justify-content: start;
+    justify-self: stretch;
+  }
+}

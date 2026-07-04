@@ -13,6 +13,11 @@ import * as types from "./graphql";
  * Learn more about it here: https://the-guild.dev/graphql/codegen/plugins/presets/preset-client#reducing-bundle-size
  */
 type Documents = {
+  "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}": typeof types.HealthCheckDocument;
+  "mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {\n  queue {\n    enqueueReprocessTorrentsBatch(input: $input)\n  }\n}": typeof types.QueueEnqueueReprocessTorrentsBatchDocument;
+  "query QueueJobs($input: QueueJobsQueryInput!) {\n  queue {\n    jobs(input: $input) {\n      items {\n        id\n        queue\n        status\n        payload\n        priority\n        retries\n        maxRetries\n        runAfter\n        ranAt\n        error\n        createdAt\n      }\n      totalCount\n      hasNextPage\n      aggregations {\n        queue {\n          value\n          label\n          count\n        }\n        status {\n          value\n          label\n          count\n        }\n      }\n    }\n  }\n}": typeof types.QueueJobsDocument;
+  "query QueueMetrics($input: QueueMetricsQueryInput!) {\n  queue {\n    metrics(input: $input) {\n      buckets {\n        queue\n        status\n        createdAtBucket\n        ranAtBucket\n        count\n        latency\n      }\n    }\n  }\n}": typeof types.QueueMetricsDocument;
+  "mutation QueuePurgeJobs($input: QueuePurgeJobsInput!) {\n  queue {\n    purgeJobs(input: $input)\n  }\n}": typeof types.QueuePurgeJobsDocument;
   "query TorrentContentSearch($cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {\n  torrentContent {\n    search(\n      input: {cached: $cached, facets: $facets, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}\n    ) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        contentType\n        seeders\n        leechers\n        dhtSeenCount\n        dhtFirstSeenAt\n        dhtLastSeenAt\n        publishedAt\n        torrent {\n          filesCount\n          magnetUri\n          name\n          size\n        }\n      }\n      aggregations {\n        contentType {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentSource {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentTag {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentFileType {\n          value\n          label\n          count\n          isEstimate\n        }\n        language {\n          value\n          label\n          count\n          isEstimate\n        }\n        genre {\n          value\n          label\n          count\n          isEstimate\n        }\n        videoResolution {\n          value\n          label\n          count\n          isEstimate\n        }\n        videoSource {\n          value\n          label\n          count\n          isEstimate\n        }\n      }\n    }\n  }\n}": typeof types.TorrentContentSearchDocument;
   "mutation TorrentDelete($infoHashes: [Hash20!]!) {\n  torrent {\n    delete(infoHashes: $infoHashes)\n  }\n}": typeof types.TorrentDeleteDocument;
   "mutation TorrentDeleteTags($infoHashes: [Hash20!], $tagNames: [String!]) {\n  torrent {\n    deleteTags(infoHashes: $infoHashes, tagNames: $tagNames)\n  }\n}": typeof types.TorrentDeleteTagsDocument;
@@ -25,6 +30,16 @@ type Documents = {
   "query Version {\n  version\n}": typeof types.VersionDocument;
 };
 const documents: Documents = {
+  "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}":
+    types.HealthCheckDocument,
+  "mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {\n  queue {\n    enqueueReprocessTorrentsBatch(input: $input)\n  }\n}":
+    types.QueueEnqueueReprocessTorrentsBatchDocument,
+  "query QueueJobs($input: QueueJobsQueryInput!) {\n  queue {\n    jobs(input: $input) {\n      items {\n        id\n        queue\n        status\n        payload\n        priority\n        retries\n        maxRetries\n        runAfter\n        ranAt\n        error\n        createdAt\n      }\n      totalCount\n      hasNextPage\n      aggregations {\n        queue {\n          value\n          label\n          count\n        }\n        status {\n          value\n          label\n          count\n        }\n      }\n    }\n  }\n}":
+    types.QueueJobsDocument,
+  "query QueueMetrics($input: QueueMetricsQueryInput!) {\n  queue {\n    metrics(input: $input) {\n      buckets {\n        queue\n        status\n        createdAtBucket\n        ranAtBucket\n        count\n        latency\n      }\n    }\n  }\n}":
+    types.QueueMetricsDocument,
+  "mutation QueuePurgeJobs($input: QueuePurgeJobsInput!) {\n  queue {\n    purgeJobs(input: $input)\n  }\n}":
+    types.QueuePurgeJobsDocument,
   "query TorrentContentSearch($cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {\n  torrentContent {\n    search(\n      input: {cached: $cached, facets: $facets, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}\n    ) {\n      totalCount\n      totalCountIsEstimate\n      hasNextPage\n      items {\n        infoHash\n        title\n        contentType\n        seeders\n        leechers\n        dhtSeenCount\n        dhtFirstSeenAt\n        dhtLastSeenAt\n        publishedAt\n        torrent {\n          filesCount\n          magnetUri\n          name\n          size\n        }\n      }\n      aggregations {\n        contentType {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentSource {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentTag {\n          value\n          label\n          count\n          isEstimate\n        }\n        torrentFileType {\n          value\n          label\n          count\n          isEstimate\n        }\n        language {\n          value\n          label\n          count\n          isEstimate\n        }\n        genre {\n          value\n          label\n          count\n          isEstimate\n        }\n        videoResolution {\n          value\n          label\n          count\n          isEstimate\n        }\n        videoSource {\n          value\n          label\n          count\n          isEstimate\n        }\n      }\n    }\n  }\n}":
     types.TorrentContentSearchDocument,
   "mutation TorrentDelete($infoHashes: [Hash20!]!) {\n  torrent {\n    delete(infoHashes: $infoHashes)\n  }\n}":
@@ -46,6 +61,36 @@ const documents: Documents = {
   "query Version {\n  version\n}": types.VersionDocument,
 };
 
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query HealthCheck {\n  health {\n    status\n    checks {\n      key\n      status\n      timestamp\n      error\n    }\n  }\n  workers {\n    listAll {\n      workers {\n        key\n        started\n      }\n    }\n  }\n}",
+): typeof import("./graphql").HealthCheckDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {\n  queue {\n    enqueueReprocessTorrentsBatch(input: $input)\n  }\n}",
+): typeof import("./graphql").QueueEnqueueReprocessTorrentsBatchDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query QueueJobs($input: QueueJobsQueryInput!) {\n  queue {\n    jobs(input: $input) {\n      items {\n        id\n        queue\n        status\n        payload\n        priority\n        retries\n        maxRetries\n        runAfter\n        ranAt\n        error\n        createdAt\n      }\n      totalCount\n      hasNextPage\n      aggregations {\n        queue {\n          value\n          label\n          count\n        }\n        status {\n          value\n          label\n          count\n        }\n      }\n    }\n  }\n}",
+): typeof import("./graphql").QueueJobsDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "query QueueMetrics($input: QueueMetricsQueryInput!) {\n  queue {\n    metrics(input: $input) {\n      buckets {\n        queue\n        status\n        createdAtBucket\n        ranAtBucket\n        count\n        latency\n      }\n    }\n  }\n}",
+): typeof import("./graphql").QueueMetricsDocument;
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(
+  source: "mutation QueuePurgeJobs($input: QueuePurgeJobsInput!) {\n  queue {\n    purgeJobs(input: $input)\n  }\n}",
+): typeof import("./graphql").QueuePurgeJobsDocument;
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */

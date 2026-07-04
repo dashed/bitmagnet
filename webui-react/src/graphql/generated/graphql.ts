@@ -910,6 +910,116 @@ export type WorkersQuery = {
   listAll: WorkersListAllQueryResult;
 };
 
+export type HealthCheckQueryVariables = Exact<{ [key: string]: never }>;
+
+export type HealthCheckQuery = {
+  __typename?: "Query";
+  health: {
+    __typename?: "HealthQuery";
+    status: HealthStatus;
+    checks: Array<{
+      __typename?: "HealthCheck";
+      key: string;
+      status: HealthStatus;
+      timestamp: string;
+      error?: string | null;
+    }>;
+  };
+  workers: {
+    __typename?: "WorkersQuery";
+    listAll: {
+      __typename?: "WorkersListAllQueryResult";
+      workers: Array<{ __typename?: "Worker"; key: string; started: boolean }>;
+    };
+  };
+};
+
+export type QueueEnqueueReprocessTorrentsBatchMutationVariables = Exact<{
+  input: QueueEnqueueReprocessTorrentsBatchInput;
+}>;
+
+export type QueueEnqueueReprocessTorrentsBatchMutation = {
+  __typename?: "Mutation";
+  queue: { __typename?: "QueueMutation"; enqueueReprocessTorrentsBatch?: null | undefined | null };
+};
+
+export type QueueJobsQueryVariables = Exact<{
+  input: QueueJobsQueryInput;
+}>;
+
+export type QueueJobsQuery = {
+  __typename?: "Query";
+  queue: {
+    __typename?: "QueueQuery";
+    jobs: {
+      __typename?: "QueueJobsQueryResult";
+      totalCount: number;
+      hasNextPage?: boolean | null;
+      items: Array<{
+        __typename?: "QueueJob";
+        id: string;
+        queue: string;
+        status: QueueJobStatus;
+        payload: string;
+        priority: number;
+        retries: number;
+        maxRetries: number;
+        runAfter: string;
+        ranAt?: string | null;
+        error?: string | null;
+        createdAt: string;
+      }>;
+      aggregations: {
+        __typename?: "QueueJobsAggregations";
+        queue?: Array<{
+          __typename?: "QueueJobQueueAgg";
+          value: string;
+          label: string;
+          count: number;
+        }> | null;
+        status?: Array<{
+          __typename?: "QueueJobStatusAgg";
+          value: QueueJobStatus;
+          label: string;
+          count: number;
+        }> | null;
+      };
+    };
+  };
+};
+
+export type QueueMetricsQueryVariables = Exact<{
+  input: QueueMetricsQueryInput;
+}>;
+
+export type QueueMetricsQuery = {
+  __typename?: "Query";
+  queue: {
+    __typename?: "QueueQuery";
+    metrics: {
+      __typename?: "QueueMetricsQueryResult";
+      buckets: Array<{
+        __typename?: "QueueMetricsBucket";
+        queue: string;
+        status: QueueJobStatus;
+        createdAtBucket: string;
+        ranAtBucket?: string | null;
+        count: number;
+        latency?: string | null;
+      }>;
+    };
+  };
+};
+
+export type QueuePurgeJobsMutationVariables = Exact<{
+  input: QueuePurgeJobsInput;
+}>;
+
+export type QueuePurgeJobsMutation = {
+  __typename?: "Mutation";
+  queue: { __typename?: "QueueMutation"; purgeJobs?: null | undefined | null };
+};
+
 export type TorrentContentSearchQueryVariables = Exact<{
   cached?: InputMaybe<Scalars["Boolean"]["input"]>;
   facets?: InputMaybe<TorrentContentFacetsInput>;
@@ -1194,6 +1304,95 @@ export class TypedDocumentString<TResult, TVariables>
   }
 }
 
+export const HealthCheckDocument = new TypedDocumentString(`
+    query HealthCheck {
+  health {
+    status
+    checks {
+      key
+      status
+      timestamp
+      error
+    }
+  }
+  workers {
+    listAll {
+      workers {
+        key
+        started
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<HealthCheckQuery, HealthCheckQueryVariables>;
+export const QueueEnqueueReprocessTorrentsBatchDocument = new TypedDocumentString(`
+    mutation QueueEnqueueReprocessTorrentsBatch($input: QueueEnqueueReprocessTorrentsBatchInput!) {
+  queue {
+    enqueueReprocessTorrentsBatch(input: $input)
+  }
+}
+    `) as unknown as TypedDocumentString<
+  QueueEnqueueReprocessTorrentsBatchMutation,
+  QueueEnqueueReprocessTorrentsBatchMutationVariables
+>;
+export const QueueJobsDocument = new TypedDocumentString(`
+    query QueueJobs($input: QueueJobsQueryInput!) {
+  queue {
+    jobs(input: $input) {
+      items {
+        id
+        queue
+        status
+        payload
+        priority
+        retries
+        maxRetries
+        runAfter
+        ranAt
+        error
+        createdAt
+      }
+      totalCount
+      hasNextPage
+      aggregations {
+        queue {
+          value
+          label
+          count
+        }
+        status {
+          value
+          label
+          count
+        }
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<QueueJobsQuery, QueueJobsQueryVariables>;
+export const QueueMetricsDocument = new TypedDocumentString(`
+    query QueueMetrics($input: QueueMetricsQueryInput!) {
+  queue {
+    metrics(input: $input) {
+      buckets {
+        queue
+        status
+        createdAtBucket
+        ranAtBucket
+        count
+        latency
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<QueueMetricsQuery, QueueMetricsQueryVariables>;
+export const QueuePurgeJobsDocument = new TypedDocumentString(`
+    mutation QueuePurgeJobs($input: QueuePurgeJobsInput!) {
+  queue {
+    purgeJobs(input: $input)
+  }
+}
+    `) as unknown as TypedDocumentString<QueuePurgeJobsMutation, QueuePurgeJobsMutationVariables>;
 export const TorrentContentSearchDocument = new TypedDocumentString(`
     query TorrentContentSearch($cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
   torrentContent {

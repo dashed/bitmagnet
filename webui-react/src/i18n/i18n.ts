@@ -194,6 +194,48 @@ const en = {
   language: {
     label: "Language",
   },
+  metrics: {
+    autoRefresh: {
+      minutes_1: "1m",
+      minutes_5: "5m",
+      off: "Off",
+      seconds_10: "10s",
+      seconds_30: "30s",
+    },
+    bucketDurations: {
+      day: "Days",
+      hour: "Hours",
+      minute: "Minutes",
+    },
+    charts: {
+      empty: "No metric buckets to show.",
+      seconds: "{{value}}s",
+    },
+    controls: {
+      bucketDuration: "Bucket",
+      lastUpdated: "Updated {{time}}",
+      loading: "Loading metrics",
+      refresh: "Refresh",
+      timeframe: "Timeframe",
+      waiting: "Waiting for data",
+    },
+    statuses: {
+      failed: "Failed",
+      pending: "Pending",
+      processed: "Processed",
+      retry: "Retry",
+    },
+    timeframes: {
+      all: "All time",
+      days_1: "1 day",
+      hours_1: "1 hour",
+      hours_6: "6 hours",
+      hours_12: "12 hours",
+      minutes_15: "15 minutes",
+      minutes_30: "30 minutes",
+      weeks_1: "1 week",
+    },
+  },
   nav: {
     classicUi: "Classic UI",
     dashboard: "Dashboard",

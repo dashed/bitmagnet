@@ -9,6 +9,8 @@ import { AppShell } from "./layout/AppShell";
 
 const DashboardPage = lazy(() => import("./routes/DashboardPage"));
 const TorrentDetailPage = lazy(() => import("./routes/TorrentDetailPage"));
+const QueuePage = lazy(() => import("./routes/QueuePage"));
+const HealthPage = lazy(() => import("./routes/HealthPage"));
 
 export function RootRouteComponent() {
   return (
@@ -50,5 +52,21 @@ export function NotFoundPage() {
       <h1>{t("error.notFound")}</h1>
       <Link to="/">{t("detail.returnToSearch")}</Link>
     </div>
+  );
+}
+
+export function QueueRouteComponent() {
+  return (
+    <Suspense fallback={null}>
+      <QueuePage />
+    </Suspense>
+  );
+}
+
+export function HealthRouteComponent() {
+  return (
+    <Suspense fallback={null}>
+      <HealthPage />
+    </Suspense>
   );
 }

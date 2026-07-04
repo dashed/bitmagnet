@@ -1,0 +1,16 @@
+.chart {
+  block-size: 320px;
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.empty {
+  align-items: center;
+  block-size: 160px;
+  border: 1px dashed var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  display: grid;
+  font-size: 13px;
+  justify-items: center;
+}
