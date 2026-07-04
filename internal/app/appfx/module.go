@@ -64,6 +64,7 @@ func New() fx.Option {
 		validationfx.New(),
 		versionfx.New(),
 		workerfx.New(),
+		configfx.NewConfigModule[webui.Config]("webui", webui.NewDefaultConfig()),
 		fx.Provide(
 			args.New,
 			cli.New,

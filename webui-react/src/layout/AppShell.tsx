@@ -42,6 +42,9 @@ export function AppShell({ children }: PropsWithChildren) {
         <nav aria-label="Primary" className={styles["desktopNav"]}>
           <NavLink to="/">{t("nav.torrents")}</NavLink>
           <NavLink to="/dashboard">{t("nav.dashboard")}</NavLink>
+          <a className={styles["navLink"]} href="/?frontend=angular">
+            {t("nav.classicUi")}
+          </a>
         </nav>
 
         <div className={styles["actions"]}>

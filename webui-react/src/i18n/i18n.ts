@@ -35,6 +35,7 @@ const en = {
     label: "Language",
   },
   nav: {
+    classicUi: "Classic UI",
     dashboard: "Dashboard",
     torrents: "Torrents",
   },
