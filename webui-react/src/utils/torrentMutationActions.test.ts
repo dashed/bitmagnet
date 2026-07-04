@@ -8,6 +8,7 @@ import {
   getNextReprocessOptions,
   getNextSuggestionIndex,
   getSubmittedTags,
+  normalizeTagName,
   removeTagName,
 } from "./torrentMutationActions";
 
@@ -19,6 +20,13 @@ describe("torrent mutation action helpers", () => {
     expect(addTagName(withTag, "movie")).toEqual(["movie"]);
     expect(removeTagName(withTag, "movie")).toEqual([]);
     expect(getSubmittedTags(["movie"], "  tv ")).toEqual(["movie", "tv"]);
+  });
+
+  it("normalizes tag names with kebab-case slug rules", () => {
+    expect(normalizeTagName("Action Movie")).toBe("action-movie");
+    expect(normalizeTagName("Sci-Fi!")).toBe("sci-fi");
+    expect(normalizeTagName("---Action---Movie")).toBe("action-movie");
+    expect(normalizeTagName("already-kebab")).toBe("already-kebab");
   });
 
   it("selects tag suggestions with keyboard wraparound", () => {

@@ -1,5 +1,5 @@
 import type { ChangeEvent, KeyboardEvent } from "react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
@@ -50,6 +50,92 @@ type TorrentBulkActionsBarProps = {
 function invalidateTorrentQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["torrentContentSearch"] });
   void queryClient.invalidateQueries({ queryKey: ["torrentDetail"] });
+}
+
+const DIALOG_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function getDialogFocusableElements(dialog: HTMLElement) {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE_SELECTOR)).filter(
+    (element) => element.tabIndex >= 0,
+  );
+}
+
+function useDialogFocus(open: boolean, onClose: () => void) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    const activeDialog = dialog;
+
+    (getDialogFocusableElements(activeDialog)[0] ?? activeDialog).focus();
+
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const focusableElements = getDialogFocusableElements(activeDialog);
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        activeDialog.focus();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements.at(-1);
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement?.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+
+      const previousFocus = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (previousFocus?.isConnected) {
+        previousFocus.focus();
+      }
+    };
+  }, [open]);
+
+  return dialogRef;
 }
 
 export function TorrentBulkActionsBar({ items, onClearSelection }: TorrentBulkActionsBarProps) {
@@ -258,6 +344,10 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
   }
 
   function submitTagMutation(kind: TagMutationKind) {
+    if (!canSubmitTagMutation(kind, infoHashes.length, tagNames, tagInput, tagMutation.isPending)) {
+      return;
+    }
+
     const nextTagNames = getSubmittedTags(tagNames, tagInput);
     setTagNames(nextTagNames);
     setTagInput("");
@@ -300,6 +390,7 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
   }
 
   const inputDisabled = tagMutation.isPending;
+  const suggestionsOpen = suggestions.length > 0;
   const activeSuggestionId =
     activeSuggestionIndex >= 0 ? `${listboxId}-${activeSuggestionIndex}` : undefined;
 
@@ -330,7 +421,9 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
             <input
               aria-activedescendant={activeSuggestionId}
               aria-autocomplete="list"
-              aria-controls={suggestions.length > 0 ? listboxId : undefined}
+              aria-controls={suggestionsOpen ? listboxId : undefined}
+              aria-expanded={suggestionsOpen}
+              aria-haspopup="listbox"
               autoComplete="off"
               className={styles["tagInput"]}
               disabled={inputDisabled}
@@ -342,7 +435,7 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
               value={tagInput}
             />
           </div>
-          {suggestions.length > 0 ? (
+          {suggestionsOpen ? (
             <div
               aria-label={t("actions.tags.suggestionsLabel")}
               className={styles["suggestions"]}
@@ -464,6 +557,17 @@ function ReprocessActions({ infoHashes }: { infoHashes: readonly string[] }) {
     setOptions((current) => getNextReprocessOptions(current, field, checked));
   }
 
+  function submitReprocess() {
+    if (infoHashes.length === 0 || reprocessMutation.isPending) {
+      return;
+    }
+
+    reprocessMutation.mutate({
+      infoHashes: [...infoHashes],
+      options,
+    });
+  }
+
   return (
     <details className={styles["actionPanel"]}>
       <summary>{t("actions.reprocess.title")}</summary>
@@ -499,12 +603,7 @@ function ReprocessActions({ infoHashes }: { infoHashes: readonly string[] }) {
           <button
             className={styles["secondaryButton"]}
             disabled={infoHashes.length === 0 || reprocessMutation.isPending}
-            onClick={() =>
-              reprocessMutation.mutate({
-                infoHashes: [...infoHashes],
-                options,
-              })
-            }
+            onClick={submitReprocess}
             type="button"
           >
             {t("actions.reprocess.submit")}
@@ -560,6 +659,24 @@ function DeleteActions({
     setAcknowledged(false);
   }
 
+  function openDialog() {
+    if (infoHashes.length === 0 || deleteMutation.isPending) {
+      return;
+    }
+
+    setDialogOpen(true);
+  }
+
+  function confirmDelete() {
+    if (!canConfirmDelete(infoHashes.length, acknowledged, deleteMutation.isPending)) {
+      return;
+    }
+
+    deleteMutation.mutate({ infoHashes: [...infoHashes] });
+  }
+
+  const dialogRef = useDialogFocus(dialogOpen, closeDialog);
+
   return (
     <details className={styles["actionPanel"]}>
       <summary>{t("actions.delete.title")}</summary>
@@ -569,7 +686,7 @@ function DeleteActions({
           <button
             className={styles["dangerButton"]}
             disabled={infoHashes.length === 0 || deleteMutation.isPending}
-            onClick={() => setDialogOpen(true)}
+            onClick={openDialog}
             type="button"
           >
             {t("actions.delete.open")}
@@ -578,12 +695,21 @@ function DeleteActions({
       </div>
 
       {dialogOpen ? (
-        <div className={styles["dialogBackdrop"]}>
+        <div
+          className={styles["dialogBackdrop"]}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDialog();
+            }
+          }}
+        >
           <div
             aria-labelledby="torrent-delete-dialog-title"
             aria-modal="true"
             className={styles["dialog"]}
+            ref={dialogRef}
             role="dialog"
+            tabIndex={-1}
           >
             <h3 id="torrent-delete-dialog-title">
               {t("actions.delete.dialogTitle", { count: infoHashes.length })}
@@ -615,7 +741,7 @@ function DeleteActions({
                 disabled={
                   !canConfirmDelete(infoHashes.length, acknowledged, deleteMutation.isPending)
                 }
-                onClick={() => deleteMutation.mutate({ infoHashes: [...infoHashes] })}
+                onClick={confirmDelete}
                 type="button"
               >
                 {t("actions.delete.confirm")}

@@ -1001,8 +1001,8 @@ export function SearchPage() {
                   onChange={handlePageSelectionToggle}
                 />
                 <span>
-                  {selectedInfoHashes.size > 0
-                    ? t("actions.selectedCount", { count: selectedInfoHashes.size })
+                  {selectedItems.length > 0
+                    ? t("actions.selectedCount", { count: selectedItems.length })
                     : t("actions.selectPage")}
                 </span>
               </label>

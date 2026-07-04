@@ -19,7 +19,12 @@ export function getErrorMessage(error: unknown) {
 }
 
 export function normalizeTagName(tagName: string) {
-  return tagName.trim();
+  return tagName
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9-]/g, "-")
+    .replace(/^-+/, "")
+    .replaceAll(/-+/g, "-")
+    .replace(/-+$/, "");
 }
 
 export function addTagName(tags: readonly string[], tagName: string) {
@@ -34,22 +39,6 @@ export function addTagName(tags: readonly string[], tagName: string) {
 
 export function removeTagName(tags: readonly string[], tagName: string) {
   return tags.filter((tag) => tag !== tagName);
-}
-
-export function renameTagName(
-  tags: readonly string[],
-  previousTagName: string,
-  nextTagName: string,
-) {
-  const normalized = normalizeTagName(nextTagName);
-
-  if (!normalized) {
-    return removeTagName(tags, previousTagName);
-  }
-
-  const renamed = tags.map((tag) => (tag === previousTagName ? normalized : tag));
-
-  return Array.from(new Set(renamed));
 }
 
 export function getSubmittedTags(tags: readonly string[], draftTagName: string) {
