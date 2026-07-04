@@ -1,6 +1,7 @@
 import type { ChangeEvent, FormEvent } from "react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
 import { ListSkeleton } from "../components/ListSkeleton";
@@ -214,7 +215,15 @@ export function SearchPage() {
                 return (
                   <li className={styles["resultItem"]} key={item.infoHash}>
                     <div className={styles["resultMain"]}>
-                      <h2>{title}</h2>
+                      <h2>
+                        <Link
+                          className={styles["resultTitleLink"]}
+                          params={{ infoHash: item.infoHash }}
+                          to="/torrents/$infoHash"
+                        >
+                          {title}
+                        </Link>
+                      </h2>
                       {showTorrentName ? <p>{item.torrent.name}</p> : null}
                     </div>
                     <dl className={styles["resultMeta"]}>

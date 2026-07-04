@@ -7,6 +7,7 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import { useTranslation } from "react-i18next";
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ListSkeleton } from "./components/ListSkeleton";
@@ -15,6 +16,7 @@ import { AppShell } from "./layout/AppShell";
 import { SearchPage } from "./routes/SearchPage";
 
 const DashboardPage = lazy(() => import("./routes/DashboardPage"));
+const TorrentDetailPage = lazy(() => import("./routes/TorrentDetailPage"));
 
 function RootRouteComponent() {
   return (
@@ -34,11 +36,23 @@ function DashboardRouteComponent() {
   );
 }
 
+function TorrentDetailRouteComponent() {
+  const { t } = useTranslation();
+
+  return (
+    <Suspense fallback={<ListSkeleton ariaLabel={t("detail.loading")} rows={6} />}>
+      <TorrentDetailPage />
+    </Suspense>
+  );
+}
+
 function NotFoundPage() {
+  const { t } = useTranslation();
+
   return (
     <div className="route-state" role="status">
-      <h1>Not found</h1>
-      <Link to="/">Return to torrents</Link>
+      <h1>{t("error.notFound")}</h1>
+      <Link to="/">{t("detail.returnToSearch")}</Link>
     </div>
   );
 }
@@ -61,7 +75,13 @@ const dashboardRoute = createRoute({
   path: "/dashboard",
 });
 
-const routeTree = rootRoute.addChildren([searchRoute, dashboardRoute]);
+const torrentDetailRoute = createRoute({
+  component: TorrentDetailRouteComponent,
+  getParentRoute: () => rootRoute,
+  path: "/torrents/$infoHash",
+});
+
+const routeTree = rootRoute.addChildren([searchRoute, dashboardRoute, torrentDetailRoute]);
 
 export const router = createRouter({
   basepath: "/app",

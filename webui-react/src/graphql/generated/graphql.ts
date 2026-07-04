@@ -942,6 +942,99 @@ export type TorrentContentSearchQuery = {
   };
 };
 
+export type TorrentDetailQueryVariables = Exact<{
+  infoHashes: Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"];
+  limit?: InputMaybe<Scalars["Int"]["input"]>;
+}>;
+
+export type TorrentDetailQuery = {
+  __typename?: "Query";
+  torrentContent: {
+    __typename?: "TorrentContentQuery";
+    search: {
+      __typename?: "TorrentContentSearchResult";
+      items: Array<{
+        __typename?: "TorrentContent";
+        infoHash: string;
+        title: string;
+        contentType?: ContentType | null;
+        seeders?: number | null;
+        leechers?: number | null;
+        publishedAt: string;
+        languages?: Array<{ __typename?: "LanguageInfo"; id: string; name: string }> | null;
+        episodes?: { __typename?: "Episodes"; label: string } | null;
+        torrent: {
+          __typename?: "Torrent";
+          name: string;
+          size: number;
+          filesStatus: FilesStatus;
+          filesCount?: number | null;
+          fileType?: FileType | null;
+          magnetUri: string;
+          sources: Array<{
+            __typename?: "TorrentSourceInfo";
+            key: string;
+            name: string;
+            seenCount: number;
+            firstSeenAt: string;
+            lastSeenAt: string;
+          }>;
+        };
+        content?: {
+          __typename?: "Content";
+          title: string;
+          originalTitle?: string | null;
+          releaseDate?: string | null;
+          releaseYear?: number | null;
+          overview?: string | null;
+          voteAverage?: number | null;
+          voteCount?: number | null;
+          originalLanguage?: { __typename?: "LanguageInfo"; id: string; name: string } | null;
+          attributes: Array<{
+            __typename?: "ContentAttribute";
+            source: string;
+            key: string;
+            value: string;
+          }>;
+          collections: Array<{ __typename?: "ContentCollection"; type: string; name: string }>;
+          externalLinks: Array<{
+            __typename?: "ExternalLink";
+            url: string;
+            metadataSource: { __typename?: "MetadataSource"; key: string; name: string };
+          }>;
+        } | null;
+      }>;
+    };
+  };
+};
+
+export type TorrentFilesQueryVariables = Exact<{
+  hasNextPage?: InputMaybe<Scalars["Boolean"]["input"]>;
+  infoHashes?: InputMaybe<Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"]>;
+  limit?: InputMaybe<Scalars["Int"]["input"]>;
+  orderBy?: InputMaybe<Array<TorrentFilesOrderByInput> | TorrentFilesOrderByInput>;
+  totalCount?: InputMaybe<Scalars["Boolean"]["input"]>;
+}>;
+
+export type TorrentFilesQuery = {
+  __typename?: "Query";
+  torrent: {
+    __typename?: "TorrentQuery";
+    files: {
+      __typename?: "TorrentFilesQueryResult";
+      totalCount: number;
+      hasNextPage?: boolean | null;
+      items: Array<{
+        __typename?: "TorrentFile";
+        index: number;
+        path: string;
+        fileType?: FileType | null;
+        size: number;
+      }>;
+    };
+  };
+};
+
 export type VersionQueryVariables = Exact<{ [key: string]: never }>;
 
 export type VersionQuery = { __typename?: "Query"; version: string };
@@ -993,6 +1086,91 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
   TorrentContentSearchQuery,
   TorrentContentSearchQueryVariables
 >;
+export const TorrentDetailDocument = new TypedDocumentString(`
+    query TorrentDetail($infoHashes: [Hash20!]!, $limit: Int) {
+  torrentContent {
+    search(input: {infoHashes: $infoHashes, limit: $limit}) {
+      items {
+        infoHash
+        title
+        contentType
+        seeders
+        leechers
+        publishedAt
+        languages {
+          id
+          name
+        }
+        episodes {
+          label
+        }
+        torrent {
+          name
+          size
+          filesStatus
+          filesCount
+          fileType
+          magnetUri
+          sources {
+            key
+            name
+            seenCount
+            firstSeenAt
+            lastSeenAt
+          }
+        }
+        content {
+          title
+          originalTitle
+          releaseDate
+          releaseYear
+          overview
+          voteAverage
+          voteCount
+          originalLanguage {
+            id
+            name
+          }
+          attributes {
+            source
+            key
+            value
+          }
+          collections {
+            type
+            name
+          }
+          externalLinks {
+            metadataSource {
+              key
+              name
+            }
+            url
+          }
+        }
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentDetailQuery, TorrentDetailQueryVariables>;
+export const TorrentFilesDocument = new TypedDocumentString(`
+    query TorrentFiles($hasNextPage: Boolean, $infoHashes: [Hash20!], $limit: Int, $orderBy: [TorrentFilesOrderByInput!], $totalCount: Boolean) {
+  torrent {
+    files(
+      input: {hasNextPage: $hasNextPage, infoHashes: $infoHashes, limit: $limit, orderBy: $orderBy, totalCount: $totalCount}
+    ) {
+      totalCount
+      hasNextPage
+      items {
+        index
+        path
+        fileType
+        size
+      }
+    }
+  }
+}
+    `) as unknown as TypedDocumentString<TorrentFilesQuery, TorrentFilesQueryVariables>;
 export const VersionDocument = new TypedDocumentString(`
     query Version {
   version

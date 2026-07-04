@@ -176,6 +176,17 @@
   margin: 0 0 4px;
 }
 
+.resultTitleLink {
+  color: inherit;
+  text-decoration-color: color-mix(in srgb, currentColor, transparent 70%);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.resultTitleLink:hover {
+  text-decoration-color: currentColor;
+}
+
 .resultMain p {
   color: var(--mantine-color-dimmed);
   font-size: var(--mantine-font-size-sm);
