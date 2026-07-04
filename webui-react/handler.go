@@ -36,9 +36,11 @@ func Handler(fsys fs.FS) http.Handler {
 		u := *r.URL
 		u.Path = strings.TrimPrefix(r.URL.Path, mountPath)
 		u.RawPath = ""
+
 		if u.Path == "" {
 			u.Path = "/"
 		}
+
 		r2.URL = &u
 
 		fileServer.ServeHTTP(w, r2)
