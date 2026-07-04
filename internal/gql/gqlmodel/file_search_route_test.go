@@ -136,9 +136,8 @@ func enableFileSearchFeature(t *testing.T) {
 	dbsearch.SetFeatureFlags(dbsearch.FeatureFlags{FileSearchEnabled: true})
 }
 
+//nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
 func TestFileSearchRouteDecision_TextUsesPathsearch(t *testing.T) {
-	t.Parallel()
-
 	enableFileSearchFeature(t)
 
 	l2 := &recordingFileSearchClient{fileSearchResult: filesearch.FileSearchResult{
@@ -180,9 +179,8 @@ func TestFileSearchRouteDecision_TextUsesPathsearch(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
 func TestFileSearchRouteDecision_EmptyQueryUsesL2(t *testing.T) {
-	t.Parallel()
-
 	enableFileSearchFeature(t)
 
 	l2ID := fileRouteID(4)
@@ -226,9 +224,8 @@ func TestFileSearchRouteDecision_EmptyQueryUsesL2(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
 func TestFileSearchRouteDecision_EmptyQueryRejectsTorrentSort(t *testing.T) {
-	t.Parallel()
-
 	enableFileSearchFeature(t)
 
 	l2 := &recordingFileSearchClient{}
@@ -262,9 +259,8 @@ func TestFileSearchRouteDecision_EmptyQueryRejectsTorrentSort(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
 func TestFileSearchRouteDecision_FlagOffUsesL2(t *testing.T) {
-	t.Parallel()
-
 	enableFileSearchFeature(t)
 
 	l2ID := fileRouteID(5)
@@ -300,9 +296,8 @@ func TestFileSearchRouteDecision_FlagOffUsesL2(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
 func TestPathTypeahead_UsesPathsearchWhenEnabled(t *testing.T) {
-	t.Parallel()
-
 	enableFileSearchFeature(t)
 
 	l2 := &recordingFileSearchClient{

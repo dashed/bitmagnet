@@ -119,6 +119,7 @@ export type FileSearchInput = {
   minSize?: InputMaybe<Scalars['Int']['input']>;
   offset?: InputMaybe<Scalars['Int']['input']>;
   query?: InputMaybe<Scalars['String']['input']>;
+  sort?: InputMaybe<Array<FileSearchSortInput>>;
   /**
    * When false, skip the exact L2 count RPC and return totalCount as 0.
    * Omitted defaults to true for compatibility with existing callers.
@@ -133,6 +134,7 @@ export type FileSearchItem = {
   infoHash: Scalars['Hash20']['output'];
   path: Scalars['String']['output'];
   size: Scalars['Int']['output'];
+  torrentContent: TorrentContent;
 };
 
 export type FileSearchResult = {
@@ -140,6 +142,11 @@ export type FileSearchResult = {
   hasNextPage: Scalars['Boolean']['output'];
   items: Array<FileSearchItem>;
   totalCount: Scalars['Int']['output'];
+};
+
+export type FileSearchSortInput = {
+  descending?: InputMaybe<Scalars['Boolean']['input']>;
+  field: Scalars['String']['input'];
 };
 
 export type FileType =

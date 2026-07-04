@@ -116,6 +116,7 @@ func TestSortFileRows_TorrentLastSeenDescSortsNullLast(t *testing.T) {
 
 	got := []string{rows[0].Path, rows[1].Path, rows[2].Path}
 	want := []string{"new.mkv", "old.mkv", "missing.mkv"}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("paths = %v, want %v", got, want)
@@ -136,6 +137,7 @@ func TestSortFileRows_TorrentSeeders(t *testing.T) {
 
 	got := []string{rows[0].Path, rows[1].Path, rows[2].Path}
 	want := []string{"many.mkv", "some.mkv", "few.mkv"}
+
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("paths = %v, want %v", got, want)
