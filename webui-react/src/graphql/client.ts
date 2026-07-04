@@ -11,9 +11,9 @@ function getGraphqlEndpoint() {
   return `${window.location.protocol}//${window.location.host}/graphql`;
 }
 
-export const graphqlEndpoint = getGraphqlEndpoint();
+const graphqlEndpoint = getGraphqlEndpoint();
 
-export const graphqlClient = new GraphQLClient(graphqlEndpoint);
+const graphqlClient = new GraphQLClient(graphqlEndpoint);
 
 export function execute<TResult, TVariables extends Variables>(
   document: TypedDocumentString<TResult, TVariables>,

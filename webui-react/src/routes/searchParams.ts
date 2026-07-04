@@ -280,10 +280,11 @@ function stringListValue(value: unknown) {
       return [];
     }
 
-    return decoded
-      .split(",")
-      .map((part) => safeDecode(part).trim())
-      .filter(Boolean);
+    return decoded.split(",").flatMap((part) => {
+      const value = safeDecode(part).trim();
+
+      return value ? [value] : [];
+    });
   });
 
   return Array.from(new Set(values)).sort();

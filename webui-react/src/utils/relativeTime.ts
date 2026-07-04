@@ -7,6 +7,24 @@ const RELATIVE_TIME_UNITS: ReadonlyArray<readonly [Intl.RelativeTimeFormatUnit, 
   ["minute", 1000 * 60],
   ["second", 1000],
 ];
+const RelativeTimeFormatter = Intl.RelativeTimeFormat;
+const RELATIVE_TIME_FORMATTERS = new Map<string, Intl.RelativeTimeFormat>();
+
+function getRelativeTimeFormatter(locales?: Intl.LocalesArgument) {
+  const key = Array.isArray(locales) ? locales.map(String).join("\0") : String(locales ?? "");
+  const cachedFormatter = RELATIVE_TIME_FORMATTERS.get(key);
+
+  if (cachedFormatter) {
+    return cachedFormatter;
+  }
+
+  const formatter = new RelativeTimeFormatter(locales, {
+    numeric: "auto",
+  });
+  RELATIVE_TIME_FORMATTERS.set(key, formatter);
+
+  return formatter;
+}
 
 export function formatRelativeTime(
   value: string,
@@ -21,9 +39,7 @@ export function formatRelativeTime(
   }
 
   const absoluteDiff = Math.abs(diff);
-  const formatter = new Intl.RelativeTimeFormat(locales, {
-    numeric: "auto",
-  });
+  const formatter = getRelativeTimeFormatter(locales);
 
   const [unit, unitMs] =
     RELATIVE_TIME_UNITS.find(([, candidateUnitMs]) => absoluteDiff >= candidateUnitMs) ??

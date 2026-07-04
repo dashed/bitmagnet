@@ -1,5 +1,5 @@
 import type { ChangeEvent, ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
@@ -25,6 +25,8 @@ const DEFAULT_FILE_SORT: FileSort = {
   direction: "asc",
   field: "index",
 };
+const DateTimeFormatter = Intl.DateTimeFormat;
+const DATE_TIME_FORMATTERS = new Map<string, Intl.DateTimeFormat>();
 
 type TorrentDetail = TorrentDetailQuery["torrentContent"]["search"]["items"][number];
 type DetailTorrent = TorrentDetail["torrent"];
@@ -67,11 +69,31 @@ function getPosterUrl(content: TorrentDetail["content"]) {
 }
 
 function getGenres(collections: ContentCollection[] | undefined) {
-  const genres = collections
-    ?.filter((collection) => collection.type === "genre")
-    .map((collection) => collection.name);
+  const genres: string[] = [];
 
-  return genres?.length ? [...genres].sort() : [];
+  for (const collection of collections ?? []) {
+    if (collection.type === "genre") {
+      genres.push(collection.name);
+    }
+  }
+
+  return genres.toSorted();
+}
+
+function getDateTimeFormatter(locale: string) {
+  const cachedFormatter = DATE_TIME_FORMATTERS.get(locale);
+
+  if (cachedFormatter) {
+    return cachedFormatter;
+  }
+
+  const formatter = new DateTimeFormatter(locale, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+  DATE_TIME_FORMATTERS.set(locale, formatter);
+
+  return formatter;
 }
 
 function formatDateTime(value: string, locale: string) {
@@ -81,10 +103,7 @@ function formatDateTime(value: string, locale: string) {
     return value;
   }
 
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
+  return getDateTimeFormatter(locale).format(date);
 }
 
 function getPeerLabel(item: Pick<TorrentDetail, "leechers" | "seeders">, locale: string) {
@@ -160,7 +179,7 @@ function getDisplayedFileRows(rows: FileRow[], filterValue: string, sort: FileSo
   const filter = filterValue.trim();
 
   if (!filter) {
-    return [...rows].sort((left, right) => compareFileRows(left, right, sort));
+    return rows.toSorted((left, right) => compareFileRows(left, right, sort));
   }
 
   const scoredRows: Array<{ row: FileRow; score: number }> = [];
@@ -212,12 +231,6 @@ function TorrentFilesSection({ infoHash, torrent }: { infoHash: string; torrent:
   const filesLimit = FILES_FETCH_LIMIT;
   const loadFiles = shouldQueryFiles(torrent);
 
-  useEffect(() => {
-    setFilterValue("");
-    setPage(1);
-    setSort(DEFAULT_FILE_SORT);
-  }, [infoHash]);
-
   function handleFilterChange(value: string) {
     setFilterValue(value);
     setPage(1);
@@ -228,7 +241,13 @@ function TorrentFilesSection({ infoHash, torrent }: { infoHash: string; torrent:
     setPage(1);
   }
 
-  const filesQuery = useQuery({
+  const {
+    data: filesData,
+    error: filesError,
+    isError: isFilesError,
+    isPending: isFilesPending,
+    refetch: refetchFiles,
+  } = useQuery({
     enabled: loadFiles,
     queryFn: () =>
       execute(TorrentFilesDocument, {
@@ -261,7 +280,7 @@ function TorrentFilesSection({ infoHash, torrent }: { infoHash: string; torrent:
     );
   }
 
-  if (filesQuery.isPending) {
+  if (isFilesPending) {
     return (
       <section className={styles["section"]}>
         <h2>{t("detail.files")}</h2>
@@ -270,16 +289,16 @@ function TorrentFilesSection({ infoHash, torrent }: { infoHash: string; torrent:
     );
   }
 
-  if (filesQuery.isError) {
+  if (isFilesError) {
     return (
       <section className={styles["section"]}>
         <h2>{t("detail.files")}</h2>
-        <QueryError error={filesQuery.error} onRetry={() => void filesQuery.refetch()} />
+        <QueryError error={filesError} onRetry={() => void refetchFiles()} />
       </section>
     );
   }
 
-  const filesResult = filesQuery.data?.torrent.files;
+  const filesResult = filesData?.torrent.files;
 
   if (!filesResult) {
     return (
@@ -517,7 +536,13 @@ export default function TorrentDetailPage() {
   const { i18n, t } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
 
-  const detailQuery = useQuery({
+  const {
+    data: detailData,
+    error: detailError,
+    isError: isDetailError,
+    isPending: isDetailPending,
+    refetch: refetchDetail,
+  } = useQuery({
     enabled: isValidInfoHash,
     queryFn: () =>
       execute(TorrentDetailDocument, {
@@ -531,15 +556,15 @@ export default function TorrentDetailPage() {
     return <NotFoundState />;
   }
 
-  if (detailQuery.isPending) {
+  if (isDetailPending) {
     return <ListSkeleton ariaLabel={t("detail.loading")} rows={6} />;
   }
 
-  if (detailQuery.isError) {
-    return <QueryError error={detailQuery.error} onRetry={() => void detailQuery.refetch()} />;
+  if (isDetailError) {
+    return <QueryError error={detailError} onRetry={() => void refetchDetail()} />;
   }
 
-  const item = detailQuery.data?.torrentContent.search.items[0];
+  const item = detailData?.torrentContent.search.items[0];
 
   if (!item) {
     return <NotFoundState />;
@@ -781,7 +806,7 @@ export default function TorrentDetailPage() {
         </section>
       ) : null}
 
-      <TorrentFilesSection infoHash={infoHash} torrent={item.torrent} />
+      <TorrentFilesSection key={infoHash} infoHash={infoHash} torrent={item.torrent} />
     </article>
   );
 }

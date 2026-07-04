@@ -58,3 +58,4 @@ docs/dev/psx-logs/
 # CB campaign raw logs (throwaway; HEL1 conn details)
 docs/dev/cb-logs/
 bench/__pycache__/
+*.tsbuildinfo

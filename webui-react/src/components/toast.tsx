@@ -1,5 +1,5 @@
 import type { PropsWithChildren } from "react";
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, use, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import styles from "./toast.module.css";
@@ -55,7 +55,7 @@ export function ToastProvider({ children }: PropsWithChildren) {
 }
 
 export function useToast() {
-  const notify = useContext(ToastContext);
+  const notify = use(ToastContext);
 
   if (!notify) {
     throw new Error("useToast must be used inside ToastProvider");

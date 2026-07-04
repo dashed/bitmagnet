@@ -1,3 +1,19 @@
+const NumberFormatter = Intl.NumberFormat;
+const NUMBER_FORMATTERS = new Map<string, Intl.NumberFormat>();
+
+function getNumberFormatter(locale: string) {
+  const cachedFormatter = NUMBER_FORMATTERS.get(locale);
+
+  if (cachedFormatter) {
+    return cachedFormatter;
+  }
+
+  const formatter = new NumberFormatter(locale);
+  NUMBER_FORMATTERS.set(locale, formatter);
+
+  return formatter;
+}
+
 export function formatIntEstimate(value: number, isEstimate = true, sigFigs = 2, locale = "en") {
   let nextValue = value;
 
@@ -7,7 +23,7 @@ export function formatIntEstimate(value: number, isEstimate = true, sigFigs = 2,
     nextValue = Math.round(nextValue / scale) * scale;
   }
 
-  const formatted = new Intl.NumberFormat(locale).format(nextValue);
+  const formatted = getNumberFormatter(locale).format(nextValue);
 
   return isEstimate ? `~${formatted}` : formatted;
 }
