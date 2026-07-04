@@ -63,6 +63,11 @@ type Config struct {
 	// offset pagination while the sidecar cursor is not usable
 	// (SEARCH_FILE_SEARCH_MAX_ROWS). 0 → client default (500).
 	FileSearchMaxRows uint
+	// FileSearchRouteText routes GraphQL fileSearch inputs with non-empty text
+	// through the L3 pathsearch candidate + L1 refine pipeline when pathsearch is
+	// enabled and healthy (SEARCH_FILE_SEARCH_ROUTE_TEXT). Default true; set false
+	// for an ops rollback to the L2 DuckDB sidecar for text shapes.
+	FileSearchRouteText bool
 
 	// --- L3 pathsearch (separate from the Tantivy main-search above) ---------
 	//
@@ -173,10 +178,11 @@ func NewDefaultConfig() Config {
 		LogDiscrepancies:    true,
 
 		// L2 filesearch — client construction defaults false (feature dark).
-		FileSearchEnabled: false,
-		FileSearchAddress: "bitmagnet-filesearch.bitmagnet.svc:50052",
-		FileSearchTimeout: 5 * time.Second,
-		FileSearchMaxRows: filesearch.DefaultMaxRows,
+		FileSearchEnabled:   false,
+		FileSearchAddress:   "bitmagnet-filesearch.bitmagnet.svc:50052",
+		FileSearchTimeout:   5 * time.Second,
+		FileSearchMaxRows:   filesearch.DefaultMaxRows,
+		FileSearchRouteText: true,
 
 		// L3 pathsearch — all switches default false (feature off).
 		PathsearchEnabled:         false,
@@ -232,6 +238,7 @@ func (c Config) composerConfig() pathsearch.ComposerConfig {
 		OversampleFactor:     c.PathsearchOversample,
 		MaxCandidates:        c.PathsearchMaxCandidates,
 		TypeaheadEnabled:     c.PathTypeaheadEnabled,
+		FileSearchRouteText:  c.FileSearchRouteText,
 		CollapseEnabled:      c.PathCollapseEnabled,
 		MaxRefineFiles:       c.PathsearchMaxRefineFiles,
 		RefineFileBudget:     c.PathsearchRefineFileBudget,

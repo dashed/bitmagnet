@@ -120,6 +120,7 @@ type FileSearchParams struct {
 	MinSize    uint64
 	MaxSize    uint64
 	InfoHash   *protocol.ID
+	Sort       []FileSort
 	Limit      uint
 	Offset     uint
 	TotalCount *bool
@@ -143,6 +144,7 @@ func NewFileSearchInput(p FileSearchParams) (FileSearchInput, error) {
 		MinSize:          p.MinSize,
 		MaxSize:          p.MaxSize,
 		InfoHash:         p.InfoHash,
+		Sort:             p.Sort,
 		Limit:            clampLimit(p.Limit, DefaultLimit, MaxLimit),
 		Offset:           p.Offset,
 		SkipTotalCount:   p.TotalCount != nil && !*p.TotalCount,

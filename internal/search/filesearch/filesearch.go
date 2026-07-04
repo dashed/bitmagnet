@@ -53,12 +53,23 @@ type FileSearchInput struct {
 	// InfoHash, when set, scopes the search to a single torrent (the per-torrent
 	// browser path).
 	InfoHash *protocol.ID
+	// Sort carries optional file-level ordering. Empty means backend default
+	// (currently size DESC for the pathsearch adapter; sidecar default for L2).
+	Sort []FileSort
 	// Limit / Offset paginate the result; Limit is clamped to [1, MaxLimit].
 	Limit  uint
 	Offset uint
 	// SkipTotalCount avoids the exact CountFiles RPC for first-page/low-latency
 	// callers. Existing callers default to exact counts.
 	SkipTotalCount bool
+}
+
+// FileSort is one optional file-search sort key. Supported fields are backend
+// dependent; common fields are "size", "path", "extension", "index", and
+// "info_hash".
+type FileSort struct {
+	Field      string
+	Descending bool
 }
 
 // FileSearchItem is a single matched file.

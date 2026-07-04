@@ -55,6 +55,11 @@ type ComposerConfig struct {
 	// (SEARCH_PATH_TYPEAHEAD_ENABLED). The master switch is the composer existing
 	// at all (nil composer = pathsearch disabled).
 	TypeaheadEnabled bool
+	// FileSearchRouteText gates routing GraphQL fileSearch queries with non-empty
+	// path text through the L3 candidate + L1 refine pipeline
+	// (SEARCH_FILE_SEARCH_ROUTE_TEXT). It is an ops rollback switch; the searchfx
+	// default is true.
+	FileSearchRouteText bool
 	// CollapseEnabled gates routing collapse:path through L3 candidates
 	// (SEARCH_PATH_COLLAPSE_L3_ENABLED).
 	CollapseEnabled bool
@@ -341,6 +346,13 @@ func (c *Composer) Eligible(queryText string) bool {
 // (SEARCH_PATH_TYPEAHEAD_ENABLED). A nil composer (feature off) reports false.
 func (c *Composer) TypeaheadEnabled() bool {
 	return c != nil && c.cfg.TypeaheadEnabled
+}
+
+// FileSearchRouteTextEnabled reports whether fileSearch text queries should be
+// adapted onto the L3 candidate + L1 refine route
+// (SEARCH_FILE_SEARCH_ROUTE_TEXT). A nil composer (feature off) reports false.
+func (c *Composer) FileSearchRouteTextEnabled() bool {
+	return c != nil && c.cfg.FileSearchRouteText
 }
 
 // CollapseEnabled reports whether collapse:path should route through L3

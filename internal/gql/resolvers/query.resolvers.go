@@ -116,7 +116,7 @@ func (r *torrentContentQueryResolver) FileSearch(ctx context.Context, obj *gqlmo
 		return obj.FileSearch(ctx, input)
 	}
 
-	return gqlmodel.FileSearchQuery{Client: r.Resolver.FileSearch}.Search(ctx, input)
+	return gqlmodel.FileSearchQuery{Client: r.Resolver.FileSearch, Pathsearch: r.Resolver.Pathsearch}.Search(ctx, input)
 }
 
 // PathTypeahead is the resolver for the pathTypeahead field.
@@ -125,7 +125,10 @@ func (r *torrentContentQueryResolver) PathTypeahead(ctx context.Context, obj *gq
 		return obj.PathTypeahead(ctx, input)
 	}
 
-	return gqlmodel.FileSearchQuery{Client: r.Resolver.FileSearch}.PathTypeahead(ctx, input)
+	return gqlmodel.FileSearchQuery{
+		Client:     r.Resolver.FileSearch,
+		Pathsearch: r.Resolver.Pathsearch,
+	}.PathTypeahead(ctx, input)
 }
 
 // Files is the resolver for the files field.

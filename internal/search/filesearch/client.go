@@ -120,6 +120,7 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 		Pagination: &pb.FilePagination{
 			Limit: uint32(requestLimit),
 		},
+		Sort:              buildSorts(in.Sort),
 		CollapseToTorrent: false,
 	}
 
@@ -222,6 +223,28 @@ func buildFilters(in FileSearchInput) *pb.FileFilters {
 	}
 
 	return filters
+}
+
+func buildSorts(in []FileSort) []*pb.FileSortBy {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]*pb.FileSortBy, 0, len(in))
+
+	for _, s := range in {
+		field := strings.TrimSpace(s.Field)
+		if field == "" {
+			continue
+		}
+
+		out = append(out, &pb.FileSortBy{
+			Field:      field,
+			Descending: s.Descending,
+		})
+	}
+
+	return out
 }
 
 func convertHits(hits []*pb.FileHit) ([]FileSearchItem, error) {
