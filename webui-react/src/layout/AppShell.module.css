@@ -1,4 +1,12 @@
 .root {
+  --app-mobile-bottom-nav-height: 0px;
+  --app-mobile-stack-gap: 0px;
+  --app-z-bottom-nav: 40;
+  --app-z-mobile-bulk-bar: 45;
+  --app-z-filter-trigger: 50;
+  --app-z-filter-scrim: 55;
+  --app-z-filter-sheet: 56;
+
   background:
     linear-gradient(
       180deg,
@@ -87,7 +95,8 @@
 }
 
 .navLink:hover,
-.navLinkActive {
+.navLinkActive,
+.navLink[aria-current="page"] {
   background: var(--mantine-color-default-hover);
   color: var(--mantine-color-text);
 }
@@ -105,6 +114,9 @@
 
 @media (max-width: 61.999em) {
   .root {
+    --app-mobile-bottom-nav-height: calc(53px + max(8px, env(safe-area-inset-bottom)));
+    --app-mobile-stack-gap: 12px;
+
     min-height: 100dvh;
   }
 
@@ -124,9 +136,14 @@
   }
 
   .main {
-    padding: 28px 16px 96px;
+    padding: 28px 16px calc(var(--app-mobile-bottom-nav-height) + 28px);
   }
 
+  /*
+   * Mobile layer ladder:
+   * 40 bottom nav, 45 sticky bulk bar, 50 filter trigger,
+   * 55 filter scrim, 56 filter sheet, 60 dialogs, max toasts.
+   */
   .bottomNav {
     background: color-mix(in srgb, var(--mantine-color-body), transparent 4%);
     border-top: 1px solid var(--mantine-color-default-border);
@@ -139,11 +156,19 @@
       max(12px, env(safe-area-inset-right));
     position: fixed;
     right: 0;
-    z-index: var(--mantine-z-index-app);
+    z-index: var(--app-z-bottom-nav);
   }
 
   .bottomNav .navLink {
     justify-content: center;
     min-height: 44px;
+  }
+
+  .bottomNav .navLinkActive,
+  .bottomNav .navLink[aria-current="page"] {
+    background: var(--mantine-primary-color-light);
+    color: var(--mantine-primary-color-light-color);
+    box-shadow: inset 0 0 0 1px
+      color-mix(in srgb, var(--mantine-primary-color-filled), transparent 62%);
   }
 }

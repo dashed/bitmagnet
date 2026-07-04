@@ -27,3 +27,10 @@
   stroke-width: 1.8;
   width: 18px;
 }
+
+@media (max-width: 47.999em) {
+  .root {
+    height: 44px;
+    width: 44px;
+  }
+}

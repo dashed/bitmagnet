@@ -469,3 +469,140 @@
     justify-content: flex-end;
   }
 }
+
+@media (max-width: 47.999em) {
+  .root {
+    gap: 24px;
+    max-width: 100%;
+  }
+
+  .header {
+    gap: 16px;
+    grid-template-columns: 1fr;
+  }
+
+  .poster {
+    max-width: min(168px, 48vw);
+  }
+
+  .summary {
+    gap: 16px;
+  }
+
+  .summary h1 {
+    font-size: 24px;
+  }
+
+  .actions,
+  .fileFilterControl,
+  .pagination {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .primaryLink,
+  .secondaryButton,
+  .inlineList li,
+  .externalLinks a {
+    min-height: 44px;
+  }
+
+  .primaryLink,
+  .secondaryButton {
+    white-space: normal;
+    width: 100%;
+  }
+
+  .metadata,
+  .sourcesList dl {
+    gap: 12px;
+    grid-template-columns: 1fr;
+  }
+
+  .metadata div {
+    gap: 4px;
+  }
+
+  .section {
+    gap: 14px;
+    padding-top: 20px;
+  }
+
+  .sectionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .hashRow {
+    grid-template-columns: 1fr;
+  }
+
+  .hashRow code {
+    max-width: 100%;
+    word-break: break-all;
+  }
+
+  .inlineList li,
+  .externalLinks a {
+    align-items: center;
+  }
+
+  .fileFilterControl input {
+    flex-basis: auto;
+    min-height: 44px;
+    width: 100%;
+  }
+
+  .filesTableScroll {
+    border: 0;
+    overflow: visible;
+  }
+
+  .filesTable,
+  .filesTable tbody {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .filesTable {
+    border-collapse: separate;
+    table-layout: auto;
+  }
+
+  .filesTable thead {
+    display: none;
+  }
+
+  .filesTable tr {
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 12px;
+  }
+
+  .filesTable td {
+    border-bottom: 0;
+    padding: 0;
+  }
+
+  .filesTable td:nth-child(2) {
+    flex: 1 0 100%;
+    order: 1;
+  }
+
+  .filesTable td:nth-child(1),
+  .filesTable td:nth-child(3),
+  .filesTable td:nth-child(4) {
+    color: var(--mantine-color-dimmed);
+    flex: 0 1 auto;
+    font-size: var(--mantine-font-size-xs);
+    order: 2;
+    overflow-wrap: anywhere;
+  }
+}

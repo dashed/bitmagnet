@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { useTranslation } from "react-i18next";
@@ -9,13 +9,21 @@ import { execute } from "../graphql/client";
 import { VersionDocument } from "../graphql/generated/graphql";
 import styles from "./AppShell.module.css";
 
-function NavLink({ children, to }: { children: string; to: "/" | "/dashboard" }) {
+function NavLink({
+  active,
+  children,
+  to,
+}: {
+  active: boolean;
+  children: string;
+  to: "/" | "/dashboard";
+}) {
   return (
     <Link
-      activeProps={{
-        className: `${styles["navLink"]} ${styles["navLinkActive"]}`,
-      }}
-      className={styles["navLink"]}
+      aria-current={active ? "page" : undefined}
+      className={[styles["navLink"], active ? styles["navLinkActive"] : ""]
+        .filter(Boolean)
+        .join(" ")}
       to={to}
     >
       {children}
@@ -25,11 +33,15 @@ function NavLink({ children, to }: { children: string; to: "/" | "/dashboard" })
 
 export function AppShell({ children }: PropsWithChildren) {
   const { t } = useTranslation();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const versionQuery = useQuery({
     queryFn: () => execute(VersionDocument, {}),
     queryKey: ["version"],
   });
   const version = versionQuery.data?.version ?? t("app.version");
+  const torrentsActive =
+    pathname === "/" || pathname === "/torrents" || pathname.startsWith("/torrents/");
+  const dashboardActive = pathname === "/dashboard";
 
   return (
     <div className={styles["root"]}>
@@ -40,8 +52,12 @@ export function AppShell({ children }: PropsWithChildren) {
         </Link>
 
         <nav aria-label="Primary" className={styles["desktopNav"]}>
-          <NavLink to="/">{t("nav.torrents")}</NavLink>
-          <NavLink to="/dashboard">{t("nav.dashboard")}</NavLink>
+          <NavLink active={torrentsActive} to="/">
+            {t("nav.torrents")}
+          </NavLink>
+          <NavLink active={dashboardActive} to="/dashboard">
+            {t("nav.dashboard")}
+          </NavLink>
           <a className={styles["navLink"]} href="/?frontend=angular">
             {t("nav.classicUi")}
           </a>
@@ -56,8 +72,12 @@ export function AppShell({ children }: PropsWithChildren) {
       <main className={styles["main"]}>{children}</main>
 
       <nav aria-label="Primary mobile" className={styles["bottomNav"]}>
-        <NavLink to="/">{t("nav.torrents")}</NavLink>
-        <NavLink to="/dashboard">{t("nav.dashboard")}</NavLink>
+        <NavLink active={torrentsActive} to="/">
+          {t("nav.torrents")}
+        </NavLink>
+        <NavLink active={dashboardActive} to="/dashboard">
+          {t("nav.dashboard")}
+        </NavLink>
       </nav>
     </div>
   );

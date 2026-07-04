@@ -4,6 +4,7 @@
   justify-items: center;
   min-height: calc(100vh - 168px);
   padding-top: clamp(32px, 8vh, 80px);
+  width: 100%;
 }
 
 .searchForm {
@@ -72,7 +73,7 @@
   width: min(100%, 860px);
 }
 
-.filters summary {
+.filters > summary {
   color: var(--mantine-color-text);
   cursor: pointer;
   font-size: var(--mantine-font-size-sm);
@@ -80,6 +81,11 @@
   list-style-position: inside;
   min-height: 44px;
   padding: 12px 14px;
+}
+
+.filtersScrim,
+.filtersSheetHeader {
+  display: none;
 }
 
 .filtersBody {
@@ -671,6 +677,7 @@
   flex-direction: column;
   gap: 0.75rem;
   margin-block: 1rem;
+  width: min(100%, 860px);
 }
 
 .primaryControls .filterBlock {
@@ -711,4 +718,257 @@
   padding: 0;
   position: absolute;
   white-space: nowrap;
+}
+
+@media (max-width: 47.999em) {
+  .root {
+    padding-bottom: 68px;
+  }
+
+  .searchForm,
+  .primaryControls,
+  .filters,
+  .resultsShell {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .chip,
+  .secondaryButton,
+  .submitSmall,
+  .magnetLink,
+  .copyButton {
+    min-height: 44px;
+  }
+
+  .chip {
+    line-height: 1.2;
+    padding: 6px 12px;
+  }
+
+  .sortBar select,
+  .sizeForm input,
+  .sizeForm select,
+  .publishedSelect select {
+    min-height: 44px;
+  }
+
+  .filterBlock h2,
+  .facetGroup summary span,
+  .facetOption span {
+    overflow-wrap: anywhere;
+  }
+
+  .filters {
+    border: 0;
+    border-radius: 0;
+    width: 100%;
+  }
+
+  .filters > summary {
+    align-items: center;
+    background: var(--mantine-color-body);
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+    bottom: calc(var(--app-mobile-bottom-nav-height) + var(--app-mobile-stack-gap));
+    box-shadow: var(--mantine-shadow-md);
+    display: inline-flex;
+    gap: 8px;
+    justify-content: center;
+    left: 16px;
+    list-style: none;
+    min-height: 48px;
+    padding: 0 16px;
+    position: fixed;
+    right: 16px;
+    transition:
+      opacity 160ms ease,
+      transform 160ms ease;
+    z-index: var(--app-z-filter-trigger);
+  }
+
+  .filters > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .filters[open] > summary {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+  }
+
+  .filtersScrim {
+    appearance: none;
+    background: color-mix(in srgb, var(--mantine-color-black), transparent 50%);
+    border: 0;
+    bottom: var(--app-mobile-bottom-nav-height);
+    display: none;
+    left: 0;
+    padding: 0;
+    position: fixed;
+    right: 0;
+    top: 0;
+    z-index: var(--app-z-filter-scrim);
+  }
+
+  .filters[open] > .filtersScrim {
+    display: block;
+  }
+
+  .filtersBody {
+    background: var(--mantine-color-body);
+    border: 1px solid var(--mantine-color-default-border);
+    border-bottom: 0;
+    border-radius: var(--mantine-radius-md) var(--mantine-radius-md) 0 0;
+    bottom: var(--app-mobile-bottom-nav-height);
+    box-shadow: var(--mantine-shadow-lg);
+    gap: 16px;
+    left: 0;
+    max-height: min(75dvh, calc(100dvh - var(--app-mobile-bottom-nav-height) - 32px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px 16px 16px;
+    pointer-events: none;
+    position: fixed;
+    right: 0;
+    transform: translateY(calc(100% + 24px));
+    transition: transform 180ms ease;
+    visibility: hidden;
+    z-index: var(--app-z-filter-sheet);
+  }
+
+  .filters[open] > .filtersBody {
+    pointer-events: auto;
+    transform: translateY(0);
+    visibility: visible;
+  }
+
+  :global([data-mantine-color-scheme="dark"]) .filters > summary,
+  :global([data-mantine-color-scheme="dark"]) .filtersBody {
+    box-shadow: none;
+  }
+
+  .filtersSheetHeader {
+    align-items: center;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    min-width: 0;
+  }
+
+  .filtersSheetHeader h2 {
+    color: var(--mantine-color-text);
+    font-size: var(--mantine-font-size-md);
+    line-height: 1.2;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .filtersToolbar,
+  .filterActions,
+  .facetActions {
+    align-items: stretch;
+    justify-content: stretch;
+  }
+
+  .filterActions > *,
+  .facetActions > *,
+  .filtersToolbar > * {
+    flex: 1 1 auto;
+  }
+
+  .facetGroup summary {
+    min-height: 44px;
+    padding: 10px 12px;
+  }
+
+  .facetOption {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    min-height: 44px;
+    padding: 8px 6px;
+  }
+
+  .facetOption input,
+  .selectAllControl input,
+  .resultSelect input {
+    height: 20px;
+    width: 20px;
+  }
+
+  .facetOption small {
+    overflow-wrap: anywhere;
+  }
+
+  .resultsToolbar,
+  .resultsActions,
+  .pagination {
+    width: 100%;
+  }
+
+  .resultsActions > *,
+  .pagination > button {
+    width: 100%;
+  }
+
+  .selectAllControl {
+    min-height: 44px;
+  }
+
+  .bulkActionsFallback {
+    bottom: calc(var(--app-mobile-bottom-nav-height) + var(--app-mobile-stack-gap));
+    position: sticky;
+    z-index: var(--app-z-mobile-bulk-bar);
+  }
+
+  .resultItem {
+    border-radius: var(--mantine-radius-md);
+    box-shadow: var(--mantine-shadow-xs);
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+    position: relative;
+  }
+
+  :global([data-mantine-color-scheme="dark"]) .resultItem {
+    box-shadow: none;
+  }
+
+  .resultSelect {
+    align-items: center;
+    background: color-mix(in srgb, var(--mantine-color-body), transparent 4%);
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+    display: inline-flex;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    position: absolute;
+    right: 12px;
+    top: 12px;
+  }
+
+  .resultMain {
+    grid-column: 1;
+    padding-right: 52px;
+  }
+
+  .resultMeta,
+  .magnetActions {
+    grid-column: 1;
+  }
+
+  .magnetActions > * {
+    flex: 1 1 140px;
+  }
+
+  .hashButton {
+    align-items: center;
+    display: inline-flex;
+    max-width: 100%;
+    min-height: 44px;
+    text-align: left;
+  }
+
+  .pagination span {
+    min-width: 0;
+  }
 }

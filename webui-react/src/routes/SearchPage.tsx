@@ -385,6 +385,7 @@ export function SearchPage() {
     uncachedSearchKey: null,
   });
   const [selectedInfoHashes, setSelectedInfoHashes] = useState<Set<string>>(() => new Set());
+  const filtersRef = useRef<HTMLDetailsElement>(null);
   const previousSearchParamsRef = useRef(searchParamsKey);
   const navigate = useNavigate({ from: "/" });
   const notify = useToast();
@@ -586,6 +587,12 @@ export function SearchPage() {
     });
   }
 
+  function handleCloseFilters() {
+    const filters = filtersRef.current;
+    filters?.removeAttribute("open");
+    filters?.querySelector("summary")?.focus();
+  }
+
   function handleResultSelectionChange(infoHash: string, checked: boolean) {
     setSelectedInfoHashes((currentSelection) =>
       toggleInfoHashSelection(currentSelection, infoHash, checked),
@@ -784,14 +791,37 @@ export function SearchPage() {
         </section>
       </div>
 
-      <details className={styles["filters"]}>
-        <summary>
+      <details className={styles["filters"]} ref={filtersRef}>
+        <summary
+          aria-label={
+            activeFilterCount > 0
+              ? t("search.filtersSummaryActive", { count: activeFilterCount })
+              : t("search.filtersSummary")
+          }
+        >
           {t("search.filtersSummary")}
           {activeFilterCount > 0 ? (
             <span className={styles["filterBadge"]}>{activeFilterCount}</span>
           ) : null}
         </summary>
+        <button
+          aria-label={t("search.closeFilters")}
+          className={styles["filtersScrim"]}
+          onClick={handleCloseFilters}
+          tabIndex={-1}
+          type="button"
+        />
         <div className={styles["filtersBody"]}>
+          <div className={styles["filtersSheetHeader"]}>
+            <h2>{t("search.filtersSummary")}</h2>
+            <button
+              className={styles["secondaryButton"]}
+              onClick={handleCloseFilters}
+              type="button"
+            >
+              {t("search.closeFilters")}
+            </button>
+          </div>
           {hasActiveFilters ? (
             <div className={styles["filtersToolbar"]}>
               <button

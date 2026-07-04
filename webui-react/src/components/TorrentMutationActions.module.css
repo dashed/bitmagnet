@@ -348,3 +348,70 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+@media (max-width: 47.999em) {
+  .bulkBar {
+    bottom: calc(var(--app-mobile-bottom-nav-height) + var(--app-mobile-stack-gap));
+    max-height: calc(100dvh - var(--app-mobile-bottom-nav-height) - 24px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    z-index: var(--app-z-mobile-bulk-bar);
+  }
+
+  .bulkHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .actionPanel summary,
+  .primaryButton,
+  .secondaryButton,
+  .dangerButton,
+  .suggestion,
+  .checkboxRow {
+    min-height: 44px;
+  }
+
+  .buttonRow,
+  .dialogActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .buttonRow > *,
+  .dialogActions > *,
+  .bulkHeader > button {
+    width: 100%;
+  }
+
+  .tagInputWrap {
+    min-height: 48px;
+  }
+
+  .tagInput {
+    min-height: 44px;
+  }
+
+  .chip {
+    min-height: 36px;
+  }
+
+  .chip button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .checkboxRow {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .checkboxRow input {
+    height: 20px;
+    width: 20px;
+  }
+
+  .dialog {
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+  }
+}
