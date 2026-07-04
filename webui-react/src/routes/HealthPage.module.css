@@ -156,7 +156,7 @@
 .checksTable td {
   border-bottom: 1px solid var(--mantine-color-default-border);
   padding: 12px;
-  text-align: left;
+  text-align: start;
   vertical-align: top;
 }
 

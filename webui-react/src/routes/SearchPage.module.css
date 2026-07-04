@@ -942,13 +942,13 @@
     min-height: 44px;
     min-width: 44px;
     position: absolute;
-    right: 12px;
+    inset-inline-end: 12px;
     top: 12px;
   }
 
   .resultMain {
     grid-column: 1;
-    padding-right: 52px;
+    padding-inline-end: 52px;
   }
 
   .resultMeta,
@@ -965,7 +965,7 @@
     display: inline-flex;
     max-width: 100%;
     min-height: 44px;
-    text-align: left;
+    text-align: start;
   }
 
   .pagination span {
