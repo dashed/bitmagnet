@@ -8,3 +8,4 @@ webui/.angular
 
 # Generated Go→Rust tokenizer parity fixture (fts.TokenizeFlat ground-truth); not hand-edited
 bitmagnet-rs/crates/bitmagnet-search/tests/fixtures/tokenizer_fixtures.json
+webui-react/pnpm-lock.yaml
