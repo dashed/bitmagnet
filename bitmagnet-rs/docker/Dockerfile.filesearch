@@ -51,6 +51,9 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/bitmagnet-filesearch /usr/local/bin/bitmagnet-filesearch
 COPY --from=builder /build/target/release/bitmagnet-parquet    /usr/local/bin/bitmagnet-parquet
+# G1/G2 gate harness (parity battery over two generation roots) — tiny, and
+# having it in the serving image means gates always run the exact deployed code.
+COPY --from=builder /build/target/release/bitmagnet-parity     /usr/local/bin/bitmagnet-parity
 
 # Serve on all interfaces inside the container; generations live on a volume
 # (immutable read-only generations + `current` pointer, atomic-swapped by the
