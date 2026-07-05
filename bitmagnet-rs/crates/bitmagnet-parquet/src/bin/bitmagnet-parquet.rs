@@ -131,6 +131,11 @@ enum Cmd {
         /// the changed-torrent count is below --min-torrents.
         #[arg(long, default_value_t = 86_400)]
         max_lag_secs: i64,
+        /// Explicit carve end (epoch seconds) instead of now − CARVE_LAG.
+        /// Must not exceed the lagged now (commit-visibility contract); used by
+        /// the parity/shadow gates to seal a frozen tree deterministically.
+        #[arg(long)]
+        window_end: Option<i64>,
     },
     /// Fold same-tier sealed segments into one higher-tier segment.
     Fold {
@@ -323,11 +328,12 @@ async fn main() -> Result<()> {
             page_size,
             min_torrents,
             max_lag_secs,
+            window_end,
         } => {
             let pool = bitmagnet_db::PgPool::connect(&dsn)
                 .await
                 .context("connecting to postgres")?;
-            let window_end = seal::default_seal_window_end(now_epoch());
+            let window_end = resolve_seal_window_end(now_epoch(), window_end)?;
             let since = seal::reconcile_watermark_with_manifest(&layout)?;
             let deleted = read_deleted_for_window(
                 &pool,
@@ -602,6 +608,21 @@ async fn one_delta_tick(
     export::run_delta(pool, layout, &version, window_end, &deleted, page_size).await
 }
 
+/// Resolve the seal carve end: an explicit override may not exceed the lagged
+/// now (rows committing later than the lag could otherwise fall between runs —
+/// the CARVE_LAG commit-visibility contract) and must be positive.
+fn resolve_seal_window_end(now_epoch: i64, override_end: Option<i64>) -> Result<i64> {
+    let lagged_now = seal::default_seal_window_end(now_epoch);
+    match override_end {
+        None => Ok(lagged_now),
+        Some(end) if end <= 0 => anyhow::bail!("--window-end must be a positive epoch, got {end}"),
+        Some(end) if end > lagged_now => anyhow::bail!(
+            "--window-end {end} exceeds the lagged now {lagged_now}; sealing an un-lagged window breaks the commit-visibility contract"
+        ),
+        Some(end) => Ok(end),
+    }
+}
+
 async fn read_deleted_for_window(
     pool: &bitmagnet_db::PgPool,
     deleted_source: DeletedSource,
@@ -775,6 +796,22 @@ fn run_from_hex(
 #[cfg(test)]
 mod tests {
     use super::follow_backoff_secs;
+    use super::resolve_seal_window_end;
+
+    #[test]
+    fn seal_window_end_defaults_to_lagged_now_and_rejects_bad_overrides() {
+        let now = 1_000_000;
+        let lagged = now - bitmagnet_parquet::export::CARVE_LAG_SECS;
+        assert_eq!(resolve_seal_window_end(now, None).unwrap(), lagged);
+        assert_eq!(resolve_seal_window_end(now, Some(lagged)).unwrap(), lagged);
+        assert_eq!(
+            resolve_seal_window_end(now, Some(lagged - 500)).unwrap(),
+            lagged - 500
+        );
+        assert!(resolve_seal_window_end(now, Some(lagged + 1)).is_err());
+        assert!(resolve_seal_window_end(now, Some(0)).is_err());
+        assert!(resolve_seal_window_end(now, Some(-5)).is_err());
+    }
 
     #[test]
     fn backoff_is_base_interval_when_no_failures() {
