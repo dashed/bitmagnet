@@ -679,6 +679,7 @@ dependencies = [
  "clap",
  "duckdb",
  "hex",
+ "libc",
  "parquet",
  "sqlx",
  "thiserror",

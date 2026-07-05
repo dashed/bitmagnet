@@ -32,6 +32,7 @@ thiserror.workspace = true
 tracing.workspace = true
 clap.workspace = true
 hex.workspace = true
+libc = "0.2"
 
 # `--sort external` only — gated by `duckdb-sort`.
 duckdb = { workspace = true, optional = true }

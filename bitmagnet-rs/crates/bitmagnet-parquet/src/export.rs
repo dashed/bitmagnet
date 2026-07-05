@@ -107,8 +107,22 @@ impl Sinks {
 
     /// Close all writers, returning the totals. Writes `agg_ext.parquet`.
     pub fn finish(self, dir: &Path) -> Result<BuildStats> {
+        self.finish_with_agg_ext(dir, true)
+    }
+
+    /// Close the segment artifact set. Segments do not carry `agg_ext.parquet`
+    /// because the serve path does not read it.
+    pub fn finish_segment(self, dir: &Path) -> Result<BuildStats> {
+        self.finish_with_agg_ext(dir, false)
+    }
+
+    fn finish_with_agg_ext(self, dir: &Path, write_agg_ext: bool) -> Result<BuildStats> {
         let fact_rows = self.fact.finish()?;
-        let agg_ext_rows = self.agg_ext.write(&dir.join(artifact::AGG_EXT))?;
+        let agg_ext_rows = if write_agg_ext {
+            self.agg_ext.write(&dir.join(artifact::AGG_EXT))?
+        } else {
+            0
+        };
         let agg_torrent_ext_rows = self.agg_torrent_ext.finish()?;
         let tombstones = match self.tombstone {
             Some(t) => t.finish()?,

@@ -9,9 +9,10 @@
 //! ```text
 //! <root>/
 //!   base/  v<ver>/{fact,agg_ext,agg_torrent_ext}.parquet   current -> v<ver>
+//!   seg/   v<ver>/{fact,agg_torrent_ext,tombstones}.parquet
 //!   delta/ v<ver>/{fact,agg_ext,agg_torrent_ext,tombstones}.parquet  current -> v<ver>
-//!   watermark    # the BASE'S cut point (compaction-only; the cumulative
-//!                # delta carve origin)
+//!   manifest     # base cut + live sealed segment list
+//!   watermark    # cumulative delta carve origin
 //!   delta_mark   # the latest delta window end (freshness display)
 //! ```
 //!
@@ -22,13 +23,15 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
-/// Which half of the generation pair.
+/// Which generation family a versioned dir belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Base,
+    Segment,
     Delta,
 }
 
@@ -36,6 +39,7 @@ impl Kind {
     fn dirname(self) -> &'static str {
         match self {
             Kind::Base => "base",
+            Kind::Segment => "seg",
             Kind::Delta => "delta",
         }
     }
@@ -78,7 +82,7 @@ impl Layout {
         &self.root
     }
 
-    fn kind_dir(&self, kind: Kind) -> PathBuf {
+    pub(crate) fn kind_dir(&self, kind: Kind) -> PathBuf {
         self.root.join(kind.dirname())
     }
 
@@ -90,9 +94,9 @@ impl Layout {
         self.kind_dir(kind).join("current.txt")
     }
 
-    /// Create (if absent) the `<root>/{base,delta}` directories.
+    /// Create (if absent) the `<root>/{base,seg,delta}` directories.
     pub fn ensure_dirs(&self) -> Result<()> {
-        for k in [Kind::Base, Kind::Delta] {
+        for k in [Kind::Base, Kind::Segment, Kind::Delta] {
             fs::create_dir_all(self.kind_dir(k))
                 .with_context(|| format!("creating {}", self.kind_dir(k).display()))?;
         }
@@ -113,6 +117,9 @@ impl Layout {
     /// fsyncs the version dir's files first, then swaps the pointer. The pointer
     /// is a symlink on unix (atomic `rename`), or a `current.txt` file elsewhere.
     pub fn publish(&self, kind: Kind, version_dir: &Path) -> Result<()> {
+        if kind == Kind::Segment {
+            anyhow::bail!("segments are manifest-published and have no current pointer");
+        }
         fsync_dir(version_dir).ok(); // best-effort durability of the new gen
         let target = version_dir
             .file_name()
@@ -140,9 +147,20 @@ impl Layout {
         Ok(())
     }
 
+    /// Durably finish a sealed segment dir. Segments become live through the
+    /// manifest, not a per-kind `current` pointer.
+    pub fn publish_segment_dir(&self, version_dir: &Path) -> Result<()> {
+        fsync_dir(version_dir).ok();
+        fsync_dir(&self.kind_dir(Kind::Segment)).ok();
+        Ok(())
+    }
+
     /// Resolve the absolute path of the `current` generation dir for `kind`,
     /// or `None` if nothing has been published yet.
     pub fn resolve_current(&self, kind: Kind) -> Option<PathBuf> {
+        if kind == Kind::Segment {
+            return None;
+        }
         #[cfg(unix)]
         {
             let link = self.current_link(kind);
@@ -198,6 +216,18 @@ impl Layout {
     /// Persist the BASE watermark (compaction/base only).
     pub fn write_watermark(&self, epoch: i64) -> Result<()> {
         self.write_epoch(&self.watermark_path(), ".watermark.tmp", epoch)
+    }
+
+    /// Advance the watermark only if `epoch` is newer than the on-disk value.
+    /// Returns `true` when a write happened and `false` for an equal/stale
+    /// request. The plain [`Self::write_watermark`] semantics stay unchanged
+    /// for compaction.
+    pub fn write_watermark_monotonic(&self, epoch: i64) -> Result<bool> {
+        if epoch <= self.read_watermark() {
+            return Ok(false);
+        }
+        self.write_watermark(epoch)?;
+        Ok(true)
     }
 
     /// Read the latest delta window end (freshness), falling back to the base
@@ -307,6 +337,11 @@ impl Layout {
     /// Prune one kind: keep `current` + newest-`keep`, delete the rest. With
     /// `dry_run`, computes + measures the delete set but unlinks nothing.
     pub fn prune_kind(&self, kind: Kind, keep: usize, dry_run: bool) -> Result<PruneReport> {
+        if kind == Kind::Segment {
+            anyhow::bail!(
+                "prune_kind(Kind::Segment) is unsafe; call prune_segments with an explicit GC grace"
+            );
+        }
         let current = self.resolve_current(kind);
         let dirs = self.list_version_dirs(kind)?;
         let (keep_set, delete_set) = Self::select_prunable(&dirs, current.as_deref(), keep);
@@ -349,12 +384,60 @@ impl Layout {
         &self,
         keep_base: usize,
         keep_delta: usize,
+        segment_gc_grace: Duration,
         dry_run: bool,
     ) -> Result<Vec<PruneReport>> {
         Ok(vec![
             self.prune_kind(Kind::Base, keep_base, dry_run)?,
             self.prune_kind(Kind::Delta, keep_delta, dry_run)?,
+            self.prune_segments(segment_gc_grace, dry_run)?,
         ])
+    }
+
+    /// Segment GC: delete only dirs absent from the current manifest and older
+    /// than the grace window. Base/delta current-pointer rules do not apply.
+    pub fn prune_segments(&self, gc_grace: Duration, dry_run: bool) -> Result<PruneReport> {
+        let dirs = self.list_version_dirs(Kind::Segment)?;
+        let manifest = crate::manifest::read_manifest(self)?;
+        let referenced = segment_reference_names(manifest.as_ref());
+        let now = SystemTime::now();
+        let mut report = PruneReport {
+            kind: Kind::Segment,
+            kept: 0,
+            deleted: Vec::new(),
+            reclaimed_bytes: 0,
+            dry_run,
+        };
+
+        for d in dirs {
+            let keep = segment_dir_should_keep(&d, &referenced, now, gc_grace);
+            if keep {
+                report.kept += 1;
+                continue;
+            }
+            let bytes = dir_size(&d).unwrap_or(0);
+            if dry_run {
+                report.reclaimed_bytes += bytes;
+                report.deleted.push(d);
+                continue;
+            }
+            // TOCTOU guard: the manifest is the liveness source for segments,
+            // so re-read it immediately before each unlink.
+            let live_manifest = crate::manifest::read_manifest(self)?;
+            let live_referenced = segment_reference_names(live_manifest.as_ref());
+            if segment_dir_is_referenced(&d, &live_referenced) {
+                report.kept += 1;
+                continue;
+            }
+            if !remove_dir_all_tolerating_not_found(&d)
+                .with_context(|| format!("removing {}", d.display()))?
+            {
+                continue;
+            }
+            report.reclaimed_bytes += bytes;
+            report.deleted.push(d);
+        }
+        Ok(report)
     }
 }
 
@@ -383,6 +466,48 @@ fn parse_version_key(name: &str) -> Option<(i64, u8)> {
     Some((epoch, empty_rank))
 }
 
+/// Parse a manifest/generation numeric `v<epoch>` name.
+pub(crate) fn parse_numeric_version_name(name: &str) -> Option<u64> {
+    name.strip_prefix('v')?.parse().ok()
+}
+
+fn segment_reference_names(
+    manifest: Option<&crate::manifest::Manifest>,
+) -> std::collections::HashSet<String> {
+    manifest
+        .into_iter()
+        .flat_map(|m| m.segments.iter().map(|s| format!("v{}", s.version)))
+        .collect()
+}
+
+fn segment_dir_is_referenced(dir: &Path, referenced: &std::collections::HashSet<String>) -> bool {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| referenced.contains(n))
+        .unwrap_or(false)
+}
+
+fn segment_dir_should_keep(
+    dir: &Path,
+    referenced: &std::collections::HashSet<String>,
+    now: SystemTime,
+    gc_grace: Duration,
+) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    if parse_numeric_version_name(name).is_none() {
+        return true;
+    }
+    if referenced.contains(name) {
+        return true;
+    }
+    let Ok(modified) = fs::metadata(dir).and_then(|m| m.modified()) else {
+        return true;
+    };
+    now.duration_since(modified).unwrap_or_default() < gc_grace
+}
+
 /// Recursively sum file sizes under `path` (best-effort; a vanished entry → 0).
 fn dir_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
@@ -396,6 +521,14 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+fn remove_dir_all_tolerating_not_found(path: &Path) -> std::io::Result<bool> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -601,5 +734,76 @@ mod tests {
         assert!(l.kind_dir(Kind::Delta).join("v200-empty").is_dir()); // current — kept
         assert!(!l.kind_dir(Kind::Delta).join("v100").exists()); // pruned
         assert_eq!(report.deleted.len(), 1);
+    }
+
+    #[test]
+    fn prune_kind_rejects_segment_callers() {
+        let l = Layout::new(tmp("prune-seg-direct"));
+        l.ensure_dirs().unwrap();
+
+        let err = l.prune_kind(Kind::Segment, 0, true).unwrap_err();
+
+        assert!(format!("{err:#}").contains("prune_segments"));
+    }
+
+    #[test]
+    fn segment_gc_keeps_manifest_references_and_deletes_old_unreferenced() {
+        let l = Layout::new(tmp("seg-gc-old"));
+        l.ensure_dirs().unwrap();
+        for v in ["110", "120"] {
+            let d = l.new_version_dir(Kind::Segment, v).unwrap();
+            fs::write(d.join(artifact::FACT), b"x").unwrap();
+        }
+        let m = crate::manifest::Manifest::new(
+            1,
+            crate::manifest::BaseEntry {
+                version: 100,
+                cut: 100,
+            },
+            vec![crate::manifest::SegmentEntry {
+                version: 110,
+                from: 100,
+                to: 110,
+                tier: 0,
+            }],
+        )
+        .unwrap();
+        crate::manifest::write_manifest_cas(&l, None, &m).unwrap();
+
+        let report = l.prune_segments(Duration::from_secs(0), false).unwrap();
+        assert!(l.kind_dir(Kind::Segment).join("v110").is_dir());
+        assert!(!l.kind_dir(Kind::Segment).join("v120").exists());
+        assert_eq!(report.deleted.len(), 1);
+        assert_eq!(report.kept, 1);
+    }
+
+    #[test]
+    fn segment_gc_keeps_unreferenced_young_dirs() {
+        let l = Layout::new(tmp("seg-gc-young"));
+        l.ensure_dirs().unwrap();
+        let d = l.new_version_dir(Kind::Segment, "120").unwrap();
+        fs::write(d.join(artifact::FACT), b"x").unwrap();
+        let m = crate::manifest::Manifest::new(
+            1,
+            crate::manifest::BaseEntry {
+                version: 100,
+                cut: 100,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        crate::manifest::write_manifest_cas(&l, None, &m).unwrap();
+
+        let report = l.prune_segments(Duration::from_secs(900), false).unwrap();
+        assert!(l.kind_dir(Kind::Segment).join("v120").is_dir());
+        assert_eq!(report.deleted.len(), 0);
+        assert_eq!(report.kept, 1);
+    }
+
+    #[test]
+    fn segment_gc_not_found_is_success() {
+        let l = Layout::new(tmp("seg-gc-notfound"));
+        let missing = l.kind_dir(Kind::Segment).join("v404");
+        assert!(!remove_dir_all_tolerating_not_found(&missing).unwrap());
     }
 }

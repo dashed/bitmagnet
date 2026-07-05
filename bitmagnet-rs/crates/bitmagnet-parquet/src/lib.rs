@@ -27,12 +27,15 @@ pub mod delta;
 pub mod export;
 pub mod fact;
 pub mod generation;
+pub mod manifest;
 pub mod rollup;
 pub mod schema;
+pub mod seal;
 pub mod verify;
 
 pub use decode::{DecodeStats, FileRow};
 pub use export::{BuildStats, Sinks};
 pub use fact::SortMode;
 pub use generation::{Kind, Layout};
+pub use manifest::{BaseEntry, Manifest, SegmentEntry};
 pub use verify::{VerifyOpts, VerifyStats};

@@ -7,6 +7,12 @@
 //!   blob failed to decode (`--fail-on-decode-error`).
 //! * `delta` — minute carve (`updated_at > watermark` + deleted list) →
 //!   delta generation (fact + tombstones) → swap + watermark.
+//! * `seal` — carve one immutable segment, manifest-publish it, then
+//!   monotonically advance the delta carve origin.
+//! * `fold` — merge same-tier sealed segments into one higher-tier segment
+//!   (requires the `duckdb-sort` feature).
+//! * `merge-base` — fold base + sealed segments into a fresh base generation
+//!   (requires the `duckdb-sort` feature).
 //! * `compact` — full rebuild + empty-delta reset (`--fail-on-decode-error`
 //!   mirrors `base`).
 //! * `prune` — generation GC: keep `current` + newest-N per kind, delete
@@ -16,11 +22,13 @@
 //! * `verify` — STUB: agg-vs-torrent_files parity (Job A); see build notes.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bitmagnet_parquet::export::{self, Sinks};
 use bitmagnet_parquet::fact::SortMode;
 use bitmagnet_parquet::generation::{Kind, Layout};
+use bitmagnet_parquet::seal::{self, SealOutcome};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::{error, info};
 
@@ -102,6 +110,35 @@ enum Cmd {
         #[arg(long, default_value_t = 20_000)]
         page_size: i64,
     },
+    /// Seal an immutable segment and advance the cumulative delta origin.
+    Seal {
+        #[arg(long, env = "BITMAGNET_POSTGRES_DSN")]
+        dsn: String,
+        /// Where the deleted-torrents list comes from (same semantics as delta).
+        #[arg(long, value_enum, default_value = "none")]
+        deleted_source: DeletedSource,
+        /// File of newline-separated deleted info_hash hex (with
+        /// `--deleted-source file`).
+        #[arg(long)]
+        deleted_file: Option<PathBuf>,
+        #[arg(long, default_value_t = 20_000)]
+        page_size: i64,
+        /// Skip sealing when changed torrents are below this count and lag is
+        /// below --max-lag-secs.
+        #[arg(long, default_value_t = 50)]
+        min_torrents: u64,
+        /// Force a seal once the window lag reaches this many seconds, even if
+        /// the changed-torrent count is below --min-torrents.
+        #[arg(long, default_value_t = 86_400)]
+        max_lag_secs: i64,
+    },
+    /// Fold same-tier sealed segments into one higher-tier segment.
+    Fold {
+        #[arg(long)]
+        tier: u8,
+    },
+    /// Fold base + all sealed segments into a fresh base generation.
+    MergeBase,
     /// In-process follow loop: run a `delta` tick, sleep, repeat — the L2
     /// freshness engine that replaces the per-minute delta CronJob (minute →
     /// seconds). Each tick is IDENTICAL to `delta` (a cumulative carve from the
@@ -164,6 +201,10 @@ enum Cmd {
         /// List what WOULD be deleted (+ reclaimed bytes) without deleting.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+        /// Segment GC grace: unreferenced seg/v* dirs younger than this many
+        /// seconds are retained.
+        #[arg(long, default_value_t = 900)]
+        gc_grace_secs: u64,
     },
     /// OFFLINE smoke: build a base generation from a `info_hash|count|hex` file.
     FromHex {
@@ -275,6 +316,103 @@ async fn main() -> Result<()> {
             .await?;
             report("delta", &stats);
         }
+        Cmd::Seal {
+            dsn,
+            deleted_source,
+            deleted_file,
+            page_size,
+            min_torrents,
+            max_lag_secs,
+        } => {
+            let pool = bitmagnet_db::PgPool::connect(&dsn)
+                .await
+                .context("connecting to postgres")?;
+            let window_end = seal::default_seal_window_end(now_epoch());
+            let since = seal::reconcile_watermark_with_manifest(&layout)?;
+            let deleted = read_deleted_for_window(
+                &pool,
+                deleted_source,
+                deleted_file.as_deref(),
+                since,
+                window_end,
+            )
+            .await?;
+            match seal::run_seal(
+                &pool,
+                &layout,
+                window_end,
+                &deleted,
+                page_size,
+                min_torrents,
+                max_lag_secs,
+            )
+            .await?
+            {
+                SealOutcome::Skipped {
+                    changed_torrents,
+                    lag_secs,
+                } => {
+                    println!(
+                        "seal: skipped changed_torrents={} lag_secs={} min_torrents={} max_lag_secs={}",
+                        changed_torrents, lag_secs, min_torrents, max_lag_secs
+                    );
+                }
+                SealOutcome::Sealed {
+                    segment,
+                    stats,
+                    manifest_mver,
+                    watermark_advanced,
+                } => {
+                    report("seal", &stats);
+                    println!(
+                        "seal: segment=v{} from={} to={} tier={} manifest_mver={} watermark_advanced={}",
+                        segment.version,
+                        segment.from,
+                        segment.to,
+                        segment.tier,
+                        manifest_mver,
+                        watermark_advanced
+                    );
+                }
+            }
+        }
+        Cmd::Fold { tier } => {
+            let outcome = seal::run_fold(&layout, tier, now_epoch() as u64)?;
+            match outcome.output {
+                Some(segment) => println!(
+                    "fold: acted={} input_count={} output=v{} from={} to={} tier={} manifest_mver={}",
+                    outcome.acted,
+                    outcome.input_count,
+                    segment.version,
+                    segment.from,
+                    segment.to,
+                    segment.tier,
+                    outcome.manifest_mver.unwrap_or(0)
+                ),
+                None => println!(
+                    "fold: acted=false input_count={} manifest_mver={}",
+                    outcome.input_count,
+                    outcome.manifest_mver.unwrap_or(0)
+                ),
+            }
+        }
+        Cmd::MergeBase => {
+            let outcome = seal::run_merge_base(&layout, now_epoch() as u64)?;
+            match outcome.base {
+                Some(base) => println!(
+                    "merge-base: acted={} input_count={} base=v{} cut={} manifest_mver={}",
+                    outcome.acted,
+                    outcome.input_count,
+                    base.version,
+                    base.cut,
+                    outcome.manifest_mver.unwrap_or(0)
+                ),
+                None => println!(
+                    "merge-base: acted=false input_count={} manifest_mver=0",
+                    outcome.input_count
+                ),
+            }
+        }
         Cmd::Follow {
             dsn,
             deleted_source,
@@ -331,11 +469,18 @@ async fn main() -> Result<()> {
             keep_base,
             keep_delta,
             dry_run,
+            gc_grace_secs,
         } => {
-            let reports = layout.prune(keep_base, keep_delta, dry_run)?;
+            let reports = layout.prune(
+                keep_base,
+                keep_delta,
+                Duration::from_secs(gc_grace_secs),
+                dry_run,
+            )?;
             for r in &reports {
                 let kind = match r.kind {
                     Kind::Base => "base",
+                    Kind::Segment => "seg",
                     Kind::Delta => "delta",
                 };
                 println!(
@@ -450,23 +595,36 @@ async fn one_delta_tick(
     // commit-visibility race). The carve ORIGIN is the base watermark —
     // compaction-owned; ticks never advance it.
     let window_end = watermark.unwrap_or_else(|| now_epoch() - export::CARVE_LAG_SECS);
-    let deleted = match deleted_source {
-        DeletedSource::None => Vec::new(),
-        DeletedSource::File => read_deleted(deleted_file)?,
+    let since = layout.read_watermark();
+    let deleted =
+        read_deleted_for_window(pool, deleted_source, deleted_file, since, window_end).await?;
+    export::run_delta(pool, layout, &version, window_end, &deleted, page_size).await
+}
+
+async fn read_deleted_for_window(
+    pool: &bitmagnet_db::PgPool,
+    deleted_source: DeletedSource,
+    deleted_file: Option<&std::path::Path>,
+    since: i64,
+    window_end: i64,
+) -> Result<Vec<String>> {
+    match deleted_source {
+        DeletedSource::None => Ok(Vec::new()),
+        DeletedSource::File => read_deleted(deleted_file),
         DeletedSource::Audit => {
             // Same half-open (since, window_end] window as the change carve,
             // so a deletion is tombstoned by exactly the run whose window
             // contains its deleted_at.
-            let since = layout.read_watermark();
-            bitmagnet_db::read_deleted_torrents(pool, since, window_end, 1_000_000)
-                .await
-                .context("reading deleted_torrents audit window")?
-                .iter()
-                .map(ToString::to_string)
-                .collect()
+            Ok(
+                bitmagnet_db::read_deleted_torrents(pool, since, window_end, 1_000_000)
+                    .await
+                    .context("reading deleted_torrents audit window")?
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            )
         }
-    };
-    export::run_delta(pool, layout, &version, window_end, &deleted, page_size).await
+    }
 }
 
 /// Backoff cap for a failing `follow` loop: a tick that keeps erroring settles
