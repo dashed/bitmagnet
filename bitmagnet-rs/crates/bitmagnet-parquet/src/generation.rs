@@ -86,6 +86,14 @@ impl Layout {
         self.root.join(kind.dirname())
     }
 
+    /// Absolute path of a sealed segment's version dir (`<root>/seg/v<version>`).
+    /// Segments have no `current` pointer — the manifest is their liveness
+    /// source — so readers (the sidecar) address them by version directly; this
+    /// is the one shared constructor so the `seg` dirname never drifts.
+    pub fn segment_version_dir(&self, version: u64) -> PathBuf {
+        self.kind_dir(Kind::Segment).join(format!("v{version}"))
+    }
+
     fn current_link(&self, kind: Kind) -> PathBuf {
         self.kind_dir(kind).join("current")
     }

@@ -32,7 +32,7 @@ struct Args {
     )]
     addr: String,
 
-    /// Generation root (the `{base,delta}/…` tree written by bitmagnet-parquet).
+    /// Generation root (the `{base,seg,delta}/…` tree written by bitmagnet-parquet).
     #[arg(
         long,
         env = "BITMAGNET_PARQUET_ROOT",
@@ -84,6 +84,8 @@ fn spawn_reload_loop(gens: Arc<GenerationManager>, reload_secs: u64) {
             match gens.reload(None) {
                 Ok((gen, true)) => tracing::info!(
                     base = %gen.base_version,
+                    manifest_version = gen.manifest_version,
+                    segment_count = gen.segment_count,
                     delta = %gen.delta_version,
                     "generation reloaded"
                 ),

@@ -30,14 +30,30 @@ pub struct SafeQuery {
     pub params: Vec<Param>,
 }
 
-/// Resolved, server-controlled Parquet paths for the current generation pair.
-#[derive(Debug, Clone)]
-pub struct GenPaths {
-    pub base_fact: String,
-    pub delta_fact: String,
-    pub delta_tombstones: String,
-    pub base_agg_torrent_ext: String,
-    pub delta_agg_torrent_ext: String,
+/// One layer's server-controlled Parquet paths. The base layer has no
+/// tombstones; every newer layer is torrent-granular and carries them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerPaths {
+    pub fact: String,
+    pub agg_torrent_ext: String,
+    pub tombstones: Option<String>,
+}
+
+/// Ordered filesearch layers: rank 0 is base, newer ranks are segments, and the
+/// last rank is the current delta.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerSet {
+    pub layers: Vec<LayerPaths>,
+}
+
+impl LayerSet {
+    pub fn new(layers: Vec<LayerPaths>) -> Self {
+        Self { layers }
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.layers.len().saturating_sub(2)
+    }
 }
 
 /// Escape an `ILIKE` pattern body so user `\`, `%`, `_` match literally. Pair
@@ -64,7 +80,7 @@ pub fn quote_literal(s: &str) -> String {
 /// The base+delta `files` CTE — the EXP-B supersession-correct anti-join
 /// (TORRENT-granular: a re-crawl/delete hides the *whole* base fileset; the
 /// delta fact supplies the survivors). Paths are server-controlled.
-pub fn files_cte(paths: &GenPaths) -> String {
+fn legacy_files_cte(base_fact: &str, delta_tombstones: &str, delta_fact: &str) -> String {
     format!(
         "WITH files AS (\
            SELECT info_hash, file_index, path, extension, size, is_padding \
@@ -72,15 +88,19 @@ pub fn files_cte(paths: &GenPaths) -> String {
            WHERE NOT EXISTS (SELECT 1 FROM read_parquet({tomb}) t WHERE t.info_hash = b.info_hash) \
            UNION ALL \
            SELECT info_hash, file_index, path, extension, size, is_padding FROM read_parquet({delta}))",
-        base = quote_literal(&paths.base_fact),
-        tomb = quote_literal(&paths.delta_tombstones),
-        delta = quote_literal(&paths.delta_fact),
+        base = quote_literal(base_fact),
+        tomb = quote_literal(delta_tombstones),
+        delta = quote_literal(delta_fact),
     )
 }
 
 /// The base+delta `att` CTE over the `agg_torrent_ext` rollups, reconciled the
 /// same way (the rollup-served collapse/facet path — the `<50 ms` lever).
-fn att_cte(paths: &GenPaths) -> String {
+fn legacy_att_cte(
+    base_agg_torrent_ext: &str,
+    delta_tombstones: &str,
+    delta_agg_torrent_ext: &str,
+) -> String {
     format!(
         "WITH att AS (\
            SELECT info_hash, extension, file_count, total_size, max_size \
@@ -88,10 +108,114 @@ fn att_cte(paths: &GenPaths) -> String {
            WHERE NOT EXISTS (SELECT 1 FROM read_parquet({tomb}) t WHERE t.info_hash = b.info_hash) \
            UNION ALL \
            SELECT info_hash, extension, file_count, total_size, max_size FROM read_parquet({delta}))",
-        base = quote_literal(&paths.base_agg_torrent_ext),
-        tomb = quote_literal(&paths.delta_tombstones),
-        delta = quote_literal(&paths.delta_agg_torrent_ext),
+        base = quote_literal(base_agg_torrent_ext),
+        tomb = quote_literal(delta_tombstones),
+        delta = quote_literal(delta_agg_torrent_ext),
     )
+}
+
+/// The N-way `files` CTE. The two-layer degenerate path is intentionally routed
+/// through the legacy formatter so absent-manifest mode remains byte-identical.
+pub fn files_cte(layers: &LayerSet) -> String {
+    if let Some((base, delta)) = legacy_pair(layers) {
+        return legacy_files_cte(
+            &base.fact,
+            delta.tombstones.as_ref().expect("delta has tombstones"),
+            &delta.fact,
+        );
+    }
+    layered_cte(
+        "files",
+        "info_hash, file_index, path, extension, size, is_padding",
+        layers,
+        |layer| &layer.fact,
+    )
+}
+
+/// The N-way `att` CTE over `agg_torrent_ext` rollups.
+fn att_cte(layers: &LayerSet) -> String {
+    if let Some((base, delta)) = legacy_pair(layers) {
+        return legacy_att_cte(
+            &base.agg_torrent_ext,
+            delta.tombstones.as_ref().expect("delta has tombstones"),
+            &delta.agg_torrent_ext,
+        );
+    }
+    layered_cte(
+        "att",
+        "info_hash, extension, file_count, total_size, max_size",
+        layers,
+        |layer| &layer.agg_torrent_ext,
+    )
+}
+
+fn legacy_pair(layers: &LayerSet) -> Option<(&LayerPaths, &LayerPaths)> {
+    match layers.layers.as_slice() {
+        [base, delta] if base.tombstones.is_none() && delta.tombstones.is_some() => {
+            Some((base, delta))
+        }
+        _ => None,
+    }
+}
+
+fn layered_cte(
+    name: &str,
+    columns: &str,
+    layers: &LayerSet,
+    path: impl Fn(&LayerPaths) -> &str,
+) -> String {
+    assert!(
+        layers.layers.len() >= 2,
+        "LayerSet must contain at least base and delta"
+    );
+    let newest_idx = layers.layers.len() - 1;
+
+    let mut ctes = Vec::new();
+    for idx in (1..=newest_idx).rev() {
+        let tombstones = layers.layers[idx]
+            .tombstones
+            .as_ref()
+            .expect("non-base layers must have tombstones");
+        let cte_name = format!("tomb_ge_{idx}");
+        let tomb_read = format!(
+            "SELECT info_hash FROM read_parquet({})",
+            quote_literal(tombstones)
+        );
+        if idx == newest_idx {
+            ctes.push(format!("{cte_name} AS ({tomb_read})"));
+        } else {
+            ctes.push(format!(
+                "{cte_name} AS ({tomb_read} UNION ALL SELECT * FROM tomb_ge_{})",
+                idx + 1
+            ));
+        }
+    }
+
+    let mut branches = Vec::new();
+    for (idx, layer) in layers.layers.iter().enumerate() {
+        let alias = layer_alias(idx, newest_idx);
+        let mut branch = format!(
+            "SELECT {columns} FROM read_parquet({}) {alias}",
+            quote_literal(path(layer))
+        );
+        if idx < newest_idx {
+            branch.push_str(&format!(
+                " WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_{} t WHERE t.info_hash = {alias}.info_hash)",
+                idx + 1
+            ));
+        }
+        branches.push(branch);
+    }
+    ctes.push(format!("{name} AS ({})", branches.join(" UNION ALL ")));
+    format!("WITH {}", ctes.join(", "))
+}
+
+fn layer_alias(idx: usize, newest_idx: usize) -> String {
+    match idx {
+        0 => "b".to_owned(),
+        i if i == newest_idx => "d".to_owned(),
+        i => format!("s{i}"),
+    }
 }
 
 /// Append the WHERE predicate for `filters`, pushing bound params. Returns the
@@ -154,7 +278,7 @@ fn order_by(field: SortField, dir: SortDir) -> &'static str {
 }
 
 /// File-rows search (collapse = false). Always LIMIT-bounded.
-pub fn build_search_files(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
+pub fn build_search_files(q: &FileQuery, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate(&q.filters, &mut params);
     let where_clause = if pred.is_empty() {
@@ -164,7 +288,7 @@ pub fn build_search_files(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
     };
     let sql = format!(
         "{cte} SELECT info_hash, file_index, path, extension, size FROM files{where_clause} {order} LIMIT ?",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
         order = order_by(q.sort.field, q.sort.dir),
     );
     params.push(Param::U64(u64::from(q.limit) + 1)); // +1 to detect has_next
@@ -176,7 +300,7 @@ pub fn build_search_files(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
 /// exact SET + max (hydrate count/total via [`build_group_aggregates`]) under
 /// [`RollupPlan::ExactSetApproxAggs`]; NEVER for [`RollupPlan::FactOnly`]
 /// shapes (use [`build_collapse_fact`]). Returns one row per torrent.
-pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
+pub fn build_collapse_rollup(q: &FileQuery, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate_rollup(&q.filters, &mut params);
     let where_clause = if pred.is_empty() {
@@ -190,7 +314,7 @@ pub fn build_collapse_rollup(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
             sum(total_size) AS matching_total_size, max(max_size) AS matching_max_size \
          FROM att{where_clause} GROUP BY info_hash \
          ORDER BY matching_max_size DESC, info_hash ASC LIMIT ?",
-        cte = att_cte(paths),
+        cte = att_cte(layers),
     );
     params.push(Param::U64(u64::from(q.limit) + 1));
     SafeQuery { sql, params }
@@ -277,7 +401,7 @@ fn predicate_rollup(filters: &Filters, params: &mut Vec<Param>) -> String {
 /// filter shapes the rollup cannot serve ([`RollupPlan::FactOnly`]): exact
 /// matching-file aggregates per torrent, same ordering contract as the rollup
 /// form (`matching_max_size DESC, info_hash ASC`).
-pub fn build_collapse_fact(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
+pub fn build_collapse_fact(q: &FileQuery, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate(&q.filters, &mut params);
     let where_clause = if pred.is_empty() {
@@ -290,7 +414,7 @@ pub fn build_collapse_fact(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
             sum(size) AS matching_total_size, max(size) AS matching_max_size \
          FROM files{where_clause} GROUP BY info_hash \
          ORDER BY matching_max_size DESC, info_hash ASC LIMIT ?",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
     );
     params.push(Param::U64(u64::from(q.limit) + 1));
     SafeQuery { sql, params }
@@ -300,7 +424,7 @@ pub fn build_collapse_fact(q: &FileQuery, paths: &GenPaths) -> SafeQuery {
 /// hydrates a rollup-served group's `file_count`/`total_size`/`max_size` under
 /// [`RollupPlan::ExactSetApproxAggs`]. `info_hash` comes from an engine result
 /// row (server data) but is bound as a parameter anyway.
-pub fn build_group_aggregate(info_hash: &str, filters: &Filters, paths: &GenPaths) -> SafeQuery {
+pub fn build_group_aggregate(info_hash: &str, filters: &Filters, layers: &LayerSet) -> SafeQuery {
     let mut params = vec![Param::Text(info_hash.to_owned())];
     let pred = predicate(filters, &mut params);
     let and_clause = if pred.is_empty() {
@@ -311,7 +435,7 @@ pub fn build_group_aggregate(info_hash: &str, filters: &Filters, paths: &GenPath
     let sql = format!(
         "{cte} SELECT count(*) AS c, sum(size) AS ts, max(size) AS ms \
          FROM files WHERE info_hash = ?{and_clause}",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
     );
     SafeQuery { sql, params }
 }
@@ -322,14 +446,14 @@ pub fn build_group_aggregate(info_hash: &str, filters: &Filters, paths: &GenPath
 pub fn build_group_aggregates(
     info_hashes: &[String],
     filters: &Filters,
-    paths: &GenPaths,
+    layers: &LayerSet,
 ) -> SafeQuery {
     if info_hashes.is_empty() {
         return SafeQuery {
             sql: format!(
                 "{cte} SELECT info_hash, count(*) AS c, sum(size) AS ts, max(size) AS ms \
                  FROM files WHERE FALSE GROUP BY info_hash",
-                cte = files_cte(paths),
+                cte = files_cte(layers),
             ),
             params: Vec::new(),
         };
@@ -345,7 +469,7 @@ pub fn build_group_aggregates(
     let sql = format!(
         "{cte} SELECT info_hash, count(*) AS c, sum(size) AS ts, max(size) AS ms \
          FROM files{where_clause} GROUP BY info_hash",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
     );
     SafeQuery { sql, params }
 }
@@ -357,14 +481,14 @@ pub fn build_previews(
     info_hashes: &[String],
     filters: &Filters,
     limit: u32,
-    paths: &GenPaths,
+    layers: &LayerSet,
 ) -> SafeQuery {
     if info_hashes.is_empty() {
         return SafeQuery {
             sql: format!(
                 "{cte} SELECT info_hash, file_index, path, extension, size \
                  FROM files WHERE FALSE LIMIT ?",
-                cte = files_cte(paths),
+                cte = files_cte(layers),
             ),
             params: vec![Param::U64(u64::from(limit))],
         };
@@ -385,7 +509,7 @@ pub fn build_previews(
            FROM files {where_clause}\
          ) ranked WHERE rn <= ? \
          ORDER BY info_hash ASC, rn ASC",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
     );
     params.push(Param::U64(u64::from(limit)));
     SafeQuery { sql, params }
@@ -394,7 +518,7 @@ pub fn build_previews(
 /// Per-extension facet over the fact CTE — the correct path whenever size/path
 /// filters are present (facet buckets count MATCHING FILES; the rollup form
 /// would drop the path filter and mis-handle size bounds).
-pub fn build_facet_fact(filters: &Filters, paths: &GenPaths) -> SafeQuery {
+pub fn build_facet_fact(filters: &Filters, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate(filters, &mut params);
     let where_clause = if pred.is_empty() {
@@ -405,7 +529,7 @@ pub fn build_facet_fact(filters: &Filters, paths: &GenPaths) -> SafeQuery {
     let sql = format!(
         "{cte} SELECT extension, count(*) AS c, sum(size) AS ts \
          FROM files{where_clause} GROUP BY extension ORDER BY c DESC",
-        cte = files_cte(paths),
+        cte = files_cte(layers),
     );
     SafeQuery { sql, params }
 }
@@ -413,7 +537,7 @@ pub fn build_facet_fact(filters: &Filters, paths: &GenPaths) -> SafeQuery {
 /// COUNT — files (collapse=false) or distinct torrents (collapse=true). The
 /// distinct-torrent count uses the rollup whenever the plan is not
 /// [`RollupPlan::FactOnly`] (set membership stays exact under `size_min`).
-pub fn build_count(q: &CountQuery, paths: &GenPaths) -> SafeQuery {
+pub fn build_count(q: &CountQuery, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     if q.collapse_to_torrent && rollup_plan(&q.filters) != RollupPlan::FactOnly {
         let pred = predicate_rollup(&q.filters, &mut params);
@@ -424,7 +548,7 @@ pub fn build_count(q: &CountQuery, paths: &GenPaths) -> SafeQuery {
         };
         let sql = format!(
             "{cte} SELECT count(DISTINCT info_hash) AS c FROM att{where_clause}",
-            cte = att_cte(paths),
+            cte = att_cte(layers),
         );
         SafeQuery { sql, params }
     } else {
@@ -441,14 +565,14 @@ pub fn build_count(q: &CountQuery, paths: &GenPaths) -> SafeQuery {
         };
         let sql = format!(
             "{cte} SELECT {agg} AS c FROM files{where_clause}",
-            cte = files_cte(paths),
+            cte = files_cte(layers),
         );
         SafeQuery { sql, params }
     }
 }
 
 /// Per-extension facet over the rollup (`<3 ms` lever).
-pub fn build_facet_ext(filters: &Filters, paths: &GenPaths) -> SafeQuery {
+pub fn build_facet_ext(filters: &Filters, layers: &LayerSet) -> SafeQuery {
     let mut params = Vec::new();
     let pred = predicate_rollup(filters, &mut params);
     let where_clause = if pred.is_empty() {
@@ -459,7 +583,7 @@ pub fn build_facet_ext(filters: &Filters, paths: &GenPaths) -> SafeQuery {
     let sql = format!(
         "{cte} SELECT extension, sum(file_count) AS c, sum(total_size) AS ts \
          FROM att{where_clause} GROUP BY extension ORDER BY c DESC",
-        cte = att_cte(paths),
+        cte = att_cte(layers),
     );
     SafeQuery { sql, params }
 }
@@ -469,14 +593,48 @@ mod tests {
     use super::*;
     use crate::query::{Filters, Sort};
 
-    fn paths() -> GenPaths {
-        GenPaths {
-            base_fact: "/g/base/v1/fact.parquet".into(),
-            delta_fact: "/g/delta/v1/fact.parquet".into(),
-            delta_tombstones: "/g/delta/v1/tombstones.parquet".into(),
-            base_agg_torrent_ext: "/g/base/v1/agg_torrent_ext.parquet".into(),
-            delta_agg_torrent_ext: "/g/delta/v1/agg_torrent_ext.parquet".into(),
-        }
+    fn paths() -> LayerSet {
+        LayerSet::new(vec![
+            LayerPaths {
+                fact: "/g/base/v1/fact.parquet".into(),
+                agg_torrent_ext: "/g/base/v1/agg_torrent_ext.parquet".into(),
+                tombstones: None,
+            },
+            LayerPaths {
+                fact: "/g/delta/v1/fact.parquet".into(),
+                agg_torrent_ext: "/g/delta/v1/agg_torrent_ext.parquet".into(),
+                tombstones: Some("/g/delta/v1/tombstones.parquet".into()),
+            },
+        ])
+    }
+
+    fn paths_with_two_segments() -> LayerSet {
+        LayerSet::new(vec![
+            LayerPaths {
+                fact: "/g/base/v100/fact.parquet".into(),
+                agg_torrent_ext: "/g/base/v100/agg_torrent_ext.parquet".into(),
+                tombstones: None,
+            },
+            LayerPaths {
+                fact: "/g/seg/v110/fact.parquet".into(),
+                agg_torrent_ext: "/g/seg/v110/agg_torrent_ext.parquet".into(),
+                tombstones: Some("/g/seg/v110/tombstones.parquet".into()),
+            },
+            LayerPaths {
+                fact: "/g/seg/v120/fact.parquet".into(),
+                agg_torrent_ext: "/g/seg/v120/agg_torrent_ext.parquet".into(),
+                tombstones: Some("/g/seg/v120/tombstones.parquet".into()),
+            },
+            LayerPaths {
+                fact: "/g/delta/v130/fact.parquet".into(),
+                agg_torrent_ext: "/g/delta/v130/agg_torrent_ext.parquet".into(),
+                tombstones: Some("/g/delta/v130/tombstones.parquet".into()),
+            },
+        ])
+    }
+
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
     }
 
     #[test]
@@ -488,6 +646,70 @@ mod tests {
     #[test]
     fn quote_literal_doubles_single_quotes() {
         assert_eq!(quote_literal("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn degenerate_files_cte_matches_legacy_text_byte_for_byte() {
+        assert_eq!(
+            files_cte(&paths()),
+            "WITH files AS (SELECT info_hash, file_index, path, extension, size, is_padding FROM read_parquet('/g/base/v1/fact.parquet') b WHERE NOT EXISTS (SELECT 1 FROM read_parquet('/g/delta/v1/tombstones.parquet') t WHERE t.info_hash = b.info_hash) UNION ALL SELECT info_hash, file_index, path, extension, size, is_padding FROM read_parquet('/g/delta/v1/fact.parquet'))"
+        );
+    }
+
+    #[test]
+    fn degenerate_att_cte_matches_legacy_text_byte_for_byte() {
+        assert_eq!(
+            att_cte(&paths()),
+            "WITH att AS (SELECT info_hash, extension, file_count, total_size, max_size FROM read_parquet('/g/base/v1/agg_torrent_ext.parquet') b WHERE NOT EXISTS (SELECT 1 FROM read_parquet('/g/delta/v1/tombstones.parquet') t WHERE t.info_hash = b.info_hash) UNION ALL SELECT info_hash, extension, file_count, total_size, max_size FROM read_parquet('/g/delta/v1/agg_torrent_ext.parquet'))"
+        );
+    }
+
+    #[test]
+    fn files_cte_with_two_segments_uses_cumulative_tombstone_chain() {
+        let cte = files_cte(&paths_with_two_segments());
+
+        let delta_tomb = cte.find("tomb_ge_3 AS (SELECT info_hash FROM read_parquet('/g/delta/v130/tombstones.parquet'))").unwrap();
+        let seg2_tomb = cte.find("tomb_ge_2 AS (SELECT info_hash FROM read_parquet('/g/seg/v120/tombstones.parquet') UNION ALL SELECT * FROM tomb_ge_3)").unwrap();
+        let seg1_tomb = cte.find("tomb_ge_1 AS (SELECT info_hash FROM read_parquet('/g/seg/v110/tombstones.parquet') UNION ALL SELECT * FROM tomb_ge_2)").unwrap();
+        assert!(delta_tomb < seg2_tomb && seg2_tomb < seg1_tomb);
+
+        assert!(cte.contains("FROM read_parquet('/g/base/v100/fact.parquet') b WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_1 t WHERE t.info_hash = b.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/seg/v110/fact.parquet') s1 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_2 t WHERE t.info_hash = s1.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/seg/v120/fact.parquet') s2 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_3 t WHERE t.info_hash = s2.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/delta/v130/fact.parquet') d)"));
+
+        for path in [
+            "/g/base/v100/fact.parquet",
+            "/g/seg/v110/fact.parquet",
+            "/g/seg/v120/fact.parquet",
+            "/g/delta/v130/fact.parquet",
+            "/g/seg/v110/tombstones.parquet",
+            "/g/seg/v120/tombstones.parquet",
+            "/g/delta/v130/tombstones.parquet",
+        ] {
+            assert_eq!(count(&cte, path), 1, "{path} should appear once");
+        }
+    }
+
+    #[test]
+    fn att_cte_with_two_segments_uses_layered_rollup_paths_once() {
+        let cte = att_cte(&paths_with_two_segments());
+        assert!(cte.contains("tomb_ge_1 AS"));
+        assert!(cte.contains("FROM read_parquet('/g/base/v100/agg_torrent_ext.parquet') b WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_1 t WHERE t.info_hash = b.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/seg/v110/agg_torrent_ext.parquet') s1 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_2 t WHERE t.info_hash = s1.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/seg/v120/agg_torrent_ext.parquet') s2 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_3 t WHERE t.info_hash = s2.info_hash)"));
+        assert!(cte.contains("FROM read_parquet('/g/delta/v130/agg_torrent_ext.parquet') d)"));
+        for path in [
+            "/g/base/v100/agg_torrent_ext.parquet",
+            "/g/seg/v110/agg_torrent_ext.parquet",
+            "/g/seg/v120/agg_torrent_ext.parquet",
+            "/g/delta/v130/agg_torrent_ext.parquet",
+            "/g/seg/v110/tombstones.parquet",
+            "/g/seg/v120/tombstones.parquet",
+            "/g/delta/v130/tombstones.parquet",
+        ] {
+            assert_eq!(count(&cte, path), 1, "{path} should appear once");
+        }
     }
 
     #[test]

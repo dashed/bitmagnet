@@ -193,7 +193,7 @@ impl Engine for DuckEngine {
         q: &FileQuery,
         deadline: Deadline,
     ) -> Result<Vec<FileHitRow>> {
-        let sq = sql::build_search_files(q, &gen.paths);
+        let sq = sql::build_search_files(q, &gen.layers);
         let (rows, _) = self.with_conn(deadline, move |conn| query_files(conn, &sq))?;
         Ok(rows)
     }
@@ -207,7 +207,7 @@ impl Engine for DuckEngine {
         match sql::rollup_plan(&q.filters) {
             // Rollup aggregates exact (ext-only / unfiltered) — the <50 ms path.
             sql::RollupPlan::Exact => {
-                let sq = sql::build_collapse_rollup(q, &gen.paths);
+                let sq = sql::build_collapse_rollup(q, &gen.layers);
                 let (rows, _) = self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 Ok(rows)
             }
@@ -215,11 +215,11 @@ impl Engine for DuckEngine {
             // would include sub-threshold files — hydrate exact aggregates for
             // the returned groups in one fact scan (page size is clamped).
             sql::RollupPlan::ExactSetApproxAggs => {
-                let sq = sql::build_collapse_rollup(q, &gen.paths);
+                let sq = sql::build_collapse_rollup(q, &gen.layers);
                 let (mut groups, _) =
                     self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 let info_hashes: Vec<String> = groups.iter().map(|g| g.info_hash.clone()).collect();
-                let agg = sql::build_group_aggregates(&info_hashes, &q.filters, &gen.paths);
+                let agg = sql::build_group_aggregates(&info_hashes, &q.filters, &gen.layers);
                 let (rows, _) =
                     self.with_conn(deadline, move |conn| query_group_aggs(conn, &agg))?;
                 for g in &mut groups {
@@ -233,7 +233,7 @@ impl Engine for DuckEngine {
             }
             // path / size_max: the rollup cannot serve this shape at all.
             sql::RollupPlan::FactOnly => {
-                let sq = sql::build_collapse_fact(q, &gen.paths);
+                let sq = sql::build_collapse_fact(q, &gen.layers);
                 let (rows, _) = self.with_conn(deadline, move |conn| query_groups(conn, &sq))?;
                 Ok(rows)
             }
@@ -260,7 +260,7 @@ impl Engine for DuckEngine {
         limit: u32,
         deadline: Deadline,
     ) -> Result<PreviewRows> {
-        let sq = sql::build_previews(info_hashes, filters, limit, &gen.paths);
+        let sq = sql::build_previews(info_hashes, filters, limit, &gen.layers);
         let (rows, _) = self.with_conn(deadline, move |conn| query_previews(conn, &sq))?;
         Ok(rows)
     }
@@ -271,7 +271,7 @@ impl Engine for DuckEngine {
         q: &CountQuery,
         deadline: Deadline,
     ) -> Result<(u64, bool)> {
-        let sq = sql::build_count(q, &gen.paths);
+        let sq = sql::build_count(q, &gen.layers);
         let (count, interrupted) =
             self.with_conn(deadline, move |conn| query_scalar_u64(conn, &sq))?;
         Ok((count, interrupted))
@@ -287,8 +287,8 @@ impl Engine for DuckEngine {
         // when no size/path filter is in play (otherwise it would drop the
         // path filter and mis-handle size bounds — see sql::rollup_plan).
         let sq = match sql::rollup_plan(filters) {
-            sql::RollupPlan::Exact => sql::build_facet_ext(filters, &gen.paths),
-            _ => sql::build_facet_fact(filters, &gen.paths),
+            sql::RollupPlan::Exact => sql::build_facet_ext(filters, &gen.layers),
+            _ => sql::build_facet_fact(filters, &gen.layers),
         };
         let (rows, _) = self.with_conn(deadline, move |conn| query_facets(conn, &sq))?;
         Ok(rows)

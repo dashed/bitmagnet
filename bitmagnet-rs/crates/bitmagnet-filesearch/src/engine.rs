@@ -353,7 +353,7 @@ pub mod duck;
 mod tests {
     use super::*;
     use crate::query::{Filters, Sort, SortDir, SortField};
-    use crate::sql::GenPaths;
+    use crate::sql::{LayerPaths, LayerSet};
 
     fn row(ih: &str, idx: u32, path: &str, ext: Option<&str>, size: u64) -> FileHitRow {
         FileHitRow {
@@ -367,14 +367,21 @@ mod tests {
 
     fn gen() -> LoadedGeneration {
         LoadedGeneration {
-            paths: GenPaths {
-                base_fact: "x".into(),
-                delta_fact: "x".into(),
-                delta_tombstones: "x".into(),
-                base_agg_torrent_ext: "x".into(),
-                delta_agg_torrent_ext: "x".into(),
-            },
+            layers: LayerSet::new(vec![
+                LayerPaths {
+                    fact: "x".into(),
+                    agg_torrent_ext: "x".into(),
+                    tombstones: None,
+                },
+                LayerPaths {
+                    fact: "x".into(),
+                    agg_torrent_ext: "x".into(),
+                    tombstones: Some("x".into()),
+                },
+            ]),
             base_version: "v1".into(),
+            manifest_version: 0,
+            segment_count: 0,
             delta_version: "v1".into(),
             delta_watermark: 0,
         }

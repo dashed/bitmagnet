@@ -5,8 +5,8 @@
 //! * [`query`] — validated, engine-agnostic query intent (proto → domain).
 //! * [`sql`] — the FB-B1d safe SQL builder (server-controlled paths +
 //!   identifiers; user values are bound `?` params; ILIKE-escaped path search).
-//! * [`generation`] — resolves the current base+delta generation and swaps it
-//!   atomically on reload (FB-B1c: immutable, read-only).
+//! * [`generation`] — resolves the current base+segments+delta layer set and
+//!   swaps it atomically on reload (FB-B1c: immutable, read-only).
 //! * [`engine`] — the [`engine::Engine`] trait, with an in-memory reference
 //!   engine (tests) and the feature-gated `DuckEngine` (production).
 //! * [`service`] — the gRPC service: proto mapping, the CB concurrency gate

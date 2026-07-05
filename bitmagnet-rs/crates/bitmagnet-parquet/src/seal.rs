@@ -258,7 +258,7 @@ fn choose_seal_segment_version(
 }
 
 fn create_seal_segment_dir(layout: &Layout, version: u64) -> Result<PathBuf> {
-    let dir = layout.kind_dir(Kind::Segment).join(format!("v{version}"));
+    let dir = layout.segment_version_dir(version);
     fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
     ensure_empty_dir(&dir)?;
     Ok(dir)
@@ -512,10 +512,7 @@ fn choose_base_version(layout: &Layout, preferred: u64) -> Result<u64> {
 }
 
 fn segment_version_exists(layout: &Layout, version: u64) -> bool {
-    layout
-        .kind_dir(Kind::Segment)
-        .join(format!("v{version}"))
-        .exists()
+    layout.segment_version_dir(version).exists()
 }
 
 fn manifest_references_segment(manifest: Option<&Manifest>, version: u64) -> bool {
@@ -540,9 +537,7 @@ fn merged_base_entry(manifest: &Manifest, version: u64) -> BaseEntry {
 }
 
 fn segment_layer(layout: &Layout, s: &SegmentEntry) -> FoldLayer {
-    let dir = layout
-        .kind_dir(Kind::Segment)
-        .join(format!("v{}", s.version));
+    let dir = layout.segment_version_dir(s.version);
     FoldLayer {
         fact: dir.join(artifact::FACT),
         agg_torrent_ext: dir.join(artifact::AGG_TORRENT_EXT),

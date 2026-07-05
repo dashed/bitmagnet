@@ -270,6 +270,15 @@ impl<E: Engine + 'static> proto::file_search_service_server::FileSearchService
             .gens
             .reload(expect.as_deref())
             .map_err(|e| Status::internal(e.to_string()))?;
+        if reloaded {
+            tracing::info!(
+                base = %gen.base_version,
+                manifest_version = gen.manifest_version,
+                segment_count = gen.segment_count,
+                delta = %gen.delta_version,
+                "generation reloaded via rpc"
+            );
+        }
         Ok(Response::new(proto::ReloadResponse {
             reloaded,
             base_version: gen.base_version.clone(),
