@@ -760,9 +760,24 @@ fn copy_tombstones_sql(layers: &[FoldLayer], out: &Path) -> Result<String> {
 
 #[cfg(feature = "duckdb-sort")]
 fn materialize_layers(layers: &[FoldLayer], out_dir: &Path, write_tombstones: bool) -> Result<()> {
+    // Same discipline as `sort_fact_external`: bound DuckDB's memory (it would
+    // otherwise size itself off the HOST's RAM, not the container limit) and
+    // spill INSIDE the unpublished output dir — readers never see it, a crash
+    // leaves nothing referenced, and the big merge-base sort cannot land in an
+    // undefined cwd. Knobs: BITMAGNET_SORT_MEMORY (8GB), BITMAGNET_SORT_THREADS (8).
+    let mem = std::env::var("BITMAGNET_SORT_MEMORY").unwrap_or_else(|_| "8GB".to_owned());
+    let threads: u32 = std::env::var("BITMAGNET_SORT_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let tmp = out_dir.join(".fold-tmp");
+    std::fs::create_dir_all(&tmp).context("creating fold spill dir")?;
     let conn = duckdb::Connection::open_in_memory().context("opening duckdb for segment fold")?;
-    conn.execute_batch("SET preserve_insertion_order=false;")
-        .context("configuring duckdb for segment fold")?;
+    conn.execute_batch(&format!(
+        "SET threads={threads}; SET memory_limit='{mem}'; SET temp_directory='{}'; SET preserve_insertion_order=false;",
+        sql_path(&tmp)
+    ))
+    .context("configuring duckdb for segment fold")?;
     conn.execute_batch(&copy_fact_sql(layers, &out_dir.join(artifact::FACT))?)
         .context("folding fact artifact")?;
     conn.execute_batch(&copy_agg_torrent_ext_sql(
@@ -777,6 +792,8 @@ fn materialize_layers(layers: &[FoldLayer], out_dir: &Path, write_tombstones: bo
         )?)
         .context("folding tombstone artifact")?;
     }
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&tmp); // spill dir must not ship in the published segment
     Ok(())
 }
 
