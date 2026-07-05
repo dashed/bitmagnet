@@ -340,6 +340,7 @@ async fn main() -> Result<()> {
             match seal::run_seal(
                 &pool,
                 &layout,
+                since,
                 window_end,
                 &deleted,
                 page_size,

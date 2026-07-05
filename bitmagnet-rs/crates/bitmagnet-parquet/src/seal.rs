@@ -1,5 +1,6 @@
 //! Sealed segment publishing plus fold/merge-base planning.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,16 @@ pub enum SealPublishStep {
     WatermarkWritten,
 }
 
+/// Retryable guard for a seal started from an older cut snapshot.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "seal since snapshot is stale: manifest cut is {manifest_cut}, seal since is {since}; retry with a fresh snapshot"
+)]
+pub struct StaleSealSinceError {
+    pub since: i64,
+    pub manifest_cut: i64,
+}
+
 /// Result of a fold attempt.
 #[derive(Debug, Clone)]
 pub struct FoldOutcome {
@@ -72,9 +83,11 @@ pub enum LayeredArtifact {
 }
 
 /// Run an hourly seal over `(watermark, window_end]`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_seal(
     pool: &PgPool,
     layout: &Layout,
+    since: i64,
     window_end: i64,
     deleted: &[String],
     page_size: i64,
@@ -82,7 +95,7 @@ pub async fn run_seal(
     max_lag_secs: i64,
 ) -> Result<SealOutcome> {
     layout.ensure_dirs()?;
-    let since = reconcile_watermark_with_manifest(layout)?;
+    ensure_manifest_cut_matches_since(layout, since)?;
     if window_end <= since {
         return Ok(SealOutcome::Skipped {
             changed_torrents: 0,
@@ -108,9 +121,9 @@ pub async fn run_seal(
         }
     }
 
-    let current_manifest = manifest::read_manifest(layout)?;
+    let current_manifest = ensure_manifest_cut_matches_since(layout, since)?;
     let version = choose_seal_segment_version(layout, current_manifest.as_ref(), window_end)?;
-    let dir = create_seal_segment_dir(layout, version)?;
+    let dir = create_version_dir_exclusive(layout, Kind::Segment, version)?;
     let stats = carve_segment(pool, &dir, since, window_end, deleted, page_size).await?;
     let segment = SegmentEntry {
         version,
@@ -125,6 +138,21 @@ pub async fn run_seal(
         manifest_mver: publish.manifest_mver,
         watermark_advanced: publish.watermark_advanced,
     })
+}
+
+fn ensure_manifest_cut_matches_since(layout: &Layout, since: i64) -> Result<Option<Manifest>> {
+    let manifest = manifest::read_manifest(layout)?;
+    if let Some(manifest) = manifest.as_ref() {
+        let cut = manifest.cut();
+        if cut != since {
+            return Err(StaleSealSinceError {
+                since,
+                manifest_cut: cut,
+            }
+            .into());
+        }
+    }
+    Ok(manifest)
 }
 
 /// If a seal crashed after manifest publish but before watermark advance, the
@@ -257,8 +285,11 @@ fn choose_seal_segment_version(
     Ok(candidate)
 }
 
-fn create_seal_segment_dir(layout: &Layout, version: u64) -> Result<PathBuf> {
-    let dir = layout.segment_version_dir(version);
+fn create_version_dir_exclusive(layout: &Layout, kind: Kind, version: u64) -> Result<PathBuf> {
+    let dir = match kind {
+        Kind::Segment => layout.segment_version_dir(version),
+        Kind::Base | Kind::Delta => layout.kind_dir(kind).join(format!("v{version}")),
+    };
     fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
     ensure_empty_dir(&dir)?;
     Ok(dir)
@@ -355,7 +386,7 @@ pub fn run_fold(layout: &Layout, tier: u8, preferred_version: u64) -> Result<Fol
         to: inputs.last().context("fold input missing last")?.to,
         tier: tier.checked_add(1).context("fold tier overflowed u8")?,
     };
-    let output_dir = layout.new_version_dir(Kind::Segment, &output.version.to_string())?;
+    let output_dir = create_version_dir_exclusive(layout, Kind::Segment, output.version)?;
     let layers: Vec<FoldLayer> = inputs.iter().map(|s| segment_layer(layout, s)).collect();
     materialize_layers(&layers, &output_dir, true)?;
     layout.publish_segment_dir(&output_dir)?;
@@ -370,8 +401,7 @@ pub fn run_fold(layout: &Layout, tier: u8, preferred_version: u64) -> Result<Fol
     })
 }
 
-/// Fold base + all sealed segments into a new base generation. Manifest CAS
-/// failures are intentionally propagated: merge-base is idempotent to rerun.
+/// Fold base + all sealed segments into a new base generation.
 pub fn run_merge_base(layout: &Layout, preferred_version: u64) -> Result<MergeBaseOutcome> {
     layout.ensure_dirs()?;
     let Some(manifest) = manifest::read_manifest(layout)? else {
@@ -402,19 +432,94 @@ pub fn run_merge_base(layout: &Layout, preferred_version: u64) -> Result<MergeBa
     layers.extend(manifest.segments.iter().map(|s| segment_layer(layout, s)));
 
     let version = choose_base_version(layout, preferred_version)?;
-    let output_dir = layout.new_version_dir(Kind::Base, &version.to_string())?;
+    let output_dir = create_version_dir_exclusive(layout, Kind::Base, version)?;
     materialize_layers(&layers, &output_dir, false)?;
+    // Until the manifest CAS below succeeds, readers can briefly combine this
+    // new base with the old manifest. That over-covers the merged rows through
+    // both base and old segments, but does not under-cover; CAS retry removes
+    // only the merged input segment versions and preserves later seals.
     layout.publish(Kind::Base, &output_dir)?;
 
     let next_base = merged_base_entry(&manifest, version);
-    let next = Manifest::new(manifest.mver + 1, next_base.clone(), Vec::new())?;
-    write_manifest_cas(layout, Some(manifest.mver), &next)?;
+    let merged_input_versions: Vec<u64> = manifest.segments.iter().map(|s| s.version).collect();
+    let next =
+        publish_merged_base_manifest(layout, &manifest, next_base.clone(), &merged_input_versions)?;
     Ok(MergeBaseOutcome {
         acted: true,
         input_count: layers.len(),
         base: Some(next_base),
         manifest_mver: Some(next.mver),
     })
+}
+
+fn publish_merged_base_manifest(
+    layout: &Layout,
+    started_manifest: &Manifest,
+    next_base: BaseEntry,
+    merged_input_versions: &[u64],
+) -> Result<Manifest> {
+    publish_merged_base_manifest_inner(
+        layout,
+        started_manifest,
+        next_base,
+        merged_input_versions,
+        |_, _, _, _| Ok(()),
+    )
+}
+
+fn publish_merged_base_manifest_inner(
+    layout: &Layout,
+    started_manifest: &Manifest,
+    next_base: BaseEntry,
+    merged_input_versions: &[u64],
+    mut before_manifest_cas: impl FnMut(usize, &Layout, Option<u64>, &Manifest) -> Result<()>,
+) -> Result<Manifest> {
+    let merged_input_versions: HashSet<u64> = merged_input_versions.iter().copied().collect();
+    let mut attempt = 1;
+    let mut expected_mver = Some(started_manifest.mver);
+    let mut next = Manifest::new(started_manifest.mver + 1, next_base.clone(), Vec::new())?;
+
+    loop {
+        before_manifest_cas(attempt, layout, expected_mver, &next)?;
+        match write_manifest_cas(layout, expected_mver, &next) {
+            Ok(()) => return Ok(next),
+            Err(err)
+                if attempt < MANIFEST_CAS_ATTEMPTS
+                    && err.downcast_ref::<manifest::ManifestCasError>().is_some() =>
+            {
+                let current = manifest::read_manifest(layout)?
+                    .context("manifest disappeared during merge-base CAS retry")?;
+                next =
+                    merge_base_retry_manifest(&current, next_base.clone(), &merged_input_versions)?;
+                expected_mver = Some(current.mver);
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn merge_base_retry_manifest(
+    current: &Manifest,
+    next_base: BaseEntry,
+    merged_input_versions: &HashSet<u64>,
+) -> Result<Manifest> {
+    let preserved: Vec<SegmentEntry> = current
+        .segments
+        .iter()
+        .filter(|s| !merged_input_versions.contains(&s.version))
+        .cloned()
+        .collect();
+    if let Some(first) = preserved.first() {
+        if first.from != next_base.cut {
+            anyhow::bail!(
+                "merge-base CAS retry cannot preserve segments: first preserved segment starts at {}, expected new base cut {}",
+                first.from,
+                next_base.cut
+            );
+        }
+    }
+    Manifest::new(current.mver + 1, next_base, preserved)
 }
 
 fn select_tier_run(manifest: &Manifest, tier: u8) -> Result<Option<(usize, usize)>> {
@@ -793,6 +898,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_seal_stale_since_errors_before_segment_dir_created() {
+        let layout = Layout::new(tmp("stale-since"));
+        layout.ensure_dirs().unwrap();
+        let manifest = manifest_with_segments(vec![SegmentEntry {
+            version: 130,
+            from: 100,
+            to: 130,
+            tier: 0,
+        }]);
+        manifest::write_manifest_cas(&layout, None, &manifest).unwrap();
+        let pool =
+            bitmagnet_db::PgPool::connect_lazy("postgres://postgres@localhost/bitmagnet").unwrap();
+
+        let err = run_seal(&pool, &layout, 120, 140, &[], 100, 1, 0)
+            .await
+            .unwrap_err();
+
+        assert!(err.downcast_ref::<StaleSealSinceError>().is_some());
+        assert!(layout.list_version_dirs(Kind::Segment).unwrap().is_empty());
+    }
+
     #[test]
     fn seal_publish_retries_manifest_cas_after_concurrent_fold() {
         let layout = Layout::new(tmp("publish-cas-retry"));
@@ -814,7 +941,7 @@ mod tests {
         ]);
         manifest::write_manifest_cas(&layout, None, &initial).unwrap();
 
-        let seg_dir = create_seal_segment_dir(&layout, 130).unwrap();
+        let seg_dir = create_version_dir_exclusive(&layout, Kind::Segment, 130).unwrap();
         let segment = SegmentEntry {
             version: 130,
             from: 120,
@@ -892,11 +1019,41 @@ mod tests {
         manifest::write_manifest_cas(&layout, None, &manifest).unwrap();
 
         let version = choose_seal_segment_version(&layout, Some(&manifest), 130).unwrap();
-        let dir = create_seal_segment_dir(&layout, version).unwrap();
+        let dir = create_version_dir_exclusive(&layout, Kind::Segment, version).unwrap();
 
         assert_eq!(version, 131);
         assert!(dir.ends_with("v131"));
         assert_eq!(fs::read(occupied.join("sentinel")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn fold_output_version_skips_preexisting_non_empty_candidate_dir() {
+        let layout = Layout::new(tmp("fold-output-collision"));
+        layout.ensure_dirs().unwrap();
+        let occupied = layout.new_version_dir(Kind::Segment, "121").unwrap();
+        fs::write(occupied.join("sentinel"), b"occupied").unwrap();
+        let manifest = manifest_with_segments(vec![
+            SegmentEntry {
+                version: 110,
+                from: 100,
+                to: 110,
+                tier: 0,
+            },
+            SegmentEntry {
+                version: 120,
+                from: 110,
+                to: 120,
+                tier: 0,
+            },
+        ]);
+
+        let version = choose_replacement_version(&layout, &manifest, 0, 2, 121).unwrap();
+        let output_dir = create_version_dir_exclusive(&layout, Kind::Segment, version).unwrap();
+
+        assert_eq!(version, 122);
+        assert!(output_dir.ends_with("v122"));
+        assert_eq!(fs::read(occupied.join("sentinel")).unwrap(), b"occupied");
+        assert!(fs::read_dir(output_dir).unwrap().next().is_none());
     }
 
     #[test]
@@ -1055,6 +1212,74 @@ mod tests {
         }
         .into();
         assert!(err.downcast_ref::<ManifestCasError>().is_some());
+    }
+
+    #[test]
+    fn merge_base_manifest_cas_retry_preserves_post_merge_seal() {
+        let layout = Layout::new(tmp("merge-base-cas-retry"));
+        layout.ensure_dirs().unwrap();
+        let started = manifest_with_segments(vec![
+            SegmentEntry {
+                version: 110,
+                from: 100,
+                to: 110,
+                tier: 0,
+            },
+            SegmentEntry {
+                version: 120,
+                from: 110,
+                to: 120,
+                tier: 0,
+            },
+        ]);
+        manifest::write_manifest_cas(&layout, None, &started).unwrap();
+        let next_base = BaseEntry {
+            version: 125,
+            cut: 120,
+        };
+        let input_versions = vec![110, 120];
+        let mut injected_seal = false;
+
+        let next = publish_merged_base_manifest_inner(
+            &layout,
+            &started,
+            next_base.clone(),
+            &input_versions,
+            |attempt, layout, expected_mver, _stale_next| {
+                if attempt == 1 && !injected_seal {
+                    assert_eq!(expected_mver, Some(1));
+                    let current = manifest::read_manifest(layout).unwrap().unwrap();
+                    let mut segments = current.segments.clone();
+                    segments.push(SegmentEntry {
+                        version: 130,
+                        from: 120,
+                        to: 140,
+                        tier: 0,
+                    });
+                    let concurrent = Manifest::new(current.mver + 1, current.base, segments)
+                        .expect("concurrent seal manifest validates");
+                    write_manifest_cas(layout, Some(current.mver), &concurrent).unwrap();
+                    injected_seal = true;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(injected_seal);
+        assert_eq!(next.mver, 3);
+        assert_eq!(next.base, next_base);
+        assert_eq!(
+            next.segments,
+            vec![SegmentEntry {
+                version: 130,
+                from: 120,
+                to: 140,
+                tier: 0,
+            }]
+        );
+        next.validate().unwrap();
+        assert_eq!(manifest::read_manifest(&layout).unwrap(), Some(next));
     }
 
     #[test]

@@ -175,8 +175,18 @@ impl GenerationManager {
         expect_version: Option<&str>,
     ) -> Result<(Arc<LoadedGeneration>, bool), GenError> {
         if let Some(v) = expect_version {
-            if self.current().delta_version == v {
-                return Ok((self.current(), false));
+            let cur = self.current();
+            if cur.delta_version == v {
+                let manifest_version = read_manifest(&self.layout)?.as_ref().map_or(0, |m| m.mver);
+                let base_version = self
+                    .layout
+                    .resolve_current(Kind::Base)
+                    .map(|dir| version_of(&dir));
+                if manifest_version == cur.manifest_version
+                    && base_version.as_deref() == Some(cur.base_version.as_str())
+                {
+                    return Ok((cur, false));
+                }
             }
         }
         let next = Arc::new(resolve(&self.layout)?);
@@ -375,6 +385,26 @@ mod tests {
         let mgr = GenerationManager::open(layout).unwrap();
         let (_, changed) = mgr.reload(Some("v100")).unwrap();
         assert!(!changed);
+    }
+
+    #[test]
+    fn reload_expect_version_reloads_when_manifest_mver_changed() {
+        let layout = Layout::new(tmp("expect-manifest-change"));
+        seed(&layout, "100", "100");
+        write_manifest_cas(&layout, None, &manifest(1, Vec::new())).unwrap();
+        let mgr = GenerationManager::open(layout.clone()).unwrap();
+        assert_eq!(mgr.current().delta_version, "v100");
+        assert_eq!(mgr.current().manifest_version, 1);
+
+        publish_segment(&layout, "150");
+        write_manifest_cas(&layout, Some(1), &manifest(2, vec![segment(150, 100, 150)])).unwrap();
+
+        let (next, changed) = mgr.reload(Some("v100")).unwrap();
+
+        assert!(changed);
+        assert_eq!(next.delta_version, "v100");
+        assert_eq!(next.manifest_version, 2);
+        assert_eq!(mgr.current().manifest_version, 2);
     }
 
     #[test]
