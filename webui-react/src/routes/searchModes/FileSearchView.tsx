@@ -14,6 +14,7 @@ import { formatFileSize } from "../../utils/filesize";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import {
   FILE_ORDER_OPTIONS,
+  PAGE_SIZE_OPTIONS,
   getDefaultDescending,
   getFileSearchSort,
   isFileOrderField,
@@ -109,6 +110,20 @@ export default function FileSearchView() {
 
   function handlePageChange(page: number) {
     navigateSearch({ ...search, page }, false);
+  }
+
+  function handlePageSizeChange(event: ChangeEvent<HTMLSelectElement>) {
+    const limit = Number.parseInt(event.target.value, 10);
+
+    if (!PAGE_SIZE_OPTIONS.some((pageSize) => pageSize === limit)) {
+      return;
+    }
+
+    navigateSearch({
+      ...search,
+      limit,
+      page: 1,
+    });
   }
 
   function handleOrderChange(event: ChangeEvent<HTMLSelectElement>) {
@@ -312,6 +327,16 @@ export default function FileSearchView() {
           )}
 
           <div className={styles["pagination"]}>
+            <label className={styles["pageSizeSelect"]}>
+              <span>{t("search.pageSize")}</span>
+              <select onChange={handlePageSizeChange} value={search.limit}>
+                {PAGE_SIZE_OPTIONS.map((pageSize) => (
+                  <option key={pageSize} value={pageSize}>
+                    {pageSize}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               className={searchStyles["secondaryButton"]}
               disabled={search.page <= 1 || isBusy}

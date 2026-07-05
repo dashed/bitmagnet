@@ -65,7 +65,7 @@ describe("legacy route redirects", () => {
         "min_size_unit=MiB",
         "max_size=2",
         "max_size_unit=GiB",
-        "published_at=7d",
+        "published_at=Jan%201%2C%202023%20to%20Jan%2031%2C%202023",
       ].join("&"),
     );
     const expectedSearch = {
@@ -81,7 +81,7 @@ describe("legacy route redirects", () => {
       min_size_unit: "MiB",
       order: "published_at",
       page: 3,
-      published_at: "7d",
+      published_at: "Jan 1, 2023 to Jan 31, 2023",
       query: "matrix resurrections",
       torrent_source: "dht",
       torrent_tag: "freeleech",

@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  formatPublishedRangeValue,
   getFileSearchSort,
+  getPublishedRangeInputValues,
   getTorrentSearchFacets,
+  isValidPublishedAtValue,
   normalizeLegacyTorrentSearch,
   parseTorrentSearchParams,
   stringifyTorrentSearchParams,
@@ -102,6 +105,43 @@ describe("torrent search params", () => {
       },
     });
     expect(getTorrentSearchFacets(search).torrentTag).not.toHaveProperty("logic");
+  });
+
+  it("round-trips custom published date ranges through the legacy published_at param", () => {
+    const publishedAt = "Jan 1, 2023 to Jan 31, 2023";
+    const search = parseTorrentSearchParams({
+      page: "4",
+      published_at: publishedAt,
+      query: "matrix",
+    });
+
+    expect(search.publishedAt).toBe(publishedAt);
+    expect(getPublishedRangeInputValues(search.publishedAt)).toEqual({
+      end: "2023-01-31",
+      start: "2023-01-01",
+    });
+    expect(stringifyTorrentSearchParams(search)).toEqual({
+      page: 4,
+      published_at: publishedAt,
+      query: "matrix",
+    });
+    expect(getTorrentSearchFacets(search).publishedAt).toBe(publishedAt);
+    expect(formatPublishedRangeValue("2023-01-01", "2023-01-31")).toBe(publishedAt);
+  });
+
+  it("drops invalid published_at values instead of sending malformed backend filters", () => {
+    const search = parseTorrentSearchParams({
+      published: "2023-03-01 to 2023-01-01",
+      published_at: "not a time frame",
+      query: "matrix",
+    });
+
+    expect(search.publishedAt).toBeUndefined();
+    expect(stringifyTorrentSearchParams(search)).toEqual({ query: "matrix" });
+    expect(getTorrentSearchFacets(search)).not.toHaveProperty("publishedAt");
+    expect(isValidPublishedAtValue("2023-01-01")).toBe(true);
+    expect(isValidPublishedAtValue("3M")).toBe(true);
+    expect(isValidPublishedAtValue("3mo")).toBe(false);
   });
 
   it("round-trips search modes while eliding the torrent default", () => {

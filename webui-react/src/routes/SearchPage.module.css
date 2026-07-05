@@ -192,7 +192,9 @@
 
 .sortBar label,
 .sizeForm label,
-.publishedSelect {
+.publishedSelect,
+.publishedRange label,
+.pageSizeSelect {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -200,7 +202,9 @@
 
 .sortBar label span,
 .sizeForm label span,
-.publishedSelect span {
+.publishedSelect span,
+.publishedRange label span,
+.pageSizeSelect span {
   color: var(--mantine-color-dimmed);
   font-size: 11px;
   font-weight: 700;
@@ -210,7 +214,9 @@
 .sortBar select,
 .sizeForm input,
 .sizeForm select,
-.publishedSelect select {
+.publishedSelect select,
+.publishedRange input,
+.pageSizeSelect select {
   background: var(--mantine-color-body);
   border: 1px solid var(--mantine-color-default-border);
   border-radius: var(--mantine-radius-sm);
@@ -218,6 +224,22 @@
   min-height: 38px;
   min-width: 0;
   padding: 0 10px;
+}
+
+.publishedRange {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+
+.publishedRange input[aria-invalid="true"] {
+  border-color: var(--mantine-color-red-6);
+}
+
+.fieldError {
+  color: var(--mantine-color-red-7);
+  font-size: var(--mantine-font-size-sm);
+  margin: 0;
 }
 
 .filterActions {
@@ -612,6 +634,17 @@
   text-align: center;
 }
 
+.pageSizeSelect {
+  align-items: center;
+  grid-template-columns: auto minmax(72px, max-content);
+  margin-right: auto;
+}
+
+.pageSizeSelect span {
+  min-width: 0;
+  text-align: start;
+}
+
 @media (max-width: 47.999em) {
   .root {
     align-content: start;
@@ -937,7 +970,8 @@
   }
 
   .resultsActions > *,
-  .pagination > button {
+  .pagination > button,
+  .pageSizeSelect {
     width: 100%;
   }
 

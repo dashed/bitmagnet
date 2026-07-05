@@ -133,4 +133,55 @@ describe("SearchPage search modes", () => {
       vi.useRealTimers();
     }
   });
+
+  it("writes custom published ranges and torrent page size to URL search params", async () => {
+    const router = await renderAt("/app/?page=3&published_at=7d");
+
+    fireEvent.change(await screen.findByLabelText("Published"), {
+      target: { value: "__custom_range" },
+    });
+
+    fireEvent.change(await screen.findByLabelText("From"), {
+      target: { value: "2023-01-01" },
+    });
+    fireEvent.change(screen.getByLabelText("To"), {
+      target: { value: "2023-01-31" },
+    });
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toMatchObject({
+        published_at: "Jan 1, 2023 to Jan 31, 2023",
+      });
+      expect(router.latestLocation.search).not.toHaveProperty("page");
+    });
+
+    fireEvent.change(screen.getByLabelText("Per page"), {
+      target: { value: "50" },
+    });
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toMatchObject({
+        limit: 50,
+        published_at: "Jan 1, 2023 to Jan 31, 2023",
+      });
+      expect(router.latestLocation.search).not.toHaveProperty("page");
+    });
+  });
+
+  it("writes files page size to the shared limit URL search param", async () => {
+    const router = await renderAt("/app/?mode=files&query=sample&page=2");
+
+    await screen.findByLabelText("Search files");
+    fireEvent.change(await screen.findByLabelText("Per page"), {
+      target: { value: "100" },
+    });
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({
+        limit: 100,
+        mode: "files",
+        query: "sample",
+      });
+    });
+  });
 });

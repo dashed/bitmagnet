@@ -15,6 +15,7 @@ import type {
 export const DEFAULT_SEARCH_LIMIT = 20;
 export const DEFAULT_SIZE_UNIT = "MiB";
 export const INFO_HASH_PATTERN = /^[0-9a-fA-F]{40}$/;
+export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 export const SEARCH_MODES = ["torrents", "files", "paths"] as const;
 
 export const SIZE_UNITS = ["KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"] as const;
@@ -189,6 +190,42 @@ export const PUBLISHED_PRESETS = [
 ] as const;
 
 export type PublishedPreset = (typeof PUBLISHED_PRESETS)[number]["value"];
+export type PublishedFilter = string;
+
+const PUBLISHED_SPECIAL_VALUES = [
+  "today",
+  "yesterday",
+  "this week",
+  "last week",
+  "this month",
+  "last month",
+  "this year",
+  "last year",
+] as const;
+
+const PUBLISHED_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+const PUBLISHED_MONTH_INDEX = new Map<string, number>(
+  PUBLISHED_MONTHS.map((month, index) => [month, index + 1] as const),
+);
+
+type ParsedPublishedDate = {
+  inputValue: string;
+  sortKey: string;
+};
 
 type SearchInput = Record<string, unknown>;
 
@@ -203,7 +240,7 @@ export type TorrentSearchUrlParams = {
   mode?: Exclude<SearchMode, "torrents">;
   order?: SearchOrderField;
   page?: number;
-  published_at?: PublishedPreset;
+  published_at?: PublishedFilter;
   query?: string;
 } & Partial<Record<TorrentSearchFacetKey, string>>;
 
@@ -219,7 +256,7 @@ export type TorrentSearchState = {
   mode: SearchMode;
   order: SearchOrderField;
   page: number;
-  publishedAt?: PublishedPreset;
+  publishedAt?: PublishedFilter;
   query: string;
 };
 
@@ -399,18 +436,179 @@ function sizeUnitValue(value: unknown): SizeUnit {
   return SIZE_UNITS.includes(candidate as SizeUnit) ? (candidate as SizeUnit) : DEFAULT_SIZE_UNIT;
 }
 
-function publishedPresetValue(value: unknown): PublishedPreset | undefined {
-  const candidate = stringValue(value);
-
-  return PUBLISHED_PRESETS.some((preset) => preset.value === candidate)
-    ? (candidate as PublishedPreset)
-    : undefined;
-}
-
 function searchModeValue(value: unknown): SearchMode {
   const candidate = stringValue(value);
 
   return SEARCH_MODES.includes(candidate as SearchMode) ? (candidate as SearchMode) : "torrents";
+}
+
+export function isPublishedPreset(value: string): value is PublishedPreset {
+  return PUBLISHED_PRESETS.some((preset) => preset.value === value);
+}
+
+function isPublishedSpecialValue(value: string) {
+  return PUBLISHED_SPECIAL_VALUES.includes(value as (typeof PUBLISHED_SPECIAL_VALUES)[number]);
+}
+
+function padDatePart(value: number) {
+  return value.toString().padStart(2, "0");
+}
+
+function isValidDateParts(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+function isValidTimeParts(hour: number, minute: number, second: number) {
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && second >= 0 && second <= 59;
+}
+
+function parsedPublishedDate(
+  year: number,
+  month: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+): ParsedPublishedDate | undefined {
+  if (!isValidDateParts(year, month, day) || !isValidTimeParts(hour, minute, second)) {
+    return undefined;
+  }
+
+  const inputValue = `${year}-${padDatePart(month)}-${padDatePart(day)}`;
+  const timeValue = `${padDatePart(hour)}:${padDatePart(minute)}:${padDatePart(second)}`;
+
+  return {
+    inputValue,
+    sortKey: `${inputValue}T${timeValue}Z`,
+  };
+}
+
+function parsePublishedDate(value: string): ParsedPublishedDate | undefined {
+  let match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match) {
+    return parsedPublishedDate(Number(match[1]), Number(match[2]), Number(match[3]));
+  }
+
+  match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value);
+  if (match) {
+    return parsedPublishedDate(Number(match[1]), Number(match[2]), Number(match[3]));
+  }
+
+  match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+  if (match) {
+    return parsedPublishedDate(Number(match[3]), Number(match[1]), Number(match[2]));
+  }
+
+  match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value);
+  if (match) {
+    return parsedPublishedDate(
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    );
+  }
+
+  match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value);
+  if (match) {
+    return parsedPublishedDate(
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3]),
+      Number(match[4]),
+      Number(match[5]),
+      Number(match[6]),
+    );
+  }
+
+  match = /^(\d{1,2})-([A-Z][a-z]{2})-(\d{4})$/.exec(value);
+  if (match) {
+    const month = PUBLISHED_MONTH_INDEX.get(match[2]);
+
+    return month ? parsedPublishedDate(Number(match[3]), month, Number(match[1])) : undefined;
+  }
+
+  match = /^([A-Z][a-z]{2}) (\d{1,2}), (\d{4})$/.exec(value);
+  if (match) {
+    const month = PUBLISHED_MONTH_INDEX.get(match[1]);
+
+    return month ? parsedPublishedDate(Number(match[3]), month, Number(match[2])) : undefined;
+  }
+
+  return undefined;
+}
+
+export function getPublishedRangeInputValues(
+  value: string | undefined,
+): { end: string; start: string } | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parts = value.split(" to ");
+
+  if (parts.length !== 2) {
+    return undefined;
+  }
+
+  const start = parsePublishedDate(parts[0]?.trim() ?? "");
+  const end = parsePublishedDate(parts[1]?.trim() ?? "");
+
+  if (!start || !end || start.sortKey > end.sortKey) {
+    return undefined;
+  }
+
+  return {
+    end: end.inputValue,
+    start: start.inputValue,
+  };
+}
+
+export function isPublishedRangeValue(value: string | undefined) {
+  return Boolean(getPublishedRangeInputValues(value));
+}
+
+export function isValidPublishedAtValue(value: string) {
+  const candidate = value.trim();
+
+  return (
+    isPublishedPreset(candidate) ||
+    /^\d+[smhdwMy]$/.test(candidate) ||
+    isPublishedSpecialValue(candidate) ||
+    Boolean(getPublishedRangeInputValues(candidate)) ||
+    Boolean(parsePublishedDate(candidate))
+  );
+}
+
+function publishedFilterValue(value: unknown): PublishedFilter | undefined {
+  const candidate = stringValue(value);
+
+  return candidate && isValidPublishedAtValue(candidate) ? candidate : undefined;
+}
+
+function formatPublishedDateInput(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+
+  return `${PUBLISHED_MONTHS[month - 1]} ${day}, ${year}`;
+}
+
+export function formatPublishedRangeValue(start: string, end: string) {
+  const startDate = parsePublishedDate(start);
+  const endDate = parsePublishedDate(end);
+
+  if (!startDate || !endDate || startDate.sortKey > endDate.sortKey) {
+    return undefined;
+  }
+
+  return `${formatPublishedDateInput(startDate.inputValue)} to ${formatPublishedDateInput(
+    endDate.inputValue,
+  )}`;
 }
 
 function finiteValue<T extends string>(values: readonly T[], value: string): value is T {
@@ -533,7 +731,7 @@ export function parseTorrentSearchParams(input: unknown): TorrentSearchState {
     order,
     page: integerValue(params["page"], 1) ?? 1,
     publishedAt:
-      publishedPresetValue(params["published_at"]) ?? publishedPresetValue(params["published"]),
+      publishedFilterValue(params["published_at"]) ?? publishedFilterValue(params["published"]),
     query,
   };
 }

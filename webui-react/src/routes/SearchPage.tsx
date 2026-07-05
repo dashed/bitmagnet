@@ -28,13 +28,17 @@ import { formatRelativeTime } from "../utils/relativeTime";
 import {
   DEFAULT_SIZE_UNIT,
   ORDER_OPTIONS,
+  PAGE_SIZE_OPTIONS,
   PUBLISHED_PRESETS,
   SEARCH_MODES,
   SIZE_UNITS,
   TORRENT_SEARCH_FACET_KEYS,
+  formatPublishedRangeValue,
   getDefaultDescending,
+  getPublishedRangeInputValues,
   getTorrentSearchFacets,
   getTorrentSearchOrderBy,
+  isPublishedPreset,
   isTorrentSearchFacetRelevant,
   parseTorrentSearchParams,
   sanitizeFacetSelections,
@@ -65,6 +69,7 @@ const LazyTorrentBulkActionsBar = lazy(async () => {
 });
 const LazyFileSearchView = lazy(() => import("./searchModes/FileSearchView"));
 const LazyPathBrowseView = lazy(() => import("./searchModes/PathBrowseView"));
+const PUBLISHED_CUSTOM_RANGE_VALUE = "__custom_range";
 
 type SearchResult = TorrentContentSearchQuery["torrentContent"]["search"];
 type SearchItem = SearchResult["items"][number];
@@ -75,6 +80,10 @@ type SizeDraft = {
   maxUnit: SizeUnit;
   min: string;
   minUnit: SizeUnit;
+};
+type PublishedRangeDraft = {
+  end: string;
+  start: string;
 };
 type SearchSelectionState = {
   infoHashes: Set<string>;
@@ -151,8 +160,16 @@ function parseSizeInput(value: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function isPublishedPreset(value: string): value is (typeof PUBLISHED_PRESETS)[number]["value"] {
-  return PUBLISHED_PRESETS.some((preset) => preset.value === value);
+function getPublishedRangeDraft(value: string | undefined): PublishedRangeDraft {
+  return getPublishedRangeInputValues(value) ?? { end: "", start: "" };
+}
+
+function isPublishedRangeDraftComplete(draft: PublishedRangeDraft) {
+  return Boolean(draft.start && draft.end);
+}
+
+function isPublishedRangeDraftInvalid(draft: PublishedRangeDraft) {
+  return isPublishedRangeDraftComplete(draft) && !formatPublishedRangeValue(draft.start, draft.end);
 }
 
 function getDhtSeenTooltip(
@@ -392,6 +409,12 @@ export function SearchPage() {
   );
   const [draftQuery, setDraftQuery] = useState(search.query);
   const [sizeDraft, setSizeDraft] = useState<SizeDraft>(() => getSizeDraft(search));
+  const [publishedRangeDraft, setPublishedRangeDraft] = useState<PublishedRangeDraft>(() =>
+    getPublishedRangeDraft(search.publishedAt),
+  );
+  const [publishedRangeOpen, setPublishedRangeOpen] = useState(() =>
+    Boolean(search.publishedAt && !isPublishedPreset(search.publishedAt)),
+  );
   const [refresh, setRefresh] = useState<{ nonce: number; uncachedSearchKey: string | null }>({
     nonce: 0,
     uncachedSearchKey: null,
@@ -426,6 +449,24 @@ export function SearchPage() {
   useEffect(() => {
     setSizeDraft(getSizeDraft(search));
   }, [search]);
+
+  useEffect(() => {
+    if (search.publishedAt && !isPublishedPreset(search.publishedAt)) {
+      setPublishedRangeOpen(true);
+      setPublishedRangeDraft(getPublishedRangeDraft(search.publishedAt));
+
+      return;
+    }
+
+    if (search.publishedAt) {
+      setPublishedRangeOpen(false);
+      setPublishedRangeDraft({ end: "", start: "" });
+
+      return;
+    }
+
+    setPublishedRangeDraft({ end: "", start: "" });
+  }, [search.publishedAt]);
 
   useEffect(() => {
     setExpandedFacets((currentFacets) => {
@@ -481,6 +522,20 @@ export function SearchPage() {
 
   function handlePageChange(page: number) {
     navigateSearch({ ...search, page }, false);
+  }
+
+  function handlePageSizeChange(event: ChangeEvent<HTMLSelectElement>) {
+    const limit = Number.parseInt(event.target.value, 10);
+
+    if (!PAGE_SIZE_OPTIONS.some((pageSize) => pageSize === limit)) {
+      return;
+    }
+
+    navigateSearch({
+      ...search,
+      limit,
+      page: 1,
+    });
   }
 
   function handleContentTypeChange(contentType: ContentTypeSelection | undefined) {
@@ -546,10 +601,49 @@ export function SearchPage() {
 
   function handlePublishedChange(event: ChangeEvent<HTMLSelectElement>) {
     const value = event.target.value;
+
+    if (value === PUBLISHED_CUSTOM_RANGE_VALUE) {
+      setPublishedRangeOpen(true);
+      setPublishedRangeDraft(getPublishedRangeDraft(search.publishedAt));
+      navigateSearch({
+        ...search,
+        page: 1,
+        publishedAt: undefined,
+      });
+
+      return;
+    }
+
+    setPublishedRangeOpen(false);
+    setPublishedRangeDraft({ end: "", start: "" });
     navigateSearch({
       ...search,
       page: 1,
       publishedAt: isPublishedPreset(value) ? value : undefined,
+    });
+  }
+
+  function handlePublishedRangeChange(field: keyof PublishedRangeDraft, value: string) {
+    const nextDraft = {
+      ...publishedRangeDraft,
+      [field]: value,
+    };
+    setPublishedRangeDraft(nextDraft);
+
+    if (!isPublishedRangeDraftComplete(nextDraft)) {
+      return;
+    }
+
+    const publishedAt = formatPublishedRangeValue(nextDraft.start, nextDraft.end);
+
+    if (!publishedAt) {
+      return;
+    }
+
+    navigateSearch({
+      ...search,
+      page: 1,
+      publishedAt,
     });
   }
 
@@ -594,6 +688,8 @@ export function SearchPage() {
       min: "",
       minUnit: DEFAULT_SIZE_UNIT,
     });
+    setPublishedRangeOpen(false);
+    setPublishedRangeDraft({ end: "", start: "" });
     navigateSearch({
       ...search,
       contentType: undefined,
@@ -768,6 +864,10 @@ export function SearchPage() {
   );
   const activeFilterCount =
     (hasSizeFilter ? 1 : 0) + (search.publishedAt ? 1 : 0) + selectedFacetKeys.length;
+  const publishedRangeInvalid = isPublishedRangeDraftInvalid(publishedRangeDraft);
+  const publishedSelectValue = publishedRangeOpen
+    ? PUBLISHED_CUSTOM_RANGE_VALUE
+    : (search.publishedAt ?? "");
   const orderOptions: ReactNode[] = [];
 
   for (const option of ORDER_OPTIONS) {
@@ -1013,15 +1113,49 @@ export function SearchPage() {
                 <h2>{t("search.publishedFilter")}</h2>
                 <label className={styles["publishedSelect"]}>
                   <span>{t("search.published")}</span>
-                  <select onChange={handlePublishedChange} value={search.publishedAt ?? ""}>
+                  <select onChange={handlePublishedChange} value={publishedSelectValue}>
                     <option value="">{t("search.publishedAny")}</option>
                     {PUBLISHED_PRESETS.map((preset) => (
                       <option key={preset.value} value={preset.value}>
                         {t(preset.labelKey)}
                       </option>
                     ))}
+                    <option value={PUBLISHED_CUSTOM_RANGE_VALUE}>
+                      {t("search.publishedCustomRange")}
+                    </option>
                   </select>
                 </label>
+                {publishedRangeOpen ? (
+                  <div className={styles["publishedRange"]}>
+                    <label>
+                      <span>{t("search.publishedRangeStart")}</span>
+                      <input
+                        aria-invalid={publishedRangeInvalid}
+                        max={publishedRangeDraft.end || undefined}
+                        onChange={(event) =>
+                          handlePublishedRangeChange("start", event.target.value)
+                        }
+                        type="date"
+                        value={publishedRangeDraft.start}
+                      />
+                    </label>
+                    <label>
+                      <span>{t("search.publishedRangeEnd")}</span>
+                      <input
+                        aria-invalid={publishedRangeInvalid}
+                        min={publishedRangeDraft.start || undefined}
+                        onChange={(event) => handlePublishedRangeChange("end", event.target.value)}
+                        type="date"
+                        value={publishedRangeDraft.end}
+                      />
+                    </label>
+                    {publishedRangeInvalid ? (
+                      <p className={styles["fieldError"]} role="alert">
+                        {t("search.publishedRangeInvalid")}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
               </section>
 
               <div className={styles["facetGroups"]}>
@@ -1295,6 +1429,16 @@ export function SearchPage() {
               )}
 
               <div className={styles["pagination"]}>
+                <label className={styles["pageSizeSelect"]}>
+                  <span>{t("search.pageSize")}</span>
+                  <select onChange={handlePageSizeChange} value={search.limit}>
+                    {PAGE_SIZE_OPTIONS.map((pageSize) => (
+                      <option key={pageSize} value={pageSize}>
+                        {pageSize}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button
                   className={styles["secondaryButton"]}
                   disabled={search.page <= 1 || isBusy}
