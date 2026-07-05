@@ -14,6 +14,7 @@
 
 pub mod engine;
 pub mod generation;
+pub mod parity;
 pub mod query;
 pub mod service;
 pub mod sql;
