@@ -126,6 +126,7 @@ async fn run(args: &Args, gens: Arc<GenerationManager>, cfg: ServiceConfig) -> a
         threads: args.threads,
         memory_limit: args.memory.clone(),
         pool_size: args.concurrency.max(1) + 1,
+        ..DuckConfig::default() // temp_dir: BITMAGNET_FILESEARCH_TMPDIR or $TMPDIR spill dir
     })?);
     let service = FileSearchServiceServer::new(FileSearchServer::new(gens, engine, cfg));
 

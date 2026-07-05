@@ -21,6 +21,7 @@
 //! connection and returns immediately; the connection is returned to the pool
 //! only after DuckDB unwinds.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,12 @@ pub struct DuckConfig {
     pub memory_limit: String,
     /// Connections in the cursor pool (the tokio semaphore should match).
     pub pool_size: usize,
+    /// Spill directory for queries that exceed `memory_limit`. DuckDB's default
+    /// is `.tmp` relative to the process cwd — in the container that is `/`,
+    /// which uid 65532 cannot write, so the FIRST spilling query would fail
+    /// with EACCES (found by the G1 parity gate; latent in the serving pod
+    /// too). Env: `BITMAGNET_FILESEARCH_TMPDIR`.
+    pub temp_dir: PathBuf,
 }
 
 impl Default for DuckConfig {
@@ -58,6 +65,9 @@ impl Default for DuckConfig {
             threads: 4,
             memory_limit: "4GB".to_owned(),
             pool_size: 6,
+            temp_dir: std::env::var_os("BITMAGNET_FILESEARCH_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("bitmagnet-filesearch-spill")),
         }
     }
 }
@@ -87,15 +97,20 @@ impl DuckEngine {
 
     /// Apply the FB-B1d lockdown PRAGMAs (order matters: lock_configuration last).
     fn lockdown(conn: &Connection, cfg: &DuckConfig) -> Result<()> {
+        std::fs::create_dir_all(&cfg.temp_dir).with_context(|| {
+            format!("creating duckdb spill dir {}", cfg.temp_dir.display())
+        })?;
         conn.execute_batch(&format!(
             "SET threads={threads}; \
              SET memory_limit='{mem}'; \
+             SET temp_directory='{tmp}'; \
              SET enable_object_cache=true; \
              SET autoinstall_known_extensions=false; \
              SET autoload_known_extensions=false; \
              SET lock_configuration=true;",
             threads = cfg.threads,
             mem = cfg.memory_limit,
+            tmp = cfg.temp_dir.to_string_lossy().replace('\'', "''")
         ))
         .context("applying duckdb lockdown pragmas")?;
         Ok(())
@@ -459,6 +474,7 @@ mod tests {
             threads: 1,
             memory_limit: "1GB".to_owned(),
             pool_size: 1,
+            ..DuckConfig::default()
         })
         .unwrap();
         let held_primary = engine.checkout().unwrap();
