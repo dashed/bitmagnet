@@ -97,9 +97,8 @@ impl DuckEngine {
 
     /// Apply the FB-B1d lockdown PRAGMAs (order matters: lock_configuration last).
     fn lockdown(conn: &Connection, cfg: &DuckConfig) -> Result<()> {
-        std::fs::create_dir_all(&cfg.temp_dir).with_context(|| {
-            format!("creating duckdb spill dir {}", cfg.temp_dir.display())
-        })?;
+        std::fs::create_dir_all(&cfg.temp_dir)
+            .with_context(|| format!("creating duckdb spill dir {}", cfg.temp_dir.display()))?;
         conn.execute_batch(&format!(
             "SET threads={threads}; \
              SET memory_limit='{mem}'; \

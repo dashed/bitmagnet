@@ -23,7 +23,9 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
@@ -132,25 +134,34 @@ impl Layout {
         let target = version_dir
             .file_name()
             .context("version dir has no file name")?;
+        let kind_dir = self.kind_dir(kind);
+        cleanup_stale_current_temps(&kind_dir);
 
         #[cfg(unix)]
         {
             let link = self.current_link(kind);
-            let tmp = self.kind_dir(kind).join(".current.tmp");
-            let _ = fs::remove_file(&tmp);
+            let tmp = unique_temp_path(&kind_dir, ".current");
             std::os::unix::fs::symlink(target, &tmp)
                 .with_context(|| format!("symlink {} -> {:?}", tmp.display(), target))?;
-            fs::rename(&tmp, &link).with_context(|| {
-                format!("atomic rename {} -> {}", tmp.display(), link.display())
-            })?;
-            fsync_dir(&self.kind_dir(kind)).ok();
+            if let Err(error) = fs::rename(&tmp, &link) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error).with_context(|| {
+                    format!("atomic rename {} -> {}", tmp.display(), link.display())
+                });
+            }
+            fsync_dir(&kind_dir).ok();
         }
         #[cfg(not(unix))]
         {
             let ptr = self.pointer_file(kind);
-            let tmp = self.kind_dir(kind).join(".current.txt.tmp");
+            let tmp = unique_temp_path(&kind_dir, ".current.txt");
             fs::write(&tmp, target.to_string_lossy().as_bytes())?;
-            fs::rename(&tmp, &ptr)?;
+            if let Err(error) = fs::rename(&tmp, &ptr) {
+                let _ = fs::remove_file(&tmp);
+                return Err(error).with_context(|| {
+                    format!("atomic rename {} -> {}", tmp.display(), ptr.display())
+                });
+            }
         }
         Ok(())
     }
@@ -223,7 +234,7 @@ impl Layout {
 
     /// Persist the BASE watermark (compaction/base only).
     pub fn write_watermark(&self, epoch: i64) -> Result<()> {
-        self.write_epoch(&self.watermark_path(), ".watermark.tmp", epoch)
+        self.write_epoch(&self.watermark_path(), epoch)
     }
 
     /// Advance the watermark only if `epoch` is newer than the on-disk value.
@@ -249,7 +260,7 @@ impl Layout {
 
     /// Persist the delta window end (every delta tick).
     pub fn write_delta_mark(&self, epoch: i64) -> Result<()> {
-        self.write_epoch(&self.delta_mark_path(), ".delta_mark.tmp", epoch)
+        self.write_epoch(&self.delta_mark_path(), epoch)
     }
 
     fn read_epoch(path: &Path) -> i64 {
@@ -259,13 +270,24 @@ impl Layout {
             .unwrap_or(0)
     }
 
-    fn write_epoch(&self, path: &Path, tmp_name: &str, epoch: i64) -> Result<()> {
-        let tmp = self.root.join(tmp_name);
-        let mut f = fs::File::create(&tmp)?;
-        write!(f, "{epoch}")?;
-        f.sync_all().ok();
-        fs::rename(&tmp, path)?;
-        Ok(())
+    fn write_epoch(&self, path: &Path, epoch: i64) -> Result<()> {
+        let name = path
+            .file_name()
+            .context("epoch mark path has no file name")?
+            .to_string_lossy();
+        let tmp = unique_temp_path(&self.root, &format!(".{name}"));
+        let result = (|| -> Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            write!(f, "{epoch}")?;
+            f.sync_all().ok();
+            drop(f);
+            fs::rename(&tmp, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        result
     }
 
     // ---- pruning (generation GC) ----
@@ -449,6 +471,50 @@ impl Layout {
     }
 }
 
+static TEMP_NAME_START: OnceLock<Instant> = OnceLock::new();
+static TEMP_NAME_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const STALE_CURRENT_TEMP_AGE: Duration = Duration::from_secs(60 * 60);
+
+fn unique_temp_path(dir: &Path, prefix: &str) -> PathBuf {
+    let monotonic_nanos = TEMP_NAME_START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos();
+    let sequence = TEMP_NAME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(
+        "{prefix}.{}.{}.{sequence}.tmp",
+        std::process::id(),
+        monotonic_nanos
+    ))
+}
+
+/// Best-effort cleanup for abandoned current-pointer temporaries. Active
+/// publishers are far younger than the one-hour threshold, so concurrent
+/// publishes never remove each other's temporary link/file.
+fn cleanup_stale_current_temps(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".current.") || !name.ends_with(".tmp") {
+            continue;
+        }
+        let is_stale = fs::symlink_metadata(entry.path())
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_CURRENT_TEMP_AGE);
+        if is_stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Best-effort `fsync` of a directory (POSIX durability of renames within it).
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -580,6 +646,48 @@ mod tests {
         assert!(cur.ends_with("v200"));
         // old generation dir still exists (immutable; GC is a separate concern)
         assert!(l.kind_dir(Kind::Base).join("v100").is_dir());
+    }
+
+    #[test]
+    fn concurrent_publishers_all_succeed_and_leave_a_valid_current() {
+        const PUBLISHERS: usize = 32;
+
+        let layout = std::sync::Arc::new(Layout::new(tmp("concurrent-publish")));
+        layout.ensure_dirs().unwrap();
+        let versions: Vec<PathBuf> = (0..PUBLISHERS)
+            .map(|version| {
+                layout
+                    .new_version_dir(Kind::Base, &version.to_string())
+                    .unwrap()
+            })
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(PUBLISHERS));
+        let handles: Vec<_> = versions
+            .iter()
+            .cloned()
+            .map(|version_dir| {
+                let layout = layout.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    layout.publish(Kind::Base, &version_dir)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("publisher thread did not panic")
+                .unwrap();
+        }
+        let current = layout
+            .resolve_current(Kind::Base)
+            .expect("current resolves");
+        assert!(
+            versions.contains(&current),
+            "current must resolve to one of the concurrently published versions"
+        );
     }
 
     #[test]

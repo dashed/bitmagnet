@@ -12,8 +12,8 @@
 //! * [`batch_torrent_files_ext_agg`] + [`FileExtAgg`] — the per-(torrent,
 //!   extension) `torrent_files` aggregate, the actual side of the L2 `verify`
 //!   parity checker (Job A).
-//! * [`read_deleted_torrents`] — the `deleted_torrents` audit window read, the
-//!   delta tombstone's deletion source.
+//! * [`read_deleted_torrents`] / [`prune_deleted_torrents`] — the deletion-audit
+//!   window read and merge-base-gated retention prune.
 //! * [`stream_changed_torrent_keys`] +
 //!   [`stream_torrents_for_index_info_hashes`] — the 00024 incremental follow
 //!   contract for the main Tantivy sidecar.
@@ -33,7 +33,7 @@ mod stream;
 
 pub use agg::{batch_torrent_files_ext_agg, FileExtAgg};
 pub use config::DbConfig;
-pub use deleted::read_deleted_torrents;
+pub use deleted::{prune_deleted_torrents, read_deleted_torrents};
 pub use error::{DbError, Result};
 pub use pool::{connect, ping};
 pub use stream::{

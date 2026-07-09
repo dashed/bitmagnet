@@ -170,6 +170,9 @@ message HealthCheckResponse {
   ServingStatus status = 1;
   // Documents currently in the index (for readiness / lag monitoring).
   uint64 doc_count = 2;
+  // Last follow-loop watermark as Unix epoch seconds. Zero when follow is off
+  // or has not initialized its watermark.
+  int64 watermark_epoch = 3;
 }
 
 // ---------------------------------------------------------------------------

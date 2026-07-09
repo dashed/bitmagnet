@@ -144,13 +144,22 @@ pub async fn spawn_follow_loop(
         .await
         .context("connecting to postgres")?;
 
-    let watermark = read_watermark(&config.watermark_file)
-        .unwrap_or_else(|| current_epoch().saturating_sub(config.carve_lag_secs).max(0));
-    write_watermark(&config.watermark_file, watermark).context("initializing search watermark")?;
+    let watermark = initialize_follow_watermark(&config, &server)?;
 
     Ok(tokio::spawn(async move {
         run_follow_loop(pool, server, config, watermark).await;
     }))
+}
+
+fn initialize_follow_watermark(
+    config: &FollowConfig,
+    server: &SearchServer,
+) -> anyhow::Result<i64> {
+    let watermark = read_watermark(&config.watermark_file)
+        .unwrap_or_else(|| current_epoch().saturating_sub(config.carve_lag_secs).max(0));
+    write_watermark(&config.watermark_file, watermark).context("initializing search watermark")?;
+    server.set_watermark_epoch(watermark);
+    Ok(watermark)
 }
 
 async fn run_follow_loop(
@@ -161,7 +170,8 @@ async fn run_follow_loop(
 ) {
     let mut consecutive_failures: u32 = 0;
     info!(
-        watermark,
+        watermark_epoch = watermark,
+        watermark_age_secs = current_epoch().saturating_sub(watermark).max(0),
         interval_secs = config.interval_secs,
         carve_lag_secs = config.carve_lag_secs,
         max_window_secs = config.max_window_secs,
@@ -179,6 +189,11 @@ async fn run_follow_loop(
             config.carve_lag_secs,
             config.max_window_secs,
         ) else {
+            info!(
+                watermark_epoch = watermark,
+                watermark_age_secs = now_epoch.saturating_sub(watermark).max(0),
+                "search follow watermark current"
+            );
             tokio::time::sleep(Duration::from_secs(config.interval_secs)).await;
             continue;
         };
@@ -201,6 +216,7 @@ async fn run_follow_loop(
         }) {
             Ok(stats) => {
                 watermark = window.until;
+                server.set_watermark_epoch(watermark);
                 consecutive_failures = 0;
                 info!(
                     since = stats.since,
@@ -214,6 +230,8 @@ async fn run_follow_loop(
                     stale_tombstones_skipped = stats.stale_tombstones_skipped,
                     commits_performed = stats.commits_performed,
                     backlog_remaining,
+                    watermark_epoch = watermark,
+                    watermark_age_secs = current_epoch().saturating_sub(watermark).max(0),
                     duration_ms = started.elapsed().as_millis() as u64,
                     "search follow tick complete"
                 );
@@ -227,6 +245,8 @@ async fn run_follow_loop(
                     until = window.until,
                     consecutive_failures,
                     backoff_secs = backoff,
+                    watermark_epoch = watermark,
+                    watermark_age_secs = current_epoch().saturating_sub(watermark).max(0),
                     duration_ms = started.elapsed().as_millis() as u64,
                     "search follow tick failed; backing off"
                 );
@@ -500,7 +520,8 @@ mod tests {
     use super::{
         carve_window, carve_window_with_max, commit_follow_batch, deleted_read_limit_with_sentinel,
         deleted_read_truncated, follow_backoff_secs, follow_sleep_secs, follow_tick,
-        live_tombstones, window_has_backlog, FollowStats, FollowWindow, DEFAULT_CARVE_LAG_SECS,
+        initialize_follow_watermark, live_tombstones, window_has_backlog, FollowConfig,
+        FollowStats, FollowWindow, DEFAULT_CARVE_LAG_SECS,
     };
     use crate::proto::search_service_server::SearchService;
     use crate::proto::{ContentType, HealthCheckRequest, TorrentDocument};
@@ -512,6 +533,35 @@ mod tests {
 
     fn info_hash(byte: u8) -> InfoHash {
         InfoHash::from_slice(&[byte; 20]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_watermark_is_initialized_from_known_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "bitmagnet-main-search-watermark-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create watermark test dir");
+        let watermark_file = dir.join("watermark");
+        std::fs::write(&watermark_file, "1700000000\n").expect("write known watermark");
+
+        let server = crate::SearchServer::in_ram().expect("in-ram search server");
+        let config = FollowConfig {
+            watermark_file,
+            ..FollowConfig::default()
+        };
+        let watermark =
+            initialize_follow_watermark(&config, &server).expect("initialize watermark");
+        let health = server
+            .health_check(Request::new(HealthCheckRequest {}))
+            .await
+            .expect("health_check ok")
+            .into_inner();
+
+        assert_eq!(watermark, 1_700_000_000);
+        assert_eq!(health.watermark_epoch, 1_700_000_000);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn doc(info_hash: Vec<u8>, name: &str, content_id: &str) -> TorrentDocument {

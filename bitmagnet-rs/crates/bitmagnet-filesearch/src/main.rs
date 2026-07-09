@@ -15,7 +15,6 @@ use bitmagnet_filesearch::generation::GenerationManager;
 use bitmagnet_filesearch::service::ServiceConfig;
 use bitmagnet_parquet::generation::Layout;
 use clap::Parser;
-#[cfg(feature = "duckdb-engine")]
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -205,8 +204,50 @@ async fn serve(
     Ok(())
 }
 
-#[cfg(feature = "duckdb-engine")]
+#[cfg_attr(not(feature = "duckdb-engine"), allow(dead_code))]
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install ctrl-c handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    wait_for_shutdown(ctrl_c, terminate).await;
     info!("shutdown signal received");
+}
+
+async fn wait_for_shutdown<C, T>(ctrl_c: C, terminate: T)
+where
+    C: std::future::Future<Output = ()>,
+    T: std::future::Future<Output = ()>,
+{
+    tokio::pin!(ctrl_c);
+    tokio::pin!(terminate);
+    tokio::select! {
+        () = &mut ctrl_c => {}
+        () = &mut terminate => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_shutdown;
+
+    #[tokio::test]
+    async fn simulated_sigterm_resolves_shutdown_selector() {
+        wait_for_shutdown(std::future::pending::<()>(), std::future::ready(())).await;
+    }
 }

@@ -3,6 +3,7 @@
 //! Serves the Tantivy-backed `bitmagnet.v1` `SearchService` plus the standard
 //! `grpc.health.v1.Health` service over gRPC for operators and orchestrators.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -127,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("opening search index at {}", args.index_path.display()))?;
     set_health_status(&health_reporter, ServingStatus::Serving).await;
 
-    let _follow_task = if args.follow {
+    let follow_task = if args.follow {
         Some(
             spawn_follow_loop(
                 FollowConfig {
@@ -159,14 +160,17 @@ async fn main() -> anyhow::Result<()> {
     match Listen::parse(&args.addr) {
         Listen::Tcp(addr) => {
             info!(%addr, "serving gRPC over TCP");
-            Server::builder()
-                .add_service(health_service)
-                .add_service(service)
-                .serve_with_shutdown(addr, shutdown_signal())
-                .await
-                .context("gRPC server (TCP) terminated with an error")?;
+            let serve = async {
+                Server::builder()
+                    .add_service(health_service)
+                    .add_service(service)
+                    .serve_with_shutdown(addr, shutdown_signal())
+                    .await
+                    .context("gRPC server (TCP) terminated with an error")
+            };
+            supervise_server(serve, follow_task).await?;
         }
-        Listen::Unix(path) => serve_unix(service, health_service, path).await?,
+        Listen::Unix(path) => serve_unix(service, health_service, path, follow_task).await?,
     }
 
     info!("bitmagnet-search stopped");
@@ -177,11 +181,38 @@ fn resolved_watermark_file(index_path: &Path, explicit_watermark_file: Option<&P
     explicit_watermark_file.map_or_else(|| index_path.join("watermark"), Path::to_path_buf)
 }
 
+async fn supervise_server<F>(
+    server: F,
+    follow_task: Option<tokio::task::JoinHandle<()>>,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    let Some(mut follow_task) = follow_task else {
+        return server.await;
+    };
+    tokio::pin!(server);
+
+    tokio::select! {
+        biased;
+        server_result = &mut server => server_result,
+        follow_result = &mut follow_task => {
+            let cause = match follow_result {
+                Ok(()) => "follow task returned unexpectedly".to_owned(),
+                Err(error) => format!("follow task failed: {error}"),
+            };
+            tracing::error!(%cause, "search follow task terminated; stopping server");
+            Err(anyhow::anyhow!(cause))
+        }
+    }
+}
+
 #[cfg(unix)]
 async fn serve_unix(
     service: SearchServiceServer<SearchServer>,
     health_service: StandardHealthService,
     path: PathBuf,
+    follow_task: Option<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     use tokio::net::UnixListener;
     use tokio_stream::wrappers::UnixListenerStream;
@@ -193,13 +224,15 @@ async fn serve_unix(
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("binding unix socket at {}", path.display()))?;
     info!(path = %path.display(), "serving gRPC over unix socket");
-    Server::builder()
-        .add_service(health_service)
-        .add_service(service)
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
-        .await
-        .context("gRPC server (unix) terminated with an error")?;
-    Ok(())
+    let serve = async {
+        Server::builder()
+            .add_service(health_service)
+            .add_service(service)
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
+            .await
+            .context("gRPC server (unix) terminated with an error")
+    };
+    supervise_server(serve, follow_task).await
 }
 
 #[cfg(not(unix))]
@@ -208,6 +241,7 @@ async fn serve_unix(
     _service: SearchServiceServer<SearchServer>,
     _health_service: StandardHealthService,
     path: PathBuf,
+    _follow_task: Option<tokio::task::JoinHandle<()>>,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "unix-socket listening ({}) is only supported on unix platforms",
@@ -255,8 +289,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolved_watermark_file, Args};
+    use super::{resolved_watermark_file, supervise_server, Args};
     use clap::Parser;
+    use std::future;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -279,5 +314,29 @@ mod tests {
             resolved_watermark_file(index_path, explicit_args.watermark_file.as_deref()),
             PathBuf::from("/tmp/explicit-watermark")
         );
+    }
+
+    #[tokio::test]
+    async fn panicking_follow_task_fails_the_combined_server_future() {
+        let follow_task = tokio::spawn(async {
+            panic!("first follow tick panicked");
+        });
+        let error = supervise_server(future::pending::<anyhow::Result<()>>(), Some(follow_task))
+            .await
+            .expect_err("a follow panic must stop the server");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("follow task failed"));
+        assert!(message.contains("first follow tick panicked"));
+    }
+
+    #[tokio::test]
+    async fn clean_follow_return_is_also_fatal() {
+        let follow_task = tokio::spawn(async {});
+        let error = supervise_server(future::pending::<anyhow::Result<()>>(), Some(follow_task))
+            .await
+            .expect_err("an unexpected clean return must stop the server");
+
+        assert!(format!("{error:#}").contains("follow task returned unexpectedly"));
     }
 }

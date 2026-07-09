@@ -7,6 +7,7 @@
 //! `HealthCheck` reports the live document count from the reader.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -45,6 +46,7 @@ pub struct SearchServer {
     fields: Fields,
     /// Tantivy allows one writer per index; all ingest funnels through this.
     writer: Arc<Mutex<IndexWriter>>,
+    watermark_epoch: Arc<AtomicI64>,
 }
 
 impl SearchServer {
@@ -62,6 +64,7 @@ impl SearchServer {
             reader,
             fields,
             writer: Arc::new(Mutex::new(writer)),
+            watermark_epoch: Arc::new(AtomicI64::new(0)),
         })
     }
 
@@ -124,6 +127,12 @@ impl SearchServer {
         }
         self.reader.reload()?;
         Ok(())
+    }
+
+    /// Update the externally reported follow watermark.
+    pub fn set_watermark_epoch(&self, watermark_epoch: i64) {
+        self.watermark_epoch
+            .store(watermark_epoch, Ordering::Relaxed);
     }
 }
 
@@ -248,6 +257,7 @@ impl SearchService for SearchServer {
         Ok(Response::new(HealthCheckResponse {
             status: ServingStatus::Serving as i32,
             doc_count,
+            watermark_epoch: self.watermark_epoch.load(Ordering::Relaxed),
         }))
     }
 }

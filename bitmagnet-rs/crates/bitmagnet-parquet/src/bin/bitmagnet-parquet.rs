@@ -143,7 +143,15 @@ enum Cmd {
         tier: u8,
     },
     /// Fold base + all sealed segments into a fresh base generation.
-    MergeBase,
+    MergeBase {
+        /// Optional PostgreSQL DSN. When present, prune deletion-audit rows
+        /// made safe by the newly published base cut.
+        #[arg(long)]
+        dsn: Option<String>,
+        /// Safety margin retained behind the new base cut before pruning.
+        #[arg(long, default_value_t = 86_400)]
+        prune_margin_secs: u64,
+    },
     /// In-process follow loop: run a `delta` tick, sleep, repeat — the L2
     /// freshness engine that replaces the per-minute delta CronJob (minute →
     /// seconds). Each tick is IDENTICAL to `delta` (a cumulative carve from the
@@ -403,9 +411,12 @@ async fn main() -> Result<()> {
                 ),
             }
         }
-        Cmd::MergeBase => {
+        Cmd::MergeBase {
+            dsn,
+            prune_margin_secs,
+        } => {
             let outcome = seal::run_merge_base(&layout, now_epoch() as u64)?;
-            match outcome.base {
+            match outcome.base.as_ref() {
                 Some(base) => println!(
                     "merge-base: acted={} input_count={} base=v{} cut={} manifest_mver={}",
                     outcome.acted,
@@ -418,6 +429,25 @@ async fn main() -> Result<()> {
                     "merge-base: acted=false input_count={} manifest_mver=0",
                     outcome.input_count
                 ),
+            }
+            if outcome.acted {
+                if let (Some(dsn), Some(base)) = (dsn.as_deref(), outcome.base.as_ref()) {
+                    let pool = bitmagnet_db::PgPool::connect(dsn)
+                        .await
+                        .context("connecting to postgres for deleted_torrents prune")?;
+                    let margin = i64::try_from(prune_margin_secs).unwrap_or(i64::MAX);
+                    let cutoff = base.cut.saturating_sub(margin);
+                    let rows_deleted = bitmagnet_db::prune_deleted_torrents(&pool, cutoff)
+                        .await
+                        .context("pruning deleted_torrents after merge-base")?;
+                    info!(
+                        rows_deleted,
+                        base_cut = base.cut,
+                        cutoff_epoch = cutoff,
+                        prune_margin_secs,
+                        "merge-base deleted_torrents prune complete"
+                    );
+                }
             }
         }
         Cmd::Follow {
@@ -671,6 +701,45 @@ fn follow_backoff_secs(interval_secs: u64, consecutive_failures: u32) -> u64 {
         .min(FOLLOW_MAX_BACKOFF_SECS)
 }
 
+async fn follow_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            error!(%error, "failed to install ctrl-c handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => error!(%error, "failed to install SIGTERM handler"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+}
+
+async fn wait_for_follow_sleep(
+    duration: Duration,
+    shutdown_task: &mut tokio::task::JoinHandle<()>,
+) -> Result<bool> {
+    tokio::select! {
+        () = tokio::time::sleep(duration) => Ok(false),
+        result = shutdown_task => {
+            result.context("follow shutdown listener task failed")?;
+            Ok(true)
+        }
+    }
+}
+
 /// The in-process `follow` loop: run a delta tick, log it, sleep, repeat. A
 /// failed tick is logged at error level and retried with exponential backoff
 /// ([`follow_backoff_secs`]); the loop never exits on a tick failure. Returns
@@ -689,6 +758,11 @@ async fn run_follow(
     let interval = interval_secs.max(1);
     let mut consecutive_failures: u32 = 0;
     let mut ticks: u64 = 0;
+    let mut shutdown_task = tokio::spawn(follow_shutdown_signal());
+    // Give the listener a chance to install both handlers before the first
+    // potentially long tick. A signal received during a tick is queued by the
+    // listener, but is only acted on in the sleep phase below.
+    tokio::task::yield_now().await;
     info!(
         interval_secs = interval,
         max_ticks,
@@ -739,12 +813,16 @@ async fn run_follow(
             info!(ticks, "follow reached --max-ticks; exiting");
             break;
         }
-        tokio::time::sleep(Duration::from_secs(follow_backoff_secs(
-            interval,
-            consecutive_failures,
-        )))
-        .await;
+        let sleep = Duration::from_secs(follow_backoff_secs(interval, consecutive_failures));
+        if wait_for_follow_sleep(sleep, &mut shutdown_task).await? {
+            info!(
+                ticks,
+                "follow shutdown signal received; exiting after completed tick"
+            );
+            break;
+        }
     }
+    shutdown_task.abort();
     Ok(())
 }
 
@@ -797,6 +875,7 @@ fn run_from_hex(
 mod tests {
     use super::follow_backoff_secs;
     use super::resolve_seal_window_end;
+    use super::wait_for_follow_sleep;
 
     #[test]
     fn seal_window_end_defaults_to_lagged_now_and_rejects_bad_overrides() {
@@ -845,6 +924,16 @@ mod tests {
         assert_eq!(follow_backoff_secs(1, u32::MAX), 300);
         assert_eq!(follow_backoff_secs(u64::MAX, 1), 300);
         assert_eq!(follow_backoff_secs(u64::MAX, u32::MAX), 300);
+    }
+
+    #[tokio::test]
+    async fn follow_sleep_stops_for_simulated_signal() {
+        let mut shutdown_task = tokio::spawn(async {});
+        let stopped = wait_for_follow_sleep(std::time::Duration::from_secs(60), &mut shutdown_task)
+            .await
+            .expect("shutdown selector succeeds");
+
+        assert!(stopped);
     }
 
     /// A single `follow` tick against a live PostgreSQL: identical carve to the
