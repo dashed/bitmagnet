@@ -19,6 +19,10 @@ type Config struct {
 	// Enabled is the master switch. When false the Tantivy client is not built,
 	// the router serves Postgres only, and the dual-write is a no-op.
 	Enabled bool
+	// DualWriteEnabled controls whether the processor writes committed changes to
+	// the Tantivy sidecar (SEARCH_DUAL_WRITE_ENABLED). It does not affect the
+	// router/shadow comparator. Default true preserves the existing behavior.
+	DualWriteEnabled bool
 	// Address of the sidecar: a Unix socket ("unix:///run/bitmagnet/search.sock")
 	// or a TCP "host:port".
 	Address string
@@ -167,6 +171,7 @@ type Config struct {
 func NewDefaultConfig() Config {
 	return Config{
 		Enabled:             false,
+		DualWriteEnabled:    true,
 		Address:             "unix:///run/bitmagnet/search.sock",
 		Engine:              string(router.ModePostgres),
 		SampleRate:          1,

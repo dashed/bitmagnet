@@ -68,14 +68,7 @@ func (t TorrentContentQuery) CollapsePaths(
 	// hard-clamp it: like the search route, limit sizes the candidate-decode budget,
 	// so a hostile GraphQL limit must not size the per-request blob decode (gate-7
 	// Finding B). offset passes through — the composer bounds the total budget.
-	limit := input.Limit
-	if limit == 0 {
-		limit = defaultPageSize
-	}
-
-	if limit > maxPathSearchLimit {
-		limit = maxPathSearchLimit
-	}
+	limit := clampCollapseLimit(input.Limit)
 
 	groups, served, err := t.Pathsearch.CollapsePaths(
 		ctx,
@@ -94,6 +87,18 @@ func (t TorrentContentQuery) CollapsePaths(
 	}
 
 	return newCollapsePathsResult(groups), nil
+}
+
+func clampCollapseLimit(limit uint) uint {
+	if limit == 0 {
+		return defaultPageSize
+	}
+
+	if limit > maxPathSearchLimit {
+		return maxPathSearchLimit
+	}
+
+	return limit
 }
 
 // collapsePathsQueryOptions builds the PostgreSQL option set the composer's

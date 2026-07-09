@@ -161,12 +161,11 @@ func (r *Router) runShadow(
 
 	req, canCompare := r.builder.build(options)
 	if !canCompare {
-		// The query carried filters the request builder can't yet map to
-		// pb.SearchFilters (Phase-5 work). Comparing a PG-filtered result against
-		// an unfiltered Tantivy result would be a false discrepancy, so skip it
-		// and don't pollute the similarity metrics; log for coverage visibility.
+		// Empty browse queries are outside the Tantivy-serving class, and filters
+		// the request builder can't yet map to pb.SearchFilters would make a
+		// comparison apples-to-oranges. Skip both without polluting the metrics.
 		if r.logger != nil {
-			r.logger.Debugw("search shadow: skipping filtered query (filters not yet mapped to Tantivy)",
+			r.logger.Debugw("search shadow: skipping ineligible query (empty text or unmapped filters)",
 				"query", req.GetQuery())
 		}
 

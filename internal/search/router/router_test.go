@@ -177,7 +177,7 @@ func TestPostgresModeNeverShadows(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModePostgres, SampleRate: 1}, 0)
 
-	result, err := r.TorrentContent(context.Background())
+	result, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.NoError(t, err)
 
 	assert.Equal(t, pg.result, result, "postgres mode returns the PG result unchanged")
@@ -250,7 +250,7 @@ func TestShadowRespectsSampleRate(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModeShadow, SampleRate: 0.5}, 0.9)
 
-	_, err := r.TorrentContent(context.Background())
+	_, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, tv.calls, "draw above sample rate must skip the shadow query")
@@ -265,7 +265,7 @@ func TestZeroSampleRateNeverShadows(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModeShadow, SampleRate: 0}, 0)
 
-	_, err := r.TorrentContent(context.Background())
+	_, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, tv.calls)
@@ -280,7 +280,7 @@ func TestShadowTantivyErrorIsSwallowed(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModeShadow, SampleRate: 1}, 0)
 
-	result, err := r.TorrentContent(context.Background())
+	result, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.NoError(t, err, "a Tantivy failure must not surface to the caller")
 
 	assert.Equal(t, pg.result, result)
@@ -297,7 +297,7 @@ func TestPGErrorShortCircuitsBeforeShadow(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModeShadow, SampleRate: 1}, 0)
 
-	_, err := r.TorrentContent(context.Background())
+	_, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.ErrorIs(t, err, pgErr)
 
 	assert.Equal(t, 0, tv.calls, "no shadow query when PG itself errored")
@@ -312,7 +312,7 @@ func TestCanaryModeStillShadows(t *testing.T) {
 	obs := &spyObserver{}
 	r := newTestRouter(pg, tv, obs, Config{Mode: ModeCanary, SampleRate: 1}, 0)
 
-	result, err := r.TorrentContent(context.Background())
+	result, err := r.TorrentContent(context.Background(), query.SearchString("matrix"))
 	require.NoError(t, err)
 
 	// Phase 4: canary still serves PG and observes (serving path is Phase 6).
@@ -417,19 +417,37 @@ func TestRequestBuilderExtractsQueryPaginationSort(t *testing.T) {
 	assert.True(t, req.GetSort()[0].GetDescending())
 }
 
-func TestRequestBuilderFlagsFilteredQueryNotComparable(t *testing.T) {
+func TestRequestBuilderComparisonEligibility(t *testing.T) {
 	t.Parallel()
 
-	// A filter criterion compiles to opaque SQL needing a live *dao.Query, so the
-	// recorder skips it and marks the request not comparable — but still extracts
-	// the query string (filter -> pb.SearchFilters mapping is a Phase-5 gap).
-	req, canCompare := optionRequestBuilder{}.build([]query.Option{
-		query.SearchString("the matrix"),
-		query.Where(search.TorrentContentTypeCriteria(model.ContentTypeMovie)),
-	})
+	tests := []struct {
+		name        string
+		queryString string
+		extra       []query.Option
+		want        bool
+	}{
+		{name: "empty", queryString: "", want: false},
+		{name: "whitespace only", queryString: " \t\n", want: false},
+		{name: "free text", queryString: "the matrix", want: true},
+		{
+			name:        "facet criteria",
+			queryString: "the matrix",
+			extra: []query.Option{
+				query.Where(search.TorrentContentTypeCriteria(model.ContentTypeMovie)),
+			},
+			want: false,
+		},
+	}
 
-	assert.False(t, canCompare, "a filtered query must not be comparable")
-	assert.Equal(t, "the matrix", req.GetQuery())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := append([]query.Option{query.SearchString(tt.queryString)}, tt.extra...)
+			req, canCompare := optionRequestBuilder{}.build(options)
+
+			assert.Equal(t, tt.want, canCompare)
+			assert.Equal(t, tt.queryString, req.GetQuery())
+		})
+	}
 }
 
 func TestRequestBuilderSkipsRelevanceOrdering(t *testing.T) {

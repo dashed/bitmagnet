@@ -18,8 +18,8 @@ type Params struct {
 	Dao              lazy.Lazy[*dao.Query]
 	BlockingManager  lazy.Lazy[blocking.Manager]
 	Logger           *zap.SugaredLogger
-	// SearchIndexer dual-writes to the Tantivy sidecar; nil when the "search"
-	// feature is disabled (provided by processorfx from searchfx's client).
+	// SearchIndexer dual-writes to the Tantivy sidecar; nil when search or the
+	// dual-write sub-feature is disabled (provided by processorfx).
 	SearchIndexer SearchIndexer `optional:"true"`
 }
 

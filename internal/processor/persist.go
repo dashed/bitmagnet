@@ -127,7 +127,7 @@ func (c processor) persist(ctx context.Context, payload persistPayload) error {
 // indexToSearchSidecar mirrors a just-committed persist into the Tantivy sidecar:
 // it upserts one document per torrent_content and deletes whole torrents by info
 // hash. It is fire-and-forget — a no-op when the sidecar is disabled (nil
-// client), detached from the request context with its own timeout, and never
+// indexer), detached from the request context with its own timeout, and never
 // returns an error to the caller (a failed dual-write must never fail crawling;
 // the periodic backfill reconciles any drift).
 //

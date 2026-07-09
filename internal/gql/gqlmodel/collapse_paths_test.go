@@ -102,6 +102,28 @@ func collapseComposer(
 
 // --- tests -------------------------------------------------------------------
 
+func TestClampCollapseLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		limit uint
+		want  uint
+	}{
+		{name: "hostile", limit: 1_000_000, want: maxPathSearchLimit},
+		{name: "omitted", limit: 0, want: defaultPageSize},
+		{name: "in range", limit: 50, want: 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampCollapseLimit(tt.limit); got != tt.want {
+				t.Fatalf("clampCollapseLimit(%d) = %d, want %d", tt.limit, got, tt.want)
+			}
+		})
+	}
+}
+
 // A served collapse result maps composer PathGroups (path + raw info hashes) onto
 // the GraphQL model. Two single-file candidates sharing one path collapse into a
 // single group carrying both info hashes, in candidate order.

@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -34,9 +35,10 @@ func (optionRequestBuilder) build(options []query.Option) (*pb.SearchRequest, bo
 		applyOption(rec, opt)
 	}
 
-	// A request is comparable only if no filter option had to be skipped; an
-	// unmapped filter would make Tantivy match a superset of the PG result.
-	return rec.toSearchRequest(), !rec.skippedFilter
+	// A request is comparable only when it is a free-text search and no filter
+	// option had to be skipped. An empty query is a browse/listing request, while
+	// an unmapped filter would make Tantivy match a superset of the PG result.
+	return rec.toSearchRequest(), rec.canCompare()
 }
 
 // applyOption applies a single option to the recorder, swallowing any panic and
@@ -114,6 +116,10 @@ func (r *recorder) toSearchRequest() *pb.SearchRequest {
 	req.Sort = r.sorts
 
 	return req
+}
+
+func (r *recorder) canCompare() bool {
+	return strings.TrimSpace(r.queryString) != "" && !r.skippedFilter
 }
 
 // --- DBContext -------------------------------------------------------------
