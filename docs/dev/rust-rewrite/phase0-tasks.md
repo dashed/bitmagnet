@@ -32,11 +32,11 @@ scripts; `internal/classifier/**`.
 
 | # | Task | Status |
 |---|------|--------|
-| B1 | GraphQL SDL golden: normalized concatenation of `graphql/schema/*.graphqls` → `testdata/parity/schema.graphql` + regeneration-assert test | open |
-| B2 | Config env-map golden: generator walking the config spec → `testdata/parity/config-env-map.golden` (§Contracts format) + assert test. **Commit+push the golden EARLY — Lane A consumes it** | open — FIRST, lane A consumes |
-| B3 | Metric-name golden: register all collectors, dump sorted `name{sorted,label,keys}` → `testdata/parity/metric-names.golden` + assert test | open |
-| B4 | goose-history manifest: `migrations/*.sql` ordered names + sha256 → `testdata/parity/migrations.golden` + assert test (protects renumber/edit) | open |
-| B5 | CI: golden-file jobs in the Go workflow; rust.yml gains cargo-deny + filesearch-image build + live-PG `#[ignore]` lane; corpus-runner job calling Lane C's runner | open |
+| B1 | GraphQL SDL golden: normalized concatenation of `graphql/schema/*.graphqls` → `testdata/parity/schema.graphql` + regeneration-assert test | ✅ done (merged 2026-07-10) |
+| B2 | Config env-map golden: generator walking the config spec → `testdata/parity/config-env-map.golden` (§Contracts format) + assert test. **Commit+push the golden EARLY — Lane A consumes it** | ✅ done (merged 2026-07-10) |
+| B3 | Metric-name golden: register all collectors, dump sorted `name{sorted,label,keys}` → `testdata/parity/metric-names.golden` + assert test | ✅ done (merged 2026-07-10) |
+| B4 | goose-history manifest: `migrations/*.sql` ordered names + sha256 → `testdata/parity/migrations.golden` + assert test (protects renumber/edit) | ✅ done (merged 2026-07-10) |
+| B5 | CI: golden-file jobs in the Go workflow; rust.yml gains cargo-deny + filesearch-image build + live-PG `#[ignore]` lane; corpus-runner job calling Lane C's runner | ✅ done (merged 2026-07-10) |
 
 ## Lane C — classifier corpus + differential harness (branch `p0c-diffharness`)
 Owns: `internal/classifier/**` (fixtures + generator test only, no logic
