@@ -1,5 +1,11 @@
 //! Shared utilities for the bitmagnet Rust workspace: a common [`Error`] type
-//! and [`Result`] alias, runtime [`Config`], and an [`init_tracing`] helper.
+//! and [`Result`] alias, runtime [`Config`], tracing, metrics, and server
+//! bootstrap helpers.
+
+pub mod config;
+pub mod metrics;
+pub mod serve;
+pub mod strcase;
 
 use std::net::SocketAddr;
 

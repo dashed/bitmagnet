@@ -85,3 +85,75 @@ jobs:
           tags: bitmagnet-search:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  docker-filesearch:
+    name: docker build (filesearch sidecar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: bitmagnet-rs
+          file: bitmagnet-rs/docker/Dockerfile.filesearch
+          push: false
+          tags: bitmagnet-filesearch:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # Reads bitmagnet-rs/deny.toml (defaults.run working-directory is bitmagnet-rs).
+      # Scoped to licenses/bans/sources for a stable Phase-0 baseline; the
+      # `advisories` check is deferred (RustSec DB format churn otherwise flaps
+      # the gate) and re-enabled in a later phase.
+      - run: cargo deny check licenses bans sources
+
+  test-pg:
+    name: live-PG integration (bitmagnet-db)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bitmagnet
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      # sslmode=disable: the alpine PG service speaks plaintext on localhost, and
+      # goose (lib/pq) otherwise defaults to sslmode=require.
+      BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.6"
+      - name: Apply goose migrations (the Go schema is the source of truth)
+        working-directory: ${{ github.workspace }}
+        run: |
+          go install github.com/pressly/goose/v3/cmd/goose@v3.24.1
+          "$(go env GOPATH)/bin/goose" -dir migrations postgres "$BITMAGNET_POSTGRES_DSN" up
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bitmagnet-rs
+      # The #[ignore]d bitmagnet-db tests connect to the migrated schema; they
+      # tolerate an empty database (streams return an empty first page).
+      - name: Run live-PG (ignored) tests
+        run: cargo test -p bitmagnet-db -- --ignored

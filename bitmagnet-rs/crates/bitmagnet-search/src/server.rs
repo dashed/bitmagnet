@@ -134,6 +134,12 @@ impl SearchServer {
         self.watermark_epoch
             .store(watermark_epoch, Ordering::Relaxed);
     }
+
+    /// Return the follow watermark shared by every clone of this server.
+    #[must_use]
+    pub fn watermark_epoch(&self) -> i64 {
+        self.watermark_epoch.load(Ordering::Relaxed)
+    }
 }
 
 /// Map a Tantivy error into a gRPC internal-error status.
@@ -257,7 +263,7 @@ impl SearchService for SearchServer {
         Ok(Response::new(HealthCheckResponse {
             status: ServingStatus::Serving as i32,
             doc_count,
-            watermark_epoch: self.watermark_epoch.load(Ordering::Relaxed),
+            watermark_epoch: self.watermark_epoch(),
         }))
     }
 }

@@ -1,0 +1,852 @@
+type Content {
+  adult: Boolean
+  attributes: [ContentAttribute!]!
+  collections: [ContentCollection!]!
+  createdAt: DateTime!
+  externalLinks: [ExternalLink!]!
+  id: String!
+  metadataSource: MetadataSource!
+  originalLanguage: LanguageInfo
+  originalTitle: String
+  overview: String
+  popularity: Float
+  releaseDate: Date
+  releaseYear: Year
+  runtime: Int
+  source: String!
+  title: String!
+  type: ContentType!
+  updatedAt: DateTime!
+  voteAverage: Float
+  voteCount: Int
+}
+
+type ContentAttribute {
+  createdAt: DateTime!
+  key: String!
+  metadataSource: MetadataSource!
+  source: String!
+  updatedAt: DateTime!
+  value: String!
+}
+
+type ContentCollection {
+  createdAt: DateTime!
+  id: String!
+  metadataSource: MetadataSource!
+  name: String!
+  source: String!
+  type: String!
+  updatedAt: DateTime!
+}
+
+enum ContentType {
+  audiobook
+  comic
+  ebook
+  game
+  movie
+  music
+  software
+  tv_show
+  xxx
+}
+
+type ContentTypeAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: ContentType
+}
+
+input ContentTypeFacetInput {
+  aggregate: Boolean
+  filter: [ContentType]
+}
+
+scalar Date
+
+scalar DateTime
+
+scalar Duration
+
+type Episodes {
+  label: String!
+  seasons: [Season!]!
+}
+
+type ExternalLink {
+  metadataSource: MetadataSource!
+  url: String!
+}
+
+enum FacetLogic {
+  and
+  or
+}
+
+type FileFacetAgg {
+  buckets: [FileFacetBucketAgg!]!
+  field: FileFacetField!
+}
+
+type FileFacetBucketAgg {
+  count: Int!
+  isEstimate: Boolean!
+  totalSize: Int!
+  value: String!
+}
+
+enum FileFacetField {
+  extension
+}
+
+input FileSearchFacetsInput {
+  extensions: [String!]
+  facets: [FileFacetField!]
+  maxSize: Int
+  minSize: Int
+  query: String
+}
+
+type FileSearchFacetsResult {
+  facets: [FileFacetAgg!]!
+}
+
+input FileSearchInput {
+  extensions: [String!]
+  infoHash: Hash20
+  limit: Int
+  maxSize: Int
+  minSize: Int
+  offset: Int
+  query: String
+  sort: [FileSearchSortInput!]
+  totalCount: Boolean
+}
+
+type FileSearchItem {
+  extension: String!
+  index: Int!
+  infoHash: Hash20!
+  path: String!
+  size: Int!
+  torrentContent: TorrentContent!
+}
+
+type FileSearchResult {
+  hasNextPage: Boolean!
+  items: [FileSearchItem!]!
+  totalCount: Int!
+}
+
+input FileSearchSortInput {
+  descending: Boolean
+  field: String!
+}
+
+enum FileType {
+  archive
+  audio
+  data
+  document
+  image
+  software
+  subtitles
+  video
+}
+
+enum FilesStatus {
+  multi
+  no_info
+  over_threshold
+  single
+}
+
+type GenreAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: String!
+}
+
+input GenreFacetInput {
+  aggregate: Boolean
+  filter: [String!]
+  logic: FacetLogic
+}
+
+scalar Hash20
+
+scalar Hash32
+
+type HealthCheck {
+  error: String
+  key: String!
+  status: HealthStatus!
+  timestamp: DateTime!
+}
+
+type HealthQuery {
+  checks: [HealthCheck!]!
+  status: HealthStatus!
+}
+
+enum HealthStatus {
+  down
+  inactive
+  unknown
+  up
+}
+
+enum Language {
+  af
+  ar
+  az
+  be
+  bg
+  bs
+  ca
+  ce
+  co
+  cs
+  cy
+  da
+  de
+  el
+  en
+  es
+  et
+  eu
+  fa
+  fi
+  fr
+  he
+  hi
+  hr
+  hu
+  hy
+  id
+  is
+  it
+  ja
+  ka
+  ko
+  ku
+  lt
+  lv
+  mi
+  mk
+  ml
+  mn
+  ms
+  mt
+  nl
+  no
+  pl
+  pt
+  ro
+  ru
+  sa
+  sk
+  sl
+  sm
+  so
+  sr
+  sv
+  ta
+  th
+  tr
+  uk
+  vi
+  yi
+  zh
+  zu
+}
+
+type LanguageAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: Language!
+}
+
+input LanguageFacetInput {
+  aggregate: Boolean
+  filter: [Language!]
+}
+
+type LanguageInfo {
+  id: String!
+  name: String!
+}
+
+type MetadataSource {
+  key: String!
+  name: String!
+}
+
+enum MetricsBucketDuration {
+  day
+  hour
+  minute
+}
+
+type Mutation {
+  queue: QueueMutation!
+  torrent: TorrentMutation!
+}
+
+input PathTypeaheadInput {
+  limit: Int
+  prefix: String!
+}
+
+type PathTypeaheadResult {
+  suggestions: [String!]!
+}
+
+type Query {
+  __schema: __Schema!
+  __type(name: String!): __Type
+  health: HealthQuery!
+  queue: QueueQuery!
+  torrent: TorrentQuery!
+  torrentContent: TorrentContentQuery!
+  version: String!
+  workers: WorkersQuery!
+}
+
+input QueueEnqueueReprocessTorrentsBatchInput {
+  apisDisabled: Boolean
+  batchSize: Int
+  chunkSize: Int
+  classifierRematch: Boolean
+  classifierWorkflow: String
+  contentTypes: [ContentType]
+  localSearchDisabled: Boolean
+  orphans: Boolean
+  purge: Boolean
+}
+
+type QueueJob {
+  createdAt: DateTime!
+  error: String
+  id: ID!
+  maxRetries: Int!
+  payload: String!
+  priority: Int!
+  queue: String!
+  ranAt: DateTime
+  retries: Int!
+  runAfter: DateTime!
+  status: QueueJobStatus!
+}
+
+type QueueJobQueueAgg {
+  count: Int!
+  label: String!
+  value: String!
+}
+
+input QueueJobQueueFacetInput {
+  aggregate: Boolean
+  filter: [String!]
+}
+
+enum QueueJobStatus {
+  failed
+  pending
+  processed
+  retry
+}
+
+type QueueJobStatusAgg {
+  count: Int!
+  label: String!
+  value: QueueJobStatus!
+}
+
+input QueueJobStatusFacetInput {
+  aggregate: Boolean
+  filter: [QueueJobStatus!]
+}
+
+type QueueJobsAggregations {
+  queue: [QueueJobQueueAgg!]
+  status: [QueueJobStatusAgg!]
+}
+
+input QueueJobsFacetsInput {
+  queue: QueueJobQueueFacetInput
+  status: QueueJobStatusFacetInput
+}
+
+enum QueueJobsOrderByField {
+  created_at
+  priority
+  ran_at
+}
+
+input QueueJobsOrderByInput {
+  descending: Boolean
+  field: QueueJobsOrderByField!
+}
+
+input QueueJobsQueryInput {
+  facets: QueueJobsFacetsInput
+  hasNextPage: Boolean
+  limit: Int
+  offset: Int
+  orderBy: [QueueJobsOrderByInput!]
+  page: Int
+  queues: [String!]
+  statuses: [QueueJobStatus!]
+  totalCount: Boolean
+}
+
+type QueueJobsQueryResult {
+  aggregations: QueueJobsAggregations!
+  hasNextPage: Boolean
+  items: [QueueJob!]!
+  totalCount: Int!
+}
+
+type QueueMetricsBucket {
+  count: Int!
+  createdAtBucket: DateTime!
+  latency: Duration
+  queue: String!
+  ranAtBucket: DateTime
+  status: QueueJobStatus!
+}
+
+input QueueMetricsQueryInput {
+  bucketDuration: MetricsBucketDuration!
+  endTime: DateTime
+  queues: [String!]
+  startTime: DateTime
+  statuses: [QueueJobStatus!]
+}
+
+type QueueMetricsQueryResult {
+  buckets: [QueueMetricsBucket!]!
+}
+
+type QueueMutation {
+  enqueueReprocessTorrentsBatch(input: QueueEnqueueReprocessTorrentsBatchInput): Void
+  purgeJobs(input: QueuePurgeJobsInput!): Void
+}
+
+input QueuePurgeJobsInput {
+  queues: [String!]
+  statuses: [QueueJobStatus!]
+}
+
+type QueueQuery {
+  jobs(input: QueueJobsQueryInput!): QueueJobsQueryResult!
+  metrics(input: QueueMetricsQueryInput!): QueueMetricsQueryResult!
+}
+
+type ReleaseYearAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: Year
+}
+
+input ReleaseYearFacetInput {
+  aggregate: Boolean
+  filter: [Year]
+}
+
+type Season {
+  episodes: [Int!]
+  season: Int!
+}
+
+input SizeRangeInput {
+  max: Int
+  min: Int
+}
+
+input SuggestTagsQueryInput {
+  exclusions: [String!]
+  prefix: String
+}
+
+type SuggestedTag {
+  count: Int!
+  name: String!
+}
+
+type Torrent {
+  createdAt: DateTime!
+  extension: String
+  fileType: FileType
+  fileTypes: [FileType!]
+  files: [TorrentFile!]
+  filesCount: Int
+  filesStatus: FilesStatus!
+  hasFilesInfo: Boolean!
+  infoHash: Hash20!
+  infoHashV2: Hash32
+  leechers: Int
+  magnetUri: String!
+  metaVersion: Int
+  name: String!
+  seeders: Int
+  singleFile: Boolean
+  size: Int!
+  sources: [TorrentSourceInfo!]!
+  tagNames: [String!]!
+  updatedAt: DateTime!
+}
+
+type TorrentContent {
+  content: Content
+  contentId: String
+  contentSource: String
+  contentType: ContentType
+  createdAt: DateTime!
+  dhtFirstSeenAt: DateTime
+  dhtLastSeenAt: DateTime
+  dhtSeenCount: Int!
+  episodes: Episodes
+  id: ID!
+  infoHash: Hash20!
+  languages: [LanguageInfo!]
+  leechers: Int
+  publishedAt: DateTime!
+  releaseGroup: String
+  seeders: Int
+  title: String!
+  torrent: Torrent!
+  updatedAt: DateTime!
+  video3d: Video3D
+  videoCodec: VideoCodec
+  videoModifier: VideoModifier
+  videoResolution: VideoResolution
+  videoSource: VideoSource
+}
+
+type TorrentContentAggregations {
+  contentType: [ContentTypeAgg!]
+  genre: [GenreAgg!]
+  language: [LanguageAgg!]
+  releaseYear: [ReleaseYearAgg!]
+  torrentFileType: [TorrentFileTypeAgg!]
+  torrentSource: [TorrentSourceAgg!]
+  torrentTag: [TorrentTagAgg!]
+  videoResolution: [VideoResolutionAgg!]
+  videoSource: [VideoSourceAgg!]
+}
+
+input TorrentContentCollapsePathsInput {
+  limit: Int
+  offset: Int
+  queryString: String!
+}
+
+type TorrentContentCollapsePathsResult {
+  groups: [TorrentContentPathGroup!]!
+}
+
+input TorrentContentFacetsInput {
+  contentType: ContentTypeFacetInput
+  genre: GenreFacetInput
+  language: LanguageFacetInput
+  publishedAt: String
+  releaseYear: ReleaseYearFacetInput
+  sizeRange: SizeRangeInput
+  torrentFileType: TorrentFileTypeFacetInput
+  torrentSource: TorrentSourceFacetInput
+  torrentTag: TorrentTagFacetInput
+  videoResolution: VideoResolutionFacetInput
+  videoSource: VideoSourceFacetInput
+}
+
+enum TorrentContentOrderByField {
+  files_count
+  info_hash
+  leechers
+  name
+  published_at
+  relevance
+  seeders
+  size
+  updated_at
+}
+
+input TorrentContentOrderByInput {
+  descending: Boolean
+  field: TorrentContentOrderByField!
+}
+
+type TorrentContentPathGroup {
+  infoHashes: [Hash20!]!
+  path: String!
+}
+
+type TorrentContentQuery {
+  collapsePaths(input: TorrentContentCollapsePathsInput!): TorrentContentCollapsePathsResult!
+  fileSearch(input: FileSearchInput!): FileSearchResult!
+  fileSearchFacets(input: FileSearchFacetsInput!): FileSearchFacetsResult!
+  pathTypeahead(input: PathTypeaheadInput!): PathTypeaheadResult!
+  search(input: TorrentContentSearchQueryInput!): TorrentContentSearchResult!
+}
+
+input TorrentContentSearchQueryInput {
+  aggregationBudget: Float
+  cached: Boolean
+  facets: TorrentContentFacetsInput
+  hasNextPage: Boolean
+  infoHashes: [Hash20!]
+  limit: Int
+  offset: Int
+  orderBy: [TorrentContentOrderByInput!]
+  page: Int
+  queryString: String
+  totalCount: Boolean
+}
+
+type TorrentContentSearchResult {
+  aggregations: TorrentContentAggregations!
+  hasNextPage: Boolean
+  items: [TorrentContent!]!
+  totalCount: Int!
+  totalCountIsEstimate: Boolean!
+}
+
+type TorrentFile {
+  createdAt: DateTime!
+  extension: String
+  fileType: FileType
+  index: Int!
+  infoHash: Hash20!
+  path: String!
+  size: Int!
+  updatedAt: DateTime!
+}
+
+type TorrentFileTypeAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: FileType!
+}
+
+input TorrentFileTypeFacetInput {
+  aggregate: Boolean
+  filter: [FileType!]
+  logic: FacetLogic
+}
+
+enum TorrentFilesOrderByField {
+  extension
+  index
+  path
+  size
+}
+
+input TorrentFilesOrderByInput {
+  descending: Boolean
+  field: TorrentFilesOrderByField!
+}
+
+input TorrentFilesQueryInput {
+  cached: Boolean
+  hasNextPage: Boolean
+  infoHashes: [Hash20!]
+  limit: Int
+  offset: Int
+  orderBy: [TorrentFilesOrderByInput!]
+  page: Int
+  totalCount: Boolean
+}
+
+type TorrentFilesQueryResult {
+  hasNextPage: Boolean
+  items: [TorrentFile!]!
+  totalCount: Int!
+}
+
+type TorrentListSourcesResult {
+  sources: [TorrentSource!]!
+}
+
+type TorrentMetricsBucket {
+  bucket: DateTime!
+  count: Int!
+  source: String!
+  updated: Boolean!
+}
+
+input TorrentMetricsQueryInput {
+  bucketDuration: MetricsBucketDuration!
+  endTime: DateTime
+  sources: [String!]
+  startTime: DateTime
+}
+
+type TorrentMetricsQueryResult {
+  buckets: [TorrentMetricsBucket!]!
+}
+
+type TorrentMutation {
+  delete(infoHashes: [Hash20!]!): Void
+  deleteTags(infoHashes: [Hash20!], tagNames: [String!]): Void
+  putTags(infoHashes: [Hash20!]!, tagNames: [String!]!): Void
+  reprocess(input: TorrentReprocessInput!): Void
+  setTags(infoHashes: [Hash20!]!, tagNames: [String!]!): Void
+}
+
+type TorrentQuery {
+  files(input: TorrentFilesQueryInput!): TorrentFilesQueryResult!
+  listSources: TorrentListSourcesResult!
+  metrics(input: TorrentMetricsQueryInput!): TorrentMetricsQueryResult!
+  suggestTags(input: SuggestTagsQueryInput): TorrentSuggestTagsResult!
+}
+
+input TorrentReprocessInput {
+  apisDisabled: Boolean
+  classifierRematch: Boolean
+  classifierWorkflow: String
+  infoHashes: [Hash20!]!
+  localSearchDisabled: Boolean
+}
+
+type TorrentSource {
+  key: String!
+  name: String!
+}
+
+type TorrentSourceAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: String!
+}
+
+input TorrentSourceFacetInput {
+  aggregate: Boolean
+  filter: [String!]
+  logic: FacetLogic
+}
+
+type TorrentSourceInfo {
+  firstSeenAt: DateTime!
+  importId: String
+  key: String!
+  lastSeenAt: DateTime!
+  leechers: Int
+  name: String!
+  seeders: Int
+  seenCount: Int!
+}
+
+type TorrentSuggestTagsResult {
+  suggestions: [SuggestedTag!]!
+}
+
+type TorrentTagAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: String!
+}
+
+input TorrentTagFacetInput {
+  aggregate: Boolean
+  filter: [String!]
+  logic: FacetLogic
+}
+
+enum Video3D {
+  V3D
+  V3DOU
+  V3DSBS
+}
+
+enum VideoCodec {
+  DivX
+  H264
+  MPEG2
+  MPEG4
+  XviD
+  x264
+  x265
+}
+
+enum VideoModifier {
+  BRDISK
+  RAWHD
+  REGIONAL
+  REMUX
+  SCREENER
+}
+
+enum VideoResolution {
+  V1080p
+  V1440p
+  V2160p
+  V360p
+  V4320p
+  V480p
+  V540p
+  V576p
+  V720p
+}
+
+type VideoResolutionAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: VideoResolution
+}
+
+input VideoResolutionFacetInput {
+  aggregate: Boolean
+  filter: [VideoResolution]
+}
+
+enum VideoSource {
+  BluRay
+  CAM
+  DVD
+  TELECINE
+  TELESYNC
+  TV
+  WEBDL
+  WEBRip
+  WORKPRINT
+}
+
+type VideoSourceAgg {
+  count: Int!
+  isEstimate: Boolean!
+  label: String!
+  value: VideoSource
+}
+
+input VideoSourceFacetInput {
+  aggregate: Boolean
+  filter: [VideoSource]
+}
+
+scalar Void
+
+type Worker {
+  key: String!
+  started: Boolean!
+}
+
+type WorkersListAllQueryResult {
+  workers: [Worker!]!
+}
+
+type WorkersQuery {
+  listAll: WorkersListAllQueryResult!
+}
+
+scalar Year
