@@ -18,10 +18,10 @@ main/wiring, `bitmagnet-rs/Cargo.toml` workspace deps. OFF-LIMITS: `.github/**`,
 
 | # | Task | Status |
 |---|------|--------|
-| A1 | Layered config module in bitmagnet-common (figment: defaults < file < env) + **strcase env-key port** matching Go's iancoleman/strcase mapping; parity test reads `testdata/parity/config-env-map.golden` (format §Contracts) | open |
-| A2 | Bootstrap module: UDS-or-TCP listener parse, tracing init, SIGINT+SIGTERM select, tonic-health (grpc.health.v1) registration, `serve_with_shutdown(service, opts)` | open |
-| A3 | Metrics module: prometheus registry + optional HTTP `/metrics` listener (env `BITMAGNET_METRICS_ADDR`, DEFAULT OFF), process + per-service metric hooks | open |
-| A4 | Retrofit serving bins (search serve, pathsearch, filesearch serve, parquet follow) onto A1-A3 — behavior-identical with existing envs (same flags/defaults); first real metric: `search_follow_watermark_age_seconds` on main-search | open |
+| A1 | Layered config module in bitmagnet-common (figment: defaults < file < env) + **strcase env-key port** matching Go's iancoleman/strcase mapping; parity test reads `testdata/parity/config-env-map.golden` (format §Contracts) | ✅ done (merged 2026-07-10) |
+| A2 | Bootstrap module: UDS-or-TCP listener parse, tracing init, SIGINT+SIGTERM select, tonic-health (grpc.health.v1) registration, `serve_with_shutdown(service, opts)` | ✅ done (merged 2026-07-10) |
+| A3 | Metrics module: prometheus registry + optional HTTP `/metrics` listener (env `BITMAGNET_METRICS_ADDR`, DEFAULT OFF), process + per-service metric hooks | ✅ done (merged 2026-07-10) |
+| A4 | Retrofit serving bins (search serve, pathsearch, filesearch serve, parquet follow) onto A1-A3 — behavior-identical with existing envs (same flags/defaults); first real metric: `search_follow_watermark_age_seconds` on main-search | ✅ done (merged 2026-07-10) |
 
 ## Lane B — Go golden files + ALL CI wiring (branch `p0b-goldens`)
 Owns: `graphql/**` (snapshot artifact + test only), `internal/config*` golden
