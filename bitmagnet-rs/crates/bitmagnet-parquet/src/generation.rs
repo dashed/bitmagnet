@@ -275,7 +275,9 @@ impl Layout {
             .file_name()
             .context("epoch mark path has no file name")?
             .to_string_lossy();
-        let tmp = unique_temp_path(&self.root, &format!(".{name}"));
+        // Epoch marks have one serialized writer, so a fixed scratch name is
+        // safely reused after a crash instead of leaking unique temp files.
+        let tmp = self.root.join(format!(".{name}.tmp"));
         let result = (|| -> Result<()> {
             let mut f = fs::File::create(&tmp)?;
             write!(f, "{epoch}")?;
@@ -711,6 +713,34 @@ mod tests {
         assert_eq!(l.read_watermark(), 0);
         l.write_watermark(1_700_000_000).unwrap();
         assert_eq!(l.read_watermark(), 1_700_000_000);
+    }
+
+    #[test]
+    fn epoch_writes_reuse_crash_temps_and_publish_latest_values() {
+        let root = tmp("epoch-temp-reuse");
+        let l = Layout::new(root.clone());
+        l.ensure_dirs().unwrap();
+
+        for epoch in [100, 200] {
+            fs::write(root.join(".watermark.tmp"), b"crash leftover").unwrap();
+            l.write_watermark(epoch).unwrap();
+            assert_eq!(l.read_watermark(), epoch);
+            assert!(!root.join(".watermark.tmp").exists());
+        }
+        for epoch in [160, 260] {
+            fs::write(root.join(".delta_mark.tmp"), b"crash leftover").unwrap();
+            l.write_delta_mark(epoch).unwrap();
+            assert_eq!(l.read_delta_mark(), epoch);
+            assert!(!root.join(".delta_mark.tmp").exists());
+        }
+
+        let temp_files: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(temp_files.is_empty(), "leftover temps: {temp_files:?}");
     }
 
     // ---- pruning ----
