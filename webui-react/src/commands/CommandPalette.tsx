@@ -11,6 +11,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { SUPPORTED_LANGUAGES, setLanguage } from "../i18n/i18n";
+import { useSavedSearches } from "../searches/savedSearches";
 import { useDialogFocus } from "../utils/dialogFocus";
 import styles from "./CommandPalette.module.css";
 import { filterCommands } from "./filterCommands";
@@ -65,6 +66,7 @@ export default function CommandPalette({ commands, isOpen, onClose }: CommandPal
   const dialogRef = useDialogFocus(isOpen, onClose);
   const listboxId = useId();
   const navigate = useNavigate();
+  const savedSearches = useSavedSearches();
   const { t } = useTranslation();
 
   const navigationCommands = useMemo<Command[]>(
@@ -143,15 +145,38 @@ export default function CommandPalette({ commands, isOpen, onClose }: CommandPal
       title: t("palette.searchFor", { query: trimmedQuery }),
     };
   }, [navigate, query, t]);
+  const savedSearchCommands = useMemo<Command[]>(
+    () =>
+      savedSearches.map((item) => ({
+        group: "saved",
+        hint: t("savedSearches.paletteHint"),
+        id: `saved-search-${item.id}`,
+        perform: () =>
+          navigate({
+            search: item.params,
+            to: "/",
+          }),
+        title: item.name,
+      })),
+    [navigate, savedSearches, t],
+  );
   const availableCommands = useMemo(
     () => [
       ...navigationCommands,
       ...(searchCommand ? [searchCommand] : []),
+      ...savedSearchCommands,
       ...commands,
       themeCommand,
       ...languageCommands,
     ],
-    [commands, languageCommands, navigationCommands, searchCommand, themeCommand],
+    [
+      commands,
+      languageCommands,
+      navigationCommands,
+      savedSearchCommands,
+      searchCommand,
+      themeCommand,
+    ],
   );
   const filteredCommands = useMemo(
     () => filterCommands(availableCommands, query),

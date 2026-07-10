@@ -22,6 +22,14 @@ import type {
   VideoResolutionAgg,
   VideoSourceAgg,
 } from "../graphql/generated/graphql";
+import {
+  addSavedSearch,
+  deleteSavedSearch,
+  renameSavedSearch,
+  type SavedSearch,
+  useSavedSearches,
+} from "../searches/savedSearches";
+import { useDialogFocus } from "../utils/dialogFocus";
 import { formatFileSize } from "../utils/filesize";
 import { formatIntEstimate } from "../utils/intEstimate";
 import { formatRelativeTime } from "../utils/relativeTime";
@@ -43,6 +51,7 @@ import {
   parseTorrentSearchParams,
   sanitizeFacetSelections,
   stringifyTorrentSearchParams,
+  type TorrentSearchUrlParams,
   updateQuery,
   updateSearchMode,
 } from "./searchParams";
@@ -108,6 +117,10 @@ type DynamicFacetOption = {
   isEstimate: boolean;
   label: string;
   value: string;
+};
+type SavedSearchControlsProps = {
+  params: TorrentSearchUrlParams;
+  suggestedName: string;
 };
 
 function IndeterminateCheckbox({
@@ -363,6 +376,214 @@ function getContentTypeOptions(
   }
 
   return options;
+}
+
+function SavedSearchControls({ params, suggestedName }: SavedSearchControlsProps) {
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  const navigate = useNavigate({ from: "/" });
+  const notify = useToast();
+  const savedSearches = useSavedSearches();
+  const { t } = useTranslation();
+
+  function closeSaveDialog() {
+    setSaveDialogOpen(false);
+  }
+
+  function openSaveDialog() {
+    setSaveName(suggestedName);
+    setSaveDialogOpen(true);
+  }
+
+  function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const savedSearch = addSavedSearch(saveName, params);
+
+    if (!savedSearch) {
+      return;
+    }
+
+    closeSaveDialog();
+    notify({ message: t("savedSearches.saved") });
+  }
+
+  function handleApply(item: SavedSearch) {
+    menuRef.current?.removeAttribute("open");
+    void navigate({
+      search: item.params,
+      to: "/",
+    });
+  }
+
+  function beginRename(item: SavedSearch) {
+    setRenameName(item.name);
+    setRenamingId(item.id);
+  }
+
+  function cancelRename() {
+    setRenameName("");
+    setRenamingId(null);
+  }
+
+  function handleRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!renamingId || !renameSavedSearch(renamingId, renameName)) {
+      return;
+    }
+
+    cancelRename();
+  }
+
+  function handleDelete(id: string) {
+    deleteSavedSearch(id);
+
+    if (renamingId === id) {
+      cancelRename();
+    }
+  }
+
+  const saveDialogRef = useDialogFocus(saveDialogOpen, closeSaveDialog);
+
+  return (
+    <div className={styles["savedSearchToolbar"]}>
+      <button className={styles["submitSmall"]} onClick={openSaveDialog} type="button">
+        {t("savedSearches.save")}
+      </button>
+      <details className={styles["savedSearchMenu"]} ref={menuRef}>
+        <summary aria-label={t("savedSearches.title")}>
+          <span>{t("savedSearches.title")}</span>
+          {savedSearches.length > 0 ? (
+            <span className={styles["savedSearchCount"]}>{savedSearches.length}</span>
+          ) : null}
+        </summary>
+        <div className={styles["savedSearchMenuBody"]}>
+          {savedSearches.length > 0 ? (
+            <ul className={styles["savedSearchList"]}>
+              {savedSearches.map((item) => (
+                <li className={styles["savedSearchRow"]} key={item.id}>
+                  {renamingId === item.id ? (
+                    <form className={styles["savedSearchRenameForm"]} onSubmit={handleRename}>
+                      <input
+                        aria-label={t("savedSearches.renameNamed", { name: item.name })}
+                        autoComplete="off"
+                        autoFocus
+                        className={styles["savedSearchRenameInput"]}
+                        onChange={(event) => setRenameName(event.target.value)}
+                        type="text"
+                        value={renameName}
+                      />
+                      <div className={styles["savedSearchRenameActions"]}>
+                        <button
+                          className={styles["savedSearchAction"]}
+                          disabled={!renameName.trim()}
+                          type="submit"
+                        >
+                          {t("savedSearches.confirm")}
+                        </button>
+                        <button
+                          className={styles["savedSearchAction"]}
+                          onClick={cancelRename}
+                          type="button"
+                        >
+                          {t("savedSearches.cancel")}
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <button
+                        className={styles["savedSearchApply"]}
+                        onClick={() => handleApply(item)}
+                        title={t("savedSearches.apply")}
+                        type="button"
+                      >
+                        {item.name}
+                      </button>
+                      <button
+                        aria-label={t("savedSearches.renameNamed", { name: item.name })}
+                        className={styles["savedSearchAction"]}
+                        onClick={() => beginRename(item)}
+                        type="button"
+                      >
+                        {t("savedSearches.rename")}
+                      </button>
+                      <button
+                        aria-label={t("savedSearches.deleteNamed", { name: item.name })}
+                        className={`${styles["savedSearchAction"]} ${styles["savedSearchDelete"]}`}
+                        onClick={() => handleDelete(item.id)}
+                        type="button"
+                      >
+                        {t("savedSearches.delete")}
+                      </button>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className={styles["savedSearchEmpty"]}>{t("savedSearches.empty")}</p>
+          )}
+        </div>
+      </details>
+
+      {saveDialogOpen ? (
+        <div
+          className={styles["saveDialogBackdrop"]}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSaveDialog();
+            }
+          }}
+          role="presentation"
+        >
+          <div
+            aria-labelledby="save-search-dialog-title"
+            aria-modal="true"
+            className={styles["saveDialog"]}
+            ref={saveDialogRef}
+            role="dialog"
+            tabIndex={-1}
+          >
+            <h3 id="save-search-dialog-title">{t("savedSearches.save")}</h3>
+            <form className={styles["saveDialogForm"]} onSubmit={handleSave}>
+              <label className={styles["saveDialogField"]} htmlFor="save-search-name">
+                <span>{t("savedSearches.nameLabel")}</span>
+                <input
+                  autoComplete="off"
+                  id="save-search-name"
+                  onChange={(event) => setSaveName(event.target.value)}
+                  placeholder={t("savedSearches.namePlaceholder")}
+                  type="text"
+                  value={saveName}
+                />
+              </label>
+              <div className={styles["saveDialogActions"]}>
+                <button
+                  className={styles["secondaryButton"]}
+                  onClick={closeSaveDialog}
+                  type="button"
+                >
+                  {t("savedSearches.cancel")}
+                </button>
+                <button
+                  className={styles["submitSmall"]}
+                  disabled={!saveName.trim()}
+                  type="submit"
+                >
+                  {t("savedSearches.confirm")}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function SearchPage() {
@@ -987,6 +1208,7 @@ export function SearchPage() {
                 </button>
               </div>
             </section>
+            <SavedSearchControls params={searchParams} suggestedName={search.query} />
           </div>
 
           <details className={styles["filters"]} ref={filtersRef}>

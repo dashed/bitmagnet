@@ -6,12 +6,14 @@ import "../i18n/i18n";
 import { createAppRouter } from "../appRouter";
 import { execute } from "../graphql/client";
 import { AppProviders } from "../providers/AppProviders";
+import { addSavedSearch } from "../searches/savedSearches";
 
 vi.mock("../graphql/client", () => ({
   execute: vi.fn(),
 }));
 
 const executeMock = vi.mocked(execute);
+const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 async function renderAt(initialEntry: string) {
   const router = createAppRouter({
@@ -37,6 +39,11 @@ async function openPalette() {
 
 describe("CommandPalette", () => {
   beforeEach(() => {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
     executeMock.mockReset();
     executeMock.mockImplementation(() => new Promise<never>(() => undefined));
   });
@@ -131,5 +138,33 @@ describe("CommandPalette", () => {
 
     expect(input.getAttribute("aria-activedescendant")).toBe(options[1]?.id);
     expect(options[1]?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("shows a saved search and applies it with Enter", async () => {
+    const savedParams = {
+      content_type: "software" as const,
+      desc: 0 as const,
+      order: "published_at" as const,
+      query: "nightly linux",
+    };
+    addSavedSearch("Weekly Arch", savedParams);
+
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "Weekly Arch" } });
+
+    const savedOption = await screen.findByRole("option", { name: /Weekly Arch/ });
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(savedOption.id);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(router.latestLocation.pathname).toBe("/");
+      expect(router.latestLocation.search).toEqual(savedParams);
+    });
   });
 });

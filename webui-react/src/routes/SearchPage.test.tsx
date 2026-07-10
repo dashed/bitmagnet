@@ -6,6 +6,7 @@ import "../i18n/i18n";
 import { createAppRouter } from "../appRouter";
 import { execute } from "../graphql/client";
 import { AppProviders } from "../providers/AppProviders";
+import { getSavedSearchesSnapshot } from "../searches/savedSearches";
 import { PATH_TYPEAHEAD_DEBOUNCE_MS } from "./searchModes/PathBrowseView";
 
 vi.mock("../graphql/client", () => ({
@@ -13,6 +14,7 @@ vi.mock("../graphql/client", () => ({
 }));
 
 const executeMock = vi.mocked(execute);
+const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 function getEmptyTorrentSearchResult() {
   return {
@@ -49,6 +51,11 @@ async function renderAt(initialEntry: string) {
 describe("SearchPage search modes", () => {
   beforeEach(() => {
     window.__BITMAGNET_FLAGS__ = undefined;
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
     executeMock.mockReset();
     executeMock.mockImplementation((_document, variables) => {
       const input = "input" in variables ? variables.input : undefined;
@@ -182,6 +189,38 @@ describe("SearchPage search modes", () => {
         mode: "files",
         query: "sample",
       });
+    });
+  });
+
+  it("saves and reapplies the exact canonical URL search params", async () => {
+    const router = await renderAt(
+      "/app/?content_type=movie&desc=0&genre=sci-fi,action&limit=50&max_size=2&max_size_unit=GiB&min_size=700&min_size_unit=MiB&order=published_at&page=3&published_at=7d&query=matrix&video_resolution=V1080p",
+    );
+    const initialParams = { ...router.latestLocation.search };
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save search" }));
+
+    const nameInput = await screen.findByLabelText("Name");
+    expect((nameInput as HTMLInputElement).value).toBe("matrix");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Search saved")).toBeTruthy();
+
+    const searchInput = screen.getByLabelText("Search torrents");
+    fireEvent.change(searchInput, { target: { value: "different" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toMatchObject({ query: "different" });
+    });
+
+    fireEvent.click(screen.getByLabelText("Saved searches"));
+    fireEvent.click(await screen.findByRole("button", { name: "matrix" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual(initialParams);
+      expect(getSavedSearchesSnapshot()[0]?.params).toEqual(router.latestLocation.search);
     });
   });
 });
