@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { type TFunction } from "i18next";
+import type { TFunction } from "i18next";
 import {
   type ChangeEvent,
   type FormEvent,
@@ -247,6 +247,36 @@ function getDhtSeenTooltip(
 
 function getContentTypeLabel(value: ContentTypeSelection | null, t: (key: string) => string) {
   return value && value !== "null" ? t(`contentTypes.${value}`) : t("contentTypes.unknown");
+}
+
+function renderResultExtensions(extensions: string[], t: TFunction) {
+  if (extensions.length === 0) {
+    return null;
+  }
+
+  const sorted = [...extensions].sort((a, b) => a.localeCompare(b));
+  const maxVisible = 4;
+  const shown = sorted.slice(0, maxVisible);
+  const overflow = sorted.slice(maxVisible);
+
+  return (
+    <ul aria-label={t("search.fileExtensions")} className={styles["extensionList"]}>
+      {shown.map((ext) => (
+        <li className={styles["extensionChip"]} key={ext}>
+          {ext}
+        </li>
+      ))}
+      {overflow.length > 0 ? (
+        <li
+          className={styles["extensionChip"]}
+          data-overflow="true"
+          title={overflow.join(", ")}
+        >
+          {t("search.fileExtensionsMore", { count: overflow.length })}
+        </li>
+      ) : null}
+    </ul>
+  );
 }
 
 function getContentTypeAggKey(agg: ContentTypeAgg): ContentTypeSelection {
@@ -1901,6 +1931,7 @@ export function SearchPage() {
                             </dd>
                           </div>
                         </dl>
+                        {renderResultExtensions(item.torrent.fileExtensions, t)}
                         <div className={styles["magnetActions"]}>
                           <a
                             aria-label={t("search.openMagnetLink", { title })}

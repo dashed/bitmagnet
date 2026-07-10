@@ -786,6 +786,32 @@
   overflow-wrap: anywhere;
 }
 
+.extensionList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.extensionChip {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.extensionChip[data-overflow="true"] {
+  font-family: var(--mantine-font-family);
+  font-weight: 700;
+}
+
 .magnetActions {
   align-items: center;
   display: flex;

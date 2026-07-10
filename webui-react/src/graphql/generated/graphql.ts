@@ -493,6 +493,7 @@ export type Torrent = {
   __typename?: "Torrent";
   createdAt: Scalars["DateTime"]["output"];
   extension?: Maybe<Scalars["String"]["output"]>;
+  fileExtensions: Array<Scalars["String"]["output"]>;
   fileType?: Maybe<FileType>;
   fileTypes?: Maybe<Array<FileType>>;
   files?: Maybe<Array<TorrentFile>>;
@@ -1127,6 +1128,7 @@ export type TorrentContentSearchQuery = {
         publishedAt: string;
         torrent: {
           __typename?: "Torrent";
+          fileExtensions: Array<string>;
           filesCount?: number | null;
           magnetUri: string;
           name: string;
@@ -1564,6 +1566,7 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
         dhtLastSeenAt
         publishedAt
         torrent {
+          fileExtensions
           filesCount
           magnetUri
           name

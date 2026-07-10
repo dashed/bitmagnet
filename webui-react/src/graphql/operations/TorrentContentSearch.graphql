@@ -35,6 +35,7 @@ query TorrentContentSearch(
         dhtLastSeenAt
         publishedAt
         torrent {
+          fileExtensions
           filesCount
           magnetUri
           name

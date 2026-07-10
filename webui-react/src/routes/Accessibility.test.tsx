@@ -199,6 +199,7 @@ const searchResponse = {
           seeders: 42,
           title: "Accessibility Demo Torrent",
           torrent: {
+            fileExtensions: ["mkv", "srt", "nfo", "jpg", "txt", "sub"],
             filesCount: 2,
             magnetUri: `magnet:?xt=urn:btih:${INFO_HASH}`,
             name: "Accessibility Demo Torrent",
