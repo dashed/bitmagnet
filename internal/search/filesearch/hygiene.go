@@ -39,6 +39,10 @@ var (
 	ErrEmptyQuery = errors.New("file search requires a query, extension, size bound or info hash")
 )
 
+var knownFacetFields = map[string]struct{}{
+	"extension": {},
+}
+
 // likeEscaper escapes the three LIKE/ILIKE metacharacters so user input is
 // treated as a literal substring, never a pattern. Backslash MUST be escaped
 // first. The result is meant to be used with an explicit `ESCAPE '\'` clause (or
@@ -112,6 +116,35 @@ func normalizeExtensions(in []string) []string {
 	return out
 }
 
+func normalizeFacetFields(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+
+	for _, field := range in {
+		field = strings.ToLower(strings.TrimSpace(field))
+		if _, ok := knownFacetFields[field]; !ok {
+			continue
+		}
+
+		if _, ok := seen[field]; ok {
+			continue
+		}
+
+		seen[field] = struct{}{}
+		out = append(out, field)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
+}
+
 // FileSearchParams is the loosely-typed input the resolver passes in; it is
 // validated and normalised by NewFileSearchInput.
 type FileSearchParams struct {
@@ -124,6 +157,14 @@ type FileSearchParams struct {
 	Limit      uint
 	Offset     uint
 	TotalCount *bool
+}
+
+type FacetsParams struct {
+	Query      string
+	Extensions []string
+	MinSize    uint64
+	MaxSize    uint64
+	Fields     []string
 }
 
 // NewFileSearchInput validates and normalises raw params into a FileSearchInput.
@@ -152,6 +193,23 @@ func NewFileSearchInput(p FileSearchParams) (FileSearchInput, error) {
 		Limit:            clampLimit(p.Limit, DefaultLimit, MaxLimit),
 		Offset:           p.Offset,
 		SkipTotalCount:   p.TotalCount != nil && !*p.TotalCount,
+	}, nil
+}
+
+func NewFacetsInput(p FacetsParams) (FacetsInput, error) {
+	query := capRunes(strings.TrimSpace(p.Query), MaxQueryLen)
+	likePattern := ""
+	if query != "" {
+		likePattern = EscapeLikePattern(query)
+	}
+
+	return FacetsInput{
+		Query:            query,
+		QueryLikePattern: likePattern,
+		Extensions:       normalizeExtensions(p.Extensions),
+		MinSize:          p.MinSize,
+		MaxSize:          p.MaxSize,
+		Fields:           normalizeFacetFields(p.Fields),
 	}, nil
 }
 

@@ -42,3 +42,41 @@ input PathTypeaheadInput {
 type PathTypeaheadResult {
   suggestions: [String!]!
 }
+
+enum FileFacetField {
+  extension
+}
+
+input FileSearchFacetsInput {
+  query: String
+  extensions: [String!]
+  minSize: Int
+  maxSize: Int
+  """
+  Which facet fields to aggregate. v1 supports only `extension`; unknown values
+  are ignored. Omitted/empty requests the default set (extension).
+  """
+  facets: [FileFacetField!]
+}
+
+"""
+One aggregated facet value and its exact match count. totalSize is the summed
+byte size of the matching files in the bucket. isEstimate mirrors the
+torrentContent aggregation contract; L2 facet counts are exact so it is always
+false in v1.
+"""
+type FileFacetBucketAgg {
+  value: String!
+  count: Int!
+  totalSize: Int!
+  isEstimate: Boolean!
+}
+
+type FileFacetAgg {
+  field: FileFacetField!
+  buckets: [FileFacetBucketAgg!]!
+}
+
+type FileSearchFacetsResult {
+  facets: [FileFacetAgg!]!
+}

@@ -8,15 +8,16 @@ import (
 
 	q "github.com/bitmagnet-io/bitmagnet/internal/database/query"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
+	"github.com/bitmagnet-io/bitmagnet/internal/gql/gqlmodel/gen"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 )
 
-// FileSearchQuery is the resolver-facing entry point for the file-grained search
-// (DV-2 DuckDB sidecar) and path typeahead (DV-3 path-FTS sidecar). It is wired
-// behind the transport-neutral filesearch.Client interface so GraphQL does not
-// depend on sidecar transport details.
+// FileSearchQuery is the resolver-facing entry point for file-grained search and
+// facets (DV-2 DuckDB sidecar), plus path typeahead (DV-3 path-FTS sidecar). It is
+// wired behind the transport-neutral filesearch.Client interface so GraphQL does
+// not depend on sidecar transport details.
 //
 // It is gated twice over: the FileSearchEnabled feature flag (default OFF) AND
 // the injected Client (filesearch.Disabled() by default). Either being off means
@@ -109,6 +110,26 @@ func (q FileSearchQuery) Search(ctx context.Context, in FileSearchInput) (filese
 	return hydrateFileSearchResult(ctx, q.TorrentContentSearch, result)
 }
 
+// FileSearchFacets runs an L2 facet aggregation. Both the file-search master
+// switch and the facets-specific switch must be enabled before input validation
+// or client delegation.
+func (q FileSearchQuery) FileSearchFacets(
+	ctx context.Context,
+	in filesearch.FacetsParams,
+) (filesearch.FacetsResult, error) {
+	flags := search.FeatureFlagsValue()
+	if !flags.FileSearchEnabled || !flags.FileSearchFacetsEnabled {
+		return filesearch.FacetsResult{}, filesearch.ErrDisabled
+	}
+
+	validated, err := filesearch.NewFacetsInput(in)
+	if err != nil {
+		return filesearch.FacetsResult{}, err
+	}
+
+	return q.client().Facets(ctx, validated)
+}
+
 // PathTypeahead returns path completions for a prefix. Returns
 // filesearch.ErrDisabled unless the flag is on AND a real client is wired, and
 // filesearch.ErrPrefixTooShort for prefixes under the min-chars threshold.
@@ -123,6 +144,20 @@ func (q FileSearchQuery) PathTypeahead(
 	validated, err := filesearch.NewPathTypeaheadInput(in.Prefix, in.Limit)
 	if err != nil {
 		return filesearch.PathTypeaheadResult{}, err
+	}
+
+	// L3 Suggest prefix-index route (flag-gated, default OFF). Falls through to
+	// the candidate-derived adapter below on not-served/unhealthy/RPC-error, so it
+	// never regresses the adapter. When the flag is OFF this block is skipped
+	// entirely and the path below is byte-identical to before.
+	if search.FeatureFlagsValue().FileSearchTypeaheadRPCEnabled {
+		if suggestions, served, suggestErr := q.Pathsearch.Suggest(
+			ctx,
+			validated.Prefix,
+			validated.Limit,
+		); suggestErr == nil && served {
+			return filesearch.PathTypeaheadResult{Suggestions: suggestions}, nil
+		}
 	}
 
 	if q.Pathsearch.TypeaheadEnabled() && q.Pathsearch.Healthy() {
@@ -154,6 +189,17 @@ func (t TorrentContentQuery) FileSearch(ctx context.Context, in FileSearchInput)
 		Pathsearch:           t.Pathsearch,
 		TorrentContentSearch: t.TorrentContentSearch,
 	}.Search(ctx, in)
+}
+
+func (t TorrentContentQuery) FileSearchFacets(
+	ctx context.Context,
+	in filesearch.FacetsParams,
+) (filesearch.FacetsResult, error) {
+	return FileSearchQuery{
+		Client:               t.FileSearchClient,
+		Pathsearch:           t.Pathsearch,
+		TorrentContentSearch: t.TorrentContentSearch,
+	}.FileSearchFacets(ctx, in)
 }
 
 func (t TorrentContentQuery) PathTypeahead(
@@ -298,6 +344,74 @@ func fileSearchInfoHashes(items []filesearch.FileSearchItem) []protocol.ID {
 	}
 
 	return out
+}
+
+func NewFileSearchFacetsParams(input gen.FileSearchFacetsInput) filesearch.FacetsParams {
+	var params filesearch.FacetsParams
+
+	if query, ok := input.Query.ValueOK(); ok && query != nil {
+		params.Query = *query
+	}
+
+	if extensions, ok := input.Extensions.ValueOK(); ok {
+		params.Extensions = extensions
+	}
+
+	if minSize, ok := input.MinSize.ValueOK(); ok && minSize != nil && *minSize > 0 {
+		params.MinSize = uint64(*minSize)
+	}
+
+	if maxSize, ok := input.MaxSize.ValueOK(); ok && maxSize != nil && *maxSize > 0 {
+		params.MaxSize = uint64(*maxSize)
+	}
+
+	if fields, ok := input.Facets.ValueOK(); ok {
+		params.Fields = make([]string, 0, len(fields))
+		for _, field := range fields {
+			params.Fields = append(params.Fields, field.String())
+		}
+	}
+
+	return params
+}
+
+func NewFileSearchFacetsResult(result filesearch.FacetsResult) gen.FileSearchFacetsResult {
+	facets := make([]gen.FileFacetAgg, 0, len(result.Facets))
+	for _, facet := range result.Facets {
+		// Skip facet fields this schema version doesn't know: a newer sidecar
+		// may emit new fields, and casting an unknown string into the non-null
+		// FileFacetField enum would make gqlgen emit an invalid enum value.
+		field := gen.FileFacetField(facet.Field)
+		if !field.IsValid() {
+			continue
+		}
+
+		buckets := make([]gen.FileFacetBucketAgg, 0, len(facet.Buckets))
+		for _, bucket := range facet.Buckets {
+			buckets = append(buckets, gen.FileFacetBucketAgg{
+				Value:      bucket.Value,
+				Count:      boundedInt(bucket.Count),
+				TotalSize:  boundedInt(bucket.TotalSize),
+				IsEstimate: false,
+			})
+		}
+
+		facets = append(facets, gen.FileFacetAgg{
+			Field:   field,
+			Buckets: buckets,
+		})
+	}
+
+	return gen.FileSearchFacetsResult{Facets: facets}
+}
+
+func boundedInt(v uint64) int {
+	maxInt := int(^uint(0) >> 1)
+	if v > uint64(maxInt) {
+		return maxInt
+	}
+
+	return int(v)
 }
 
 func uint64ToUint(v uint64) uint {

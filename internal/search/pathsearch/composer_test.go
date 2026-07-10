@@ -15,10 +15,14 @@ import (
 // --- fakes -------------------------------------------------------------------
 
 type fakeL3 struct {
-	resp     *pb.PathCandidatesResponse
-	err      error
-	gotLimit uint32
-	gotQuery string
+	resp         *pb.PathCandidatesResponse
+	err          error
+	gotLimit     uint32
+	gotQuery     string
+	suggestResp  *pb.SuggestResponse
+	suggestErr   error
+	suggestReq   *pb.SuggestRequest
+	suggestCalls int
 }
 
 func (f *fakeL3) PathCandidates(_ context.Context, req *pb.PathCandidatesRequest) (*pb.PathCandidatesResponse, error) {
@@ -26,6 +30,13 @@ func (f *fakeL3) PathCandidates(_ context.Context, req *pb.PathCandidatesRequest
 	f.gotQuery = req.GetQuery()
 
 	return f.resp, f.err
+}
+
+func (f *fakeL3) Suggest(_ context.Context, req *pb.SuggestRequest) (*pb.SuggestResponse, error) {
+	f.suggestCalls++
+	f.suggestReq = req
+
+	return f.suggestResp, f.suggestErr
 }
 
 type fakePG struct {

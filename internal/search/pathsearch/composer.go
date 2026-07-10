@@ -20,6 +20,7 @@ import (
 // can substitute a fake. *Client satisfies it.
 type candidateSource interface {
 	PathCandidates(ctx context.Context, req *pb.PathCandidatesRequest) (*pb.PathCandidatesResponse, error)
+	Suggest(ctx context.Context, req *pb.SuggestRequest) (*pb.SuggestResponse, error)
 }
 
 // torrentContentSearcher is the slice of the PostgreSQL search the Composer needs
@@ -334,6 +335,42 @@ func (c *Composer) Healthy() bool {
 	}
 
 	return c.health == nil || c.health()
+}
+
+// Suggest routes path typeahead through the L3 prefix-index Suggest RPC. It is
+// nil-safe (nil composer => not served) and fails soft: when L3 is unhealthy or
+// the RPC errors/returns Unavailable (for example, the prefix index was never
+// built), it returns served=false with a nil error so the caller falls back to
+// the candidate-derived adapter. A successful call returns served=true even
+// when the suggestion list is empty (an empty answer is authoritative, not a
+// fallback).
+func (c *Composer) Suggest(
+	ctx context.Context,
+	prefix string,
+	limit uint,
+) (suggestions []string, served bool, err error) {
+	if c == nil || c.l3 == nil || !c.Healthy() {
+		return nil, false, nil
+	}
+
+	resp, rpcErr := c.l3.Suggest(ctx, &pb.SuggestRequest{
+		Prefix: prefix,
+		Limit:  uint32(limit),
+	})
+	if rpcErr != nil {
+		if c.logger != nil {
+			c.logger.Debugw("pathsearch: suggest RPC fell back to adapter", "error", rpcErr)
+		}
+
+		return nil, false, nil
+	}
+
+	out := make([]string, 0, len(resp.GetSuggestions()))
+	for _, suggestion := range resp.GetSuggestions() {
+		out = append(out, suggestion.GetValue())
+	}
+
+	return out, true, nil
 }
 
 // Eligible reports whether the query is long enough for the L3 route (the

@@ -123,6 +123,32 @@ func (r *torrentContentQueryResolver) FileSearch(ctx context.Context, obj *gqlmo
 	}.Search(ctx, input)
 }
 
+// FileSearchFacets is the resolver for the fileSearchFacets field.
+func (r *torrentContentQueryResolver) FileSearchFacets(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gen.FileSearchFacetsInput) (gen.FileSearchFacetsResult, error) {
+	params := gqlmodel.NewFileSearchFacetsParams(input)
+
+	var (
+		result filesearch.FacetsResult
+		err    error
+	)
+
+	if obj != nil {
+		result, err = obj.FileSearchFacets(ctx, params)
+	} else {
+		result, err = (gqlmodel.FileSearchQuery{
+			Client:               r.Resolver.FileSearch,
+			Pathsearch:           r.Resolver.Pathsearch,
+			TorrentContentSearch: r.Resolver.Search,
+		}).FileSearchFacets(ctx, params)
+	}
+
+	if err != nil {
+		return gen.FileSearchFacetsResult{}, err
+	}
+
+	return gqlmodel.NewFileSearchFacetsResult(result), nil
+}
+
 // PathTypeahead is the resolver for the pathTypeahead field.
 func (r *torrentContentQueryResolver) PathTypeahead(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.PathTypeaheadInput) (filesearch.PathTypeaheadResult, error) {
 	if obj != nil {

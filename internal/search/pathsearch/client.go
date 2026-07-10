@@ -102,6 +102,14 @@ func (c *Client) PathCandidates(
 	return c.svc.PathCandidates(ctx, req)
 }
 
+// Suggest asks L3's prefix index for path-segment completions.
+func (c *Client) Suggest(ctx context.Context, req *pb.SuggestRequest) (*pb.SuggestResponse, error) {
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+
+	return c.svc.Suggest(ctx, req)
+}
+
 // HealthCheck probes the sidecar's serving status, doc count, index size, and
 // follow watermark. It reuses the shared empty HealthCheckRequest.
 func (c *Client) HealthCheck(ctx context.Context) (*pb.PathSearchHealth, error) {

@@ -65,6 +65,8 @@ sqlx = { version = "0.9", default-features = false, features = [
 # Search engine. 0.26 is the upstream target that motivated the sidecar (the
 # tantivy-go FFI bindings are pinned to 0.22).
 tantivy = "0.26"
+fst = "0.4"
+memmap2 = "0.9"
 
 # CLI.
 clap = { version = "4", features = ["derive", "env"] }

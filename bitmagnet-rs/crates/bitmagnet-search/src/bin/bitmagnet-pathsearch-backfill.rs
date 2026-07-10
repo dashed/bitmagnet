@@ -10,6 +10,7 @@ use bitmagnet_search::pathsearch::index::{open_or_create, writer, DEFAULT_WRITER
 use bitmagnet_search::pathsearch::indexer::{delete, upsert};
 use bitmagnet_search::pathsearch::schema::Fields;
 use bitmagnet_search::pathsearch::watermark::{current_epoch, write_watermark};
+use bitmagnet_search::pathsearch::{PrefixIndexBuilder, PrefixIndexConfig, PREFIX_INDEX_FILENAME};
 use clap::Parser;
 use tracing::{info, warn};
 
@@ -98,6 +99,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let heap = args.writer_heap_mb * 1024 * 1024;
     let mut index_writer =
         writer(&index, heap, args.writer_threads).context("allocating pathsearch writer")?;
+    let suggest_path = args.index_path.join(PREFIX_INDEX_FILENAME);
+    let prefix_cfg = prefix_config_from_env();
+    let mut prefix_builder = PrefixIndexBuilder::new(prefix_cfg);
 
     let mut cursor = args.after_info_hash;
     let mut indexed = 0_u64;
@@ -113,6 +117,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
         batch_size = args.batch_size,
         limit = ?args.limit,
         start_after = ?cursor,
+        suggest_path = %suggest_path.display(),
+        suggest_max_tracked = prefix_cfg.max_tracked,
+        suggest_min_freq = prefix_cfg.min_freq,
+        suggest_max_entries = prefix_cfg.max_entries,
         "pathsearch backfill starting"
     );
 
@@ -130,6 +138,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             match PathDocument::from_torrent(row) {
                 Ok(Some(doc)) => {
                     upsert(&index_writer, &fields, &doc).context("indexing path-bag")?;
+                    prefix_builder.add_paths(&doc.paths);
                     indexed += 1;
                     since_commit += 1;
                 }
@@ -175,6 +184,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .wait_merging_threads()
         .context("draining pathsearch index merge threads")?;
 
+    match prefix_builder.finalize(&suggest_path) {
+        Ok(stats) => info!(
+            suggest_entries = stats.entries,
+            suggest_path = %stats.out_path.display(),
+            "pathsearch prefix index built"
+        ),
+        Err(error) => warn!(
+            %error,
+            suggest_path = %suggest_path.display(),
+            "pathsearch prefix index build failed; Suggest disabled"
+        ),
+    }
+
     let watermark_seeded =
         seed_followup_watermark(&args.watermark_file, snapshot_epoch, completed_full_scan)
             .context("seeding follow watermark")?;
@@ -189,6 +211,26 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "pathsearch backfill complete"
     );
     Ok(())
+}
+
+fn prefix_config_from_env() -> PrefixIndexConfig {
+    let defaults = PrefixIndexConfig::default();
+    PrefixIndexConfig {
+        max_tracked: env_parse_or_default("PATHSEARCH_SUGGEST_MAX_TRACKED", defaults.max_tracked),
+        min_freq: env_parse_or_default("PATHSEARCH_SUGGEST_MIN_FREQ", defaults.min_freq),
+        max_entries: env_parse_or_default("PATHSEARCH_SUGGEST_MAX_ENTRIES", defaults.max_entries),
+        ..defaults
+    }
+}
+
+fn env_parse_or_default<T>(name: &str, default: T) -> T
+where
+    T: std::str::FromStr,
+{
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 /// On a FULL backfill (the keyset scan reached the end), seed the follow-loop

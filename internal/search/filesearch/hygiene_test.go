@@ -165,11 +165,69 @@ func TestNewFileSearchInput_TotalCountDefaultsAndOptOut(t *testing.T) {
 	}
 }
 
+func TestNewFacetsInput_NormalizesFieldsAndFilters(t *testing.T) {
+	in, err := NewFacetsInput(FacetsParams{
+		Query:      "  50%_files  ",
+		Extensions: []string{".MKV", "mkv"},
+		Fields:     []string{"unknown", " Extension ", "EXTENSION"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+
+	if in.Query != "50%_files" {
+		t.Errorf("Query = %q, want %q", in.Query, "50%_files")
+	}
+
+	if in.QueryLikePattern != `50\%\_files` {
+		t.Errorf("QueryLikePattern = %q, want %q", in.QueryLikePattern, `50\%\_files`)
+	}
+
+	if len(in.Extensions) != 1 || in.Extensions[0] != "mkv" {
+		t.Errorf("Extensions = %v, want [mkv]", in.Extensions)
+	}
+
+	if len(in.Fields) != 1 || in.Fields[0] != "extension" {
+		t.Errorf("Fields = %v, want [extension]", in.Fields)
+	}
+}
+
+func TestNewFacetsInput_EmptyFieldsAreNilAndQueryIsCapped(t *testing.T) {
+	in, err := NewFacetsInput(FacetsParams{
+		Query:  strings.Repeat("z", MaxQueryLen+100),
+		Fields: []string{"unknown", " "},
+	})
+	if err != nil {
+		t.Fatalf("unexpected err %v", err)
+	}
+
+	if len([]rune(in.Query)) != MaxQueryLen {
+		t.Errorf("query len = %d, want capped %d", len([]rune(in.Query)), MaxQueryLen)
+	}
+
+	if in.Fields != nil {
+		t.Errorf("Fields = %v, want nil", in.Fields)
+	}
+
+	empty, err := NewFacetsInput(FacetsParams{})
+	if err != nil {
+		t.Fatalf("empty facets input: unexpected err %v", err)
+	}
+
+	if empty.Fields != nil || empty.QueryLikePattern != "" {
+		t.Errorf("empty facets input = %+v, want nil fields and empty pattern", empty)
+	}
+}
+
 func TestDisabledClient(t *testing.T) {
 	c := Disabled()
 
 	if _, err := c.FileSearch(context.Background(), FileSearchInput{}); !errors.Is(err, ErrDisabled) {
 		t.Errorf("FileSearch err = %v, want ErrDisabled", err)
+	}
+
+	if _, err := c.Facets(context.Background(), FacetsInput{}); !errors.Is(err, ErrDisabled) {
+		t.Errorf("Facets err = %v, want ErrDisabled", err)
 	}
 
 	if _, err := c.PathTypeahead(context.Background(), PathTypeaheadInput{}); !errors.Is(err, ErrDisabled) {

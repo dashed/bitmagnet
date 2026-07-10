@@ -1,8 +1,8 @@
-// Package filesearch defines the Go-side contract the GraphQL fileSearch +
-// pathTypeahead resolvers depend on. It is a thin, transport-neutral interface
-// so the real implementation — a gRPC client for the DuckDB file-search sidecar
-// (DV-2) and the path-FTS sidecar (DV-3) — can be wired in later without
-// touching the resolver layer.
+// Package filesearch defines the Go-side contract the GraphQL fileSearch,
+// fileSearchFacets and pathTypeahead resolvers depend on. It is a thin,
+// transport-neutral interface so the real implementation — a gRPC client for
+// the DuckDB file-search sidecar (DV-2) and the path-FTS sidecar (DV-3) — can be
+// wired in later without touching the resolver layer.
 //
 // Until that sidecar is deployed and the FileSearchEnabled feature flag is
 // flipped, the resolvers use the Disabled() client, which rejects every call
@@ -113,6 +113,34 @@ type FileSearchResult struct {
 	HasNextPage bool
 }
 
+// FacetsInput is the validated input for an L2 facet aggregation over the
+// file corpus. Unlike FileSearchInput it carries no sort/limit/offset and no
+// InfoHash: facets aggregate the whole matching set. Empty filters are allowed
+// (aggregate-all is a bounded rollup on the sidecar).
+type FacetsInput struct {
+	Query            string
+	QueryLikePattern string
+	Extensions       []string
+	MinSize          uint64
+	MaxSize          uint64
+	Fields           []string // facet field names; empty => sidecar default (extension)
+}
+
+type FacetBucket struct {
+	Value     string
+	Count     uint64
+	TotalSize uint64
+}
+
+type Facet struct {
+	Field   string
+	Buckets []FacetBucket
+}
+
+type FacetsResult struct {
+	Facets []Facet
+}
+
 // PathTypeaheadInput is the validated input to a path typeahead. Build it with
 // NewPathTypeaheadInput.
 type PathTypeaheadInput struct {
@@ -133,6 +161,7 @@ type PathTypeaheadResult struct {
 // gRPC sidecar client (real), and Disabled() (no-op).
 type Client interface {
 	FileSearch(ctx context.Context, in FileSearchInput) (FileSearchResult, error)
+	Facets(ctx context.Context, in FacetsInput) (FacetsResult, error)
 	PathTypeahead(ctx context.Context, in PathTypeaheadInput) (PathTypeaheadResult, error)
 }
 
@@ -146,6 +175,10 @@ type disabledClient struct{}
 
 func (disabledClient) FileSearch(context.Context, FileSearchInput) (FileSearchResult, error) {
 	return FileSearchResult{}, ErrDisabled
+}
+
+func (disabledClient) Facets(context.Context, FacetsInput) (FacetsResult, error) {
+	return FacetsResult{}, ErrDisabled
 }
 
 func (disabledClient) PathTypeahead(context.Context, PathTypeaheadInput) (PathTypeaheadResult, error) {

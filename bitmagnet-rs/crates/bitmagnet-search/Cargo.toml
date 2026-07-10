@@ -28,6 +28,8 @@ tonic-health.workspace = true
 # feature gate, so the read path needs no extra feature here. (The old
 # `aggregation` feature no longer exists; enabling it would fail to build.)
 tantivy.workspace = true
+fst = { workspace = true }
+memmap2 = { workspace = true }
 # `env` (read defaults from environment) is additive on top of the workspace's
 # `derive` feature; it backs the `#[arg(env = "...")]` attributes in main.rs.
 clap = { workspace = true, features = ["env"] }
@@ -45,6 +47,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # (tests/fixtures/tokenizer_fixtures.json) as a `serde_json::Value` to assert
 # byte-for-byte parity of the `TokenizeFlat` port.
 serde_json = { workspace = true }
+tempfile = "3"
 
 [[bin]]
 name = "bitmagnet-pathsearch"

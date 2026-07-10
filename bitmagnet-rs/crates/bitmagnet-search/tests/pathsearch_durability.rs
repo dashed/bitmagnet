@@ -86,7 +86,7 @@ async fn backfilled_index_survives_reopen_and_restart() {
 
     // The serving pod reopens the same dir and creates its writer. This MUST NOT
     // drop the committed segments.
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server open");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server open");
     assert_eq!(
         server_doc_count(&server).await,
         u64::from(n),
@@ -95,7 +95,7 @@ async fn backfilled_index_survives_reopen_and_restart() {
     drop(server);
 
     // A second restart (serving pod restarts again) must also preserve them.
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server reopen");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server reopen");
     assert_eq!(
         server_doc_count(&server).await,
         u64::from(n),
@@ -143,7 +143,7 @@ async fn xprocess_open_half() {
         .expect("XPROC n")
         .parse()
         .unwrap();
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server open");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server open");
     assert_eq!(
         server_doc_count(&server).await,
         n,
@@ -162,7 +162,7 @@ async fn xprocess_open_half() {
 async fn xprocess_churn_half() {
     let dir = PathBuf::from(std::env::var("BITMAGNET_PS_XPROC_DIR").expect("XPROC dir"));
     let _ = std::fs::remove_dir_all(&dir);
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server open");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server open");
     // Prod writes the follow watermark file inside the Tantivy index dir.
     std::fs::write(dir.join("watermark"), "1600000000\n").expect("watermark");
     let count_file = dir.with_extension("count");
@@ -182,7 +182,7 @@ async fn xprocess_churn_half() {
 #[ignore = "SIGKILL repro half; reopens a kill -9'ed index dir and reports doc_count"]
 async fn xprocess_report_half() {
     let dir = PathBuf::from(std::env::var("BITMAGNET_PS_XPROC_DIR").expect("XPROC dir"));
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server open");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server open");
     println!("DOC_COUNT={}", server_doc_count(&server).await);
 }
 
@@ -199,7 +199,7 @@ async fn serving_writer_commit_preserves_backfill() {
     // index directory before its first commit.
     std::fs::write(dir.join("watermark"), "1600000000\n").expect("write watermark");
 
-    let server = PathSearchServer::open(&dir, HEAP, 1).expect("server open");
+    let server = PathSearchServer::open(&dir, HEAP, 1, None).expect("server open");
     assert_eq!(
         server_doc_count(&server).await,
         u64::from(n),

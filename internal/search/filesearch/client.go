@@ -33,6 +33,7 @@ type Config struct {
 type fileSearchRPC interface {
 	SearchFiles(context.Context, *pb.SearchFilesRequest, ...grpc.CallOption) (*pb.SearchFilesResponse, error)
 	CountFiles(context.Context, *pb.CountFilesRequest, ...grpc.CallOption) (*pb.CountFilesResponse, error)
+	Facets(context.Context, *pb.FacetsRequest, ...grpc.CallOption) (*pb.FacetsResponse, error)
 	HealthCheck(
 		context.Context,
 		*pb.FileHealthCheckRequest,
@@ -176,6 +177,40 @@ func (c *SidecarClient) PathTypeahead(context.Context, PathTypeaheadInput) (Path
 	return PathTypeaheadResult{}, ErrPathTypeaheadUnsupported
 }
 
+func (c *SidecarClient) Facets(ctx context.Context, in FacetsInput) (FacetsResult, error) {
+	req := &pb.FacetsRequest{
+		Filters:     fileFilters(in.Query, in.Extensions, in.MinSize, in.MaxSize),
+		FacetFields: in.Fields,
+	}
+
+	ctx, cancel := c.callCtx(ctx)
+	defer cancel()
+
+	resp, err := c.svc.Facets(ctx, req)
+	if err != nil {
+		return FacetsResult{}, err
+	}
+
+	facets := make([]Facet, 0, len(resp.GetFacets()))
+	for _, facet := range resp.GetFacets() {
+		buckets := make([]FacetBucket, 0, len(facet.GetBuckets()))
+		for _, bucket := range facet.GetBuckets() {
+			buckets = append(buckets, FacetBucket{
+				Value:     bucket.GetValue(),
+				Count:     uint64(boundedUint(bucket.GetCount())),
+				TotalSize: uint64(boundedUint(bucket.GetTotalSize())),
+			})
+		}
+
+		facets = append(facets, Facet{
+			Field:   facet.GetField(),
+			Buckets: buckets,
+		})
+	}
+
+	return FacetsResult{Facets: facets}, nil
+}
+
 func (c *SidecarClient) HealthCheck(ctx context.Context) (*pb.FileHealthCheckResponse, error) {
 	ctx, cancel := c.callCtx(ctx)
 	defer cancel()
@@ -203,22 +238,24 @@ func (c *SidecarClient) requestLimit(in FileSearchInput) (uint, error) {
 }
 
 func buildFilters(in FileSearchInput) *pb.FileFilters {
+	return fileFilters(in.Query, in.Extensions, in.MinSize, in.MaxSize)
+}
+
+func fileFilters(query string, extensions []string, minSize, maxSize uint64) *pb.FileFilters {
 	filters := &pb.FileFilters{
-		Extensions: in.Extensions,
+		Extensions: extensions,
 	}
 
-	if in.Query != "" {
-		q := in.Query
+	if query != "" {
+		q := query
 		filters.PathQuery = &q
 	}
 
-	if in.MinSize > 0 {
-		minSize := in.MinSize
+	if minSize > 0 {
 		filters.SizeMin = &minSize
 	}
 
-	if in.MaxSize > 0 {
-		maxSize := in.MaxSize
+	if maxSize > 0 {
 		filters.SizeMax = &maxSize
 	}
 
