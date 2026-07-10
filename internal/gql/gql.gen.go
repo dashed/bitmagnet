@@ -290,6 +290,7 @@ type ComplexityRoot struct {
 	Torrent struct {
 		CreatedAt    func(childComplexity int) int
 		Extension    func(childComplexity int) int
+		FileExts     func(childComplexity int) int
 		FileType     func(childComplexity int) int
 		FileTypes    func(childComplexity int) int
 		Files        func(childComplexity int) int
@@ -1471,6 +1472,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.Torrent.Extension(childComplexity), true
+
+	case "Torrent.fileExtensions":
+		if e.complexity.Torrent.FileExts == nil {
+			break
+		}
+
+		return e.complexity.Torrent.FileExts(childComplexity), true
 
 	case "Torrent.fileType":
 		if e.complexity.Torrent.FileType == nil {
@@ -2862,6 +2870,7 @@ input TorrentMetricsQueryInput {
   filesCount: Int
   fileType: FileType
   fileTypes: [FileType!]
+  fileExtensions: [String!]!
   files: [TorrentFile!]
   sources: [TorrentSourceInfo!]!
   seeders: Int
@@ -10576,6 +10585,50 @@ func (ec *executionContext) fieldContext_Torrent_fileTypes(_ context.Context, fi
 	return fc, nil
 }
 
+func (ec *executionContext) _Torrent_fileExtensions(ctx context.Context, field graphql.CollectedField, obj *model.Torrent) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_Torrent_fileExtensions(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.FileExts, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]string)
+	fc.Result = res
+	return ec.marshalNString2ᚕstringᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_Torrent_fileExtensions(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Torrent",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Torrent_files(ctx context.Context, field graphql.CollectedField, obj *model.Torrent) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_Torrent_files(ctx, field)
 	if err != nil {
@@ -11106,6 +11159,8 @@ func (ec *executionContext) fieldContext_TorrentContent_torrent(_ context.Contex
 				return ec.fieldContext_Torrent_fileType(ctx, field)
 			case "fileTypes":
 				return ec.fieldContext_Torrent_fileTypes(ctx, field)
+			case "fileExtensions":
+				return ec.fieldContext_Torrent_fileExtensions(ctx, field)
 			case "files":
 				return ec.fieldContext_Torrent_files(ctx, field)
 			case "sources":
@@ -21541,6 +21596,11 @@ func (ec *executionContext) _Torrent(ctx context.Context, sel ast.SelectionSet, 
 			out.Values[i] = ec._Torrent_fileType(ctx, field, obj)
 		case "fileTypes":
 			out.Values[i] = ec._Torrent_fileTypes(ctx, field, obj)
+		case "fileExtensions":
+			out.Values[i] = ec._Torrent_fileExtensions(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		case "files":
 			out.Values[i] = ec._Torrent_files(ctx, field, obj)
 		case "sources":

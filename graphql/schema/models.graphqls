@@ -11,6 +11,7 @@ type Torrent {
   filesCount: Int
   fileType: FileType
   fileTypes: [FileType!]
+  fileExtensions: [String!]!
   files: [TorrentFile!]
   sources: [TorrentSourceInfo!]!
   seeders: Int

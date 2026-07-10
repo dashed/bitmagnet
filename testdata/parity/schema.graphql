@@ -483,6 +483,7 @@ type SuggestedTag {
 type Torrent {
   createdAt: DateTime!
   extension: String
+  fileExtensions: [String!]!
   fileType: FileType
   fileTypes: [FileType!]
   files: [TorrentFile!]
