@@ -128,7 +128,7 @@ Coverage across the 25 rows:
    hashes the id to 20 bytes), so goldens and the replay harness share stable
    hashes without hard-coding them.
 
-## 4. Query corpus (`corpus.jsonl`, 51 queries)
+## 4. Query corpus (`corpus.jsonl`, 65 queries)
 
 Each line: `{id, kind: caps|search|error, path, desc, dims, expectIds?}`.
 Golden filename derives from id: `caps` → `caps.golden.xml`, else
@@ -141,7 +141,7 @@ ids the query is designed to return.
 > fixture/oracle has a bug (I fix it) or the adapter behaves differently than
 > modeled (needs review). Do not `-update` past an `expectIds` mismatch.
 
-Coverage (51 = 1 caps + 48 search + 2 error):
+Coverage (65 = 1 caps + 48 search + 14 tokenizer + 2 error):
 
 | group | queries |
 |---|---|
@@ -153,7 +153,48 @@ Coverage (51 = 1 caps + 48 search + 2 error):
 | t=tvsearch | all / q / season / season+ep / imdbid / tmdbid / cat=5045 / season-nonnumeric edge |
 | t=music | all / q |
 | t=book | all / q / cat=7020(redundant edge) |
+| tokenizer (`tok-*`) | see §4.1 |
 | errors | missing t= (code 200) / unknown function (code 202) |
+
+### 4.1 Tokenizer coverage (highest parity risk)
+
+Per Lane Q: the app-query→tsquery tokenizer (`internal/database/fts/tsquery.go`
++ `tokenizer.go`, `internal/lexer/`) is the single highest parity-risk piece of
+Phase 1, so the corpus stresses every construct so tokenizer divergence fails the
+golden gate loudly. The `q=` grammar: bare words → implicit `&` (AND); `&`/`|`/`.`
+→ `&`/`|`/`<->` (followed-by); `!` → negation; trailing `*` → prefix `:*`; `"…"`
+→ phrase (`<->`-joined); `(…)` grouping; non-ASCII → unidecode-folded lexemes;
+`simple` dictionary → no stemming/fuzzy.
+
+| id | q (decoded) | construct | expected |
+|---|---|---|---|
+| tok-and-implicit | `nebula rising` | implicit AND | mov-nebula-1080 |
+| tok-and-explicit | `deep&space` | `&` (AND excludes game "Space Racer") | mus-nebula-album |
+| tok-or | `nebula|zzznone` | `|` (empty operand) | 4 nebula rows |
+| tok-followedby-match | `deep.space` | `<->` adjacency present | mus-nebula-album |
+| tok-followedby-nomatch | `space.deep` | `<->` wrong order | ∅ |
+| tok-quoted-phrase | `"deep space"` | quoted phrase | mus-nebula-album |
+| tok-quoted-order | `"space deep"` | quoted, wrong order | ∅ |
+| tok-wildcard-prefix | `neb*` | prefix `neb:*` | 4 nebula rows |
+| tok-wildcard-single | `eclip*` | prefix, single row | book-ebook-eclipse |
+| tok-negation | `nebula !rising` | `& !` negation | 3 nebula rows (excl -1080) |
+| tok-parens-and | `(nebula) rising` | parens grouping | mov-nebula-1080 |
+| tok-unicode-fold | `nébula` | unidecode fold | 4 nebula rows |
+| tok-misspelling | `nebulaa` | no stemming/fuzzy | ∅ |
+| tok-dangling-operator | `nebula&` | trailing op dropped | 4 nebula rows |
+
+**Determinism (binding — Lane Q finding #1):** both Torznab orderings —
+default `published_at DESC` (single column) and `q=` relevance (`ts_rank_cd`) —
+have **no tie-breaker** in the Go builder, so tied rows come back in physical
+(non-deterministic) order and would flake the golden. Every tokenizer query is
+therefore designed to return a **single row, empty, or the nebula family**
+(token counts 1/2/3/4 → strictly distinct `ts_rank_cd`), never an equal-rank
+multi-row set. `q=` whitespace/punctuation-only inputs (which collapse to an
+empty tsquery and return all rows at rank 0 — an all-ties set) are deliberately
+excluded. The same rule governs the §3 fixture seeds: distinct `published_at`
+per row, distinct FTS ranks per matched set. FIND-2's popularity rewrite does
+**not** touch the Torznab path (GraphQL-only), so relevance goldens reflect raw
+`ts_rank_cd`.
 
 Deliberately included **behavioral edges** the Rust side must reproduce: the
 lossy category maps (`4050`≡PC, `7020`≡Books), the no-op `8000`, non-numeric
@@ -223,7 +264,7 @@ compares. Implemented once in Go (`internal/parity/torznab_xml.go`,
 
 ```
 testdata/parity/torznab/fixtures.jsonl        # this stage — fixture dataset (25 rows)
-testdata/parity/torznab/corpus.jsonl          # this stage — query corpus (51)
+testdata/parity/torznab/corpus.jsonl          # this stage — query corpus (65)
 testdata/parity/torznab/caps.golden.xml       # G1 — generated (DB-free)
 testdata/parity/torznab/q-*.golden.xml        # G1 — generated (live-PG)
 internal/torznab/caps_parity_test.go          # G1 — caps golden (DB-free, new file)
