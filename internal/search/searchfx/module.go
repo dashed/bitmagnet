@@ -1,6 +1,6 @@
 // Package searchfx wires the Tantivy search sidecar into the application: it
-// registers the "search" config section, provides the gRPC client and shadow
-// metrics, and decorates the database's search.Search with the SearchRouter so
+// registers the "search" config section, provides the gRPC client, health state,
+// shadow and serving metrics, and decorates search.Search with the SearchRouter so
 // every consumer (GraphQL, Torznab, processor) transparently runs through it.
 //
 // The feature is disabled by default (see Config); when disabled the client is
@@ -25,8 +25,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// docCountInterval is how often the sidecar's index document count is polled for
-// the Prometheus gauge (readiness / replication-lag monitoring).
+// docCountInterval is the safe fallback cadence for sidecar health polling when
+// a route-specific interval is unset.
 const docCountInterval = 30 * time.Second
 
 // New is the fx module for the search feature: the "search" config section, the
@@ -45,10 +45,12 @@ func New() fx.Option {
 			newComposer,
 			pathsearch.NewHealthState,
 			pathsearch.NewMetricsResult,
+			router.NewHealthState,
+			router.NewServeMetricsResult,
 			func(c Config) router.Config { return c.routerConfig() },
 			shadow.New,
 		),
-		fx.Invoke(registerDocCountReporter),
+		fx.Invoke(registerSearchHealthReporter),
 		fx.Invoke(registerPathsearchHealthReporter),
 	)
 }
@@ -128,35 +130,167 @@ func newComposer(
 	})
 }
 
-// registerDocCountReporter starts a background poller (when the feature is
-// enabled) that periodically reads the sidecar's index document count from its
-// HealthCheck and publishes it to the Prometheus gauge. It is lifecycle-managed:
-// started on app start, cancelled and drained on stop. A nil client (feature
-// disabled) is a no-op.
-func registerDocCountReporter(
+// searchHealthChecker is the slice of the Tantivy client the main-search health
+// poller needs. The concrete client satisfies it; tests substitute a fake.
+type searchHealthChecker interface {
+	HealthCheck(ctx context.Context) (*pb.HealthCheckResponse, error)
+}
+
+// searchPollState carries change-only logging state across main-search health
+// polls. A never-succeeded failure is logged loudly because it commonly means
+// SEARCH_ADDRESS is misconfigured while serving silently fails closed.
+type searchPollState struct {
+	everSucceeded bool
+	lastEligible  *bool
+}
+
+// logState invokes log only on the first observation or when eligibility
+// changes, preventing steady-state health polling from spamming logs.
+func (ps *searchPollState) logState(eligible bool, log func()) {
+	if ps.lastEligible != nil && *ps.lastEligible == eligible {
+		return
+	}
+
+	log()
+
+	value := eligible
+	ps.lastEligible = &value
+}
+
+// pollSearchHealth performs one main-search HealthCheck, computes the required
+// serving trust decision, and publishes it to the lock-free HealthState and both
+// metric facades. nowEpoch is injected so freshness behavior is deterministic in
+// tests. Failed polls preserve the last-known doc count, watermark, and success
+// time while immediately closing the serve gate.
+func pollSearchHealth(
+	ctx context.Context,
+	hc searchHealthChecker,
+	state *router.HealthState,
+	shadowMetrics *shadow.Metrics,
+	serveMetrics *router.ServeMetrics,
+	cfg Config,
+	logger *zap.SugaredLogger,
+	ps *searchPollState,
+	nowEpoch int64,
+) {
+	resp, err := hc.HealthCheck(ctx)
+	if err != nil {
+		_, docCount, watermark, lastSuccess := state.Snapshot()
+		state.SetHealthy(false, docCount, watermark, lastSuccess)
+		serveMetrics.SetHealth(false, watermark)
+
+		if logger != nil {
+			ps.logState(false, func() {
+				if !ps.everSucceeded {
+					logger.Errorw(
+						"search: main-search HealthCheck FAILED and has NEVER succeeded — "+
+							"check SEARCH_ADDRESS; Tantivy serving is failing closed to PostgreSQL",
+						"address", cfg.Address, "error", err,
+					)
+				} else {
+					logger.Warnw(
+						"search: main-search HealthCheck failed; Tantivy serving now failing closed to PostgreSQL",
+						"address", cfg.Address, "error", err,
+					)
+				}
+			})
+		}
+
+		return
+	}
+
+	ps.everSucceeded = true
+	docCount := int64(resp.GetDocCount())
+	watermark := resp.GetWatermarkEpoch()
+	serving := resp.GetStatus() == pb.HealthCheckResponse_SERVING_STATUS_SERVING
+	eligible := serving && docCount > 0
+	staleLag := time.Duration(0)
+
+	if eligible {
+		switch {
+		case cfg.MaxStaleness <= 0:
+			eligible = false
+		case watermark <= 0:
+			eligible = false
+		default:
+			staleLag = time.Duration(nowEpoch-watermark) * time.Second
+			if staleLag > cfg.MaxStaleness {
+				eligible = false
+			}
+		}
+	}
+
+	shadowMetrics.SetTantivyDocCount(docCount)
+	state.SetHealthy(eligible, docCount, watermark, nowEpoch)
+	serveMetrics.SetHealth(eligible, watermark)
+
+	if logger != nil {
+		ps.logState(eligible, func() {
+			switch {
+			case eligible:
+				logger.Infow(
+					"search: Tantivy main-search sidecar is serve-eligible",
+					"doc_count", docCount,
+					"watermark_epoch", watermark,
+				)
+			case !serving || docCount == 0:
+				logger.Warnw(
+					"search: Tantivy main-search sidecar is not trusted; serving failing closed to PostgreSQL",
+					"status", resp.GetStatus().String(),
+					"doc_count", docCount,
+				)
+			case cfg.MaxStaleness <= 0:
+				logger.Warnw(
+					"search: SEARCH_MAX_STALENESS must be positive; Tantivy serving failing closed to PostgreSQL",
+					"max_staleness", cfg.MaxStaleness,
+				)
+			case watermark <= 0:
+				logger.Warnw(
+					"search: Tantivy main-search sidecar has no watermark; serving failing closed to PostgreSQL",
+					"watermark_epoch", watermark,
+				)
+			default:
+				logger.Warnw(
+					"search: Tantivy main-search watermark is stale; serving failing closed to PostgreSQL",
+					"lag", staleLag,
+					"max_staleness", cfg.MaxStaleness,
+					"watermark_epoch", watermark,
+				)
+			}
+		})
+	}
+}
+
+// registerSearchHealthReporter starts the lifecycle-managed main-search health
+// poller when the Tantivy feature is enabled. It replaces the former doc-count
+// reporter: successful polls still publish that gauge and now also cache the
+// required healthy-and-fresh serve decision. A nil client is a no-op.
+func registerSearchHealthReporter(
 	lc fx.Lifecycle,
 	client *tantivy.Client,
-	metrics *shadow.Metrics,
+	state *router.HealthState,
+	shadowMetrics *shadow.Metrics,
+	serveMetrics *router.ServeMetrics,
+	cfg Config,
 	logger *zap.SugaredLogger,
 ) {
 	if client == nil {
 		return
 	}
 
+	interval := cfg.SearchHealthInterval
+	if interval <= 0 {
+		interval = docCountInterval
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	ps := &searchPollState{}
 
 	poll := func() {
-		resp, err := client.HealthCheck(ctx)
-		if err != nil {
-			if logger != nil {
-				logger.Debugw("search: tantivy health check failed", "error", err)
-			}
-
-			return
-		}
-
-		metrics.SetTantivyDocCount(int64(resp.GetDocCount()))
+		pollSearchHealth(
+			ctx, client, state, shadowMetrics, serveMetrics, cfg, logger, ps, time.Now().Unix(),
+		)
 	}
 
 	lc.Append(fx.Hook{
@@ -164,7 +298,7 @@ func registerDocCountReporter(
 			go func() {
 				defer close(done)
 
-				ticker := time.NewTicker(docCountInterval)
+				ticker := time.NewTicker(interval)
 				defer ticker.Stop()
 
 				poll()
@@ -202,7 +336,7 @@ func registerDocCountReporter(
 //     than silently serving PG on every query.
 //
 // It is lifecycle-managed (started on app start, drained on stop) and mirrors
-// registerDocCountReporter. A nil client (feature disabled) is a no-op. Because
+// registerSearchHealthReporter. A nil client (feature disabled) is a no-op. Because
 // HealthState defaults fail-closed (Healthy()==false), the route stays on
 // PostgreSQL until the first SUCCESSFUL poll flips it healthy.
 // pathsearchHealthChecker is the slice of *pathsearch.Client the poller depends
@@ -351,7 +485,7 @@ func pollPathsearchHealth(
 //     than silently serving PG on every query.
 //
 // It is lifecycle-managed (started on app start, drained on stop) and mirrors
-// registerDocCountReporter. A nil client (feature disabled) is a no-op. Because
+// registerSearchHealthReporter. A nil client (feature disabled) is a no-op. Because
 // HealthState defaults fail-closed (Healthy()==false), the route stays on
 // PostgreSQL until the first SUCCESSFUL poll flips it healthy.
 func registerPathsearchHealthReporter(
@@ -422,6 +556,8 @@ func Decorator(
 	metrics *shadow.Metrics,
 	logger *zap.SugaredLogger,
 	cfg router.Config,
+	health *router.HealthState,
+	serveMetrics *router.ServeMetrics,
 ) lazy.Lazy[search.Search] {
 	return lazy.New(func() (search.Search, error) {
 		s, err := pg.Get()
@@ -429,7 +565,7 @@ func Decorator(
 			return nil, err
 		}
 
-		return router.New(s, client, metrics, logger, cfg), nil
+		return router.New(s, client, metrics, logger, cfg, health, serveMetrics), nil
 	})
 }
 

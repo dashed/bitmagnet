@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/query"
@@ -16,12 +15,21 @@ import (
 // shadow orchestration can be unit-tested with a stub, independent of the
 // extraction mechanism.
 type requestBuilder interface {
-	// build returns the derived request and whether it is comparable. comparable
-	// is false when the query carried filter options the recorder could not map
+	// build returns the derived request and its routing metadata. canCompare is
+	// false when the query carried filter options the recorder could not map
 	// (see recorder): such a request would match a superset of the PostgreSQL
 	// result (Tantivy-unfiltered vs PG-filtered), so the router skips the shadow
 	// comparison rather than pollute the similarity metrics with that artifact.
-	build(options []query.Option) (req *pb.SearchRequest, canCompare bool)
+	build(options []query.Option) (req *pb.SearchRequest, meta buildResult)
+}
+
+// buildResult carries the request signals shared by the serving and shadow
+// eligibility gates.
+type buildResult struct {
+	// canCompare is false only when an unmapped filter option was dropped.
+	canCompare bool
+	// hasFacets is true when facet or aggregation work was requested.
+	hasFacets bool
 }
 
 // optionRequestBuilder extracts the request by replaying the options against a
@@ -29,16 +37,16 @@ type requestBuilder interface {
 // what it deliberately drops (structured filters).
 type optionRequestBuilder struct{}
 
-func (optionRequestBuilder) build(options []query.Option) (*pb.SearchRequest, bool) {
+func (optionRequestBuilder) build(options []query.Option) (*pb.SearchRequest, buildResult) {
 	rec := newRecorder()
 	for _, opt := range options {
 		applyOption(rec, opt)
 	}
 
-	// A request is comparable only when it is a free-text search and no filter
-	// option had to be skipped. An empty query is a browse/listing request, while
-	// an unmapped filter would make Tantivy match a superset of the PG result.
-	return rec.toSearchRequest(), rec.canCompare()
+	return rec.toSearchRequest(), buildResult{
+		canCompare: !rec.skippedFilter,
+		hasFacets:  rec.hasFacets,
+	}
 }
 
 // applyOption applies a single option to the recorder, swallowing any panic and
@@ -77,9 +85,9 @@ func applyOption(rec *recorder, opt query.Option) {
 // Deliberately NOT captured: structured filters. query.Where compiles its
 // Criteria straight to opaque SQL (a Scope closure); there is no structured
 // representation to map onto pb.SearchFilters without recognising each Criteria
-// type at the call site. That bridge is a Phase-5/6 task; until then shadow
-// comparisons are exact for unfiltered free-text queries and approximate for
-// filtered ones (an expected, documented divergence).
+// type at the call site. Until that bridge exists, filtered queries are rejected
+// before either serving or shadow comparison so the engines are never compared
+// with different predicates.
 type recorder struct {
 	query.OptionBuilder // nil; supplies the unexported interface methods (never called during option application)
 
@@ -90,6 +98,9 @@ type recorder struct {
 	limitSet    bool
 	offset      uint
 	sorts       []*pb.SortBy
+	// hasFacets records aggregation work that Tantivy serving cannot yet
+	// reproduce. Shadow comparison remains eligible because it compares items.
+	hasFacets bool
 	// skippedFilter is set when applyOption recovered a panic, which (for the
 	// current option set) means a filter option was dropped — see applyOption.
 	skippedFilter bool
@@ -116,10 +127,6 @@ func (r *recorder) toSearchRequest() *pb.SearchRequest {
 	req.Sort = r.sorts
 
 	return req
-}
-
-func (r *recorder) canCompare() bool {
-	return strings.TrimSpace(r.queryString) != "" && !r.skippedFilter
 }
 
 // --- DBContext -------------------------------------------------------------
@@ -160,18 +167,31 @@ func (r *recorder) OrderBy(columns ...query.OrderByColumn) query.OptionBuilder {
 // --- No-op options (return r so chaining inside a composite option keeps the
 // state captured by earlier sub-options) ------------------------------------
 
-func (r *recorder) Table(string) query.OptionBuilder                   { return r }
-func (r *recorder) Join(...query.TableJoin) query.OptionBuilder        { return r }
-func (r *recorder) RequireJoin(...string) query.OptionBuilder          { return r }
-func (r *recorder) Select(...clause.Expr) query.OptionBuilder          { return r }
-func (r *recorder) Group(...clause.Column) query.OptionBuilder         { return r }
-func (r *recorder) Facet(...query.Facet) query.OptionBuilder           { return r }
+func (r *recorder) Table(string) query.OptionBuilder            { return r }
+func (r *recorder) Join(...query.TableJoin) query.OptionBuilder { return r }
+func (r *recorder) RequireJoin(...string) query.OptionBuilder   { return r }
+func (r *recorder) Select(...clause.Expr) query.OptionBuilder   { return r }
+func (r *recorder) Group(...clause.Column) query.OptionBuilder  { return r }
+func (r *recorder) Facet(facets ...query.Facet) query.OptionBuilder {
+	if len(facets) > 0 {
+		r.hasFacets = true
+	}
+
+	return r
+}
+
 func (r *recorder) Preload(...field.RelationField) query.OptionBuilder { return r }
 func (r *recorder) Scope(...query.Scope) query.OptionBuilder           { return r }
 func (r *recorder) Callback(...query.Callback) query.OptionBuilder     { return r }
 func (r *recorder) WithTotalCount(bool) query.OptionBuilder            { return r }
 func (r *recorder) WithHasNextPage(bool) query.OptionBuilder           { return r }
-func (r *recorder) WithAggregationBudget(float64) query.OptionBuilder  { return r }
+func (r *recorder) WithAggregationBudget(budget float64) query.OptionBuilder {
+	if budget > 0 {
+		r.hasFacets = true
+	}
+
+	return r
+}
 
 func (r *recorder) Context(func(context.Context) context.Context) query.OptionBuilder {
 	return r
