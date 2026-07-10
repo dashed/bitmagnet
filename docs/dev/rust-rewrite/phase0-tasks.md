@@ -47,8 +47,8 @@ target to Lane B), bitmagnet-common, bins.
 
 | # | Task | Status |
 |---|------|--------|
-| C1 | Deterministic classifier fixture corpus (~200-500 synthetic torrents covering DSL branches + release-name edge cases; NO network — assert the classifier path used is pure) + Go generator test emitting `testdata/parity/classifier/*.golden` (input → full Classification JSON) | open |
-| C2 | Differential harness: fixture format (JSONL), Go driver package (`internal/parity`) + Rust crate skeleton (`bitmagnet-diff`) with driver trait + normalizing differ; prove with ONE ported example pair (blob codec or tokenizer fixtures re-expressed in the harness) | open |
+| C1 | Deterministic classifier fixture corpus (~200-500 synthetic torrents covering DSL branches + release-name edge cases; NO network — assert the classifier path used is pure) + Go generator test emitting `testdata/parity/classifier/*.golden` (input → full Classification JSON) | ✅ done (merged 2026-07-10) |
+| C2 | Differential harness: fixture format (JSONL), Go driver package (`internal/parity`) + Rust crate skeleton (`bitmagnet-diff`) with driver trait + normalizing differ; prove with ONE ported example pair (blob codec or tokenizer fixtures re-expressed in the harness) | ✅ done (merged 2026-07-10) |
 
 ## Contracts (cross-lane, fixed here so no lane waits)
 - **config-env-map.golden format**: sorted unique lines, `ENV_KEY\tdot.path`,
