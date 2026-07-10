@@ -48,7 +48,6 @@ impl Layered {
     ///
     /// A missing path is a no-op. Errors from an existing file are reported by
     /// [`Self::merge_env`] or [`Self::extract`].
-    #[must_use]
     pub fn merge_yaml_file(mut self, path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         if path.exists() {

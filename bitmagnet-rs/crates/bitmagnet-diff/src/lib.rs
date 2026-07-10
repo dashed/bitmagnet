@@ -11,8 +11,8 @@
 //! both the driver's output and `expected`, compares them, and records counts
 //! plus the first configured number of differences.
 
-pub mod fixture;
 pub mod driver;
+pub mod fixture;
 pub mod normalize;
 pub mod runner;
 

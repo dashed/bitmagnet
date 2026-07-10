@@ -40,8 +40,7 @@ pub fn load_jsonl<R: BufRead>(reader: R) -> Result<Vec<Fixture>> {
 /// Load newline-delimited fixtures from a file path.
 pub fn load_file<P: AsRef<Path>>(path: P) -> Result<Vec<Fixture>> {
     let path = path.as_ref();
-    let file = File::open(path)
-        .with_context(|| format!("open fixture file {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open fixture file {}", path.display()))?;
 
     load_jsonl(BufReader::new(file))
         .with_context(|| format!("load fixture file {}", path.display()))
