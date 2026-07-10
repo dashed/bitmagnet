@@ -1,0 +1,15 @@
+[package]
+name = "bitmagnet-torznab"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-search-query = { path = "../bitmagnet-search-query" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
