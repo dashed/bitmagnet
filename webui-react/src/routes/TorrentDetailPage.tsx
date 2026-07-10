@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 
+import { useRegisterCommands } from "../commands/CommandPaletteProvider";
 import { ListSkeleton } from "../components/ListSkeleton";
 import { QueryError } from "../components/QueryError";
 import { TorrentMutationActions } from "../components/TorrentMutationActions";
@@ -551,6 +552,52 @@ export default function TorrentDetailPage() {
       }),
     queryKey: ["torrentDetail", infoHash],
   });
+  const item = detailData?.torrentContent.search.items[0];
+  const commandInfoHash = item?.infoHash;
+  const commandMagnetUri = item?.torrent.magnetUri;
+
+  async function handleCopy(value: string, successMessage: string, failureMessage: string) {
+    try {
+      await writeClipboard(value);
+      notify({ message: successMessage });
+    } catch {
+      notify({ message: failureMessage, tone: "error" });
+    }
+  }
+
+  useRegisterCommands(
+    () => {
+      if (!commandInfoHash || !commandMagnetUri) {
+        return [];
+      }
+
+      return [
+        {
+          group: "actions",
+          id: "detail-copy-magnet",
+          perform: () =>
+            handleCopy(
+              commandMagnetUri,
+              t("toast.magnetCopied"),
+              t("toast.magnetCopyFailed"),
+            ),
+          title: t("palette.copyMagnet"),
+        },
+        {
+          group: "actions",
+          id: "detail-copy-info-hash",
+          perform: () =>
+            handleCopy(
+              commandInfoHash,
+              t("toast.infoHashCopied"),
+              t("toast.infoHashCopyFailed"),
+            ),
+          title: t("palette.copyHash"),
+        },
+      ];
+    },
+    [commandInfoHash, commandMagnetUri, notify, t],
+  );
 
   if (!isValidInfoHash) {
     return <NotFoundState />;
@@ -563,8 +610,6 @@ export default function TorrentDetailPage() {
   if (isDetailError) {
     return <QueryError error={detailError} onRetry={() => void refetchDetail()} />;
   }
-
-  const item = detailData?.torrentContent.search.items[0];
 
   if (!item) {
     return <NotFoundState />;
@@ -580,15 +625,6 @@ export default function TorrentDetailPage() {
     item.content?.voteAverage == null
       ? null
       : `${item.content.voteAverage.toLocaleString(locale)} / 10`;
-
-  async function handleCopy(value: string, successMessage: string, failureMessage: string) {
-    try {
-      await writeClipboard(value);
-      notify({ message: successMessage });
-    } catch {
-      notify({ message: failureMessage, tone: "error" });
-    }
-  }
 
   return (
     <article className={styles["root"]}>

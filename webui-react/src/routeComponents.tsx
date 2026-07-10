@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ListSkeleton } from "./components/ListSkeleton";
 import { QueryError } from "./components/QueryError";
+import { CommandPaletteProvider } from "./commands/CommandPaletteProvider";
 import { AppShell } from "./layout/AppShell";
 
 const DashboardPage = lazy(() => import("./routes/DashboardPage"));
@@ -14,11 +15,15 @@ const HealthPage = lazy(() => import("./routes/HealthPage"));
 
 export function RootRouteComponent() {
   return (
-    <AppShell>
-      <ErrorBoundary fallback={({ error, reset }) => <QueryError error={error} onRetry={reset} />}>
-        <Outlet />
-      </ErrorBoundary>
-    </AppShell>
+    <CommandPaletteProvider>
+      <AppShell>
+        <ErrorBoundary
+          fallback={({ error, reset }) => <QueryError error={error} onRetry={reset} />}
+        >
+          <Outlet />
+        </ErrorBoundary>
+      </AppShell>
+    </CommandPaletteProvider>
   );
 }
 

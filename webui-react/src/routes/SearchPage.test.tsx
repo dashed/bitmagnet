@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,6 +6,7 @@ import "../i18n/i18n";
 import { createAppRouter } from "../appRouter";
 import { execute } from "../graphql/client";
 import { AppProviders } from "../providers/AppProviders";
+import { getSavedSearchesSnapshot } from "../searches/savedSearches";
 import { PATH_TYPEAHEAD_DEBOUNCE_MS } from "./searchModes/PathBrowseView";
 
 vi.mock("../graphql/client", () => ({
@@ -13,6 +14,8 @@ vi.mock("../graphql/client", () => ({
 }));
 
 const executeMock = vi.mocked(execute);
+const RECENT_SEARCHES_STORAGE_KEY = "bitmagnet-recent-searches";
+const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 function getEmptyTorrentSearchResult() {
   return {
@@ -46,9 +49,19 @@ async function renderAt(initialEntry: string) {
   return router;
 }
 
-describe("SearchPage search modes", () => {
+describe("SearchPage", () => {
   beforeEach(() => {
     window.__BITMAGNET_FLAGS__ = undefined;
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
+      }),
+    );
     executeMock.mockReset();
     executeMock.mockImplementation((_document, variables) => {
       const input = "input" in variables ? variables.input : undefined;
@@ -183,5 +196,124 @@ describe("SearchPage search modes", () => {
         query: "sample",
       });
     });
+  });
+
+  it("saves and reapplies the exact canonical URL search params", async () => {
+    const router = await renderAt(
+      "/app/?content_type=movie&desc=0&genre=sci-fi,action&limit=50&max_size=2&max_size_unit=GiB&min_size=700&min_size_unit=MiB&order=published_at&page=3&published_at=7d&query=matrix&video_resolution=V1080p",
+    );
+    const initialParams = { ...router.latestLocation.search };
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save search" }));
+
+    const nameInput = await screen.findByLabelText("Name");
+    expect((nameInput as HTMLInputElement).value).toBe("matrix");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Search saved")).toBeTruthy();
+
+    const searchInput = screen.getByLabelText("Search torrents");
+    fireEvent.change(searchInput, { target: { value: "different" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toMatchObject({ query: "different" });
+    });
+
+    fireEvent.click(screen.getByLabelText("Saved searches"));
+    fireEvent.click(await screen.findByRole("button", { name: "matrix" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual(initialParams);
+      expect(getSavedSearchesSnapshot()[0]?.params).toEqual(router.latestLocation.search);
+    });
+  });
+
+  it("renders active-filter chips and removes only the dismissed facet value", async () => {
+    const router = await renderAt(
+      "/app/?content_type=movie&genre=action&language=en&max_size=2&max_size_unit=GiB&min_size=700&min_size_unit=MiB&published_at=7d&query=matrix",
+    );
+
+    expect(await screen.findByRole("group", { name: "Filters applied" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Movie filter" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove 700 MiB – 2 GiB filter" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Last week filter" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Genre: action filter" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({
+        content_type: "movie",
+        language: "en",
+        max_size: 2,
+        max_size_unit: "GiB",
+        min_size: 700,
+        min_size_unit: "MiB",
+        published_at: "7d",
+        query: "matrix",
+      });
+    });
+  });
+
+  it(
+    "offers filter recovery and a simplified query when constrained results are empty",
+    async () => {
+      const router = await renderAt(
+        "/app/?content_type=movie&query=%22The.Matrix-Reloaded%21%21%21%22",
+      );
+
+      expect(
+        await screen.findByRole("heading", { level: 1, name: "No matching torrents" }),
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Clear filters and retry" })).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Search instead for “The Matrix Reloaded”",
+        }),
+      ).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Clear filters and retry" }));
+
+      await waitFor(() => {
+        expect(router.latestLocation.search).toEqual({ query: "The.Matrix-Reloaded!!!" });
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Search instead for “The Matrix Reloaded”",
+        }),
+      );
+
+      await waitFor(() => {
+        expect(router.latestLocation.search).toEqual({ query: "The Matrix Reloaded" });
+      });
+    },
+  );
+
+  it("records a submitted query and shows it in Recent after reloading", async () => {
+    const router = await renderAt("/app/");
+
+    fireEvent.change(await screen.findByLabelText("Search torrents"), {
+      target: { value: "  Ubuntu  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({ query: "Ubuntu" });
+    });
+
+    cleanup();
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    await renderAt("/app/");
+
+    expect(await screen.findByRole("region", { name: "Recent" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ubuntu" })).toBeTruthy();
   });
 });

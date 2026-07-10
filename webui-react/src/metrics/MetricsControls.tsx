@@ -1,5 +1,5 @@
 import { Button, SegmentedControl, Select, Text } from "@mantine/core";
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatRelativeTime } from "../utils/relativeTime";
@@ -64,6 +64,7 @@ export function MetricsControls({
   timeframes = metricTimeframes,
 }: MetricsControlsProps) {
   const { i18n, t } = useTranslation();
+  const bucketMultiplierId = useId();
   const timeframeOptions = useMemo(
     () =>
       timeframes.map((value) => ({
@@ -134,10 +135,11 @@ export function MetricsControls({
         value={bucketDuration}
       />
       {onBucketMultiplierChange ? (
-        <label className={styles["numberField"]}>
-          <span>{t("metrics.controls.bucketMultiplier")}</span>
+        <div className={styles["numberField"]}>
+          <label htmlFor={bucketMultiplierId}>{t("metrics.controls.bucketMultiplier")}</label>
           <div className={styles["numberInputRow"]}>
             <button
+              aria-label={t("metrics.controls.decreaseBucketMultiplier")}
               disabled={disabled || effectiveBucketMultiplier <= 1}
               onClick={() => onBucketMultiplierChange(Math.max(1, effectiveBucketMultiplier - 1))}
               type="button"
@@ -146,6 +148,7 @@ export function MetricsControls({
             </button>
             <input
               disabled={disabled}
+              id={bucketMultiplierId}
               inputMode="numeric"
               min={1}
               onChange={(event) => {
@@ -160,6 +163,7 @@ export function MetricsControls({
               value={multiplierValue}
             />
             <button
+              aria-label={t("metrics.controls.increaseBucketMultiplier")}
               disabled={disabled}
               onClick={() => onBucketMultiplierChange(effectiveBucketMultiplier + 1)}
               type="button"
@@ -167,7 +171,7 @@ export function MetricsControls({
               +
             </button>
           </div>
-        </label>
+        </div>
       ) : null}
       {scopeFilter ? (
         <Select

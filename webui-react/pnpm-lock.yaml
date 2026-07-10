@@ -78,6 +78,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: 6.0.2
         version: 6.0.2(vite@8.1.0(@types/node@25.9.3)(jiti@2.7.0)(yaml@2.9.0))
+      axe-core:
+        specifier: 4.12.1
+        version: 4.12.1
       eslint:
         specifier: 9.39.3
         version: 9.39.3(jiti@2.7.0)
@@ -1184,6 +1187,10 @@ packages:
   auto-bind@4.0.0:
     resolution: {integrity: sha512-Hdw8qdNiqdJ8LqT0iK0sVzkFbzg6fhnQqqfWhBDxcHZvU75+B+ayzTy8x+k5Ix0Y92XOhOUlx74ps+bA6BeYMQ==}
     engines: {node: '>=8'}
+
+  axe-core@4.12.1:
+    resolution: {integrity: sha512-s7iGf5GaVMxEG0ENN9x+xTr7GFZCb1ZP/1uATUpCEK2X78nDB3RwbtFCo9pGAf9ru+VwoQ464DkaLEeRM08wJA==}
+    engines: {node: '>=4'}
 
   balanced-match@1.0.2:
     resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
@@ -4055,6 +4062,8 @@ snapshots:
   assertion-error@2.0.1: {}
 
   auto-bind@4.0.0: {}
+
+  axe-core@4.12.1: {}
 
   balanced-match@1.0.2: {}
 

@@ -14,7 +14,7 @@
   gap: 5px;
 }
 
-.numberField > span {
+.numberField > label {
   color: var(--mantine-color-text);
   font-size: var(--mantine-font-size-sm);
   font-weight: 500;
