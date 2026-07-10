@@ -2,6 +2,7 @@ export type CommandGroupId =
   | "actions"
   | "language"
   | "navigation"
+  | "recent"
   | "saved"
   | "search"
   | "theme";

@@ -6,6 +6,7 @@ import "../i18n/i18n";
 import { createAppRouter } from "../appRouter";
 import { execute } from "../graphql/client";
 import { AppProviders } from "../providers/AppProviders";
+import { recordRecentSearch } from "../searches/recentSearches";
 import { addSavedSearch } from "../searches/savedSearches";
 
 vi.mock("../graphql/client", () => ({
@@ -13,6 +14,7 @@ vi.mock("../graphql/client", () => ({
 }));
 
 const executeMock = vi.mocked(execute);
+const RECENT_SEARCHES_STORAGE_KEY = "bitmagnet-recent-searches";
 const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 async function renderAt(initialEntry: string) {
@@ -42,6 +44,11 @@ describe("CommandPalette", () => {
     window.dispatchEvent(
       new StorageEvent("storage", {
         key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
       }),
     );
     executeMock.mockReset();
@@ -168,5 +175,35 @@ describe("CommandPalette", () => {
       expect(router.latestLocation.pathname).toBe("/");
       expect(router.latestLocation.search).toEqual(savedParams);
     });
+  });
+
+  it("shows recent searches only while the palette query is empty", async () => {
+    recordRecentSearch("Ubuntu");
+
+    const router = await renderAt("/app/");
+    await openPalette();
+
+    const listbox = screen.getByRole("listbox");
+    const recentTitle = within(listbox).getByText("Ubuntu");
+    const recentOption = recentTitle.closest('[role="option"]');
+
+    expect(recentOption).toBeTruthy();
+    expect(within(listbox).getByText("Recent search")).toBeTruthy();
+
+    fireEvent.click(recentOption!);
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({ query: "Ubuntu" });
+    });
+
+    const input = await openPalette();
+    fireEvent.change(input, { target: { value: "ubu" } });
+
+    await waitFor(() => {
+      expect(within(screen.getByRole("listbox")).queryByText("Recent search")).toBeNull();
+    });
+    expect(
+      screen.getByRole("option", { name: "Search torrents for “ubu”" }),
+    ).toBeTruthy();
   });
 });

@@ -3,11 +3,12 @@ import { type Command, type CommandGroupId } from "./types";
 
 const GROUP_ORDER: Record<CommandGroupId, number> = {
   actions: 2,
-  language: 5,
+  language: 6,
   navigation: 0,
+  recent: 4,
   saved: 3,
   search: 1,
-  theme: 4,
+  theme: 5,
 };
 
 export function filterCommands(commands: Command[], query: string): Command[] {

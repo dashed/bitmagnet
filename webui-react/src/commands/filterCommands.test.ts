@@ -20,6 +20,7 @@ describe("filterCommands", () => {
       createCommand("navigation", "navigation-first"),
       createCommand("theme", "theme"),
       createCommand("navigation", "navigation-second"),
+      createCommand("recent", "recent"),
       createCommand("saved", "saved"),
       createCommand("search", "search"),
     ];
@@ -30,6 +31,7 @@ describe("filterCommands", () => {
       "search",
       "action",
       "saved",
+      "recent",
       "theme",
       "language",
     ]);

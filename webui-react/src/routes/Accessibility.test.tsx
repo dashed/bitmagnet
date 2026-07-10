@@ -33,6 +33,7 @@ vi.mock("../graphql/client", () => ({
 
 const executeMock = vi.mocked(execute);
 const INFO_HASH = "0123456789abcdef0123456789abcdef01234567";
+const RECENT_SEARCHES_STORAGE_KEY = "bitmagnet-recent-searches";
 const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 const dashboardHealthResponse = {
@@ -211,6 +212,29 @@ const searchResponse = {
   },
 } satisfies TorrentContentSearchQuery;
 
+const emptySearchResponse = {
+  torrentContent: {
+    search: {
+      aggregations: {
+        contentType: [],
+        genre: [],
+        language: [],
+        torrentFileType: [],
+        torrentSource: [],
+        torrentTag: [],
+        videoResolution: [],
+        videoSource: [],
+      },
+      hasNextPage: false,
+      items: [],
+      totalCount: 0,
+      totalCountIsEstimate: false,
+    },
+  },
+} satisfies TorrentContentSearchQuery;
+
+let torrentSearchResponse: TorrentContentSearchQuery = searchResponse;
+
 const torrentDetailResponse = {
   torrentContent: {
     search: {
@@ -359,9 +383,15 @@ async function expectNoSeriousOrCriticalViolations() {
 describe("page accessibility", () => {
   beforeEach(() => {
     window.__BITMAGNET_FLAGS__ = undefined;
+    torrentSearchResponse = searchResponse;
     window.dispatchEvent(
       new StorageEvent("storage", {
         key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
       }),
     );
     executeMock.mockReset();
@@ -379,7 +409,7 @@ describe("page accessibility", () => {
       }
 
       if (document === TorrentContentSearchDocument) {
-        return Promise.resolve(searchResponse);
+        return Promise.resolve(torrentSearchResponse);
       }
 
       if (document === TorrentDetailDocument) {
@@ -444,6 +474,46 @@ describe("page accessibility", () => {
 
       expect(await screen.findByRole("checkbox", { name: /^Science fiction/ })).toBeTruthy();
       expect(screen.getByRole("checkbox", { name: /^English/ })).toBeTruthy();
+
+      await expectNoSeriousOrCriticalViolations();
+    },
+    15_000,
+  );
+
+  it(
+    "has no serious or critical violations with active-filter chips visible",
+    async () => {
+      await renderAt(
+        "/app/?content_type=movie&genre=science-fiction&published_at=7d&query=accessibility",
+      );
+
+      expect(await screen.findByRole("group", { name: "Filters applied" })).toBeTruthy();
+      expect(
+        screen.getByRole("button", { name: "Remove Genre: science-fiction filter" }),
+      ).toBeTruthy();
+
+      await expectNoSeriousOrCriticalViolations();
+    },
+    15_000,
+  );
+
+  it(
+    "has no serious or critical violations in the helpful zero-result state",
+    async () => {
+      torrentSearchResponse = emptySearchResponse;
+      await renderAt(
+        "/app/?content_type=movie&query=%22Missing.Torrent-2026%21%21%21%22",
+      );
+
+      expect(
+        await screen.findByRole("heading", { level: 1, name: "No matching torrents" }),
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Clear filters and retry" })).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Search instead for “Missing Torrent 2026”",
+        }),
+      ).toBeTruthy();
 
       await expectNoSeriousOrCriticalViolations();
     },

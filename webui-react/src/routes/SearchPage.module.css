@@ -7,10 +7,72 @@
   width: 100%;
 }
 
+.searchArea,
 .searchForm {
   display: grid;
   gap: 10px;
   width: min(100%, 720px);
+}
+
+.searchArea {
+  gap: 8px;
+  min-width: 0;
+}
+
+.searchForm {
+  width: 100%;
+}
+
+.recentSearches {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  width: min(100%, 720px);
+}
+
+.recentSearchesHeader {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.recentSearchesHeader h2 {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.recentClear {
+  background: transparent;
+  border: 0;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-primary-color-filled);
+  cursor: pointer;
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 700;
+  min-height: 32px;
+  padding: 0 8px;
+}
+
+.recentClear:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.recentChip {
+  border-radius: 999px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.recentChip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modeSwitch {
@@ -305,6 +367,35 @@
   justify-content: flex-end;
 }
 
+.facetSearch {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.facetSearch span {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.facetSearch input {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.facetSearch input:focus-visible {
+  border-color: var(--mantine-primary-color-filled);
+  outline: 1px solid var(--mantine-primary-color-filled);
+}
+
 .facetOptionList {
   display: grid;
   gap: 2px;
@@ -394,10 +485,97 @@
   margin: 0;
 }
 
+.emptyFilterSummary {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.emptyFilterSummary strong {
+  color: var(--mantine-color-text);
+}
+
+.emptyActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 4px;
+  max-width: 100%;
+}
+
+.emptyActions > * {
+  max-width: 100%;
+  white-space: normal;
+}
+
 .resultsShell {
   display: grid;
   gap: 16px;
   width: min(100%, 860px);
+}
+
+.activeFilterRow {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.activeFilterChip,
+.activeFilterClear {
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  min-height: 38px;
+}
+
+.activeFilterChip {
+  align-items: center;
+  background: var(--mantine-primary-color-light);
+  border: 1px solid
+    color-mix(in srgb, var(--mantine-primary-color-filled), transparent 48%);
+  color: var(--mantine-primary-color-light-color);
+  display: inline-flex;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 8px 4px 12px;
+  text-align: start;
+}
+
+.activeFilterChip:hover {
+  border-color: var(--mantine-primary-color-filled);
+}
+
+.activeFilterChip > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activeFilterRemoveIcon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 18px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 20px;
+}
+
+.activeFilterClear {
+  background: var(--mantine-color-body);
+  border: 1px dashed var(--mantine-color-default-border);
+  color: var(--mantine-color-text);
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.activeFilterClear:hover {
+  background: var(--mantine-color-default-hover);
+  border-style: solid;
 }
 
 .resultsToolbar {
@@ -538,6 +716,13 @@
 
 .resultTitleLink:hover {
   text-decoration-color: currentColor;
+}
+
+.mark {
+  background: var(--mantine-color-yellow-light);
+  border-radius: 2px;
+  color: var(--mantine-color-yellow-light-color);
+  padding: 0 2px;
 }
 
 .resultMain p {
@@ -1298,5 +1483,91 @@
 
   .pagination span {
     min-width: 0;
+  }
+}
+
+@media (min-width: 62em) {
+  .copyButton {
+    opacity: 0.48;
+    transition: opacity 160ms ease;
+  }
+
+  .resultItem:hover .copyButton,
+  .resultItem:focus-within .copyButton,
+  .copyButton:focus-visible {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 61.999em) {
+  .activeFilterRow,
+  .recentSearches,
+  .searchArea {
+    max-width: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .activeFilterChip,
+  .activeFilterClear,
+  .chip,
+  .copyButton,
+  .facetGroup summary,
+  .facetSearch input,
+  .hashButton,
+  .magnetLink,
+  .modeSwitch button,
+  .pageSizeSelect select,
+  .publishedRange input,
+  .publishedSelect select,
+  .recentClear,
+  .saveDialogField input,
+  .savedSearchAction,
+  .savedSearchApply,
+  .savedSearchMenu > summary,
+  .savedSearchRenameInput,
+  .secondaryButton,
+  .selectAllControl,
+  .sizeForm input,
+  .sizeForm select,
+  .sortBar select,
+  .submitSmall {
+    min-height: 44px;
+  }
+
+  .activeFilterChip {
+    max-width: 100%;
+  }
+
+  .emptyActions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .emptyActions > * {
+    width: 100%;
+  }
+
+  .facetOption {
+    min-height: 44px;
+  }
+
+  .facetOption input,
+  .resultSelect input,
+  .selectAllControl input {
+    height: 20px;
+    width: 20px;
+  }
+
+  .resultSelect {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (min-width: 48em) and (max-width: 61.999em) {
+  .resultItem {
+    grid-template-columns: 44px minmax(0, 1fr) auto;
   }
 }

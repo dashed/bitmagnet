@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +14,7 @@ vi.mock("../graphql/client", () => ({
 }));
 
 const executeMock = vi.mocked(execute);
+const RECENT_SEARCHES_STORAGE_KEY = "bitmagnet-recent-searches";
 const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
 
 function getEmptyTorrentSearchResult() {
@@ -48,12 +49,17 @@ async function renderAt(initialEntry: string) {
   return router;
 }
 
-describe("SearchPage search modes", () => {
+describe("SearchPage", () => {
   beforeEach(() => {
     window.__BITMAGNET_FLAGS__ = undefined;
     window.dispatchEvent(
       new StorageEvent("storage", {
         key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
       }),
     );
     executeMock.mockReset();
@@ -222,5 +228,92 @@ describe("SearchPage search modes", () => {
       expect(router.latestLocation.search).toEqual(initialParams);
       expect(getSavedSearchesSnapshot()[0]?.params).toEqual(router.latestLocation.search);
     });
+  });
+
+  it("renders active-filter chips and removes only the dismissed facet value", async () => {
+    const router = await renderAt(
+      "/app/?content_type=movie&genre=action&language=en&max_size=2&max_size_unit=GiB&min_size=700&min_size_unit=MiB&published_at=7d&query=matrix",
+    );
+
+    expect(await screen.findByRole("group", { name: "Filters applied" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Movie filter" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Remove 700 MiB – 2 GiB filter" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Last week filter" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove Genre: action filter" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({
+        content_type: "movie",
+        language: "en",
+        max_size: 2,
+        max_size_unit: "GiB",
+        min_size: 700,
+        min_size_unit: "MiB",
+        published_at: "7d",
+        query: "matrix",
+      });
+    });
+  });
+
+  it(
+    "offers filter recovery and a simplified query when constrained results are empty",
+    async () => {
+      const router = await renderAt(
+        "/app/?content_type=movie&query=%22The.Matrix-Reloaded%21%21%21%22",
+      );
+
+      expect(
+        await screen.findByRole("heading", { level: 1, name: "No matching torrents" }),
+      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Clear filters and retry" })).toBeTruthy();
+      expect(
+        screen.getByRole("button", {
+          name: "Search instead for “The Matrix Reloaded”",
+        }),
+      ).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Clear filters and retry" }));
+
+      await waitFor(() => {
+        expect(router.latestLocation.search).toEqual({ query: "The.Matrix-Reloaded!!!" });
+      });
+
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Search instead for “The Matrix Reloaded”",
+        }),
+      );
+
+      await waitFor(() => {
+        expect(router.latestLocation.search).toEqual({ query: "The Matrix Reloaded" });
+      });
+    },
+  );
+
+  it("records a submitted query and shows it in Recent after reloading", async () => {
+    const router = await renderAt("/app/");
+
+    fireEvent.change(await screen.findByLabelText("Search torrents"), {
+      target: { value: "  Ubuntu  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({ query: "Ubuntu" });
+    });
+
+    cleanup();
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    await renderAt("/app/");
+
+    expect(await screen.findByRole("region", { name: "Recent" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Ubuntu" })).toBeTruthy();
   });
 });

@@ -1,26 +1,37 @@
-import type { ChangeEvent, FormEvent, InputHTMLAttributes, ReactNode } from "react";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { type TFunction } from "i18next";
+import {
+  type ChangeEvent,
+  type FormEvent,
+  type InputHTMLAttributes,
+  lazy,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { ListSkeleton } from "../components/ListSkeleton";
 import { QueryError } from "../components/QueryError";
-import type { TorrentActionItem } from "../components/TorrentMutationActions";
+import { type TorrentActionItem } from "../components/TorrentMutationActions";
 import { useToast } from "../components/toast";
 import { isSearchModesEnabled } from "../flags";
 import { execute } from "../graphql/client";
-import { TorrentContentSearchDocument } from "../graphql/generated/graphql";
-import type {
-  ContentTypeAgg,
-  GenreAgg,
-  LanguageAgg,
-  TorrentContentSearchQuery,
-  TorrentFileTypeAgg,
-  TorrentSourceAgg,
-  TorrentTagAgg,
-  VideoResolutionAgg,
-  VideoSourceAgg,
+import {
+  type ContentTypeAgg,
+  type GenreAgg,
+  type LanguageAgg,
+  TorrentContentSearchDocument,
+  type TorrentContentSearchQuery,
+  type TorrentFileTypeAgg,
+  type TorrentSourceAgg,
+  type TorrentTagAgg,
+  type VideoResolutionAgg,
+  type VideoSourceAgg,
 } from "../graphql/generated/graphql";
 import {
   addSavedSearch,
@@ -29,8 +40,14 @@ import {
   type SavedSearch,
   useSavedSearches,
 } from "../searches/savedSearches";
+import {
+  clearRecentSearches,
+  recordRecentSearch,
+  useRecentSearches,
+} from "../searches/recentSearches";
 import { useDialogFocus } from "../utils/dialogFocus";
 import { formatFileSize } from "../utils/filesize";
+import { highlightMatches } from "../utils/highlightMatches";
 import { formatIntEstimate } from "../utils/intEstimate";
 import { formatRelativeTime } from "../utils/relativeTime";
 import {
@@ -41,6 +58,7 @@ import {
   SEARCH_MODES,
   SIZE_UNITS,
   TORRENT_SEARCH_FACET_KEYS,
+  type ContentTypeSelection,
   formatPublishedRangeValue,
   getDefaultDescending,
   getPublishedRangeInputValues,
@@ -50,18 +68,16 @@ import {
   isTorrentSearchFacetRelevant,
   parseTorrentSearchParams,
   sanitizeFacetSelections,
+  type SearchMode,
+  type SizeUnit,
+  sizeToBytes,
   stringifyTorrentSearchParams,
+  type TorrentSearchFacetKey,
+  type TorrentSearchFacetSelections,
+  type TorrentSearchState,
   type TorrentSearchUrlParams,
   updateQuery,
   updateSearchMode,
-} from "./searchParams";
-import type {
-  ContentTypeSelection,
-  SearchMode,
-  SizeUnit,
-  TorrentSearchFacetKey,
-  TorrentSearchFacetSelections,
-  TorrentSearchState,
 } from "./searchParams";
 import {
   clearSelectionOnSearchParamsChange,
@@ -69,6 +85,7 @@ import {
   toggleInfoHashSelection,
   togglePageSelection,
 } from "./searchSelection";
+import { simplifyQuery } from "./simplifyQuery";
 import styles from "./SearchPage.module.css";
 
 const LazyTorrentBulkActionsBar = lazy(async () => {
@@ -78,7 +95,18 @@ const LazyTorrentBulkActionsBar = lazy(async () => {
 });
 const LazyFileSearchView = lazy(() => import("./searchModes/FileSearchView"));
 const LazyPathBrowseView = lazy(() => import("./searchModes/PathBrowseView"));
+const BINARY_FILE_SIZE_UNIT_PATTERN = / ([KMGTPE])B$/;
+const EMPTY_FACET_FILTERS: Record<TorrentSearchFacetKey, string> = {
+  file_type: "",
+  genre: "",
+  language: "",
+  torrent_source: "",
+  torrent_tag: "",
+  video_resolution: "",
+  video_source: "",
+};
 const PUBLISHED_CUSTOM_RANGE_VALUE = "__custom_range";
+const TRAILING_ZERO_FILE_SIZE_PATTERN = /\.0 (?=[KMGTPE]B$)/;
 
 type SearchResult = TorrentContentSearchQuery["torrentContent"]["search"];
 type SearchItem = SearchResult["items"][number];
@@ -98,6 +126,19 @@ type SearchSelectionState = {
   infoHashes: Set<string>;
   searchParamsKey: string;
 };
+type ActiveFilter =
+  | {
+      facetKey: TorrentSearchFacetKey;
+      id: string;
+      kind: "facet";
+      label: string;
+      value: string;
+    }
+  | {
+      id: string;
+      kind: "contentType" | "published" | "size";
+      label: string;
+    };
 type ContentTypeOption = {
   count: number;
   isEstimate: boolean;
@@ -277,6 +318,88 @@ function getFacetValueLabel(key: TorrentSearchFacetKey, value: string, t: (key: 
   }
 
   return value;
+}
+
+function formatFilterFileSize(bytes: number) {
+  return formatFileSize(bytes)
+    .replace(TRAILING_ZERO_FILE_SIZE_PATTERN, " ")
+    .replace(BINARY_FILE_SIZE_UNIT_PATTERN, " $1iB");
+}
+
+function getSizeFilterLabel(search: TorrentSearchState, t: TFunction) {
+  const maxBytes = sizeToBytes(search.maxSize, search.maxSizeUnit);
+  const minBytes = sizeToBytes(search.minSize, search.minSizeUnit);
+  const maxSize = maxBytes ? formatFilterFileSize(maxBytes) : undefined;
+  const minSize = minBytes ? formatFilterFileSize(minBytes) : undefined;
+
+  if (maxSize && minSize) {
+    return t("search.sizeRange", { max: maxSize, min: minSize });
+  }
+
+  if (minSize) {
+    return t("search.sizeAtLeast", { size: minSize });
+  }
+
+  if (maxSize) {
+    return t("search.sizeAtMost", { size: maxSize });
+  }
+
+  return "";
+}
+
+function getActiveFilters(
+  search: TorrentSearchState,
+  selectedFacetKeys: readonly TorrentSearchFacetKey[],
+  selections: TorrentSearchFacetSelections,
+  t: TFunction,
+): ActiveFilter[] {
+  const filters: ActiveFilter[] = [];
+
+  if (search.contentType) {
+    filters.push({
+      id: `content-type:${search.contentType}`,
+      kind: "contentType",
+      label: getContentTypeLabel(search.contentType, t),
+    });
+  }
+
+  const sizeLabel = getSizeFilterLabel(search, t);
+
+  if (sizeLabel) {
+    filters.push({
+      id: "size",
+      kind: "size",
+      label: sizeLabel,
+    });
+  }
+
+  if (search.publishedAt) {
+    const preset = isPublishedPreset(search.publishedAt)
+      ? PUBLISHED_PRESETS.find((item) => item.value === search.publishedAt)
+      : undefined;
+
+    filters.push({
+      id: `published:${search.publishedAt}`,
+      kind: "published",
+      label: preset ? t(preset.labelKey) : search.publishedAt,
+    });
+  }
+
+  for (const key of selectedFacetKeys) {
+    const facetLabel = t(`facets.${key}`);
+
+    for (const value of selections[key] ?? []) {
+      filters.push({
+        facetKey: key,
+        id: `facet:${key}:${value}`,
+        kind: "facet",
+        label: `${facetLabel}: ${getFacetValueLabel(key, value, t)}`,
+        value,
+      });
+    }
+  }
+
+  return filters;
 }
 
 function getFacetAggLabel(
@@ -589,6 +712,7 @@ function SavedSearchControls({ params, suggestedName }: SavedSearchControlsProps
 export function SearchPage() {
   const routeSearch = useSearch({ from: "/" });
   const search = useMemo(() => parseTorrentSearchParams(routeSearch), [routeSearch]);
+  const recentSearches = useRecentSearches();
   const searchModesEnabled = isSearchModesEnabled();
   const effectiveMode: SearchMode = searchModesEnabled ? search.mode : "torrents";
   const searchParams = useMemo(() => stringifyTorrentSearchParams(search), [search]);
@@ -603,6 +727,9 @@ export function SearchPage() {
   );
   const [expandedFacets, setExpandedFacets] = useState<Set<TorrentSearchFacetKey>>(
     () => new Set(selectedFacetKeys),
+  );
+  const [facetFilters, setFacetFilters] = useState<Record<TorrentSearchFacetKey, string>>(
+    () => ({ ...EMPTY_FACET_FILTERS }),
   );
   const activeFacetKeys = useMemo(
     () =>
@@ -705,6 +832,20 @@ export function SearchPage() {
 
       return areFacetKeySetsEqual(currentFacets, nextFacets) ? currentFacets : nextFacets;
     });
+
+    setFacetFilters((currentFilters) => {
+      let changed = false;
+      const nextFilters = { ...currentFilters };
+
+      for (const key of TORRENT_SEARCH_FACET_KEYS) {
+        if (!isTorrentSearchFacetRelevant(key, search.contentType) && nextFilters[key]) {
+          nextFilters[key] = "";
+          changed = true;
+        }
+      }
+
+      return changed ? nextFilters : currentFilters;
+    });
   }, [search.contentType, selectedFacetKeys]);
 
   function navigateSearch(nextSearch: TorrentSearchState, replace = true) {
@@ -731,7 +872,17 @@ export function SearchPage() {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    navigateSearch(updateQuery(search, draftQuery));
+    const trimmedQuery = draftQuery.trim();
+
+    if (trimmedQuery) {
+      recordRecentSearch(trimmedQuery);
+    }
+
+    navigateSearch(updateQuery(search, trimmedQuery));
+  }
+
+  function handleRecentSearch(query: string) {
+    navigateSearch(updateQuery(search, query));
   }
 
   function handleRefresh() {
@@ -820,8 +971,8 @@ export function SearchPage() {
     });
   }
 
-  function handlePublishedChange(event: ChangeEvent<HTMLSelectElement>) {
-    const value = event.target.value;
+  function handlePublishedChange(eventOrValue: ChangeEvent<HTMLSelectElement> | string) {
+    const value = typeof eventOrValue === "string" ? eventOrValue : eventOrValue.target.value;
 
     if (value === PUBLISHED_CUSTOM_RANGE_VALUE) {
       setPublishedRangeOpen(true);
@@ -869,6 +1020,17 @@ export function SearchPage() {
   }
 
   function handleFacetExpandedChange(key: TorrentSearchFacetKey, expanded: boolean) {
+    if (!expanded) {
+      setFacetFilters((currentFilters) =>
+        currentFilters[key]
+          ? {
+              ...currentFilters,
+              [key]: "",
+            }
+          : currentFilters,
+      );
+    }
+
     setExpandedFacets((currentFacets) => {
       const nextFacets = new Set(currentFacets);
 
@@ -903,6 +1065,7 @@ export function SearchPage() {
 
   function handleResetFilters() {
     setExpandedFacets(new Set());
+    setFacetFilters({ ...EMPTY_FACET_FILTERS });
     setSizeDraft({
       max: "",
       maxUnit: DEFAULT_SIZE_UNIT,
@@ -922,6 +1085,23 @@ export function SearchPage() {
       page: 1,
       publishedAt: undefined,
     });
+  }
+
+  function handleActiveFilterRemove(filter: ActiveFilter) {
+    switch (filter.kind) {
+      case "contentType":
+        handleContentTypeChange(undefined);
+        return;
+      case "facet":
+        handleFacetValueChange(filter.facetKey, filter.value, false);
+        return;
+      case "published":
+        handlePublishedChange("");
+        return;
+      case "size":
+        handleSizeClear();
+        return;
+    }
   }
 
   function handleCloseFilters() {
@@ -1079,16 +1259,15 @@ export function SearchPage() {
       : Boolean(result?.totalCountIsEstimate);
   const contentTypeOptions = getContentTypeOptions(contentTypeAggregations, search.contentType, t);
   const hasSizeFilter = Boolean(search.minSize || search.maxSize);
-  const hasDynamicFacetFilters = selectedFacetKeys.length > 0;
-  const hasActiveFilters = Boolean(
-    search.contentType || hasSizeFilter || search.publishedAt || hasDynamicFacetFilters,
-  );
-  const activeFilterCount =
-    (hasSizeFilter ? 1 : 0) + (search.publishedAt ? 1 : 0) + selectedFacetKeys.length;
+  const activeFilters = getActiveFilters(search, selectedFacetKeys, sanitizedFacetSelections, t);
+  const activeFilterCount = activeFilters.length;
+  const hasActiveFilters = activeFilterCount > 0;
   const publishedRangeInvalid = isPublishedRangeDraftInvalid(publishedRangeDraft);
   const publishedSelectValue = publishedRangeOpen
     ? PUBLISHED_CUSTOM_RANGE_VALUE
     : (search.publishedAt ?? "");
+  const simplifiedQuery = simplifyQuery(search.query);
+  const showHelpfulEmptyState = Boolean(search.query || hasActiveFilters);
   const orderOptions: ReactNode[] = [];
 
   for (const option of ORDER_OPTIONS) {
@@ -1133,25 +1312,55 @@ export function SearchPage() {
       ) : null}
       {effectiveMode === "torrents" ? (
         <>
-          <form className={styles["searchForm"]} onSubmit={handleSubmit} role="search">
-            <label className={styles["label"]} htmlFor="torrent-search">
-              {t("search.inputLabel")}
-            </label>
-            <div className={styles["searchControl"]}>
-              <input
-                autoComplete="off"
-                className={styles["input"]}
-                id="torrent-search"
-                onChange={handleQueryChange}
-                placeholder={t("search.placeholder")}
-                type="search"
-                value={draftQuery}
-              />
-              <button className={styles["submit"]} type="submit">
-                {t("search.submit")}
-              </button>
-            </div>
-          </form>
+          <div className={styles["searchArea"]}>
+            <form className={styles["searchForm"]} onSubmit={handleSubmit} role="search">
+              <label className={styles["label"]} htmlFor="torrent-search">
+                {t("search.inputLabel")}
+              </label>
+              <div className={styles["searchControl"]}>
+                <input
+                  autoComplete="off"
+                  className={styles["input"]}
+                  id="torrent-search"
+                  onChange={handleQueryChange}
+                  placeholder={t("search.placeholder")}
+                  type="search"
+                  value={draftQuery}
+                />
+                <button className={styles["submit"]} type="submit">
+                  {t("search.submit")}
+                </button>
+              </div>
+            </form>
+
+            {isBrowse && recentSearches.length > 0 ? (
+              <section aria-label={t("search.recentTitle")} className={styles["recentSearches"]}>
+                <div className={styles["recentSearchesHeader"]}>
+                  <h2>{t("search.recentTitle")}</h2>
+                  <button
+                    aria-label={t("search.recentClear")}
+                    className={styles["recentClear"]}
+                    onClick={clearRecentSearches}
+                    type="button"
+                  >
+                    {t("search.clear")}
+                  </button>
+                </div>
+                <div className={styles["chipRow"]}>
+                  {recentSearches.map((recent) => (
+                    <button
+                      className={`${styles["chip"]} ${styles["recentChip"]}`}
+                      key={recent}
+                      onClick={() => handleRecentSearch(recent)}
+                      type="button"
+                    >
+                      <span>{recent}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
 
           <div className={styles["primaryControls"]}>
             <section className={styles["filterBlock"]}>
@@ -1389,6 +1598,12 @@ export function SearchPage() {
                     selectedValues,
                     t,
                   );
+                  const facetFilter = facetFilters[key].trim().toLocaleLowerCase();
+                  const filteredOptions = facetFilter
+                    ? options.filter((option) =>
+                        option.label.toLocaleLowerCase().includes(facetFilter),
+                      )
+                    : options;
                   const isExpanded = expandedFacets.has(key);
                   const hasSelections = selectedValues.length > 0;
 
@@ -1418,9 +1633,26 @@ export function SearchPage() {
                             </button>
                           </div>
                         ) : null}
-                        {options.length ? (
+                        {options.length > 15 ? (
+                          <label className={styles["facetSearch"]}>
+                            <span>{t("facets.searchLabel", { facet: t(`facets.${key}`) })}</span>
+                            <input
+                              autoComplete="off"
+                              onChange={(event) =>
+                                setFacetFilters((currentFilters) => ({
+                                  ...currentFilters,
+                                  [key]: event.target.value,
+                                }))
+                              }
+                              placeholder={t("facets.searchPlaceholder")}
+                              type="search"
+                              value={facetFilters[key]}
+                            />
+                          </label>
+                        ) : null}
+                        {filteredOptions.length ? (
                           <ul className={styles["facetOptionList"]}>
-                            {options.map((option) => (
+                            {filteredOptions.map((option) => (
                               <li key={option.value}>
                                 <label className={styles["facetOption"]}>
                                   <input
@@ -1467,6 +1699,35 @@ export function SearchPage() {
 
           {isSearchSuccess ? (
             <div className={styles["resultsShell"]}>
+              {hasActiveFilters ? (
+                <div
+                  aria-label={t("search.filtersApplied")}
+                  className={styles["activeFilterRow"]}
+                  role="group"
+                >
+                  {activeFilters.map((filter) => (
+                    <button
+                      aria-label={t("search.removeFilter", { filter: filter.label })}
+                      className={styles["activeFilterChip"]}
+                      key={filter.id}
+                      onClick={() => handleActiveFilterRemove(filter)}
+                      type="button"
+                    >
+                      <span>{filter.label}</span>
+                      <span aria-hidden="true" className={styles["activeFilterRemoveIcon"]}>
+                        ×
+                      </span>
+                    </button>
+                  ))}
+                  <button
+                    className={styles["activeFilterClear"]}
+                    onClick={handleResetFilters}
+                    type="button"
+                  >
+                    {t("search.clearAllFilters")}
+                  </button>
+                </div>
+              ) : null}
               <div className={styles["resultsToolbar"]}>
                 <div>
                   <p className={styles["resultsEyebrow"]}>
@@ -1532,6 +1793,7 @@ export function SearchPage() {
                 <ul className={styles["resultsList"]}>
                   {result.items.map((item: SearchItem) => {
                     const title = getResultTitle(item);
+                    const titleSegments = highlightMatches(title, search.query);
                     const torrentName = item.torrent.name.trim();
                     const showTorrentName = torrentName !== title;
                     const selected = selectedInfoHashes.has(item.infoHash);
@@ -1564,11 +1826,20 @@ export function SearchPage() {
                         <div className={styles["resultMain"]}>
                           <h2>
                             <Link
+                              aria-label={title}
                               className={styles["resultTitleLink"]}
                               params={{ infoHash: item.infoHash }}
                               to="/torrents/$infoHash"
                             >
-                              {title}
+                              {titleSegments.map((segment, index) =>
+                                segment.match ? (
+                                  <mark className={styles["mark"]} key={`match:${index}`}>
+                                    {segment.text}
+                                  </mark>
+                                ) : (
+                                  <span key={`text:${index}`}>{segment.text}</span>
+                                ),
+                              )}
                             </Link>
                           </h2>
                           {showTorrentName ? <p>{item.torrent.name}</p> : null}
@@ -1645,8 +1916,47 @@ export function SearchPage() {
                 </ul>
               ) : (
                 <div className={styles["emptyState"]}>
-                  <h1>{isBrowse ? t("search.emptyTitle") : t("search.noResultsTitle")}</h1>
-                  <p>{isBrowse ? t("search.emptyBody") : t("search.noResultsBody")}</p>
+                  <h1>
+                    {showHelpfulEmptyState
+                      ? t("search.noResultsTitle")
+                      : t("search.emptyTitle")}
+                  </h1>
+                  <p>
+                    {showHelpfulEmptyState
+                      ? t("search.noResultsBody")
+                      : t("search.emptyBody")}
+                  </p>
+                  {showHelpfulEmptyState && hasActiveFilters ? (
+                    <p className={styles["emptyFilterSummary"]}>
+                      <strong>{t("search.filtersApplied")}:</strong>{" "}
+                      {activeFilters.map((filter) => filter.label).join(", ")}
+                    </p>
+                  ) : null}
+                  {showHelpfulEmptyState &&
+                  (hasActiveFilters || simplifiedQuery !== search.query) ? (
+                    <div className={styles["emptyActions"]}>
+                      {hasActiveFilters ? (
+                        <button
+                          className={styles["submitSmall"]}
+                          onClick={handleResetFilters}
+                          type="button"
+                        >
+                          {t("search.clearFiltersRetry")}
+                        </button>
+                      ) : null}
+                      {simplifiedQuery !== search.query ? (
+                        <button
+                          className={styles["secondaryButton"]}
+                          onClick={() =>
+                            navigateSearch(updateQuery(search, simplifiedQuery))
+                          }
+                          type="button"
+                        >
+                          {t("search.searchInsteadFor", { query: simplifiedQuery })}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               )}
 
