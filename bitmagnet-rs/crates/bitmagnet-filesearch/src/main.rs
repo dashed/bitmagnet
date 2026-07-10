@@ -11,10 +11,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+#[cfg(any(feature = "duckdb-engine", test))]
+use bitmagnet_common::metrics::maybe_spawn_metrics_server;
+#[cfg(feature = "duckdb-engine")]
+use bitmagnet_common::serve::{serve_router, shutdown_signal, Listen};
 use bitmagnet_filesearch::generation::GenerationManager;
 use bitmagnet_filesearch::service::ServiceConfig;
 use bitmagnet_parquet::generation::Layout;
 use clap::Parser;
+#[cfg(feature = "duckdb-engine")]
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -127,6 +132,7 @@ async fn run(args: &Args, gens: Arc<GenerationManager>, cfg: ServiceConfig) -> a
         pool_size: args.concurrency.max(1) + 1,
         ..DuckConfig::default() // temp_dir: BITMAGNET_FILESEARCH_TMPDIR or $TMPDIR spill dir
     })?);
+    let _metrics_server = maybe_start_metrics().await?;
     let service = FileSearchServiceServer::new(FileSearchServer::new(gens, engine, cfg));
 
     let listen = Listen::parse(&args.addr);
@@ -148,24 +154,6 @@ async fn run(
     )
 }
 
-/// Listener kind (production serve path only).
-#[cfg(feature = "duckdb-engine")]
-#[derive(Debug)]
-enum Listen {
-    Tcp(std::net::SocketAddr),
-    Unix(PathBuf),
-}
-
-#[cfg(feature = "duckdb-engine")]
-impl Listen {
-    fn parse(addr: &str) -> Self {
-        let candidate = addr.strip_prefix("unix:").unwrap_or(addr);
-        candidate
-            .parse::<std::net::SocketAddr>()
-            .map_or_else(|_| Listen::Unix(PathBuf::from(candidate)), Listen::Tcp)
-    }
-}
-
 #[cfg(feature = "duckdb-engine")]
 async fn serve(
     service: bitmagnet_proto::v1::file_search_service_server::FileSearchServiceServer<
@@ -176,81 +164,56 @@ async fn serve(
     listen: Listen,
 ) -> anyhow::Result<()> {
     use tonic::transport::Server;
-    match listen {
-        Listen::Tcp(addr) => {
-            info!(%addr, "serving gRPC over TCP");
-            Server::builder()
-                .add_service(service)
-                .serve_with_shutdown(addr, shutdown_signal())
-                .await
-                .context("gRPC server (TCP) terminated")?;
-        }
-        Listen::Unix(path) => {
-            use tokio::net::UnixListener;
-            use tokio_stream::wrappers::UnixListenerStream;
-            if path.exists() {
-                std::fs::remove_file(&path).ok();
-            }
-            let listener = UnixListener::bind(&path)
-                .with_context(|| format!("binding unix socket {}", path.display()))?;
-            info!(path = %path.display(), "serving gRPC over unix socket");
-            Server::builder()
-                .add_service(service)
-                .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
-                .await
-                .context("gRPC server (unix) terminated")?;
-        }
-    }
-    Ok(())
+
+    let termination_context = match &listen {
+        Listen::Tcp(_) => "gRPC server (TCP) terminated",
+        Listen::Unix(_) => "gRPC server (unix) terminated",
+    };
+    let router = Server::builder().add_service(service);
+    serve_router(router, listen, shutdown_signal())
+        .await
+        .context(termination_context)
 }
 
-#[cfg_attr(not(feature = "duckdb-engine"), allow(dead_code))]
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to install ctrl-c handler");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        // If registration failed, this branch would complete immediately and
-        // cause a premature clean shutdown (not ignore SIGTERM or hang). As
-        // PID 1 on Linux, SIGTERM registration is effectively infallible.
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    wait_for_shutdown(ctrl_c, terminate).await;
-    info!("shutdown signal received");
-}
-
-async fn wait_for_shutdown<C, T>(ctrl_c: C, terminate: T)
-where
-    C: std::future::Future<Output = ()>,
-    T: std::future::Future<Output = ()>,
-{
-    tokio::pin!(ctrl_c);
-    tokio::pin!(terminate);
-    tokio::select! {
-        () = &mut ctrl_c => {}
-        () = &mut terminate => {}
-    }
+#[cfg(any(feature = "duckdb-engine", test))]
+async fn maybe_start_metrics(
+) -> anyhow::Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
+    maybe_spawn_metrics_server()
+        .await
+        .context("starting Prometheus metrics listener")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_shutdown;
+    use super::maybe_start_metrics;
+    use std::ffi::OsString;
+
+    struct MetricsAddrRestore(Option<OsString>);
+
+    impl MetricsAddrRestore {
+        fn clear() -> Self {
+            let original = std::env::var_os("BITMAGNET_METRICS_ADDR");
+            std::env::remove_var("BITMAGNET_METRICS_ADDR");
+            Self(original)
+        }
+    }
+
+    impl Drop for MetricsAddrRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BITMAGNET_METRICS_ADDR", value),
+                None => std::env::remove_var("BITMAGNET_METRICS_ADDR"),
+            }
+        }
+    }
 
     #[tokio::test]
-    async fn simulated_sigterm_resolves_shutdown_selector() {
-        wait_for_shutdown(std::future::pending::<()>(), std::future::ready(())).await;
+    async fn metrics_listener_is_disabled_by_default() {
+        let _restore = MetricsAddrRestore::clear();
+        let server = maybe_start_metrics()
+            .await
+            .expect("an unset metrics address is valid");
+
+        assert!(server.is_none(), "no metrics listener should be created");
     }
 }

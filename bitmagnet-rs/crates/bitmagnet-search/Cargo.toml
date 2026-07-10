@@ -37,9 +37,9 @@ anyhow.workspace = true
 # Stream combinators (`StreamExt`, `stream::iter`) for the backfill bin's
 # client-streaming `BatchIndex` and for consuming the DB row stream.
 futures = "0.3"
-# `tonic`'s server transport already pulls in `tokio-stream` with the `net`
-# feature; we depend on it directly to expose the Unix-domain-socket listener
-# (and the ephemeral TCP listener + streaming requests used by the smoke test).
+# `tonic`'s server transport already pulls in `tokio-stream`; the direct
+# dependency provides ephemeral TCP listener streams and request streams used
+# by the smoke tests (production listener wrapping lives in bitmagnet-common).
 tokio-stream = { version = "0.1", features = ["net"] }
 
 [dev-dependencies]

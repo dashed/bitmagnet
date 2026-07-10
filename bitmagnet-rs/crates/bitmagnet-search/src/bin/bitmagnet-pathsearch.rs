@@ -1,12 +1,13 @@
 //! Entry point for the L3 pathsearch sidecar.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use bitmagnet_common::metrics::maybe_spawn_metrics_server;
+use bitmagnet_common::serve::{serve_router, shutdown_signal, Listen};
 use bitmagnet_db::{
     connect, read_deleted_torrents, stream_changed_torrents, DbConfig, PgPool, TorrentWithBlob,
 };
@@ -93,21 +94,6 @@ struct Args {
     watermark_file: PathBuf,
 }
 
-#[derive(Debug)]
-enum Listen {
-    Tcp(SocketAddr),
-    Unix(PathBuf),
-}
-
-impl Listen {
-    fn parse(addr: &str) -> Self {
-        let candidate = addr.strip_prefix("unix:").unwrap_or(addr);
-        candidate
-            .parse::<SocketAddr>()
-            .map_or_else(|_| Listen::Unix(PathBuf::from(candidate)), Listen::Tcp)
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
@@ -130,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let server = PathSearchServer::open(&args.index_path, heap, args.writer_threads, prefix)
         .with_context(|| format!("opening pathsearch index at {}", args.index_path.display()))?;
+    let _metrics_server = maybe_start_metrics().await?;
 
     // Prefix suggestions are intentionally rebuilt only by backfill. Typeahead
     // tolerates staleness; the backend can fall back to live path candidates.
@@ -146,20 +133,25 @@ async fn main() -> anyhow::Result<()> {
         "bitmagnet-pathsearch starting"
     );
 
-    match Listen::parse(&args.addr) {
-        Listen::Tcp(addr) => {
-            info!(%addr, "serving gRPC over TCP");
-            Server::builder()
-                .add_service(service)
-                .serve_with_shutdown(addr, shutdown_signal())
-                .await
-                .context("gRPC server (TCP) terminated with an error")?;
-        }
-        Listen::Unix(path) => serve_unix(service, path).await?,
-    }
+    let listen = Listen::parse(&args.addr);
+    let termination_context = match &listen {
+        Listen::Tcp(_) => "gRPC server (TCP) terminated with an error",
+        Listen::Unix(_) => "gRPC server (unix) terminated with an error",
+    };
+    let router = Server::builder().add_service(service);
+    serve_router(router, listen, shutdown_signal())
+        .await
+        .context(termination_context)?;
 
     info!("bitmagnet-pathsearch stopped");
     Ok(())
+}
+
+async fn maybe_start_metrics(
+) -> anyhow::Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
+    maybe_spawn_metrics_server()
+        .await
+        .context("starting Prometheus metrics listener")
 }
 
 async fn spawn_follow_loop(
@@ -377,72 +369,11 @@ fn deleted_read_truncated(found: usize, deleted_limit: i64) -> bool {
     deleted_limit > 0 && found as i64 >= deleted_limit
 }
 
-#[cfg(unix)]
-async fn serve_unix(
-    service: PathSearchServiceServer<PathSearchServer>,
-    path: PathBuf,
-) -> anyhow::Result<()> {
-    use tokio::net::UnixListener;
-    use tokio_stream::wrappers::UnixListenerStream;
-
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing stale socket at {}", path.display()))?;
-    }
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding unix socket at {}", path.display()))?;
-    info!(path = %path.display(), "serving gRPC over unix socket");
-    Server::builder()
-        .add_service(service)
-        .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
-        .await
-        .context("gRPC server (unix) terminated with an error")?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unused_async)]
-async fn serve_unix(
-    _service: PathSearchServiceServer<PathSearchServer>,
-    path: PathBuf,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "unix-socket listening ({}) is only supported on unix platforms",
-        path.display()
-    )
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to install ctrl-c handler");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
-    info!("shutdown signal received");
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_changed_row, current_epoch, deleted_read_truncated, live_tombstones, RowOutcome,
+        apply_changed_row, current_epoch, deleted_read_truncated, live_tombstones,
+        maybe_start_metrics, RowOutcome,
     };
     use bitmagnet_db::TorrentWithBlob;
     use bitmagnet_model::{serialize_files, BlobFile, InfoHash};
@@ -450,7 +381,27 @@ mod tests {
     use bitmagnet_search::proto::path_search_service_server::PathSearchService;
     use bitmagnet_search::proto::{HealthCheckRequest, PathCandidatesRequest};
     use std::collections::HashSet;
+    use std::ffi::OsString;
     use tonic::Request;
+
+    struct MetricsAddrRestore(Option<OsString>);
+
+    impl MetricsAddrRestore {
+        fn clear() -> Self {
+            let original = std::env::var_os("BITMAGNET_METRICS_ADDR");
+            std::env::remove_var("BITMAGNET_METRICS_ADDR");
+            Self(original)
+        }
+    }
+
+    impl Drop for MetricsAddrRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BITMAGNET_METRICS_ADDR", value),
+                None => std::env::remove_var("BITMAGNET_METRICS_ADDR"),
+            }
+        }
+    }
 
     fn changed_row(byte: u8, files_status: &str, files_data: Option<Vec<u8>>) -> TorrentWithBlob {
         TorrentWithBlob {
@@ -495,6 +446,16 @@ mod tests {
             .unwrap()
             .into_inner()
             .candidate_total
+    }
+
+    #[tokio::test]
+    async fn metrics_listener_is_disabled_by_default() {
+        let _restore = MetricsAddrRestore::clear();
+        let server = maybe_start_metrics()
+            .await
+            .expect("an unset metrics address is valid");
+
+        assert!(server.is_none(), "no metrics listener should be created");
     }
 
     /// The changed-torrent path is the follow loop's core invariant: a torrent

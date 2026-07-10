@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bitmagnet_common::serve::wait_for_shutdown_signal;
 use bitmagnet_parquet::export::{self, Sinks};
 use bitmagnet_parquet::fact::SortMode;
 use bitmagnet_parquet::generation::{Kind, Layout};
@@ -723,35 +724,9 @@ fn follow_backoff_secs(interval_secs: u64, consecutive_failures: u32) -> u64 {
         .min(FOLLOW_MAX_BACKOFF_SECS)
 }
 
-async fn follow_shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            error!(%error, "failed to install ctrl-c handler");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        // If registration failed, this branch would complete immediately and
-        // cause a premature clean shutdown (not ignore SIGTERM or hang). As
-        // PID 1 on Linux, SIGTERM registration is effectively infallible.
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => error!(%error, "failed to install SIGTERM handler"),
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
-}
-
+/// Keep this select local: the shared signal helper owns OS signal detection,
+/// while this loop must finish an in-flight delta tick and only consume the
+/// completed signal at its between-tick sleep boundary.
 async fn wait_for_follow_sleep(
     duration: Duration,
     shutdown_task: &mut tokio::task::JoinHandle<()>,
@@ -783,7 +758,7 @@ async fn run_follow(
     let interval = interval_secs.max(1);
     let mut consecutive_failures: u32 = 0;
     let mut ticks: u64 = 0;
-    let mut shutdown_task = tokio::spawn(follow_shutdown_signal());
+    let mut shutdown_task = tokio::spawn(wait_for_shutdown_signal());
     // Give the listener a chance to install both handlers before the first
     // potentially long tick. A signal received during a tick is queued by the
     // listener, but is only acted on in the sleep phase below.
