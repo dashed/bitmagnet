@@ -154,7 +154,9 @@ describe("CommandPalette", () => {
 
     fireEvent.change(input, { target: { value: "Weekly Arch" } });
 
-    const savedOption = await screen.findByRole("option", { name: /Weekly Arch/ });
+    // The pinned "Search torrents for …" option echoes the typed text, so anchor the
+    // match: only the saved-search option's name starts with the saved name.
+    const savedOption = await screen.findByRole("option", { name: /^Weekly Arch/ });
 
     fireEvent.keyDown(input, { key: "ArrowDown" });
 
