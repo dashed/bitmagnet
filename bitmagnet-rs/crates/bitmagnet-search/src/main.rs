@@ -4,21 +4,22 @@
 //! `grpc.health.v1.Health` service over gRPC for operators and orchestrators.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use bitmagnet_common::metrics::{maybe_spawn_metrics_server, register_computed_gauge};
+use bitmagnet_common::serve::{health, serve_router, shutdown_signal, Listen};
 use bitmagnet_search::follow::{
     spawn_follow_loop, FollowConfig, DEFAULT_CARVE_LAG_SECS, DEFAULT_DELETED_LIMIT,
     DEFAULT_FOLLOW_BATCH_SIZE, DEFAULT_FOLLOW_INTERVAL_SECS, DEFAULT_FOLLOW_MAX_WINDOW_SECS,
 };
+use bitmagnet_search::pathsearch::watermark::current_epoch;
 use bitmagnet_search::proto::search_service_server::SearchServiceServer;
 use bitmagnet_search::SearchServer;
 use clap::Parser;
 use tonic::server::NamedService;
 use tonic::transport::Server;
-use tonic_health::pb::health_server::HealthServer as GrpcHealthServer;
-use tonic_health::server::{HealthReporter, HealthService};
+use tonic_health::server::HealthReporter;
 use tonic_health::ServingStatus;
 use tracing::info;
 
@@ -97,36 +98,20 @@ struct Args {
     watermark_file: Option<PathBuf>,
 }
 
-/// How the server should listen, derived from `--addr`.
-#[derive(Debug)]
-enum Listen {
-    Tcp(SocketAddr),
-    Unix(PathBuf),
-}
-
-type StandardHealthService = GrpcHealthServer<HealthService>;
-
-impl Listen {
-    fn parse(addr: &str) -> Self {
-        let candidate = addr.strip_prefix("unix:").unwrap_or(addr);
-        candidate
-            .parse::<SocketAddr>()
-            .map_or_else(|_| Listen::Unix(PathBuf::from(candidate)), Listen::Tcp)
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
     let args = Args::parse();
     let watermark_file = resolved_watermark_file(&args.index_path, args.watermark_file.as_deref());
 
-    let health_reporter = HealthReporter::new();
+    let (health_reporter, health_service) = health();
     set_health_status(&health_reporter, ServingStatus::NotServing).await;
 
     let server = SearchServer::open(&args.index_path)
         .with_context(|| format!("opening search index at {}", args.index_path.display()))?;
     set_health_status(&health_reporter, ServingStatus::Serving).await;
+
+    let metrics_server = maybe_start_metrics().await?;
 
     let follow_task = if args.follow {
         Some(
@@ -148,8 +133,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let health_service =
-        GrpcHealthServer::new(HealthService::from_health_reporter(health_reporter));
+    register_search_metrics(metrics_server.is_some(), &server);
+
     let service = SearchServiceServer::new(server);
     info!(
         index_path = %args.index_path.display(),
@@ -157,24 +142,46 @@ async fn main() -> anyhow::Result<()> {
         "bitmagnet-search starting (Tantivy read/write path and gRPC health services live)"
     );
 
-    match Listen::parse(&args.addr) {
-        Listen::Tcp(addr) => {
-            info!(%addr, "serving gRPC over TCP");
-            let serve = async {
-                Server::builder()
-                    .add_service(health_service)
-                    .add_service(service)
-                    .serve_with_shutdown(addr, shutdown_signal())
-                    .await
-                    .context("gRPC server (TCP) terminated with an error")
-            };
-            supervise_server(serve, follow_task).await?;
-        }
-        Listen::Unix(path) => serve_unix(service, health_service, path, follow_task).await?,
-    }
+    let listen = Listen::parse(&args.addr);
+    let termination_context = match &listen {
+        Listen::Tcp(_) => "gRPC server (TCP) terminated with an error",
+        Listen::Unix(_) => "gRPC server (unix) terminated with an error",
+    };
+    let router = Server::builder()
+        .add_service(health_service)
+        .add_service(service);
+    let serve = async move {
+        serve_router(router, listen, shutdown_signal())
+            .await
+            .context(termination_context)
+    };
+    supervise_server(serve, follow_task).await?;
 
     info!("bitmagnet-search stopped");
     Ok(())
+}
+
+async fn maybe_start_metrics(
+) -> anyhow::Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
+    maybe_spawn_metrics_server()
+        .await
+        .context("starting Prometheus metrics listener")
+}
+
+fn watermark_age_seconds(now_epoch: i64, watermark_epoch: i64) -> f64 {
+    now_epoch.saturating_sub(watermark_epoch).max(0) as f64
+}
+
+fn register_search_metrics(metrics_enabled: bool, server: &SearchServer) {
+    if !metrics_enabled {
+        return;
+    }
+    let server = server.clone();
+    register_computed_gauge(
+        "search_follow_watermark_age_seconds",
+        "Seconds since the main-search follow watermark.",
+        move || watermark_age_seconds(current_epoch(), server.watermark_epoch()),
+    );
 }
 
 fn resolved_watermark_file(index_path: &Path, explicit_watermark_file: Option<&Path>) -> PathBuf {
@@ -207,48 +214,6 @@ where
     }
 }
 
-#[cfg(unix)]
-async fn serve_unix(
-    service: SearchServiceServer<SearchServer>,
-    health_service: StandardHealthService,
-    path: PathBuf,
-    follow_task: Option<tokio::task::JoinHandle<()>>,
-) -> anyhow::Result<()> {
-    use tokio::net::UnixListener;
-    use tokio_stream::wrappers::UnixListenerStream;
-
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing stale socket at {}", path.display()))?;
-    }
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding unix socket at {}", path.display()))?;
-    info!(path = %path.display(), "serving gRPC over unix socket");
-    let serve = async {
-        Server::builder()
-            .add_service(health_service)
-            .add_service(service)
-            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), shutdown_signal())
-            .await
-            .context("gRPC server (unix) terminated with an error")
-    };
-    supervise_server(serve, follow_task).await
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unused_async)]
-async fn serve_unix(
-    _service: SearchServiceServer<SearchServer>,
-    _health_service: StandardHealthService,
-    path: PathBuf,
-    _follow_task: Option<tokio::task::JoinHandle<()>>,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "unix-socket listening ({}) is only supported on unix platforms",
-        path.display()
-    )
-}
-
 async fn set_health_status(reporter: &HealthReporter, status: ServingStatus) {
     reporter.set_service_status("", status).await;
     reporter
@@ -259,40 +224,37 @@ async fn set_health_status(reporter: &HealthReporter, status: ServingStatus) {
         .await;
 }
 
-/// Resolves when the process receives `SIGINT` (Ctrl-C) or, on unix, `SIGTERM`.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to install ctrl-c handler");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => tracing::error!(%error, "failed to install SIGTERM handler"),
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
-    info!("shutdown signal received");
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{resolved_watermark_file, supervise_server, Args};
+    use super::{
+        maybe_start_metrics, register_search_metrics, resolved_watermark_file, supervise_server,
+        watermark_age_seconds, Args,
+    };
+    use bitmagnet_common::metrics::gather_text;
+    use bitmagnet_search::SearchServer;
     use clap::Parser;
+    use std::ffi::OsString;
     use std::future;
     use std::path::{Path, PathBuf};
+
+    struct MetricsAddrRestore(Option<OsString>);
+
+    impl MetricsAddrRestore {
+        fn clear() -> Self {
+            let original = std::env::var_os("BITMAGNET_METRICS_ADDR");
+            std::env::remove_var("BITMAGNET_METRICS_ADDR");
+            Self(original)
+        }
+    }
+
+    impl Drop for MetricsAddrRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("BITMAGNET_METRICS_ADDR", value),
+                None => std::env::remove_var("BITMAGNET_METRICS_ADDR"),
+            }
+        }
+    }
 
     #[test]
     fn computed_default_watermark_path_follows_index_path_and_explicit_flag_wins() {
@@ -314,6 +276,52 @@ mod tests {
             resolved_watermark_file(index_path, explicit_args.watermark_file.as_deref()),
             PathBuf::from("/tmp/explicit-watermark")
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_listener_is_disabled_by_default() {
+        let _restore = MetricsAddrRestore::clear();
+        let server = maybe_start_metrics()
+            .await
+            .expect("an unset metrics address is valid");
+
+        assert!(server.is_none(), "no metrics listener should be created");
+    }
+
+    #[test]
+    fn watermark_age_is_saturating_and_never_negative() {
+        assert_eq!(watermark_age_seconds(120, 100), 20.0);
+        assert_eq!(watermark_age_seconds(100, 120), 0.0);
+        assert_eq!(watermark_age_seconds(i64::MAX, i64::MIN), i64::MAX as f64);
+    }
+
+    #[test]
+    fn watermark_metric_is_gated_and_reads_the_shared_atomic() {
+        const METRIC_NAME: &str = "search_follow_watermark_age_seconds";
+
+        let server = SearchServer::in_ram().expect("in-memory search server");
+        register_search_metrics(false, &server);
+        assert!(!gather_text()
+            .lines()
+            .any(|line| line.starts_with(METRIC_NAME)));
+
+        server.set_watermark_epoch(i64::MAX);
+        register_search_metrics(true, &server);
+        let first = metric_value(&gather_text(), METRIC_NAME);
+        assert_eq!(first, 0.0, "a future watermark clamps the age to zero");
+
+        server.set_watermark_epoch(0);
+        let second = metric_value(&gather_text(), METRIC_NAME);
+        assert!(second > 1_000_000_000.0, "the updated atomic is re-read");
+    }
+
+    fn metric_value(text: &str, name: &str) -> f64 {
+        let prefix = format!("{name} ");
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+            .expect("metric sample is present")
+            .parse()
+            .expect("metric value is numeric")
     }
 
     #[tokio::test]

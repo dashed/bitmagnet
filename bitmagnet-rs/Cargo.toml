@@ -38,6 +38,9 @@ tokio = { version = "1", features = ["full"] }
 # Observability.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Prometheus client_golang analog with exact metric-name, label, and bucket
+# control for dashboard compatibility.
+prometheus = { version = "0.14", features = ["process"] }
 
 # Error handling.
 thiserror = "2"
@@ -51,6 +54,11 @@ zstd = "0.13"
 # JSON — currently test-only (the tokenizer parity fixtures); pinned centrally
 # so member crates reference it via `serde_json.workspace = true`.
 serde_json = "1"
+
+# Layered config provider-stack selected in
+# docs/dev/rust-rewrite/03-ecosystem-mapping.md §7 (defaults < file < env).
+# The explicit strcase env-key mapping, not Figment, is the compatibility contract.
+figment = { version = "0.10", features = ["yaml", "env"] }
 
 # Database. NOTE: sqlx 0.7+ split the combined `runtime-tokio-rustls` feature
 # into separate `runtime-*` and `tls-*` features.
