@@ -9,6 +9,7 @@ members = [
     "crates/bitmagnet-parquet",
     "crates/bitmagnet-filesearch",
     "crates/bitmagnet-shadow",
+    "crates/bitmagnet-diff",
 ]
 
 [workspace.package]
