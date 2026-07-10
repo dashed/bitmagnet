@@ -8,10 +8,15 @@
 pub mod document;
 pub mod index;
 pub mod indexer;
+pub mod prefix;
 pub mod query;
 pub mod schema;
 pub mod server;
 pub mod watermark;
 
 pub use document::PathDocument;
+pub use prefix::{
+    PrefixIndex, PrefixIndexBuilder, PrefixIndexConfig, PrefixIndexStats, Suggestion,
+    PREFIX_INDEX_FILENAME,
+};
 pub use server::PathSearchServer;

@@ -16,8 +16,11 @@ import (
 
 type recordingFileSearchClient struct {
 	fileSearchCalls    int
+	facetsCalls        int
 	pathTypeaheadCalls int
 	fileSearchResult   filesearch.FileSearchResult
+	facetsInput        filesearch.FacetsInput
+	facetsResult       filesearch.FacetsResult
 	pathResult         filesearch.PathTypeaheadResult
 }
 
@@ -30,6 +33,16 @@ func (c *recordingFileSearchClient) FileSearch(
 	return c.fileSearchResult, nil
 }
 
+func (c *recordingFileSearchClient) Facets(
+	_ context.Context,
+	in filesearch.FacetsInput,
+) (filesearch.FacetsResult, error) {
+	c.facetsCalls++
+	c.facetsInput = in
+
+	return c.facetsResult, nil
+}
+
 func (c *recordingFileSearchClient) PathTypeahead(
 	context.Context,
 	filesearch.PathTypeaheadInput,
@@ -40,8 +53,13 @@ func (c *recordingFileSearchClient) PathTypeahead(
 }
 
 type fileRouteL3 struct {
-	resp  *pb.PathCandidatesResponse
-	calls int
+	resp           *pb.PathCandidatesResponse
+	calls          int
+	suggestResp    *pb.SuggestResponse
+	suggestErr     error
+	suggestReq     *pb.SuggestRequest
+	suggestCalls   int
+	panicOnSuggest bool
 }
 
 func (f *fileRouteL3) PathCandidates(
@@ -51,6 +69,20 @@ func (f *fileRouteL3) PathCandidates(
 	f.calls++
 
 	return f.resp, nil
+}
+
+func (f *fileRouteL3) Suggest(
+	_ context.Context,
+	req *pb.SuggestRequest,
+) (*pb.SuggestResponse, error) {
+	if f.panicOnSuggest {
+		panic("Suggest must not be consulted while FileSearchTypeaheadRPCEnabled is off")
+	}
+
+	f.suggestCalls++
+	f.suggestReq = req
+
+	return f.suggestResp, f.suggestErr
 }
 
 type fileRoutePG struct {
@@ -134,6 +166,16 @@ func enableFileSearchFeature(t *testing.T) {
 
 	t.Cleanup(func() { dbsearch.SetFeatureFlags(dbsearch.FeatureFlags{}) })
 	dbsearch.SetFeatureFlags(dbsearch.FeatureFlags{FileSearchEnabled: true})
+}
+
+func enableFileSearchTypeaheadRPCFeature(t *testing.T) {
+	t.Helper()
+
+	t.Cleanup(func() { dbsearch.SetFeatureFlags(dbsearch.FeatureFlags{}) })
+	dbsearch.SetFeatureFlags(dbsearch.FeatureFlags{
+		FileSearchEnabled:             true,
+		FileSearchTypeaheadRPCEnabled: true,
+	})
 }
 
 //nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
@@ -297,7 +339,7 @@ func TestFileSearchRouteDecision_FlagOffUsesL2(t *testing.T) {
 }
 
 //nolint:paralleltest // mutates global dbsearch feature flags via enableFileSearchFeature
-func TestPathTypeahead_UsesPathsearchWhenEnabled(t *testing.T) {
+func TestPathTypeahead_FlagOffUsesAdapterWithoutConsultingSuggest(t *testing.T) {
 	enableFileSearchFeature(t)
 
 	l2 := &recordingFileSearchClient{
@@ -307,7 +349,7 @@ func TestPathTypeahead_UsesPathsearchWhenEnabled(t *testing.T) {
 		Candidates:     []*pb.PathCandidate{fileRouteCandidate(1), fileRouteCandidate(2)},
 		CandidateTotal: 2,
 		Estimated:      true,
-	}}
+	}, panicOnSuggest: true}
 	pg := &fileRoutePG{result: dbsearch.TorrentContentResult{
 		Items: []dbsearch.TorrentContentResultItem{
 			fileRouteItem(1, "Movies/Inception/movie.mkv", 700),
@@ -336,5 +378,111 @@ func TestPathTypeahead_UsesPathsearchWhenEnabled(t *testing.T) {
 		if result.Suggestions[i] != want[i] {
 			t.Fatalf("suggestions = %v, want %v", result.Suggestions, want)
 		}
+	}
+
+	if l3.suggestCalls != 0 {
+		t.Fatalf("flag-off typeahead consulted Suggest %d times, want 0", l3.suggestCalls)
+	}
+}
+
+//nolint:paralleltest // mutates global dbsearch feature flags
+func TestPathTypeahead_FlagOnSuggestServedSkipsAdapter(t *testing.T) {
+	enableFileSearchTypeaheadRPCFeature(t)
+
+	l2 := &recordingFileSearchClient{
+		pathResult: filesearch.PathTypeaheadResult{Suggestions: []string{"l2"}},
+	}
+	l3 := &fileRouteL3{
+		resp: &pb.PathCandidatesResponse{
+			Candidates: []*pb.PathCandidate{fileRouteCandidate(1)},
+		},
+		suggestResp: &pb.SuggestResponse{Suggestions: []*pb.Suggestion{
+			{Value: "inception", Score: 20},
+			{Value: "interstellar", Score: 10},
+		}},
+	}
+	pg := &fileRoutePG{result: dbsearch.TorrentContentResult{
+		Items: []dbsearch.TorrentContentResultItem{
+			fileRouteItem(1, "Movies/Inception/movie.mkv", 700),
+		},
+	}}
+
+	result, err := (FileSearchQuery{
+		Client:     l2,
+		Pathsearch: fileRouteComposer(true, l3, pg),
+	}).PathTypeahead(context.Background(), PathTypeaheadInput{Prefix: "Movies/I", Limit: 2})
+	if err != nil {
+		t.Fatalf("PathTypeahead: %v", err)
+	}
+
+	want := []string{"inception", "interstellar"}
+	if len(result.Suggestions) != len(want) {
+		t.Fatalf("suggestions = %v, want %v", result.Suggestions, want)
+	}
+
+	for i := range want {
+		if result.Suggestions[i] != want[i] {
+			t.Fatalf("suggestions = %v, want %v", result.Suggestions, want)
+		}
+	}
+
+	if l3.suggestCalls != 1 || l3.suggestReq.GetPrefix() != "Movies/I" || l3.suggestReq.GetLimit() != 2 {
+		t.Fatalf("Suggest calls=%d req=%+v, want one validated request", l3.suggestCalls, l3.suggestReq)
+	}
+
+	if l3.calls != 0 || pg.callCount != 0 || l2.pathTypeaheadCalls != 0 {
+		t.Fatalf("served Suggest must skip adapter: candidates=%d pg=%d l2=%d",
+			l3.calls, pg.callCount, l2.pathTypeaheadCalls)
+	}
+}
+
+//nolint:paralleltest // mutates global dbsearch feature flags
+func TestPathTypeahead_FlagOnSuggestErrorFallsBackToAdapter(t *testing.T) {
+	enableFileSearchTypeaheadRPCFeature(t)
+
+	l2 := &recordingFileSearchClient{
+		pathResult: filesearch.PathTypeaheadResult{Suggestions: []string{"l2"}},
+	}
+	l3 := &fileRouteL3{
+		suggestErr: errors.New("suggest unavailable"),
+		resp: &pb.PathCandidatesResponse{
+			Candidates:     []*pb.PathCandidate{fileRouteCandidate(1), fileRouteCandidate(2)},
+			CandidateTotal: 2,
+			Estimated:      true,
+		},
+	}
+	pg := &fileRoutePG{result: dbsearch.TorrentContentResult{
+		Items: []dbsearch.TorrentContentResultItem{
+			fileRouteItem(1, "Movies/Inception/movie.mkv", 700),
+			fileRouteItem(2, "Movies/Interstellar/movie.mkv", 700),
+		},
+	}}
+
+	result, err := (FileSearchQuery{
+		Client:     l2,
+		Pathsearch: fileRouteComposer(true, l3, pg),
+	}).PathTypeahead(context.Background(), PathTypeaheadInput{Prefix: "Movies/I", Limit: 2})
+	if err != nil {
+		t.Fatalf("PathTypeahead: %v", err)
+	}
+
+	want := []string{"Inception", "Interstellar"}
+	if len(result.Suggestions) != len(want) {
+		t.Fatalf("suggestions = %v, want adapter result %v", result.Suggestions, want)
+	}
+
+	for i := range want {
+		if result.Suggestions[i] != want[i] {
+			t.Fatalf("suggestions = %v, want adapter result %v", result.Suggestions, want)
+		}
+	}
+
+	if l3.suggestCalls != 1 || l3.calls != 1 || pg.callCount != 1 {
+		t.Fatalf("fallback calls: suggest=%d candidates=%d pg=%d, want 1 each",
+			l3.suggestCalls, l3.calls, pg.callCount)
+	}
+
+	if l2.pathTypeaheadCalls != 0 {
+		t.Fatalf("candidate adapter served fallback, L2 calls=%d want 0", l2.pathTypeaheadCalls)
 	}
 }

@@ -57,6 +57,15 @@ type FeatureFlags struct {
 	// feature as disabled; when ON they delegate to the configured sidecar
 	// client. Flip only once the DuckDB/path-FTS sidecar is deployed and proven.
 	FileSearchEnabled bool
+
+	// FileSearchFacetsEnabled gates the GraphQL torrentContent.fileSearchFacets
+	// surface (L2 extension aggregations). Requires FileSearchEnabled. Default OFF.
+	FileSearchFacetsEnabled bool
+
+	// FileSearchTypeaheadRPCEnabled routes pathTypeahead through the L3 Suggest RPC
+	// (prefix index) instead of the candidate-derived adapter, falling back to the
+	// adapter when the RPC is disabled/unhealthy. Requires FileSearchEnabled. Default OFF.
+	FileSearchTypeaheadRPCEnabled bool
 }
 
 var featureFlags atomic.Pointer[FeatureFlags]

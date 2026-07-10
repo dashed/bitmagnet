@@ -43,6 +43,25 @@ message PathCandidatesResponse {
   bool estimated = 3;
 }
 
+message SuggestRequest {
+  // User-typed prefix. Server trims + lowercases + validates (min 2 chars
+  // post-trim); a shorter prefix returns an empty response (never a full scan).
+  string prefix = 1;
+  // Max suggestions (top-N by document frequency). Server clamps to a hard max.
+  uint32 limit = 2;
+}
+
+message Suggestion {
+  // Suggested path segment (lowercased normalized form).
+  string value = 1;
+  // Document frequency: number of torrents whose path-bag contains this segment.
+  uint64 score = 2;
+}
+
+message SuggestResponse {
+  repeated Suggestion suggestions = 1;
+}
+
 message PathSearchHealth {
   enum ServingStatus {
     SERVING_STATUS_UNKNOWN = 0;
@@ -56,9 +75,14 @@ message PathSearchHealth {
   // or has not completed a tick.
   int64 watermark_epoch = 4;
   bool writable = 5;
+  // Prefix index loaded and non-empty.
+  bool suggest_ready = 6;
+  // Number of path segments in the prefix index.
+  uint64 suggest_entries = 7;
 }
 
 service PathSearchService {
   rpc PathCandidates(PathCandidatesRequest) returns (PathCandidatesResponse);
+  rpc Suggest(SuggestRequest) returns (SuggestResponse);
   rpc HealthCheck(HealthCheckRequest) returns (PathSearchHealth);
 }

@@ -17,6 +17,10 @@ func TestFeatureFlagsDefaultAllOff(t *testing.T) {
 	if (got != FeatureFlags{}) {
 		t.Errorf("default flags = %+v, want all-zero/off", got)
 	}
+
+	if got.FileSearchFacetsEnabled || got.FileSearchTypeaheadRPCEnabled {
+		t.Errorf("new file-search flags must default off: %+v", got)
+	}
 }
 
 func TestSetAndReadFeatureFlags(t *testing.T) {
@@ -37,20 +41,24 @@ func TestApplyFeatureFlags(t *testing.T) {
 	t.Cleanup(func() { SetFeatureFlags(FeatureFlags{}) })
 
 	ApplyFeatureFlags(FeatureFlagsConfig{
-		DropCompatibleReads:     true,
-		GateFileExtensionsJSONB: true,
-		PopularitySortDefault:   true,
-		FileBrowserFromBlob:     true,
-		FileSearchEnabled:       true,
+		DropCompatibleReads:           true,
+		GateFileExtensionsJSONB:       true,
+		PopularitySortDefault:         true,
+		FileBrowserFromBlob:           true,
+		FileSearchEnabled:             true,
+		FileSearchFacetsEnabled:       true,
+		FileSearchTypeaheadRPCEnabled: true,
 	})
 
 	got := FeatureFlagsValue()
 	want := FeatureFlags{
-		DropCompatibleReads:     true,
-		GateFileExtensionsJSONB: true,
-		PopularitySortDefault:   true,
-		FileBrowserFromBlob:     true,
-		FileSearchEnabled:       true,
+		DropCompatibleReads:           true,
+		GateFileExtensionsJSONB:       true,
+		PopularitySortDefault:         true,
+		FileBrowserFromBlob:           true,
+		FileSearchEnabled:             true,
+		FileSearchFacetsEnabled:       true,
+		FileSearchTypeaheadRPCEnabled: true,
 	}
 
 	if got != want {
@@ -62,11 +70,13 @@ func TestFeatureFlagEnvVarNames(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]string{
-		"DropCompatibleReads":     "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
-		"GateFileExtensionsJSONB": "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
-		"PopularitySortDefault":   "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
-		"FileBrowserFromBlob":     "SEARCH_FEATURES_FILE_BROWSER_FROM_BLOB",
-		"FileSearchEnabled":       "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
+		"DropCompatibleReads":           "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
+		"GateFileExtensionsJSONB":       "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
+		"PopularitySortDefault":         "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
+		"FileBrowserFromBlob":           "SEARCH_FEATURES_FILE_BROWSER_FROM_BLOB",
+		"FileSearchEnabled":             "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
+		"FileSearchFacetsEnabled":       "SEARCH_FEATURES_FILE_SEARCH_FACETS_ENABLED",
+		"FileSearchTypeaheadRPCEnabled": "SEARCH_FEATURES_FILE_SEARCH_TYPEAHEAD_RPC_ENABLED",
 	}
 
 	ct := reflect.TypeOf(FeatureFlagsConfig{})

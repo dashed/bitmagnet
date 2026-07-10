@@ -29,6 +29,13 @@ func (f *collapseL3) PathCandidates(
 	return f.resp, f.err
 }
 
+func (*collapseL3) Suggest(
+	context.Context,
+	*pb.SuggestRequest,
+) (*pb.SuggestResponse, error) {
+	panic("unexpected Suggest call")
+}
+
 // collapsePG is a fake composer-side searcher returning fixed items. FileCounts
 // reports 1 file per candidate so the whole set fits a single refine chunk.
 type collapsePG struct {
@@ -102,25 +109,33 @@ func collapseComposer(
 
 // --- tests -------------------------------------------------------------------
 
-func TestClampCollapseLimit(t *testing.T) {
+func TestPathSearchLimitHelpers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
+	clampTests := []struct {
 		name  string
 		limit uint
 		want  uint
 	}{
-		{name: "hostile", limit: 1_000_000, want: maxPathSearchLimit},
 		{name: "omitted", limit: 0, want: defaultPageSize},
-		{name: "in range", limit: 50, want: 50},
+		{name: "in range", limit: 5, want: 5},
+		{name: "hostile", limit: 1000, want: maxPathSearchLimit},
 	}
 
-	for _, tt := range tests {
+	for _, tt := range clampTests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := clampCollapseLimit(tt.limit); got != tt.want {
-				t.Fatalf("clampCollapseLimit(%d) = %d, want %d", tt.limit, got, tt.want)
+			if got := clampPathSearchLimit(tt.limit); got != tt.want {
+				t.Fatalf("clampPathSearchLimit(%d) = %d, want %d", tt.limit, got, tt.want)
 			}
 		})
+	}
+
+	if got := capPathSearchLimit(1000); got != maxPathSearchLimit {
+		t.Fatalf("capPathSearchLimit(1000) = %d, want %d", got, maxPathSearchLimit)
+	}
+
+	if got := capPathSearchLimit(5); got != 5 {
+		t.Fatalf("capPathSearchLimit(5) = %d, want 5", got)
 	}
 }
 

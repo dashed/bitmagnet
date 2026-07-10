@@ -124,6 +124,22 @@ type ComplexityRoot struct {
 		URL            func(childComplexity int) int
 	}
 
+	FileFacetAgg struct {
+		Buckets func(childComplexity int) int
+		Field   func(childComplexity int) int
+	}
+
+	FileFacetBucketAgg struct {
+		Count      func(childComplexity int) int
+		IsEstimate func(childComplexity int) int
+		TotalSize  func(childComplexity int) int
+		Value      func(childComplexity int) int
+	}
+
+	FileSearchFacetsResult struct {
+		Facets func(childComplexity int) int
+	}
+
 	FileSearchItem struct {
 		Extension      func(childComplexity int) int
 		Index          func(childComplexity int) int
@@ -343,10 +359,11 @@ type ComplexityRoot struct {
 	}
 
 	TorrentContentQuery struct {
-		CollapsePaths func(childComplexity int, input gqlmodel.TorrentContentCollapsePathsInput) int
-		FileSearch    func(childComplexity int, input gqlmodel.FileSearchInput) int
-		PathTypeahead func(childComplexity int, input gqlmodel.PathTypeaheadInput) int
-		Search        func(childComplexity int, input gqlmodel.TorrentContentSearchQueryInput) int
+		CollapsePaths    func(childComplexity int, input gqlmodel.TorrentContentCollapsePathsInput) int
+		FileSearch       func(childComplexity int, input gqlmodel.FileSearchInput) int
+		FileSearchFacets func(childComplexity int, input gen.FileSearchFacetsInput) int
+		PathTypeahead    func(childComplexity int, input gqlmodel.PathTypeaheadInput) int
+		Search           func(childComplexity int, input gqlmodel.TorrentContentSearchQueryInput) int
 	}
 
 	TorrentContentSearchResult struct {
@@ -502,6 +519,7 @@ type TorrentResolver interface {
 }
 type TorrentContentQueryResolver interface {
 	FileSearch(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.FileSearchInput) (filesearch.FileSearchResult, error)
+	FileSearchFacets(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gen.FileSearchFacetsInput) (gen.FileSearchFacetsResult, error)
 	PathTypeahead(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.PathTypeaheadInput) (filesearch.PathTypeaheadResult, error)
 }
 type TorrentMutationResolver interface {
@@ -824,6 +842,55 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.ExternalLink.URL(childComplexity), true
+
+	case "FileFacetAgg.buckets":
+		if e.complexity.FileFacetAgg.Buckets == nil {
+			break
+		}
+
+		return e.complexity.FileFacetAgg.Buckets(childComplexity), true
+
+	case "FileFacetAgg.field":
+		if e.complexity.FileFacetAgg.Field == nil {
+			break
+		}
+
+		return e.complexity.FileFacetAgg.Field(childComplexity), true
+
+	case "FileFacetBucketAgg.count":
+		if e.complexity.FileFacetBucketAgg.Count == nil {
+			break
+		}
+
+		return e.complexity.FileFacetBucketAgg.Count(childComplexity), true
+
+	case "FileFacetBucketAgg.isEstimate":
+		if e.complexity.FileFacetBucketAgg.IsEstimate == nil {
+			break
+		}
+
+		return e.complexity.FileFacetBucketAgg.IsEstimate(childComplexity), true
+
+	case "FileFacetBucketAgg.totalSize":
+		if e.complexity.FileFacetBucketAgg.TotalSize == nil {
+			break
+		}
+
+		return e.complexity.FileFacetBucketAgg.TotalSize(childComplexity), true
+
+	case "FileFacetBucketAgg.value":
+		if e.complexity.FileFacetBucketAgg.Value == nil {
+			break
+		}
+
+		return e.complexity.FileFacetBucketAgg.Value(childComplexity), true
+
+	case "FileSearchFacetsResult.facets":
+		if e.complexity.FileSearchFacetsResult.Facets == nil {
+			break
+		}
+
+		return e.complexity.FileSearchFacetsResult.Facets(childComplexity), true
 
 	case "FileSearchItem.extension":
 		if e.complexity.FileSearchItem.Extension == nil {
@@ -1807,6 +1874,18 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 
 		return e.complexity.TorrentContentQuery.FileSearch(childComplexity, args["input"].(gqlmodel.FileSearchInput)), true
 
+	case "TorrentContentQuery.fileSearchFacets":
+		if e.complexity.TorrentContentQuery.FileSearchFacets == nil {
+			break
+		}
+
+		args, err := ec.field_TorrentContentQuery_fileSearchFacets_args(context.TODO(), rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.TorrentContentQuery.FileSearchFacets(childComplexity, args["input"].(gen.FileSearchFacetsInput)), true
+
 	case "TorrentContentQuery.pathTypeahead":
 		if e.complexity.TorrentContentQuery.PathTypeahead == nil {
 			break
@@ -2342,6 +2421,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	ec := executionContext{opCtx, e, 0, 0, make(chan graphql.DeferredResult)}
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
 		ec.unmarshalInputContentTypeFacetInput,
+		ec.unmarshalInputFileSearchFacetsInput,
 		ec.unmarshalInputFileSearchInput,
 		ec.unmarshalInputFileSearchSortInput,
 		ec.unmarshalInputGenreFacetInput,
@@ -2685,6 +2765,44 @@ input PathTypeaheadInput {
 type PathTypeaheadResult {
   suggestions: [String!]!
 }
+
+enum FileFacetField {
+  extension
+}
+
+input FileSearchFacetsInput {
+  query: String
+  extensions: [String!]
+  minSize: Int
+  maxSize: Int
+  """
+  Which facet fields to aggregate. v1 supports only ` + "`" + `extension` + "`" + `; unknown values
+  are ignored. Omitted/empty requests the default set (extension).
+  """
+  facets: [FileFacetField!]
+}
+
+"""
+One aggregated facet value and its exact match count. totalSize is the summed
+byte size of the matching files in the bucket. isEstimate mirrors the
+torrentContent aggregation contract; L2 facet counts are exact so it is always
+false in v1.
+"""
+type FileFacetBucketAgg {
+  value: String!
+  count: Int!
+  totalSize: Int!
+  isEstimate: Boolean!
+}
+
+type FileFacetAgg {
+  field: FileFacetField!
+  buckets: [FileFacetBucketAgg!]!
+}
+
+type FileSearchFacetsResult {
+  facets: [FileFacetAgg!]!
+}
 `, BuiltIn: false},
 	{Name: "../../graphql/schema/metrics.graphqls", Input: `enum MetricsBucketDuration {
   minute
@@ -2933,6 +3051,7 @@ type SuggestedTag {
 type TorrentContentQuery {
   search(input: TorrentContentSearchQueryInput!): TorrentContentSearchResult!
   fileSearch(input: FileSearchInput!): FileSearchResult!
+  fileSearchFacets(input: FileSearchFacetsInput!): FileSearchFacetsResult!
   pathTypeahead(input: PathTypeaheadInput!): PathTypeaheadResult!
   collapsePaths(
     input: TorrentContentCollapsePathsInput!
@@ -3480,6 +3599,34 @@ func (ec *executionContext) field_TorrentContentQuery_collapsePaths_argsInput(
 	}
 
 	var zeroVal gqlmodel.TorrentContentCollapsePathsInput
+	return zeroVal, nil
+}
+
+func (ec *executionContext) field_TorrentContentQuery_fileSearchFacets_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := ec.field_TorrentContentQuery_fileSearchFacets_argsInput(ctx, rawArgs)
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg0
+	return args, nil
+}
+func (ec *executionContext) field_TorrentContentQuery_fileSearchFacets_argsInput(
+	ctx context.Context,
+	rawArgs map[string]any,
+) (gen.FileSearchFacetsInput, error) {
+	if _, ok := rawArgs["input"]; !ok {
+		var zeroVal gen.FileSearchFacetsInput
+		return zeroVal, nil
+	}
+
+	ctx = graphql.WithPathContext(ctx, graphql.NewPathWithField("input"))
+	if tmp, ok := rawArgs["input"]; ok {
+		return ec.unmarshalNFileSearchFacetsInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileSearchFacetsInput(ctx, tmp)
+	}
+
+	var zeroVal gen.FileSearchFacetsInput
 	return zeroVal, nil
 }
 
@@ -5823,6 +5970,330 @@ func (ec *executionContext) fieldContext_ExternalLink_url(_ context.Context, fie
 	return fc, nil
 }
 
+func (ec *executionContext) _FileFacetAgg_field(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetAgg_field(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Field, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(gen.FileFacetField)
+	fc.Result = res
+	return ec.marshalNFileFacetField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetField(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetAgg_field(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type FileFacetField does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileFacetAgg_buckets(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetAgg_buckets(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Buckets, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]gen.FileFacetBucketAgg)
+	fc.Result = res
+	return ec.marshalNFileFacetBucketAgg2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetBucketAggᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetAgg_buckets(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "value":
+				return ec.fieldContext_FileFacetBucketAgg_value(ctx, field)
+			case "count":
+				return ec.fieldContext_FileFacetBucketAgg_count(ctx, field)
+			case "totalSize":
+				return ec.fieldContext_FileFacetBucketAgg_totalSize(ctx, field)
+			case "isEstimate":
+				return ec.fieldContext_FileFacetBucketAgg_isEstimate(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileFacetBucketAgg", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileFacetBucketAgg_value(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetBucketAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetBucketAgg_value(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Value, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(string)
+	fc.Result = res
+	return ec.marshalNString2string(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetBucketAgg_value(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetBucketAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileFacetBucketAgg_count(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetBucketAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetBucketAgg_count(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Count, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetBucketAgg_count(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetBucketAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileFacetBucketAgg_totalSize(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetBucketAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetBucketAgg_totalSize(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.TotalSize, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(int)
+	fc.Result = res
+	return ec.marshalNInt2int(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetBucketAgg_totalSize(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetBucketAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileFacetBucketAgg_isEstimate(ctx context.Context, field graphql.CollectedField, obj *gen.FileFacetBucketAgg) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileFacetBucketAgg_isEstimate(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.IsEstimate, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileFacetBucketAgg_isEstimate(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileFacetBucketAgg",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileSearchFacetsResult_facets(ctx context.Context, field graphql.CollectedField, obj *gen.FileSearchFacetsResult) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileSearchFacetsResult_facets(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.Facets, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.([]gen.FileFacetAgg)
+	fc.Result = res
+	return ec.marshalNFileFacetAgg2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetAggᚄ(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileSearchFacetsResult_facets(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileSearchFacetsResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "field":
+				return ec.fieldContext_FileFacetAgg_field(ctx, field)
+			case "buckets":
+				return ec.fieldContext_FileFacetAgg_buckets(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileFacetAgg", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _FileSearchItem_infoHash(ctx context.Context, field graphql.CollectedField, obj *filesearch.FileSearchItem) (ret graphql.Marshaler) {
 	fc, err := ec.fieldContext_FileSearchItem_infoHash(ctx, field)
 	if err != nil {
@@ -7521,6 +7992,8 @@ func (ec *executionContext) fieldContext_Query_torrentContent(_ context.Context,
 				return ec.fieldContext_TorrentContentQuery_search(ctx, field)
 			case "fileSearch":
 				return ec.fieldContext_TorrentContentQuery_fileSearch(ctx, field)
+			case "fileSearchFacets":
+				return ec.fieldContext_TorrentContentQuery_fileSearchFacets(ctx, field)
 			case "pathTypeahead":
 				return ec.fieldContext_TorrentContentQuery_pathTypeahead(ctx, field)
 			case "collapsePaths":
@@ -12307,6 +12780,65 @@ func (ec *executionContext) fieldContext_TorrentContentQuery_fileSearch(ctx cont
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_TorrentContentQuery_fileSearch_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _TorrentContentQuery_fileSearchFacets(ctx context.Context, field graphql.CollectedField, obj *gqlmodel.TorrentContentQuery) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_TorrentContentQuery_fileSearchFacets(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return ec.resolvers.TorrentContentQuery().FileSearchFacets(rctx, obj, fc.Args["input"].(gen.FileSearchFacetsInput))
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(gen.FileSearchFacetsResult)
+	fc.Result = res
+	return ec.marshalNFileSearchFacetsResult2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileSearchFacetsResult(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_TorrentContentQuery_fileSearchFacets(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "TorrentContentQuery",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "facets":
+				return ec.fieldContext_FileSearchFacetsResult_facets(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type FileSearchFacetsResult", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_TorrentContentQuery_fileSearchFacets_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -17506,6 +18038,61 @@ func (ec *executionContext) unmarshalInputContentTypeFacetInput(ctx context.Cont
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputFileSearchFacetsInput(ctx context.Context, obj any) (gen.FileSearchFacetsInput, error) {
+	var it gen.FileSearchFacetsInput
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"query", "extensions", "minSize", "maxSize", "facets"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "query":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("query"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Query = graphql.OmittableOf(data)
+		case "extensions":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("extensions"))
+			data, err := ec.unmarshalOString2ᚕstringᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Extensions = graphql.OmittableOf(data)
+		case "minSize":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("minSize"))
+			data, err := ec.unmarshalOInt2ᚖint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.MinSize = graphql.OmittableOf(data)
+		case "maxSize":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("maxSize"))
+			data, err := ec.unmarshalOInt2ᚖint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.MaxSize = graphql.OmittableOf(data)
+		case "facets":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("facets"))
+			data, err := ec.unmarshalOFileFacetField2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetFieldᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Facets = graphql.OmittableOf(data)
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputFileSearchInput(ctx context.Context, obj any) (gqlmodel.FileSearchInput, error) {
 	var it gqlmodel.FileSearchInput
 	asMap := map[string]any{}
@@ -19289,6 +19876,143 @@ func (ec *executionContext) _ExternalLink(ctx context.Context, sel ast.Selection
 			}
 		case "url":
 			out.Values[i] = ec._ExternalLink_url(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileFacetAggImplementors = []string{"FileFacetAgg"}
+
+func (ec *executionContext) _FileFacetAgg(ctx context.Context, sel ast.SelectionSet, obj *gen.FileFacetAgg) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileFacetAggImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileFacetAgg")
+		case "field":
+			out.Values[i] = ec._FileFacetAgg_field(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "buckets":
+			out.Values[i] = ec._FileFacetAgg_buckets(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileFacetBucketAggImplementors = []string{"FileFacetBucketAgg"}
+
+func (ec *executionContext) _FileFacetBucketAgg(ctx context.Context, sel ast.SelectionSet, obj *gen.FileFacetBucketAgg) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileFacetBucketAggImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileFacetBucketAgg")
+		case "value":
+			out.Values[i] = ec._FileFacetBucketAgg_value(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "count":
+			out.Values[i] = ec._FileFacetBucketAgg_count(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "totalSize":
+			out.Values[i] = ec._FileFacetBucketAgg_totalSize(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "isEstimate":
+			out.Values[i] = ec._FileFacetBucketAgg_isEstimate(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.processDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var fileSearchFacetsResultImplementors = []string{"FileSearchFacetsResult"}
+
+func (ec *executionContext) _FileSearchFacetsResult(ctx context.Context, sel ast.SelectionSet, obj *gen.FileSearchFacetsResult) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, fileSearchFacetsResultImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("FileSearchFacetsResult")
+		case "facets":
+			out.Values[i] = ec._FileSearchFacetsResult_facets(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -21226,6 +21950,42 @@ func (ec *executionContext) _TorrentContentQuery(ctx context.Context, sel ast.Se
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "fileSearchFacets":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._TorrentContentQuery_fileSearchFacets(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
 		case "pathTypeahead":
 			field := field
 
@@ -23063,6 +23823,121 @@ func (ec *executionContext) marshalNExternalLink2ᚕgithubᚗcomᚋbitmagnetᚑi
 	return ret
 }
 
+func (ec *executionContext) marshalNFileFacetAgg2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetAgg(ctx context.Context, sel ast.SelectionSet, v gen.FileFacetAgg) graphql.Marshaler {
+	return ec._FileFacetAgg(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNFileFacetAgg2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetAggᚄ(ctx context.Context, sel ast.SelectionSet, v []gen.FileFacetAgg) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNFileFacetAgg2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetAgg(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNFileFacetBucketAgg2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetBucketAgg(ctx context.Context, sel ast.SelectionSet, v gen.FileFacetBucketAgg) graphql.Marshaler {
+	return ec._FileFacetBucketAgg(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNFileFacetBucketAgg2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetBucketAggᚄ(ctx context.Context, sel ast.SelectionSet, v []gen.FileFacetBucketAgg) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNFileFacetBucketAgg2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetBucketAgg(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) unmarshalNFileFacetField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetField(ctx context.Context, v any) (gen.FileFacetField, error) {
+	var res gen.FileFacetField
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNFileFacetField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetField(ctx context.Context, sel ast.SelectionSet, v gen.FileFacetField) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) unmarshalNFileSearchFacetsInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileSearchFacetsInput(ctx context.Context, v any) (gen.FileSearchFacetsInput, error) {
+	res, err := ec.unmarshalInputFileSearchFacetsInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNFileSearchFacetsResult2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileSearchFacetsResult(ctx context.Context, sel ast.SelectionSet, v gen.FileSearchFacetsResult) graphql.Marshaler {
+	return ec._FileSearchFacetsResult(ctx, sel, &v)
+}
+
 func (ec *executionContext) unmarshalNFileSearchInput2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚐFileSearchInput(ctx context.Context, v any) (gqlmodel.FileSearchInput, error) {
 	res, err := ec.unmarshalInputFileSearchInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -24738,6 +25613,73 @@ func (ec *executionContext) marshalOFacetLogic2ᚖgithubᚗcomᚋbitmagnetᚑio�
 	}
 	res := graphql.MarshalString(string(*v))
 	return res
+}
+
+func (ec *executionContext) unmarshalOFileFacetField2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetFieldᚄ(ctx context.Context, v any) ([]gen.FileFacetField, error) {
+	if v == nil {
+		return nil, nil
+	}
+	var vSlice []any
+	if v != nil {
+		vSlice = graphql.CoerceList(v)
+	}
+	var err error
+	res := make([]gen.FileFacetField, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNFileFacetField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetField(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalOFileFacetField2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetFieldᚄ(ctx context.Context, sel ast.SelectionSet, v []gen.FileFacetField) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	ret := make(graphql.Array, len(v))
+	var wg sync.WaitGroup
+	isLen1 := len(v) == 1
+	if !isLen1 {
+		wg.Add(len(v))
+	}
+	for i := range v {
+		i := i
+		fc := &graphql.FieldContext{
+			Index:  &i,
+			Result: &v[i],
+		}
+		ctx := graphql.WithFieldContext(ctx, fc)
+		f := func(i int) {
+			defer func() {
+				if r := recover(); r != nil {
+					ec.Error(ctx, ec.Recover(ctx, r))
+					ret = nil
+				}
+			}()
+			if !isLen1 {
+				defer wg.Done()
+			}
+			ret[i] = ec.marshalNFileFacetField2githubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋgqlᚋgqlmodelᚋgenᚐFileFacetField(ctx, sel, v[i])
+		}
+		if isLen1 {
+			f(i)
+		} else {
+			go f(i)
+		}
+
+	}
+	wg.Wait()
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) unmarshalOFileSearchSortInput2ᚕgithubᚗcomᚋbitmagnetᚑioᚋbitmagnetᚋinternalᚋsearchᚋfilesearchᚐFileSortᚄ(ctx context.Context, v any) ([]filesearch.FileSort, error) {

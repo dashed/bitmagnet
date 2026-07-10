@@ -13,16 +13,25 @@ type FeatureFlagsConfig struct {
 	PopularitySortDefault   bool
 	FileBrowserFromBlob     bool
 	FileSearchEnabled       bool
+	// FileSearchFacetsEnabled gates the GraphQL torrentContent.fileSearchFacets
+	// surface (L2 extension aggregations). Requires FileSearchEnabled. Default OFF.
+	FileSearchFacetsEnabled bool
+	// FileSearchTypeaheadRPCEnabled routes pathTypeahead through the L3 Suggest RPC
+	// (prefix index) instead of the candidate-derived adapter, falling back to the
+	// adapter when the RPC is disabled/unhealthy. Requires FileSearchEnabled. Default OFF.
+	FileSearchTypeaheadRPCEnabled bool
 }
 
 // NewDefaultFeatureFlagsConfig returns the safe, all-OFF default.
 func NewDefaultFeatureFlagsConfig() FeatureFlagsConfig {
 	return FeatureFlagsConfig{
-		DropCompatibleReads:     false,
-		GateFileExtensionsJSONB: false,
-		PopularitySortDefault:   false,
-		FileBrowserFromBlob:     false,
-		FileSearchEnabled:       false,
+		DropCompatibleReads:           false,
+		GateFileExtensionsJSONB:       false,
+		PopularitySortDefault:         false,
+		FileBrowserFromBlob:           false,
+		FileSearchEnabled:             false,
+		FileSearchFacetsEnabled:       false,
+		FileSearchTypeaheadRPCEnabled: false,
 	}
 }
 

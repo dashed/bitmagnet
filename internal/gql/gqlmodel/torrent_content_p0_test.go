@@ -187,6 +187,13 @@ func (r *recordingL3) PathCandidates(
 	return r.resp, nil
 }
 
+func (*recordingL3) Suggest(
+	context.Context,
+	*pb.SuggestRequest,
+) (*pb.SuggestResponse, error) {
+	panic("unexpected Suggest call")
+}
+
 // recordingSearch records whether the PostgreSQL search path was consulted. It
 // satisfies both search.TorrentContentSearch (the main path) and the composer's
 // internal searcher (same method set).

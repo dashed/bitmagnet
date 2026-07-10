@@ -460,6 +460,26 @@ func pathsearchOrderEligible(orderBy []gen.TorrentContentOrderByInput) bool {
 // so legitimate clients are unaffected; only abusive page sizes are capped.
 const maxPathSearchLimit uint = 200
 
+// capPathSearchLimit caps an already-defaulted page size to the L3 hard limit.
+func capPathSearchLimit(limit uint) uint {
+	if limit > maxPathSearchLimit {
+		return maxPathSearchLimit
+	}
+
+	return limit
+}
+
+// clampPathSearchLimit defaults an omitted (0) limit to defaultPageSize then
+// applies capPathSearchLimit. Used by the collapse:path route whose input.Limit
+// may be 0.
+func clampPathSearchLimit(limit uint) uint {
+	if limit == 0 {
+		limit = defaultPageSize
+	}
+
+	return capPathSearchLimit(limit)
+}
+
 // searchPageLimit / searchPageOffset replicate q.SearchParams.Option's page-window
 // arithmetic so the composer can paginate in Go (the L3 route does not push the
 // page window into PostgreSQL). An omitted limit resolves to defaultPageSize, the
@@ -478,12 +498,7 @@ func searchPageLimit(s q.SearchParams) uint {
 // The PostgreSQL path keeps using the unclamped searchPageLimit, so its behavior
 // is byte-identical to before.
 func pathSearchPageLimit(s q.SearchParams) uint {
-	limit := searchPageLimit(s)
-	if limit > maxPathSearchLimit {
-		return maxPathSearchLimit
-	}
-
-	return limit
+	return capPathSearchLimit(searchPageLimit(s))
 }
 
 func searchPageOffset(s q.SearchParams) uint {

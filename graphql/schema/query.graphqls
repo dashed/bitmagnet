@@ -35,6 +35,7 @@ type SuggestedTag {
 type TorrentContentQuery {
   search(input: TorrentContentSearchQueryInput!): TorrentContentSearchResult!
   fileSearch(input: FileSearchInput!): FileSearchResult!
+  fileSearchFacets(input: FileSearchFacetsInput!): FileSearchFacetsResult!
   pathTypeahead(input: PathTypeaheadInput!): PathTypeaheadResult!
   collapsePaths(
     input: TorrentContentCollapsePathsInput!

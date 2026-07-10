@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -14,7 +15,9 @@ use bitmagnet_proto::v1::path_search_service_server::PathSearchServiceServer;
 use bitmagnet_search::pathsearch::document::PathDocument;
 use bitmagnet_search::pathsearch::index::DEFAULT_WRITER_HEAP_BYTES;
 use bitmagnet_search::pathsearch::watermark::{current_epoch, read_watermark, write_watermark};
-use bitmagnet_search::pathsearch::PathSearchServer;
+use bitmagnet_search::pathsearch::{
+    PathSearchServer, PrefixIndex, PrefixIndexConfig, PREFIX_INDEX_FILENAME,
+};
 use clap::Parser;
 use tokio::task::JoinHandle;
 use tonic::transport::Server;
@@ -110,9 +113,26 @@ async fn main() -> anyhow::Result<()> {
     bitmagnet_common::init_tracing();
     let args = Args::parse();
     let heap = args.writer_heap_mb * 1024 * 1024;
-    let server = PathSearchServer::open(&args.index_path, heap, args.writer_threads)
+    let suggest_path = args.index_path.join(PREFIX_INDEX_FILENAME);
+    let prefix = PrefixIndex::open(&suggest_path, PrefixIndexConfig::default())
+        .with_context(|| format!("opening prefix index at {}", suggest_path.display()))?
+        .map(Arc::new);
+    match &prefix {
+        Some(index) => info!(
+            entries = index.len(),
+            path = %suggest_path.display(),
+            "prefix index loaded"
+        ),
+        None => info!(
+            path = %suggest_path.display(),
+            "prefix index absent — Suggest disabled"
+        ),
+    }
+    let server = PathSearchServer::open(&args.index_path, heap, args.writer_threads, prefix)
         .with_context(|| format!("opening pathsearch index at {}", args.index_path.display()))?;
 
+    // Prefix suggestions are intentionally rebuilt only by backfill. Typeahead
+    // tolerates staleness; the backend can fall back to live path candidates.
     let _follow_task = if args.follow {
         Some(spawn_follow_loop(&args, server.clone()).await?)
     } else {
@@ -613,7 +633,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let server = PathSearchServer::open(&dir, 256 * 1024 * 1024, 1).expect("open server");
+        let server = PathSearchServer::open(&dir, 256 * 1024 * 1024, 1, None).expect("open server");
 
         let until = current_epoch() - 30;
         let since = until - 24 * 3600;
@@ -658,7 +678,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create index dir");
-        let server = PathSearchServer::open(&dir, 256 * 1024 * 1024, 1).expect("open server");
+        let server = PathSearchServer::open(&dir, 256 * 1024 * 1024, 1, None).expect("open server");
         let watermark_file = dir.join("watermark");
 
         // Two non-overlapping windows derived from ONE clock read, so the second
