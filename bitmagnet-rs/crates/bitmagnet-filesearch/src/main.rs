@@ -214,6 +214,9 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
+        // If registration failed, this branch would complete immediately and
+        // cause a premature clean shutdown (not ignore SIGTERM or hang). As
+        // PID 1 on Linux, SIGTERM registration is effectively infallible.
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut signal) => {
                 signal.recv().await;

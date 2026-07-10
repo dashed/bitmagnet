@@ -432,20 +432,9 @@ async fn main() -> Result<()> {
             }
             if outcome.acted {
                 if let (Some(dsn), Some(base)) = (dsn.as_deref(), outcome.base.as_ref()) {
-                    let pool = bitmagnet_db::PgPool::connect(dsn)
-                        .await
-                        .context("connecting to postgres for deleted_torrents prune")?;
-                    let margin = i64::try_from(prune_margin_secs).unwrap_or(i64::MAX);
-                    let cutoff = base.cut.saturating_sub(margin);
-                    let rows_deleted = bitmagnet_db::prune_deleted_torrents(&pool, cutoff)
-                        .await
-                        .context("pruning deleted_torrents after merge-base")?;
-                    info!(
-                        rows_deleted,
-                        base_cut = base.cut,
-                        cutoff_epoch = cutoff,
-                        prune_margin_secs,
-                        "merge-base deleted_torrents prune complete"
+                    swallow_prune_result(
+                        prune_deleted_torrents_after_merge_base(dsn, base.cut, prune_margin_secs)
+                            .await,
                     );
                 }
             }
@@ -598,6 +587,39 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn prune_deleted_torrents_after_merge_base(
+    dsn: &str,
+    base_cut: i64,
+    prune_margin_secs: u64,
+) -> Result<u64> {
+    let pool = bitmagnet_db::PgPool::connect(dsn)
+        .await
+        .context("connecting to postgres for deleted_torrents prune")?;
+    let margin = i64::try_from(prune_margin_secs).unwrap_or(i64::MAX);
+    let cutoff = base_cut.saturating_sub(margin);
+    let rows_deleted = bitmagnet_db::prune_deleted_torrents(&pool, cutoff)
+        .await
+        .context("pruning deleted_torrents after merge-base")?;
+    info!(
+        rows_deleted,
+        base_cut,
+        cutoff_epoch = cutoff,
+        prune_margin_secs,
+        "merge-base deleted_torrents prune complete"
+    );
+    Ok(rows_deleted)
+}
+
+fn swallow_prune_result(result: Result<u64>) {
+    if let Err(error) = result {
+        error!(
+            %error,
+            cause = %error.root_cause(),
+            "merge-base deleted_torrents prune failed after base publish; continuing"
+        );
+    }
+}
+
 fn report(job: &str, s: &export::BuildStats) {
     println!(
         "{job}: torrents_ok={} decode_errors={} file_rows={} padding_rows={} agg_ext={} agg_torrent_ext={} tombstones={} clean={}",
@@ -710,6 +732,9 @@ async fn follow_shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
+        // If registration failed, this branch would complete immediately and
+        // cause a premature clean shutdown (not ignore SIGTERM or hang). As
+        // PID 1 on Linux, SIGTERM registration is effectively infallible.
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut signal) => {
                 signal.recv().await;
@@ -875,7 +900,19 @@ fn run_from_hex(
 mod tests {
     use super::follow_backoff_secs;
     use super::resolve_seal_window_end;
+    use super::swallow_prune_result;
     use super::wait_for_follow_sleep;
+
+    #[test]
+    fn merge_base_prune_result_is_swallowed() {
+        let success = std::panic::catch_unwind(|| swallow_prune_result(Ok(7)));
+        let failure = std::panic::catch_unwind(|| {
+            swallow_prune_result(Err(anyhow::anyhow!("postgres unavailable")))
+        });
+
+        assert!(success.is_ok());
+        assert!(failure.is_ok());
+    }
 
     #[test]
     fn seal_window_end_defaults_to_lagged_now_and_rejects_bad_overrides() {
