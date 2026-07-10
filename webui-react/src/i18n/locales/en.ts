@@ -366,6 +366,26 @@ const en = {
     dashboard: "Dashboard",
     torrents: "Torrents",
   },
+  palette: {
+    close: "Close command palette",
+    copyHash: "Copy info hash",
+    copyMagnet: "Copy magnet link",
+    empty: "No matching commands",
+    external: "External",
+    groups: {
+      actions: "Actions",
+      language: "Language",
+      navigation: "Navigation",
+      saved: "Saved searches",
+      search: "Search",
+      theme: "Theme",
+    },
+    hint: "Search commands and actions…",
+    inputLabel: "Command palette",
+    language: "Language: {{language}}",
+    open: "Open command palette",
+    searchFor: "Search torrents for “{{query}}”",
+  },
   queue: {
     admin: {
       acknowledge: "I understand this permanently deletes the selected queue jobs.",

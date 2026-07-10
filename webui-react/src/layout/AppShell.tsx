@@ -3,11 +3,25 @@ import { useQuery } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useCommandPalette } from "../commands/CommandPaletteProvider";
 import { LanguageMenu } from "../components/LanguageMenu";
 import { ThemeToggle } from "../components/ThemeToggle";
 import { execute } from "../graphql/client";
 import { VersionDocument } from "../graphql/generated/graphql";
 import styles from "./AppShell.module.css";
+
+function preloadCommandPalette() {
+  void import("../commands/CommandPalette");
+}
+
+function PaletteIcon() {
+  return (
+    <svg aria-hidden="true" className={styles["paletteIcon"]} viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="6" />
+      <path d="m16 16 4 4" />
+    </svg>
+  );
+}
 
 function NavLink({
   active,
@@ -32,6 +46,7 @@ function NavLink({
 }
 
 export function AppShell({ children }: PropsWithChildren) {
+  const { open: openCommandPalette } = useCommandPalette();
   const { t } = useTranslation();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { data: versionData } = useQuery({
@@ -64,6 +79,17 @@ export function AppShell({ children }: PropsWithChildren) {
         </nav>
 
         <div className={styles["actions"]}>
+          <button
+            aria-label={t("palette.open")}
+            className={styles["paletteButton"]}
+            onClick={openCommandPalette}
+            onFocus={preloadCommandPalette}
+            onMouseEnter={preloadCommandPalette}
+            type="button"
+          >
+            <PaletteIcon />
+            <kbd className={styles["paletteShortcut"]}>⌘K</kbd>
+          </button>
           <LanguageMenu />
           <ThemeToggle />
         </div>

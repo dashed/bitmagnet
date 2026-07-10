@@ -177,6 +177,14 @@ describe("i18n infrastructure", () => {
       "minutes_30",
       "weeks_1",
     ]);
+    expectCatalogKeys("palette.groups", [
+      "actions",
+      "language",
+      "navigation",
+      "saved",
+      "search",
+      "theme",
+    ]);
     expectCatalogKeys("queue.order", ["created_at", "priority", "ran_at"]);
     expectCatalogKeys("queue.status", ["failed", "pending", "processed", "retry"]);
     expectCatalogKeys("search.ordering", [
