@@ -526,6 +526,7 @@ const en = {
     closeFilters: "Close filters",
     contentType: "Content type",
     contentTypeAll: "All",
+    contentTypeBadge: "Content type: {{type}}",
     copyMagnet: "Copy",
     copyMagnetLink: "Copy magnet link for {{title}}",
     descending: "Descending",

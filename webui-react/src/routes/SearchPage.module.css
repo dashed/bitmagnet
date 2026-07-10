@@ -695,6 +695,30 @@
   min-width: 0;
 }
 
+.contentTypeBadge {
+  align-items: center;
+  background: var(--mantine-primary-color-light);
+  border: 1px solid transparent;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-primary-color-light-color);
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 700;
+  justify-self: start;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  max-width: 100%;
+  padding: 1px 7px;
+  text-transform: uppercase;
+  width: fit-content;
+}
+
+.contentTypeBadge[data-content-type="unknown"] {
+  background: var(--mantine-color-default);
+  border-color: var(--mantine-color-default-border);
+  color: var(--mantine-color-dimmed);
+}
+
 .resultMain h2,
 .resultMain p {
   overflow-wrap: anywhere;

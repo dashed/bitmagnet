@@ -1824,6 +1824,15 @@ export function SearchPage() {
                           />
                         </label>
                         <div className={styles["resultMain"]}>
+                          <span
+                            aria-label={t("search.contentTypeBadge", {
+                              type: getContentTypeLabel(item.contentType ?? null, t),
+                            })}
+                            className={styles["contentTypeBadge"]}
+                            data-content-type={item.contentType ?? "unknown"}
+                          >
+                            {getContentTypeLabel(item.contentType ?? null, t)}
+                          </span>
                           <h2>
                             <Link
                               aria-label={title}
