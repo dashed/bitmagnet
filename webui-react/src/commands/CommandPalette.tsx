@@ -315,7 +315,12 @@ export default function CommandPalette({ commands, isOpen, onClose }: CommandPal
           value={query}
         />
 
-        <div className={styles["list"]} id={listboxId} role="listbox">
+        <div
+          aria-label={t("palette.resultsLabel")}
+          className={styles["list"]}
+          id={listboxId}
+          role="listbox"
+        >
           {visibleCommands.length > 0 ? (
             commandGroups.map((commandGroup) => (
               <div

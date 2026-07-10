@@ -329,7 +329,9 @@ const en = {
       allSources: "All sources",
       bucketDuration: "Bucket",
       bucketMultiplier: "Multiplier",
+      decreaseBucketMultiplier: "Decrease bucket multiplier",
       event: "Event",
+      increaseBucketMultiplier: "Increase bucket multiplier",
       lastUpdated: "Updated {{time}}",
       loading: "Loading metrics",
       queue: "Queue",
@@ -384,6 +386,7 @@ const en = {
     inputLabel: "Command palette",
     language: "Language: {{language}}",
     open: "Open command palette",
+    resultsLabel: "Command results",
     searchFor: "Search torrents for “{{query}}”",
   },
   queue: {
