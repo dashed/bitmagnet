@@ -42,6 +42,20 @@ type Config struct {
 	BatchTimeout time.Duration
 	// ShadowTimeout bounds a background shadow comparison.
 	ShadowTimeout time.Duration
+	// ServeTimeout bounds the Tantivy Search RPC on the Phase-6 serving hot path
+	// (SEARCH_SERVE_TIMEOUT). On a deadline or error the router fails closed to
+	// PostgreSQL.
+	ServeTimeout time.Duration
+	// MaxStaleness is the Phase-6 serve freshness bound
+	// (SEARCH_MAX_STALENESS): the sidecar is serve-eligible only if its watermark
+	// is within this age. The poller folds freshness into the cached serve
+	// decision. The default is 2m, matching the L2 freshness SLA. Serving requires
+	// a positive value and watermark_epoch > 0.
+	MaxStaleness time.Duration
+	// SearchHealthInterval is the cadence of the main-search HealthCheck poller
+	// (SEARCH_HEALTH_INTERVAL) that publishes doc_count and the cached serve
+	// decision. <= 0 falls back to a safe default.
+	SearchHealthInterval time.Duration
 	// ShadowMaxConcurrent bounds in-flight shadow comparisons
 	// (SEARCH_SHADOW_MAX_CONCURRENT). Default 4. When saturated, sampled
 	// comparisons are dropped without blocking the serving path.
@@ -170,17 +184,20 @@ type Config struct {
 // NewDefaultConfig returns the safe, disabled-by-default search config.
 func NewDefaultConfig() Config {
 	return Config{
-		Enabled:             false,
-		DualWriteEnabled:    true,
-		Address:             "unix:///run/bitmagnet/search.sock",
-		Engine:              string(router.ModePostgres),
-		SampleRate:          1,
-		CanaryPercent:       0,
-		Timeout:             5 * time.Second,
-		BatchTimeout:        0,
-		ShadowTimeout:       5 * time.Second,
-		ShadowMaxConcurrent: 4,
-		LogDiscrepancies:    true,
+		Enabled:              false,
+		DualWriteEnabled:     true,
+		Address:              "unix:///run/bitmagnet/search.sock",
+		Engine:               string(router.ModePostgres),
+		SampleRate:           1,
+		CanaryPercent:        0,
+		Timeout:              5 * time.Second,
+		BatchTimeout:         0,
+		ShadowTimeout:        5 * time.Second,
+		ServeTimeout:         800 * time.Millisecond,
+		MaxStaleness:         2 * time.Minute,
+		SearchHealthInterval: 30 * time.Second,
+		ShadowMaxConcurrent:  4,
+		LogDiscrepancies:     true,
 
 		// L2 filesearch — client construction defaults false (feature dark).
 		FileSearchEnabled:   false,
@@ -277,6 +294,7 @@ func (c Config) routerConfig() router.Config {
 		Mode:                mode,
 		SampleRate:          c.SampleRate,
 		CanaryPercent:       c.CanaryPercent,
+		ServeTimeout:        c.ServeTimeout,
 		ShadowTimeout:       c.ShadowTimeout,
 		ShadowMaxConcurrent: c.ShadowMaxConcurrent,
 		LogDiscrepancies:    c.LogDiscrepancies,

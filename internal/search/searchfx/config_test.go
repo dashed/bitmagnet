@@ -3,6 +3,7 @@ package searchfx
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/config"
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configresolver"
@@ -20,6 +21,9 @@ func TestNewDefaultConfigIsDisabledPassthrough(t *testing.T) {
 	assert.False(t, c.Enabled, "search must be off by default")
 	assert.True(t, c.DualWriteEnabled, "dual-write must preserve its existing default-on behavior")
 	assert.Equal(t, 4, c.ShadowMaxConcurrent)
+	assert.Equal(t, 800*time.Millisecond, c.ServeTimeout)
+	assert.Equal(t, 2*time.Minute, c.MaxStaleness)
+	assert.Equal(t, 30*time.Second, c.SearchHealthInterval)
 	assert.Equal(t, router.ModePostgres, c.routerConfig().Mode,
 		"a disabled, default config is a pure Postgres passthrough")
 }
@@ -72,12 +76,14 @@ func TestRouterConfigUsesModeWhenEnabled(t *testing.T) {
 	c.Enabled = true
 	c.Engine = string(router.ModeShadow)
 	c.SampleRate = 0.25
+	c.ServeTimeout = 650 * time.Millisecond
 	c.ShadowMaxConcurrent = 2
 	c.LogDiscrepancies = true
 
 	rc := c.routerConfig()
 	assert.Equal(t, router.ModeShadow, rc.Mode)
 	assert.InDelta(t, 0.25, rc.SampleRate, 0)
+	assert.Equal(t, 650*time.Millisecond, rc.ServeTimeout)
 	assert.Equal(t, 2, rc.ShadowMaxConcurrent)
 	assert.True(t, rc.LogDiscrepancies)
 }
