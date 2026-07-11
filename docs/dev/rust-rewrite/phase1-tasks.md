@@ -27,7 +27,7 @@ Go builder being ported — NO changes there).
 
 | # | Task | Status |
 |---|------|--------|
-| Q1 | Inventory the exact predicate/order/limit subset the Go Torznab adapter exercises (trace `internal/torznab/adapter*` → search options → `internal/database/search` builder); document it in the crate as the v1 contract | open |
+| Q1 | Inventory the exact predicate/order/limit subset the Go Torznab adapter exercises (trace `internal/torznab/adapter*` → search options → `internal/database/search` builder); document it in the crate as the v1 contract | ✅ done (ce1ad303; FIND-2 does NOT apply to Torznab — deviation noted) |
 | Q2 | Port that subset to sqlx query construction (hand-written SQL per the house style in bitmagnet-db; no ORM) incl. FIND-2 default ordering semantics where Torznab hits them | open |
 | Q3 | Parity: Go generator test emits fixture pairs (search options JSON → result infohash list against the live-PG CI lane's migrated schema + seeded fixture rows); Rust side consumes the same fixtures via the Phase-0 `bitmagnet-diff` harness → 0 diffs | open |
 
@@ -60,8 +60,8 @@ route PREPARED behind a default-off flag. NO deploys, NO route flip.
 
 | # | Task | Status |
 |---|------|--------|
-| I1 | Role per the sidecar pattern (Phase-0 conventions: tag-only pin, IfNotPresent, CNP default-deny + Prometheus allow, ServiceMonitor, BITMAGNET_METRICS_ADDR, goose-assert env) | open |
-| I2 | Image-import pipeline gains the torznab image; route flag `bitmagnet_torznab_route_enabled: false` with the Traefik IngressRoute staged | open |
+| I1 | Role per the sidecar pattern (Phase-0 conventions: tag-only pin, IfNotPresent, CNP default-deny + Prometheus allow, ServiceMonitor, BITMAGNET_METRICS_ADDR, goose-assert env) | ✅ done (homelab d0e4df5, dark) |
+| I2 | Image-import pipeline gains the torznab image; route flag `bitmagnet_torznab_route_enabled: false` with the Traefik IngressRoute staged | ✅ done (homelab 4fa1439; torznab excluded from IMAGE=all until Dockerfile lands) |
 
 ## Cross-lane contracts
 - `bitmagnet-search-query` public API: builder functions taking a
