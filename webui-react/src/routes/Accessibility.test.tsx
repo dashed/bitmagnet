@@ -203,6 +203,7 @@ const searchResponse = {
             filesCount: 2,
             magnetUri: `magnet:?xt=urn:btih:${INFO_HASH}`,
             name: "Accessibility Demo Torrent",
+            singleFile: false,
             size: 1_500_000_000,
           },
         },

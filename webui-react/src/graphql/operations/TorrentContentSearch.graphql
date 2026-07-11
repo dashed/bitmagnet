@@ -39,6 +39,7 @@ query TorrentContentSearch(
           filesCount
           magnetUri
           name
+          singleFile
           size
         }
       }

@@ -249,6 +249,18 @@ function getContentTypeLabel(value: ContentTypeSelection | null, t: (key: string
   return value && value !== "null" ? t(`contentTypes.${value}`) : t("contentTypes.unknown");
 }
 
+// A single-file torrent has no separate file rows, so the crawler leaves
+// filesCount null; it nonetheless has exactly one file. Surface that as 1 so the
+// result row shows a file count instead of hiding it (mirrors the detail page,
+// which renders a single synthesised file row for single-file torrents).
+function getDisplayFilesCount(torrent: SearchItem["torrent"]): number | null {
+  if (torrent.filesCount != null) {
+    return torrent.filesCount;
+  }
+
+  return torrent.singleFile ? 1 : null;
+}
+
 function renderResultExtensions(extensions: string[], t: TFunction) {
   if (extensions.length === 0) {
     return null;
@@ -1901,10 +1913,10 @@ export function SearchPage() {
                             <dt>{t("search.peers")}</dt>
                             <dd>{getPeerLabel(item, locale)}</dd>
                           </div>
-                          {item.torrent.filesCount ? (
+                          {getDisplayFilesCount(item.torrent) != null ? (
                             <div>
                               <dt>{t("search.files")}</dt>
-                              <dd>{item.torrent.filesCount.toLocaleString(locale)}</dd>
+                              <dd>{getDisplayFilesCount(item.torrent)?.toLocaleString(locale)}</dd>
                             </div>
                           ) : null}
                           <div>

@@ -1132,6 +1132,7 @@ export type TorrentContentSearchQuery = {
           filesCount?: number | null;
           magnetUri: string;
           name: string;
+          singleFile?: boolean | null;
           size: number;
         };
       }>;
@@ -1570,6 +1571,7 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
           filesCount
           magnetUri
           name
+          singleFile
           size
         }
       }
