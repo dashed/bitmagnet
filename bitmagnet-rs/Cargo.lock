@@ -753,6 +753,8 @@ name = "bitmagnet-search-query"
 version = "0.1.0"
 dependencies = [
  "bitmagnet-db",
+ "bitmagnet-model",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",

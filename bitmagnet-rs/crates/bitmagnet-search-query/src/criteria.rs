@@ -71,6 +71,7 @@ impl Criteria {
     }
 
     /// Negation combinator (Go `query.Not`).
+    #[allow(clippy::should_implement_trait)] // Frozen v1 constructor name.
     pub fn not(criteria: Criteria) -> Self {
         Self::Not(Box::new(criteria))
     }
