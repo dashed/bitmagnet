@@ -35,6 +35,16 @@ import (
 	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 )
 
+// TestMain pins the process timezone to UTC so RSSDate rendering
+// (Torznab pubDate/publishdate carry a numeric offset) is machine-independent.
+// The pg driver returns timestamptz in time.Local; without this the goldens would
+// bake in the generating host's offset. UTC matches the production cluster and the
+// Rust parity target — the golden's dates are the canonical UTC rendering.
+func TestMain(m *testing.M) {
+	time.Local = time.UTC
+	os.Exit(m.Run())
+}
+
 func setupV2TestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 

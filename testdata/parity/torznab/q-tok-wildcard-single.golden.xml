@@ -1,0 +1,25 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Eclipse - The Long Dark Novel EPUB</title>
+      <guid>295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb</guid>
+      <pubDate>Thu, 09 Jan 2020 00:00:00 +0000</pubDate>
+      <category>ebook</category>
+      <size>4200000</size>
+      <enclosure length="4200000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb&amp;dn=Eclipse+-+The+Long+Dark+Novel+EPUB&amp;xl=4200000"/>
+      <torznab:attr name="infohash" value="295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb&amp;dn=Eclipse+-+The+Long+Dark+Novel+EPUB&amp;xl=4200000"/>
+      <torznab:attr name="category" value="7000"/>
+      <torznab:attr name="size" value="4200000"/>
+      <torznab:attr name="publishdate" value="Thu, 09 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="45"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="47"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

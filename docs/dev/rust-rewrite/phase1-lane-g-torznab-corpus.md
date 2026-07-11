@@ -128,7 +128,7 @@ Coverage across the 25 rows:
    hashes the id to 20 bytes), so goldens and the replay harness share stable
    hashes without hard-coding them.
 
-## 4. Query corpus (`corpus.jsonl`, 65 queries)
+## 4. Query corpus (`corpus.jsonl`, 66 queries)
 
 Each line: `{id, kind: caps|search|error, path, desc, dims, expectIds?}`.
 Golden filename derives from id: `caps` → `caps.golden.xml`, else
@@ -141,7 +141,7 @@ ids the query is designed to return.
 > fixture/oracle has a bug (I fix it) or the adapter behaves differently than
 > modeled (needs review). Do not `-update` past an `expectIds` mismatch.
 
-Coverage (65 = 1 caps + 48 search + 14 tokenizer + 2 error):
+Coverage (66 = 1 caps + 49 search + 14 tokenizer + 2 error):
 
 | group | queries |
 |---|---|
@@ -150,7 +150,7 @@ Coverage (65 = 1 caps + 48 search + 14 tokenizer + 2 error):
 | t=search categories | 2000, 2030, 2040, 2045, 2060, 5000, 5040, 3000, 3030, 4000, 4050, 6000, 7000, 7020, 7030, 2000,5000 (multi), 8000 (noop edge), non-numeric edge |
 | t=search identifiers | imdbid, tmdbid, q+cat |
 | t=movie | all / q / imdbid / tmdbid / cat=2040 / paging / offset-beyond(empty) |
-| t=tvsearch | all / q / season / season+ep / imdbid / tmdbid / cat=5045 / season-nonnumeric edge |
+| t=tvsearch | all / q / season(whole-season trap → empty) / season-whole(=5 pack) / season+ep / imdbid / tmdbid / cat=5045 / season-nonnumeric edge |
 | t=music | all / q |
 | t=book | all / q / cat=7020(redundant edge) |
 | tokenizer (`tok-*`) | see §4.1 |
@@ -248,6 +248,20 @@ compares. Implemented once in Go (`internal/parity/torznab_xml.go`,
 - **Enclosure vs guid.** `guid` = infohash string; `enclosure@url` = magnet URI;
   `torznab:attr name="infohash"` = infohash. G2 extracts infohashes from the
   `torznab:attr name="infohash"` values (falls back to `guid`).
+- **`season=` alone = whole-season pack, not "episodes in season N".** The adapter
+  maps a bare `season=N` to `episodes #> '{N}' = '{}'::jsonb`, which matches only
+  torrents whose episodes JSON is the empty-object whole-season marker `{N:{}}`
+  (a season pack) — NOT torrents carrying specific episodes in season N. `season=N&ep=M`
+  instead uses `@> '{"M":{}}'`. The corpus freezes both: `tv-season` (=1) is empty
+  (only specific-episode s1 rows seeded) and `tv-season-whole` (=5) matches the
+  `tv-quasar-s05` pack. The `expectIds` oracle caught this during generation — my
+  first oracle modeled it wrong; the Go behavior is authoritative and now documented.
+- **RSS dates render in UTC.** `RSSDate` formats with a numeric offset in the
+  `time.Time`'s location, and the pg driver returns `timestamptz` in `time.Local`,
+  so the golden generator pins `time.Local = time.UTC` (TestMain). Goldens are the
+  canonical UTC rendering (`… +0000`); the Rust service must render pubDate/publishdate
+  in UTC too (the production cluster runs UTC). This is a determinism invariant, not
+  just a trap.
 
 ## 6. Gates
 
