@@ -52,6 +52,18 @@ type ComposerConfig struct {
 	// MaxCandidates hard-caps the candidates fetched and blob-decoded per request,
 	// regardless of OversampleFactor. 0 means no cap (not recommended in prod).
 	MaxCandidates uint
+	// MaxDecodeCandidates bounds the per-request candidate blob-decode for LATENCY
+	// (distinct from MaxCandidates, which bounds MEMORY). candidateBudget grows as
+	// (offset+limit)×OversampleFactor, so a large page size makes decode — and thus
+	// wall-clock — grow linearly (measured ≈13ms/torrent: limit 100 → 400 decodes ≈
+	// 5.3s, far under the MaxCandidates=2000 memory ceiling but well over an
+	// interactive budget). This caps the decode count so worst-case latency stays
+	// bounded regardless of page size. 0 falls back to DefaultMaxDecodeCandidates
+	// (never "no cap" — a 0/unset config is still latency-bounded, matching the
+	// MaxCandidates philosophy). The default leaves page-1 sizes ≤50 unchanged; only
+	// larger pages / deep offsets are bounded, which may serve a short page for a
+	// high-recall query (totalCount/candidate_total still reflects the fuller set).
+	MaxDecodeCandidates uint
 	// TypeaheadEnabled gates the UI path-typeahead route
 	// (SEARCH_PATH_TYPEAHEAD_ENABLED). The master switch is the composer existing
 	// at all (nil composer = pathsearch disabled).
@@ -406,6 +418,14 @@ func (c *Composer) CollapseEnabled() bool {
 // OOM/DoS — a single large request could decode an unbounded candidate set.
 const DefaultMaxCandidates uint = 2000
 
+// DefaultMaxDecodeCandidates is the per-request decode ceiling enforced when the
+// configured MaxDecodeCandidates is 0. It bounds LATENCY (not memory): at the
+// measured ≈13ms/decoded-torrent, 200 candidates ≈ 2s, which is the flat cost of
+// a limit-50 page today, so page-1 sizes ≤50 are unchanged while a limit-100 page
+// drops from ≈400 decodes (≈5.3s) to 200 (≈2s). Chosen to leave normal UI paging
+// byte-identical and only bound pathological page sizes / deep offsets.
+const DefaultMaxDecodeCandidates uint = 200
+
 // candidateBudget sizes the COUNT of candidate torrents to fetch and blob-decode
 // for a page window. It must cover offset+limit AFTER refine drops, hence the
 // oversample multiplier, bounded by the hard MaxCandidates cap.
@@ -438,12 +458,27 @@ func (c *Composer) candidateBudget(limit, offset uint) uint {
 		maxCands = DefaultMaxCandidates
 	}
 
+	// The LATENCY cap is likewise always applied; 0/unset → the safe default so a
+	// zero-valued config is never latency-unbounded.
+	maxDecode := c.cfg.MaxDecodeCandidates
+	if maxDecode == 0 {
+		maxDecode = DefaultMaxDecodeCandidates
+	}
+
 	// OversampleFactor is normalized to >= 1 in NewComposer, so budget >= need
 	// absent overflow; budget < need is therefore an unsigned-overflow sentinel
 	// (a hostile offset+limit), which we clamp straight to the cap.
 	budget := need * c.cfg.OversampleFactor
 	if budget < need || budget > maxCands {
 		budget = maxCands
+	}
+
+	// Bound decode COUNT for latency independently of the memory cap. This can pull
+	// the budget below `need` (e.g. a limit-100 page window of 400 → 200): the L3
+	// route then serves the top-relevance prefix of what refine yields and reports
+	// the fuller total via candidate_total, rather than blocking ~5s on the decode.
+	if budget > maxDecode {
+		budget = maxDecode
 	}
 
 	return budget

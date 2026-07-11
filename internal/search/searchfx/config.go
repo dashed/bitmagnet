@@ -121,6 +121,14 @@ type Config struct {
 	// request so a broad gram never decodes an unbounded set
 	// (SEARCH_PATHSEARCH_MAX_CANDIDATES).
 	PathsearchMaxCandidates uint
+	// PathsearchMaxDecodeCandidates bounds the per-request candidate blob-decode for
+	// LATENCY (SEARCH_PATHSEARCH_MAX_DECODE_CANDIDATES), distinct from
+	// PathsearchMaxCandidates (memory). The decode budget grows as
+	// (offset+limit)×PathsearchOversample, so a large page size makes wall-clock grow
+	// linearly (limit 100 ≈ 5.3s). This caps the decode count so worst-case latency
+	// stays interactive regardless of page size. 0 → composer default (200), which
+	// leaves page-1 sizes ≤50 unchanged and only bounds larger pages / deep offsets.
+	PathsearchMaxDecodeCandidates uint
 	// PathsearchHealthInterval is the cadence of the background L3 HealthCheck
 	// poller (SEARCH_PATHSEARCH_HEALTH_INTERVAL). The poll publishes the doc-count
 	// / healthy / watermark gauges and updates the cached HealthGate that fails the
@@ -207,16 +215,19 @@ func NewDefaultConfig() Config {
 		FileSearchRouteText: true,
 
 		// L3 pathsearch — all switches default false (feature off).
-		PathsearchEnabled:         false,
-		PathTypeaheadEnabled:      false,
-		PathCollapseEnabled:       false,
-		PathsearchAddress:         "bitmagnet-pathsearch.bitmagnet.svc:50053",
-		PathsearchTimeout:         5 * time.Second,
-		PathsearchMinQueryLength:  3,
-		PathsearchOversample:      4,
-		PathsearchMaxCandidates:   2000,
-		PathsearchHealthInterval:  15 * time.Second,
-		PathsearchMaxWatermarkLag: 0, // disabled by default (see field doc)
+		PathsearchEnabled:        false,
+		PathTypeaheadEnabled:     false,
+		PathCollapseEnabled:      false,
+		PathsearchAddress:        "bitmagnet-pathsearch.bitmagnet.svc:50053",
+		PathsearchTimeout:        5 * time.Second,
+		PathsearchMinQueryLength: 3,
+		PathsearchOversample:     4,
+		PathsearchMaxCandidates:  2000,
+		// Latency ceiling on the per-request decode (see field doc). 200 ≈ 2s at the
+		// measured ≈13ms/decode; leaves page-1 sizes ≤50 (≤200 decodes) unchanged.
+		PathsearchMaxDecodeCandidates: 200,
+		PathsearchHealthInterval:      15 * time.Second,
+		PathsearchMaxWatermarkLag:     0, // disabled by default (see field doc)
 
 		// gate7-4 byte-bound: per-torrent sanity cap + chunk + retained budgets.
 		// MaxRefineFiles == RefineFileBudget so ONE chunk's transient decode
@@ -259,6 +270,7 @@ func (c Config) composerConfig() pathsearch.ComposerConfig {
 		MinQueryLength:       c.PathsearchMinQueryLength,
 		OversampleFactor:     c.PathsearchOversample,
 		MaxCandidates:        c.PathsearchMaxCandidates,
+		MaxDecodeCandidates:  c.PathsearchMaxDecodeCandidates,
 		TypeaheadEnabled:     c.PathTypeaheadEnabled,
 		FileSearchRouteText:  c.FileSearchRouteText,
 		CollapseEnabled:      c.PathCollapseEnabled,

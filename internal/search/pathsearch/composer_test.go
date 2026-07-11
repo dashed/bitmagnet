@@ -364,14 +364,52 @@ func TestComposer_CandidateBudget_HardBounded(t *testing.T) {
 	}
 
 	// MaxCandidates == 0 must NOT mean "unbounded" — it falls back to the hard
-	// DefaultMaxCandidates so a misconfigured/zero cap is still memory-safe.
-	zeroCap := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 0}, nil)
+	// DefaultMaxCandidates so a misconfigured/zero cap is still memory-safe. Pin the
+	// latency cap high here so this asserts the MEMORY fallback in isolation (the
+	// latency cap's own default is exercised by TestComposer_CandidateBudget_DecodeLatencyCap).
+	zeroCap := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 0, MaxDecodeCandidates: DefaultMaxCandidates}, nil)
 	if got := zeroCap.candidateBudget(1<<20, 0); got != DefaultMaxCandidates {
 		t.Errorf(
 			"budget with MaxCandidates=0 = %d, want DefaultMaxCandidates(%d) — 0 must not be unbounded",
 			got,
 			DefaultMaxCandidates,
 		)
+	}
+}
+
+// TestComposer_CandidateBudget_DecodeLatencyCap asserts the LATENCY cap
+// (MaxDecodeCandidates) bounds the decode COUNT independently of the memory cap,
+// that a 0/unset value falls back to the safe default (never "no cap"), and that
+// it leaves normal page-1 sizes (<=50 -> <=200 decodes) unchanged while bounding
+// larger pages. This is the fix for the limit-100 relevance-search latency
+// (candidateBudget grew as (offset+limit)*Oversample -> ~5.3s at limit 100).
+func TestComposer_CandidateBudget_DecodeLatencyCap(t *testing.T) {
+	// Unset -> DefaultMaxDecodeCandidates, and it dominates the large memory cap.
+	def := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000}, nil)
+
+	// Page-1 sizes <=50 are unchanged: 20*4=80, 50*4=200 both <= the 200 default.
+	if got := def.candidateBudget(20, 0); got != 80 {
+		t.Errorf("budget(limit=20) = %d, want 80 (unchanged by the latency cap)", got)
+	}
+
+	if got := def.candidateBudget(50, 0); got != 200 {
+		t.Errorf("budget(limit=50) = %d, want 200 (at the cap, unchanged)", got)
+	}
+
+	// A limit-100 page is bounded from 400 down to the 200 default (~5.3s -> ~2s).
+	if got := def.candidateBudget(100, 0); got != DefaultMaxDecodeCandidates {
+		t.Errorf("budget(limit=100) = %d, want DefaultMaxDecodeCandidates(%d)", got, DefaultMaxDecodeCandidates)
+	}
+
+	// An explicit cap is honored and can bind below the memory cap.
+	tuned := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000, MaxDecodeCandidates: 120}, nil)
+	if got := tuned.candidateBudget(100, 0); got != 120 {
+		t.Errorf("budget(limit=100, decodeCap=120) = %d, want 120", got)
+	}
+
+	// 0/unset is never "unbounded": even an absurd window is bounded by the default.
+	if got := def.candidateBudget(1<<20, 0); got != DefaultMaxDecodeCandidates {
+		t.Errorf("budget(huge, decodeCap unset) = %d, want DefaultMaxDecodeCandidates(%d)", got, DefaultMaxDecodeCandidates)
 	}
 }
 
@@ -399,7 +437,10 @@ func TestComposer_Candidates_TruncatesToBudget(t *testing.T) {
 	}
 
 	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands, CandidateTotal: uint64(len(cands))}}
-	c := NewComposer(l3, nil, ComposerConfig{OversampleFactor: oversample, MaxCandidates: maxCands}, nil)
+	// Pin the latency cap == memory cap so this test isolates the MEMORY-cap
+	// truncation (the latency cap's own binding is covered by
+	// TestComposer_CandidateBudget_DecodeLatencyCap).
+	c := NewComposer(l3, nil, ComposerConfig{OversampleFactor: oversample, MaxCandidates: maxCands, MaxDecodeCandidates: maxCands}, nil)
 
 	ids, gotTotal, err := c.candidates(context.Background(), Filters{Query: "matrix"}, limit, 0, nil)
 	if err != nil {
