@@ -368,4 +368,18 @@ describe("SearchPage", () => {
     expect(await screen.findByText("4 results")).toBeTruthy();
     expect(screen.queryByText("About 669 results")).toBeNull();
   });
+
+  it("defaults the torrent search page size to 20 (matches Angular; not the slow 100)", async () => {
+    await renderAt("/app/?query=ubuntu");
+
+    await waitFor(() => {
+      const torrentCall = executeMock.mock.calls.find(
+        ([, variables]) =>
+          variables && !("input" in variables) && "queryString" in variables,
+      );
+
+      expect(torrentCall).toBeTruthy();
+      expect((torrentCall?.[1] as { limit?: number }).limit).toBe(20);
+    });
+  });
 });

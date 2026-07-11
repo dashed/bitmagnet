@@ -387,18 +387,24 @@ func TestComposer_CandidateBudget_DecodeLatencyCap(t *testing.T) {
 	// Unset -> DefaultMaxDecodeCandidates, and it dominates the large memory cap.
 	def := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000}, nil)
 
-	// Page-1 sizes <=50 are unchanged: 20*4=80, 50*4=200 both <= the 200 default.
-	if got := def.candidateBudget(20, 0); got != 80 {
-		t.Errorf("budget(limit=20) = %d, want 80 (unchanged by the latency cap)", got)
-	}
-
-	if got := def.candidateBudget(50, 0); got != 200 {
-		t.Errorf("budget(limit=50) = %d, want 200 (at the cap, unchanged)", got)
-	}
-
-	// A limit-100 page is bounded from 400 down to the 200 default (~5.3s -> ~2s).
-	if got := def.candidateBudget(100, 0); got != DefaultMaxDecodeCandidates {
-		t.Errorf("budget(limit=100) = %d, want DefaultMaxDecodeCandidates(%d)", got, DefaultMaxDecodeCandidates)
+	// The requested-page-size boundaries: 20/50 unchanged, 100/200 bounded to 200.
+	for _, tc := range []struct {
+		limit, offset, want uint
+	}{
+		{20, 0, 80},   // 20*4=80, under the cap (unchanged)
+		{50, 0, 200},  // 50*4=200, exactly at the cap (unchanged)
+		{100, 0, 200}, // 100*4=400 -> capped (the limit-100 fix: ~5.3s -> ~2s)
+		{200, 0, 200}, // 200*4=800 -> capped (also the maxPathSearchLimit ceiling)
+		// Offset interplay: candidateBudget covers offset+limit, so a deep page of a
+		// SMALL limit still crosses the cap. Page 2 of 20 (offset 20) stays under;
+		// page 3 (offset 40) crosses it.
+		{20, 20, 160}, // need=40 -> 160, under the cap (unchanged)
+		{20, 40, 200}, // need=60 -> 240 -> capped
+		{20, 0, 80},   // page 1 of the same limit is unaffected (regression guard)
+	} {
+		if got := def.candidateBudget(tc.limit, tc.offset); got != tc.want {
+			t.Errorf("budget(limit=%d, offset=%d) = %d, want %d", tc.limit, tc.offset, got, tc.want)
+		}
 	}
 
 	// An explicit cap is honored and can bind below the memory cap.
