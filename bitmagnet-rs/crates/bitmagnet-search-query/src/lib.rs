@@ -49,6 +49,7 @@
 //! FIND-2 does not apply on this path (see `CONTRACT.md` §Ordering).
 
 mod criteria;
+mod fts;
 mod order;
 mod params;
 mod query;

@@ -13,3 +13,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+bitmagnet-diff = { path = "../bitmagnet-diff" }
+tokio = { workspace = true }
+anyhow = { workspace = true }

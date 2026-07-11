@@ -4,17 +4,26 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[[bin]]
+name = "bitmagnet-torznab"
+path = "src/main.rs"
+
 [dependencies]
 bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 anyhow = { workspace = true }
 async-trait = "0.1"
 axum = "0.8"
 chrono = "0.4"
+clap = { workspace = true, features = ["env"] }
 form_urlencoded = "1"
+prometheus.workspace = true
 serde = { workspace = true }
+sqlx.workspace = true
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing.workspace = true
 
 [dev-dependencies]
 # The Lane G golden parity test parses the crate's raw `encoding/xml`-shaped

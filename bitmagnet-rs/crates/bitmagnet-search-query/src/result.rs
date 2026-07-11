@@ -55,3 +55,36 @@ pub struct SearchResultItem {
     /// `tmdb` external id for the content, if any.
     pub tmdb_id: Option<String>,
 }
+
+impl SearchResultItem {
+    /// Test-only constructor for a baseline result row.
+    ///
+    /// `#[non_exhaustive]` blocks the struct *literal* outside this crate, so
+    /// Lane T (`bitmagnet-torznab`) cannot build a `SearchResultItem` to drive
+    /// its XML goldens for populated feeds without a live DB. This gives a
+    /// minimal identity row (all other fields defaulted); every field is `pub`,
+    /// so callers mutate what they need afterwards (e.g. `item.seeders =
+    /// Some(5)`). Hidden from docs because it is not part of the runtime API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_test(info_hash: InfoHash, name: impl Into<String>, size: u64) -> Self {
+        Self {
+            info_hash,
+            name: name.into(),
+            size,
+            content_type: None,
+            published_at: 0,
+            seeders: None,
+            leechers: None,
+            files_count: None,
+            video_resolution: None,
+            video_3d: None,
+            video_codec: None,
+            release_group: None,
+            episodes: Episodes::new(),
+            release_year: None,
+            imdb_id: None,
+            tmdb_id: None,
+        }
+    }
+}
