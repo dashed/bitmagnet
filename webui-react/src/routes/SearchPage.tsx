@@ -254,27 +254,17 @@ function renderResultExtensions(extensions: string[], t: TFunction) {
     return null;
   }
 
+  // Show every extension (user decision 2026-07-11: no "+N more" overflow);
+  // the list wraps via the extensionList styles.
   const sorted = [...extensions].sort((a, b) => a.localeCompare(b));
-  const maxVisible = 4;
-  const shown = sorted.slice(0, maxVisible);
-  const overflow = sorted.slice(maxVisible);
 
   return (
     <ul aria-label={t("search.fileExtensions")} className={styles["extensionList"]}>
-      {shown.map((ext) => (
+      {sorted.map((ext) => (
         <li className={styles["extensionChip"]} key={ext}>
           {ext}
         </li>
       ))}
-      {overflow.length > 0 ? (
-        <li
-          className={styles["extensionChip"]}
-          data-overflow="true"
-          title={overflow.join(", ")}
-        >
-          {t("search.fileExtensionsMore", { count: overflow.length })}
-        </li>
-      ) : null}
     </ul>
   );
 }

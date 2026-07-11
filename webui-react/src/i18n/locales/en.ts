@@ -539,7 +539,6 @@ const en = {
     emptyTitle: "No torrents yet",
     fetchedIn: "fetched in {{ms}} ms",
     fileExtensions: "File extensions",
-    fileExtensionsMore: "+{{count}} more",
     files: "Files",
     filtersApplied: "Filters applied",
     filtersSummary: "Filters",
