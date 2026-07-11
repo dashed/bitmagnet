@@ -8,6 +8,8 @@ license = "MIT"
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 anyhow = { workspace = true }
+chrono = "0.4"
+quick-xml = "0.39"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
