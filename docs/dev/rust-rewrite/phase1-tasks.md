@@ -28,8 +28,8 @@ Go builder being ported — NO changes there).
 | # | Task | Status |
 |---|------|--------|
 | Q1 | Inventory the exact predicate/order/limit subset the Go Torznab adapter exercises (trace `internal/torznab/adapter*` → search options → `internal/database/search` builder); document it in the crate as the v1 contract | ✅ done (ce1ad303; FIND-2 does NOT apply to Torznab — deviation noted) |
-| Q2 | Port that subset to sqlx query construction (hand-written SQL per the house style in bitmagnet-db; no ORM) incl. FIND-2 default ordering semantics where Torznab hits them | open |
-| Q3 | Parity: Go generator test emits fixture pairs (search options JSON → result infohash list against the live-PG CI lane's migrated schema + seeded fixture rows); Rust side consumes the same fixtures via the Phase-0 `bitmagnet-diff` harness → 0 diffs | open |
+| Q2 | Port that subset to sqlx query construction (hand-written SQL per the house style in bitmagnet-db; no ORM) incl. FIND-2 default ordering semantics where Torznab hits them | ✅ done (merged 2026-07-11) |
+| Q3 | Parity: Go generator test emits fixture pairs (search options JSON → result infohash list against the live-PG CI lane's migrated schema + seeded fixture rows); Rust side consumes the same fixtures via the Phase-0 `bitmagnet-diff` harness → 0 diffs | ✅ done (merged 2026-07-11) |
 
 ## Lane T — `bitmagnet-torznab` crate + bin (branch `p1t-torznab`)
 Owns: `bitmagnet-rs/crates/bitmagnet-torznab/**`. Read-only reference:
@@ -39,9 +39,9 @@ behind a feature flag or in-crate trait; do NOT block.
 
 | # | Task | Status |
 |---|------|--------|
-| T1 | quick-xml response structs: caps, categories, search/tv/movie/music/book result feeds, `torznab:attr` emission, RSS date format — byte-parity with Go's output as the target (see Lane G goldens) | open |
-| T2 | axum handler on the Phase-0 bootstrap (bitmagnet-common serve/metrics/config): param parsing (t=, q=, cat=, imdbid= etc. — mirror Go's accepted params exactly incl. error XML), category mapping | open |
-| T3 | Torznab metric series parity (§01 §2.5 names) via bitmagnet-common metrics; goose_db_version boot assert (04 §3.2: Rust processes assert, never migrate) | open |
+| T1 | quick-xml response structs: caps, categories, search/tv/movie/music/book result feeds, `torznab:attr` emission, RSS date format — byte-parity with Go's output as the target (see Lane G goldens) | ✅ done (merged 2026-07-11) |
+| T2 | axum handler on the Phase-0 bootstrap (bitmagnet-common serve/metrics/config): param parsing (t=, q=, cat=, imdbid= etc. — mirror Go's accepted params exactly incl. error XML), category mapping | ✅ done (merged 2026-07-11) |
+| T3 | Torznab metric series parity (§01 §2.5 names) via bitmagnet-common metrics; goose_db_version boot assert (04 §3.2: Rust processes assert, never migrate) | ✅ done (merged 2026-07-11) |
 
 ## Lane G — parity goldens + gates (branch `p1g-goldens`)
 Owns: `internal/torznab/*parity_test.go` (new test files only),
