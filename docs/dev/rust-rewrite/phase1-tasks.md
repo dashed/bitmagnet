@@ -50,8 +50,8 @@ harness under `internal/parity/` (new files only).
 
 | # | Task | Status |
 |---|------|--------|
-| G1 | Golden corpus: run the REAL Go Torznab adapter over (a) caps, (b) a fixed ~50-query corpus (all t= modes, category combos, paging, edge params) against deterministic fixture data → `testdata/parity/torznab/*.golden.xml` + regen/assert tests; document the namespace/whitespace normalization | open |
-| G2 | Shadow-replay harness: replayer that fires the corpus at BOTH endpoints (Go :3333/torznab and the Rust service) and diffs infohash sets + ordering + counts → the ≥0.99 set-match / ≥0.98 count gates from the roadmap | open |
+| G1 | Golden corpus: run the REAL Go Torznab adapter over (a) caps, (b) a fixed ~50-query corpus (all t= modes, category combos, paging, edge params) against deterministic fixture data → `testdata/parity/torznab/*.golden.xml` + regen/assert tests; document the namespace/whitespace normalization | ✅ done (merged 2026-07-11) |
+| G2 | Shadow-replay harness: replayer that fires the corpus at BOTH endpoints (Go :3333/torznab and the Rust service) and diffs infohash sets + ordering + counts → the ≥0.99 set-match / ≥0.98 count gates from the roadmap | ✅ done (merged 2026-07-11) |
 
 ## Lane I — deploy IaC, ships DARK (branch: homelab master, own files)
 Owns (homelab repo): new `ansible/roles/bitmagnet-torznab/**`, a `torznab`
