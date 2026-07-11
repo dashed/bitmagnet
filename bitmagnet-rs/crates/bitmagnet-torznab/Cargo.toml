@@ -8,7 +8,11 @@ license = "MIT"
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 anyhow = { workspace = true }
+async-trait = "0.1"
+axum = "0.8"
 chrono = "0.4"
+form_urlencoded = "1"
+serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
@@ -17,3 +21,4 @@ tokio = { workspace = true }
 # for byte-exact Go `encoding/xml` parity, so quick-xml is test-only.
 quick-xml = "0.39"
 serde_json = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
