@@ -9,9 +9,11 @@ bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 anyhow = { workspace = true }
 chrono = "0.4"
-quick-xml = "0.39"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# Only the Lane G golden smoke test parses XML; the serializer is hand-rolled
+# for byte-exact Go `encoding/xml` parity, so quick-xml is test-only.
+quick-xml = "0.39"
 serde_json = { workspace = true }
