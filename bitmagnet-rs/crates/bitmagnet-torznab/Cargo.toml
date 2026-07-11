@@ -17,8 +17,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-# Only the Lane G golden smoke test parses XML; the serializer is hand-rolled
-# for byte-exact Go `encoding/xml` parity, so quick-xml is test-only.
+# The Lane G golden parity test parses the crate's raw `encoding/xml`-shaped
+# output and re-serialises it to the canonical normal form (a Rust port of
+# `internal/parity/torznab_xml.go`) for byte comparison; the production
+# serializer is hand-rolled for byte-exact Go parity, so quick-xml is test-only.
 quick-xml = "0.39"
+serde = { workspace = true }
 serde_json = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+# Re-declared from the normal deps so the golden integration test can reuse the
+# crate's HTTP param parser and name Lane Q's value types when building fixtures.
+bitmagnet-search-query = { path = "../bitmagnet-search-query" }
+form_urlencoded = "1"
+# The golden fixtures key each torrent's info hash as sha1(fixture-id), matching
+# Lane G's Go seed (`torznabFixtureInfoHash`).
+sha1 = "0.10"

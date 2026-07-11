@@ -14,11 +14,18 @@ use crate::response::{Channel, Enclosure, Item, Response, RssDate, SearchResult,
 const MAGNET_MIME_TYPE: &str = "application/x-bittorrent;x-scheme-handler/magnet";
 
 /// Builds the v1 magnet URI exposed by the current Lane Q result contract.
+///
+/// Mirrors Go `model.Torrent.MagnetURI` (`internal/model/torrents.go`): the
+/// `xt` btih topic, `&dn=` display name, then `&xl=` exact length (the byte
+/// size). Lane G's goldens pin the trailing `&xl`.
 #[must_use]
-pub fn magnet(info_hash: &InfoHash, name: &str) -> String {
+pub fn magnet(info_hash: &InfoHash, name: &str, size: u64) -> String {
     // TODO(lane-q): SearchResultItem carries only one v1 info hash, so this
     // cannot add the `btmh` topic emitted by Go for v2 and hybrid torrents.
-    format!("magnet:?xt=urn:btih:{info_hash}&dn={}", query_escape(name))
+    format!(
+        "magnet:?xt=urn:btih:{info_hash}&dn={}&xl={size}",
+        query_escape(name)
+    )
 }
 
 /// Maps a content classification to its Torznab numeric category ID.
@@ -64,6 +71,56 @@ pub fn to_search_result(
     }
 }
 
+/// Owned field view used by the Lane G golden parity harness to build an
+/// [`Item`] straight from `testdata/parity/torznab/fixtures.jsonl` — the
+/// v1 [`SearchResultItem`] has no external constructor (it is only produced by
+/// Lane Q's `SearchQuery::fetch`), so the parity test hands these fields to the
+/// real [`map_fields`] to exercise byte-parity without a live query. Not part
+/// of the supported API.
+#[doc(hidden)]
+pub struct FixtureItemFields {
+    pub info_hash: [u8; 20],
+    pub name: String,
+    pub size: u64,
+    pub content_type: Option<ContentType>,
+    pub published_at: i64,
+    pub seeders: Option<u32>,
+    pub leechers: Option<u32>,
+    pub files_count: Option<u32>,
+    pub video_resolution: Option<VideoResolution>,
+    pub video_codec: Option<String>,
+    pub release_group: Option<String>,
+    pub episodes: Episodes,
+    pub release_year: Option<i32>,
+    pub imdb_id: Option<String>,
+    pub tmdb_id: Option<String>,
+}
+
+/// Builds a Torznab [`Item`] from fixture fields through the production
+/// [`map_fields`] path. Parity-harness only (see [`FixtureItemFields`]).
+#[doc(hidden)]
+#[must_use]
+pub fn item_from_fixture_fields(fields: &FixtureItemFields) -> Item {
+    let info_hash = InfoHash::new(fields.info_hash);
+    map_fields(ResultFields {
+        info_hash: &info_hash,
+        name: &fields.name,
+        size: fields.size,
+        content_type: fields.content_type,
+        published_at: fields.published_at,
+        seeders: fields.seeders,
+        leechers: fields.leechers,
+        files_count: fields.files_count,
+        video_resolution: fields.video_resolution,
+        video_codec: fields.video_codec.as_deref(),
+        release_group: fields.release_group.as_deref(),
+        episodes: &fields.episodes,
+        release_year: fields.release_year,
+        imdb_id: fields.imdb_id.as_deref(),
+        tmdb_id: fields.tmdb_id.as_deref(),
+    })
+}
+
 struct ResultFields<'a> {
     info_hash: &'a InfoHash,
     name: &'a str,
@@ -106,7 +163,7 @@ impl<'a> From<&'a SearchResultItem> for ResultFields<'a> {
 
 fn map_fields(row: ResultFields<'_>) -> Item {
     let info_hash = row.info_hash.to_string();
-    let magnet = magnet(row.info_hash, row.name);
+    let magnet = magnet(row.info_hash, row.name, row.size);
     let pub_date = DateTime::<Utc>::from_timestamp(row.published_at, 0)
         .map(|date| RssDate(date.fixed_offset()))
         .unwrap_or_default();
@@ -249,7 +306,7 @@ mod tests {
         });
 
         let hash = "abababababababababababababababababababab";
-        let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=A+name+%26+more");
+        let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=A+name+%26+more&xl=42");
         assert_eq!(item.title, "A name & more");
         assert_eq!(item.guid.as_deref(), Some(hash));
         assert_eq!(item.category.as_deref(), Some("movie"));
@@ -290,10 +347,10 @@ mod tests {
     fn magnet_query_escape_matches_go_for_spaces_ampersands_and_utf8() {
         let info_hash = InfoHash::new([0; 20]);
         assert_eq!(
-            magnet(&info_hash, "space & café"),
+            magnet(&info_hash, "space & café", 4200),
             concat!(
                 "magnet:?xt=urn:btih:0000000000000000000000000000000000000000",
-                "&dn=space+%26+caf%C3%A9"
+                "&dn=space+%26+caf%C3%A9&xl=4200"
             )
         );
     }

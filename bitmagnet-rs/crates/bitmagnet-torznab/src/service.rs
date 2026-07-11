@@ -54,7 +54,6 @@ impl<C> Clone for ServiceState<C> {
 }
 
 /// Builds the dependency-injected Torznab and liveness routes.
-#[must_use]
 pub fn router<C>(config: Config, client: Arc<C>) -> Router
 where
     C: SearchClient,

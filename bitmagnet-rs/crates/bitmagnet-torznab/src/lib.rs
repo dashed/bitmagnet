@@ -34,6 +34,9 @@ pub use response::{
     caps, Caps, CapsLimits, CapsSearch, CapsSearching, CapsServer, Category, Channel, Enclosure,
     Item, Response, RssDate, SearchResult, Subcategory, TorznabAttr, TorznabError, RSS_DATE_FORMAT,
 };
-pub use result_map::{content_type_category_id, magnet, to_item, to_search_result};
+pub use result_map::{
+    content_type_category_id, item_from_fixture_fields, magnet, to_item, to_search_result,
+    FixtureItemFields,
+};
 pub use service::{router, SearchClient, SearchError};
 pub use xml::XmlError;
