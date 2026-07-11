@@ -150,9 +150,10 @@ type ComplexityRoot struct {
 	}
 
 	FileSearchResult struct {
-		HasNextPage func(childComplexity int) int
-		Items       func(childComplexity int) int
-		TotalCount  func(childComplexity int) int
+		HasNextPage          func(childComplexity int) int
+		Items                func(childComplexity int) int
+		TotalCount           func(childComplexity int) int
+		TotalCountIsEstimate func(childComplexity int) int
 	}
 
 	GenreAgg struct {
@@ -957,6 +958,13 @@ func (e *executableSchema) Complexity(typeName, field string, childComplexity in
 		}
 
 		return e.complexity.FileSearchResult.TotalCount(childComplexity), true
+
+	case "FileSearchResult.totalCountIsEstimate":
+		if e.complexity.FileSearchResult.TotalCountIsEstimate == nil {
+			break
+		}
+
+		return e.complexity.FileSearchResult.TotalCountIsEstimate(childComplexity), true
 
 	case "GenreAgg.count":
 		if e.complexity.GenreAgg.Count == nil {
@@ -2763,6 +2771,13 @@ type FileSearchItem {
 
 type FileSearchResult {
   totalCount: Int!
+  """
+  totalCountIsEstimate is true when totalCount is an approximation rather than an
+  exact matching-file count. The L3 pathsearch text route returns candidate_total
+  (a torrent-doc recall upper bound), so it is true; the L2 sidecar route counts
+  files exactly, so it is false. Mirrors TorrentContentSearchResult.
+  """
+  totalCountIsEstimate: Boolean!
   hasNextPage: Boolean!
   items: [FileSearchItem!]!
 }
@@ -6658,6 +6673,50 @@ func (ec *executionContext) fieldContext_FileSearchResult_totalCount(_ context.C
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _FileSearchResult_totalCountIsEstimate(ctx context.Context, field graphql.CollectedField, obj *filesearch.FileSearchResult) (ret graphql.Marshaler) {
+	fc, err := ec.fieldContext_FileSearchResult_totalCountIsEstimate(ctx, field)
+	if err != nil {
+		return graphql.Null
+	}
+	ctx = graphql.WithFieldContext(ctx, fc)
+	defer func() {
+		if r := recover(); r != nil {
+			ec.Error(ctx, ec.Recover(ctx, r))
+			ret = graphql.Null
+		}
+	}()
+	resTmp, err := ec.ResolverMiddleware(ctx, func(rctx context.Context) (any, error) {
+		ctx = rctx // use context from middleware stack in children
+		return obj.TotalCountIsEstimate, nil
+	})
+	if err != nil {
+		ec.Error(ctx, err)
+		return graphql.Null
+	}
+	if resTmp == nil {
+		if !graphql.HasFieldError(ctx, fc) {
+			ec.Errorf(ctx, "must not be null")
+		}
+		return graphql.Null
+	}
+	res := resTmp.(bool)
+	fc.Result = res
+	return ec.marshalNBoolean2bool(ctx, field.Selections, res)
+}
+
+func (ec *executionContext) fieldContext_FileSearchResult_totalCountIsEstimate(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "FileSearchResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
 		},
 	}
 	return fc, nil
@@ -12821,6 +12880,8 @@ func (ec *executionContext) fieldContext_TorrentContentQuery_fileSearch(ctx cont
 			switch field.Name {
 			case "totalCount":
 				return ec.fieldContext_FileSearchResult_totalCount(ctx, field)
+			case "totalCountIsEstimate":
+				return ec.fieldContext_FileSearchResult_totalCountIsEstimate(ctx, field)
 			case "hasNextPage":
 				return ec.fieldContext_FileSearchResult_hasNextPage(ctx, field)
 			case "items":
@@ -20204,6 +20265,11 @@ func (ec *executionContext) _FileSearchResult(ctx context.Context, sel ast.Selec
 			out.Values[i] = graphql.MarshalString("FileSearchResult")
 		case "totalCount":
 			out.Values[i] = ec._FileSearchResult_totalCount(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "totalCountIsEstimate":
+			out.Values[i] = ec._FileSearchResult_totalCountIsEstimate(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

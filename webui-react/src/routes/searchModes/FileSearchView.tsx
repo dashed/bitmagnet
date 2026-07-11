@@ -239,7 +239,9 @@ export default function FileSearchView() {
                 {search.query ? search.query : t("fileSearch.browseEyebrow")}
               </p>
               <h2 className={styles["title"]}>
-                {t("fileSearch.resultsCount", { count: result.totalCount })}
+                {result.totalCountIsEstimate
+                  ? t("fileSearch.resultsCountEstimate", { count: result.totalCount })
+                  : t("fileSearch.resultsCount", { count: result.totalCount })}
               </h2>
               {fetchMsRef.current !== null ? (
                 <p className={styles["latency"]}>

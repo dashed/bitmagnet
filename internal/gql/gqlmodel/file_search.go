@@ -266,9 +266,10 @@ func fileRowsResult(result pathsearch.FileRowsResult) filesearch.FileSearchResul
 	}
 
 	return filesearch.FileSearchResult{
-		Items:       items,
-		TotalCount:  result.TotalCount,
-		HasNextPage: result.HasNextPage,
+		Items:                items,
+		TotalCount:           result.TotalCount,
+		TotalCountIsEstimate: result.TotalCountIsEstimate,
+		HasNextPage:          result.HasNextPage,
 	}
 }
 

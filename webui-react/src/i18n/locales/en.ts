@@ -253,6 +253,8 @@ const en = {
     placeholder: "Search files by path or name",
     resultsCount: "{{count}} file",
     resultsCount_other: "{{count}} files",
+    resultsCountEstimate: "About {{count}} file",
+    resultsCountEstimate_other: "About {{count}} files",
     size: "Size",
     sort: "Sort",
     torrent: "Torrent",

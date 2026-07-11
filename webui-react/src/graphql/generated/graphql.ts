@@ -110,6 +110,45 @@ export type ExternalLink = {
 
 export type FacetLogic = "and" | "or";
 
+export type FileFacetAgg = {
+  __typename?: "FileFacetAgg";
+  buckets: Array<FileFacetBucketAgg>;
+  field: FileFacetField;
+};
+
+/**
+ * One aggregated facet value and its exact match count. totalSize is the summed
+ * byte size of the matching files in the bucket. isEstimate mirrors the
+ * torrentContent aggregation contract; L2 facet counts are exact so it is always
+ * false in v1.
+ */
+export type FileFacetBucketAgg = {
+  __typename?: "FileFacetBucketAgg";
+  count: Scalars["Int"]["output"];
+  isEstimate: Scalars["Boolean"]["output"];
+  totalSize: Scalars["Int"]["output"];
+  value: Scalars["String"]["output"];
+};
+
+export type FileFacetField = "extension";
+
+export type FileSearchFacetsInput = {
+  extensions?: InputMaybe<Array<Scalars["String"]["input"]>>;
+  /**
+   * Which facet fields to aggregate. v1 supports only `extension`; unknown values
+   * are ignored. Omitted/empty requests the default set (extension).
+   */
+  facets?: InputMaybe<Array<FileFacetField>>;
+  maxSize?: InputMaybe<Scalars["Int"]["input"]>;
+  minSize?: InputMaybe<Scalars["Int"]["input"]>;
+  query?: InputMaybe<Scalars["String"]["input"]>;
+};
+
+export type FileSearchFacetsResult = {
+  __typename?: "FileSearchFacetsResult";
+  facets: Array<FileFacetAgg>;
+};
+
 export type FileSearchInput = {
   extensions?: InputMaybe<Array<Scalars["String"]["input"]>>;
   infoHash?: InputMaybe<Scalars["Hash20"]["input"]>;
@@ -141,6 +180,13 @@ export type FileSearchResult = {
   hasNextPage: Scalars["Boolean"]["output"];
   items: Array<FileSearchItem>;
   totalCount: Scalars["Int"]["output"];
+  /**
+   * totalCountIsEstimate is true when totalCount is an approximation rather than an
+   * exact matching-file count. The L3 pathsearch text route returns candidate_total
+   * (a torrent-doc recall upper bound), so it is true; the L2 sidecar route counts
+   * files exactly, so it is false. Mirrors TorrentContentSearchResult.
+   */
+  totalCountIsEstimate: Scalars["Boolean"]["output"];
 };
 
 export type FileSearchSortInput = {
@@ -616,6 +662,7 @@ export type TorrentContentQuery = {
   __typename?: "TorrentContentQuery";
   collapsePaths: TorrentContentCollapsePathsResult;
   fileSearch: FileSearchResult;
+  fileSearchFacets: FileSearchFacetsResult;
   pathTypeahead: PathTypeaheadResult;
   search: TorrentContentSearchResult;
 };
@@ -626,6 +673,10 @@ export type TorrentContentQueryCollapsePathsArgs = {
 
 export type TorrentContentQueryFileSearchArgs = {
   input: FileSearchInput;
+};
+
+export type TorrentContentQueryFileSearchFacetsArgs = {
+  input: FileSearchFacetsInput;
 };
 
 export type TorrentContentQueryPathTypeaheadArgs = {
@@ -948,6 +999,7 @@ export type FileSearchQuery = {
     fileSearch: {
       __typename?: "FileSearchResult";
       totalCount: number;
+      totalCountIsEstimate: boolean;
       hasNextPage: boolean;
       items: Array<{
         __typename?: "FileSearchItem";
@@ -1423,6 +1475,7 @@ export const FileSearchDocument = new TypedDocumentString(`
   torrentContent {
     fileSearch(input: $input) {
       totalCount
+      totalCountIsEstimate
       hasNextPage
       items {
         infoHash

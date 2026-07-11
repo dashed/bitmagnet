@@ -216,6 +216,14 @@ func TestFileSearchRouteDecision_TextUsesPathsearch(t *testing.T) {
 		t.Fatalf("pathsearch result = %+v, want candidate_total=11 and refined file row", result)
 	}
 
+	// The L3 route's TotalCount is candidate_total (a torrent-doc recall upper
+	// bound), so the estimate flag must survive fileRowsResult conversion — the
+	// webui uses it to render "About N files" instead of presenting an estimate
+	// as an exact count.
+	if !result.TotalCountIsEstimate {
+		t.Fatalf("pathsearch (L3) route TotalCountIsEstimate = false, want true")
+	}
+
 	if !result.Items[0].TorrentContent.Seeders.Valid || result.Items[0].TorrentContent.Seeders.Uint != 1 {
 		t.Fatalf("pathsearch row torrent seeders = %+v, want 1", result.Items[0].TorrentContent.Seeders)
 	}

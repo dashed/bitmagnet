@@ -30,6 +30,13 @@ type FileSearchItem {
 
 type FileSearchResult {
   totalCount: Int!
+  """
+  totalCountIsEstimate is true when totalCount is an approximation rather than an
+  exact matching-file count. The L3 pathsearch text route returns candidate_total
+  (a torrent-doc recall upper bound), so it is true; the L2 sidecar route counts
+  files exactly, so it is false. Mirrors TorrentContentSearchResult.
+  """
+  totalCountIsEstimate: Boolean!
   hasNextPage: Boolean!
   items: [FileSearchItem!]!
 }

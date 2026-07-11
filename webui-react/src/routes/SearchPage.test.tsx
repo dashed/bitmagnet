@@ -93,6 +93,7 @@ describe("SearchPage", () => {
               hasNextPage: false,
               items: [],
               totalCount: 0,
+              totalCountIsEstimate: false,
             },
           },
         });
@@ -367,6 +368,60 @@ describe("SearchPage", () => {
 
     expect(await screen.findByText("4 results")).toBeTruthy();
     expect(screen.queryByText("About 669 results")).toBeNull();
+  });
+
+  it("labels the files-mode headline as an estimate when totalCount is approximate", async () => {
+    executeMock.mockImplementation((_document, variables) => {
+      const input = "input" in variables ? variables.input : undefined;
+
+      if (input && typeof input === "object" && "query" in input) {
+        return Promise.resolve({
+          torrentContent: {
+            fileSearch: {
+              hasNextPage: false,
+              items: [],
+              // L3 candidate_total: a torrent-doc recall upper bound, not an
+              // exact matching-file count — the UI must not present it as exact.
+              totalCount: 669,
+              totalCountIsEstimate: true,
+            },
+          },
+        });
+      }
+
+      return Promise.resolve(getEmptyTorrentSearchResult());
+    });
+
+    await renderAt("/app/?mode=files&query=lehman+trilogy");
+
+    expect(await screen.findByText("About 669 files")).toBeTruthy();
+    expect(screen.queryByText("669 files")).toBeNull();
+  });
+
+  it("shows an exact files-mode headline when totalCount is not an estimate", async () => {
+    executeMock.mockImplementation((_document, variables) => {
+      const input = "input" in variables ? variables.input : undefined;
+
+      if (input && typeof input === "object" && "query" in input) {
+        return Promise.resolve({
+          torrentContent: {
+            fileSearch: {
+              hasNextPage: false,
+              items: [],
+              totalCount: 11,
+              totalCountIsEstimate: false,
+            },
+          },
+        });
+      }
+
+      return Promise.resolve(getEmptyTorrentSearchResult());
+    });
+
+    await renderAt("/app/?mode=files&query=exact+file+count");
+
+    expect(await screen.findByText("11 files")).toBeTruthy();
+    expect(screen.queryByText("About 11 files")).toBeNull();
   });
 
   it("defaults the torrent search page size to 20 (matches Angular; not the slow 100)", async () => {

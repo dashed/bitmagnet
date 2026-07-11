@@ -138,6 +138,7 @@ type FileSearchResult {
   hasNextPage: Boolean!
   items: [FileSearchItem!]!
   totalCount: Int!
+  totalCountIsEstimate: Boolean!
 }
 
 input FileSearchSortInput {

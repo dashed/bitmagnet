@@ -167,9 +167,11 @@ func (c *SidecarClient) FileSearch(ctx context.Context, in FileSearchInput) (Fil
 	}
 
 	return FileSearchResult{
-		Items:       items,
-		TotalCount:  totalCount,
-		HasNextPage: resp.GetHasNext(),
+		Items:      items,
+		TotalCount: totalCount,
+		// L2 CountFiles is an exact matching-file count, never an estimate.
+		TotalCountIsEstimate: false,
+		HasNextPage:          resp.GetHasNext(),
 	}, nil
 }
 

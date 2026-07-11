@@ -174,6 +174,8 @@ func TestFileSearchMapsRowsOffsetHasNextAndCount(t *testing.T) {
 
 	assert.Equal(t, uint32(3), rpc.searchReq.GetPagination().GetLimit())
 	assert.Equal(t, uint(42), got.TotalCount)
+	// L2 CountFiles is exact, never an estimate.
+	assert.False(t, got.TotalCountIsEstimate)
 	assert.True(t, got.HasNextPage)
 	require.Len(t, got.Items, 2)
 	assert.Equal(t, id2, got.Items[0].InfoHash)

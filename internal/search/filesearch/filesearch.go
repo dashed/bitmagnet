@@ -108,9 +108,16 @@ type FileSearchItem struct {
 
 // FileSearchResult is a page of matched files.
 type FileSearchResult struct {
-	Items       []FileSearchItem
-	TotalCount  uint
-	HasNextPage bool
+	Items      []FileSearchItem
+	TotalCount uint
+	// TotalCountIsEstimate reports whether TotalCount is an approximation rather
+	// than an exact matching-file count. The L2 sidecar route counts files
+	// exactly (CountFiles RPC) so it is false; the L3 pathsearch text route
+	// returns candidate_total — a torrent-doc recall upper bound — so it is true.
+	// Mirrors TorrentContentSearchResult.totalCountIsEstimate so the webui can
+	// render "About N files" instead of presenting an estimate as exact.
+	TotalCountIsEstimate bool
+	HasNextPage          bool
 }
 
 // FacetsInput is the validated input for an L2 facet aggregation over the

@@ -2,6 +2,7 @@ query FileSearch($input: FileSearchInput!) {
   torrentContent {
     fileSearch(input: $input) {
       totalCount
+      totalCountIsEstimate
       hasNextPage
       items {
         infoHash
