@@ -316,4 +316,56 @@ describe("SearchPage", () => {
     expect(await screen.findByRole("region", { name: "Recent" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ubuntu" })).toBeTruthy();
   });
+
+  it("shows the exact summed contentType count, not the totalCount estimate", async () => {
+    executeMock.mockImplementation((_document, variables) => {
+      if ("input" in variables) {
+        return Promise.resolve(getEmptyTorrentSearchResult());
+      }
+
+      return Promise.resolve({
+        torrentContent: {
+          search: {
+            aggregations: {
+              contentType: [
+                { count: 1, isEstimate: false, label: "ebook", value: "ebook" },
+                { count: 1, isEstimate: false, label: "movie", value: "movie" },
+                { count: 2, isEstimate: false, label: "Unknown", value: null },
+              ],
+            },
+            hasNextPage: false,
+            items: [
+              {
+                contentType: "movie",
+                dhtFirstSeenAt: "2024-01-01T00:00:00Z",
+                dhtLastSeenAt: "2024-01-02T00:00:00Z",
+                dhtSeenCount: 5,
+                infoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                leechers: 2,
+                publishedAt: "2024-01-01T00:00:00Z",
+                seeders: 10,
+                title: "The Lehman Trilogy",
+                torrent: {
+                  fileExtensions: ["mp4"],
+                  filesCount: 3,
+                  magnetUri: "magnet:?xt=urn:btih:aaaa",
+                  name: "The.Lehman.Trilogy.2019.1080p",
+                  singleFile: false,
+                  size: 1234567,
+                },
+              },
+            ],
+            // Bogus budgeted_count planner estimate: the UI must not surface this.
+            totalCount: 669,
+            totalCountIsEstimate: true,
+          },
+        },
+      });
+    });
+
+    await renderAt("/app/?query=lehman+trilogy");
+
+    expect(await screen.findByText("4 results")).toBeTruthy();
+    expect(screen.queryByText("About 669 results")).toBeNull();
+  });
 });

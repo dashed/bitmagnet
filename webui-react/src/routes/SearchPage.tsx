@@ -1275,12 +1275,14 @@ export function SearchPage() {
   }, [pageItems, selectedInfoHashes]);
   const resultCount = result?.totalCount ?? 0;
   const isBrowse = search.query.length === 0;
-  const totalCountLabel = result?.totalCountIsEstimate
-    ? t("search.resultsCountEstimate", { count: resultCount })
-    : t("search.resultsCount", { count: resultCount });
   const hasResults = Boolean(result && result.items.length > 0);
   const isBusy = isSearchPending || isSearchFetching;
   const contentTypeAggregations = result?.aggregations.contentType ?? [];
+  // The headline count mirrors the Angular UI: sum the (exact) contentType facet
+  // buckets rather than result.totalCount, which is the budgeted_count fallback —
+  // a PostgreSQL planner row estimate (Plan Rows) that is wildly off for narrow
+  // full-text queries (e.g. "About 669 results" for a query with 4 matches). The
+  // facet aggregation is exact whenever no bucket reports isEstimate.
   const totalContentTypeCount =
     contentTypeAggregations.length > 0
       ? contentTypeAggregations.reduce((sum, agg) => sum + agg.count, 0)
@@ -1289,6 +1291,9 @@ export function SearchPage() {
     contentTypeAggregations.length > 0
       ? contentTypeAggregations.some((agg) => agg.isEstimate)
       : Boolean(result?.totalCountIsEstimate);
+  const totalCountLabel = totalContentTypeIsEstimate
+    ? t("search.resultsCountEstimate", { count: totalContentTypeCount })
+    : t("search.resultsCount", { count: totalContentTypeCount });
   const contentTypeOptions = getContentTypeOptions(contentTypeAggregations, search.contentType, t);
   const hasSizeFilter = Boolean(search.minSize || search.maxSize);
   const activeFilters = getActiveFilters(search, selectedFacetKeys, sanitizedFacetSelections, t);
