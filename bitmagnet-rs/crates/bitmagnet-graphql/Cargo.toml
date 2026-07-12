@@ -5,3 +5,10 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+async-graphql = "7"
+async-graphql-parser = "7"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
