@@ -189,12 +189,22 @@ order — non-deterministic. **Parity fixtures MUST give matched rows distinct
 `published_at` (case 1) and distinct `ts_rank_cd` ranks (case 2)** or paginate
 unstably. Q3 seed design must guarantee this.
 
+### Deviations
+
 **FIND-2 does NOT apply here.** The lone-relevance→`seeders DESC` popularity-sort
 rewrite lives in `internal/gql/gqlmodel/torrent_content.go` (flag
 `POPULARITY_SORT_DEFAULT`, default OFF) and only fires on the **GraphQL** path.
 The Torznab adapter builds options directly and never traverses gqlmodel, so its
 relevance order is the raw `ts_rank_cd` order above. (The phase-1 ledger's "FIND-2
 where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
+
+- **`files` attr from `files_count`.** The crate projects `files_count` from
+  `torrent_contents.files_count`; Lane T emits the `files` attr from it. Live Go instead uses
+  `len(Torrent.Files)` which is empty under the D1 `torrent_files` read-disable, so live Go omits
+  `files`. Deliberate: the Rust behavior restores data the D1 cutover removed from Go's feed.
+- **LIMIT/OFFSET rendered as literals.** Parameterised LIMIT drives PG to a parallel Gather-Merge
+  plan that shuffles ties nondeterministically; literals (matching GORM) keep a serial,
+  order-stable plan. Applies to any future full search builder (Phase-2 Lane S).
 
 **CTE race strategy** (`doItems` / `shouldTryCteStrategy`): a performance
 optimisation that returns identical results to the default strategy. It triggers
@@ -242,7 +252,7 @@ pub enum OrderDirection { Ascending, Descending }
 // query.rs — the entry point + execution
 pub fn build_query(params: &TorznabSearchParams) -> Result<SearchQuery, SearchQueryError>;
 pub struct SearchQuery { /* sql(): &str ; binds(): &[Bind] */ }
-pub enum Bind { Bytea(Vec<u8>), Text(String), BigInt(i64), Tsquery(String) }
+pub enum Bind { Bytea(Vec<u8>), Text(String), Tsquery(String) }
 impl SearchQuery {
     pub async fn fetch_info_hashes(&self, pool: &PgPool) -> Result<Vec<InfoHash>>; // Q3 parity output
     pub async fn fetch(&self, pool: &PgPool) -> Result<Vec<SearchResultItem>>;     // rows for XML
