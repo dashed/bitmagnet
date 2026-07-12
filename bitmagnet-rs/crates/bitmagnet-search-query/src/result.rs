@@ -54,6 +54,12 @@ pub struct SearchResultItem {
     pub imdb_id: Option<String>,
     /// `tmdb` external id for the content, if any.
     pub tmdb_id: Option<String>,
+    /// `torrents.info_hash_v1` (20-byte SHA-1), if present. Drives the
+    /// `xt=urn:btih:` magnet topic for v1/hybrid torrents (Go `Torrent.MagnetURI`).
+    pub info_hash_v1: Option<[u8; 20]>,
+    /// `torrents.info_hash_v2` (32-byte SHA-256), if present. Drives the
+    /// `xt=urn:btmh:1220<hex>` multihash magnet topic for v2/hybrid torrents.
+    pub info_hash_v2: Option<[u8; 32]>,
 }
 
 impl SearchResultItem {
@@ -85,6 +91,8 @@ impl SearchResultItem {
             release_year: None,
             imdb_id: None,
             tmdb_id: None,
+            info_hash_v1: None,
+            info_hash_v2: None,
         }
     }
 }

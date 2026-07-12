@@ -209,6 +209,11 @@ type searchQueryScenario struct {
 
 type searchQueryResultRow struct {
 	InfoHash    string  `json:"info_hash"`
+	InfoHashV1  *string `json:"info_hash_v1"`
+	InfoHashV2  *string `json:"info_hash_v2"`
+	PublishedAt int64   `json:"published_at"`
+	Seeders     *int    `json:"seeders"`
+	Leechers    *int    `json:"leechers"`
 	ReleaseYear *int    `json:"release_year"`
 	ImdbID      *string `json:"imdb_id"`
 	TmdbID      *string `json:"tmdb_id"`
@@ -361,6 +366,9 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 		seenNames[seed.name] = struct{}{}
 
 		publishedAt := baseTime.Add(time.Duration(i) * time.Hour)
+		if seed.number == 3 {
+			publishedAt = publishedAt.Add(750 * time.Millisecond)
+		}
 		if _, exists := seenPublishedAt[publishedAt]; exists {
 			t.Fatalf("duplicate seed published_at %s", publishedAt)
 		}
@@ -368,7 +376,7 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 
 		infoHash := fixedInfoHash(seed.number)
 		size := uint(100_000 + i)
-		torrents = append(torrents, model.Torrent{
+		torrent := model.Torrent{
 			InfoHash:    infoHash,
 			Name:        seed.name,
 			Size:        size,
@@ -376,7 +384,17 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 			CreatedAt:   publishedAt,
 			UpdatedAt:   publishedAt,
 			FilesStatus: model.FilesStatusNoInfo,
-		})
+		}
+		if seed.number == 1 {
+			v1 := fixedInfoHash(1)
+			var v2 protocol.InfoHashV2
+			for j := range v2 {
+				v2[j] = byte(j + 1)
+			}
+			torrent.InfoHashV1 = &v1
+			torrent.InfoHashV2 = &v2
+		}
+		torrents = append(torrents, torrent)
 
 		torrentContent := model.TorrentContent{
 			InfoHash:    infoHash,
@@ -387,6 +405,10 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 			PublishedAt: publishedAt,
 			Size:        size,
 			FilesCount:  model.NewNullUint(1),
+		}
+		if seed.number == 1 {
+			torrentContent.Seeders = model.NewNullUint(999)
+			torrentContent.Leechers = model.NewNullUint(999)
 		}
 		if seed.resolution != "" {
 			torrentContent.VideoResolution = model.NewNullVideoResolution(seed.resolution)
@@ -440,6 +462,17 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 		Omit("ID", "Torrent", "Content").
 		Create(&torrentContents).Error; err != nil {
 		t.Fatalf("insert parity torrent contents: %v", err)
+	}
+
+	sources := []model.TorrentsTorrentSource{
+		{Source: "dht", InfoHash: fixedInfoHash(1), Seeders: model.NewNullUint(10), Leechers: model.NewNullUint(5), SeenCount: 1, CreatedAt: baseTime, UpdatedAt: baseTime},
+		{Source: "rarbg", InfoHash: fixedInfoHash(1), Seeders: model.NewNullUint(3), Leechers: model.NewNullUint(8), SeenCount: 1, CreatedAt: baseTime, UpdatedAt: baseTime},
+	}
+	if err := db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Omit("TorrentSource").
+		Create(&sources).Error; err != nil {
+		t.Fatalf("insert parity torrent sources: %v", err)
 	}
 
 	attributes := []model.ContentAttribute{{
@@ -1026,7 +1059,26 @@ func runGoSearchQueryOracle(
 	rows := make([]searchQueryResultRow, 0, len(result.Items))
 	for _, item := range result.Items {
 		row := searchQueryResultRow{
-			InfoHash: strings.ToLower(item.InfoHash.String()),
+			InfoHash:    strings.ToLower(item.InfoHash.String()),
+			PublishedAt: item.PublishedAt.Unix(),
+		}
+		if item.Torrent.InfoHashV1 != nil {
+			s := item.Torrent.InfoHashV1.String()
+			row.InfoHashV1 = &s
+		}
+		if item.Torrent.InfoHashV2 != nil {
+			s := item.Torrent.InfoHashV2.String()
+			row.InfoHashV2 = &s
+		}
+		seeders := item.Torrent.Seeders()
+		if seeders.Valid {
+			value := int(seeders.Uint)
+			row.Seeders = &value
+		}
+		leechers := item.Torrent.Leechers()
+		if leechers.Valid {
+			value := int(leechers.Uint)
+			row.Leechers = &value
 		}
 		if !item.Content.ReleaseYear.IsNil() {
 			releaseYear := int(item.Content.ReleaseYear)

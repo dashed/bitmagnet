@@ -43,6 +43,11 @@ impl Driver for SearchQueryDriver {
                 .map(|item| {
                     serde_json::json!({
                         "info_hash": item.info_hash.to_string(),
+                        "info_hash_v1": item.info_hash_v1.map(|bytes| hex_lower(&bytes)),
+                        "info_hash_v2": item.info_hash_v2.map(|bytes| hex_lower(&bytes)),
+                        "published_at": item.published_at,
+                        "seeders": item.seeders,
+                        "leechers": item.leechers,
                         "release_year": item.release_year,
                         "imdb_id": item.imdb_id,
                         "tmdb_id": item.tmdb_id,
@@ -51,6 +56,15 @@ impl Driver for SearchQueryDriver {
                 .collect(),
         ))
     }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 #[test]
@@ -78,7 +92,15 @@ fn search_query_parity_via_live_postgres() {
             })
         })
     };
-    for field in ["release_year", "imdb_id", "tmdb_id"] {
+    for field in [
+        "seeders",
+        "leechers",
+        "release_year",
+        "imdb_id",
+        "tmdb_id",
+        "info_hash_v1",
+        "info_hash_v2",
+    ] {
         assert!(
             has_non_null_field(field),
             "search-query parity corpus lacks a non-null {field} value"
