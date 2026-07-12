@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 bitmagnet-db = { path = "../bitmagnet-db" }
+bitmagnet-fts = { path = "../bitmagnet-fts" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 sqlx = { workspace = true }
 serde = { workspace = true }

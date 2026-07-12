@@ -257,7 +257,7 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
     let mut state = BuildState::default();
     let tsquery_placeholder = _params.query.as_ref().and_then(|raw| {
         (!raw.is_empty())
-            .then(|| state.push_bind(Bind::Tsquery(crate::fts::app_query_to_tsquery(raw))))
+            .then(|| state.push_bind(Bind::Tsquery(bitmagnet_fts::app_query_to_tsquery(raw))))
     });
 
     let mut where_conditions = Vec::new();
