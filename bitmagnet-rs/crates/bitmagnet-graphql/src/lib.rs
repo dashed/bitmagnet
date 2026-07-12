@@ -1,3 +1,6 @@
 //! GraphQL read API for the bitmagnet Rust rewrite (Phase-2).
 //!
-//! Skeleton crate (Phase-2 P0-1); implemented by the Phase-2 build lanes.
+//! Lane G: async-graphql code-first schema reproducing the Go gqlgen SDL
+//! (0-diff gate via [`normalize`]) plus the read resolvers.
+
+pub mod normalize;
