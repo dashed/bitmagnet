@@ -209,6 +209,8 @@ type searchQueryScenario struct {
 
 type searchQueryResultRow struct {
 	InfoHash    string  `json:"info_hash"`
+	InfoHashV1  *string `json:"info_hash_v1"`
+	InfoHashV2  *string `json:"info_hash_v2"`
 	PublishedAt int64   `json:"published_at"`
 	Seeders     *int    `json:"seeders"`
 	Leechers    *int    `json:"leechers"`
@@ -374,7 +376,7 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 
 		infoHash := fixedInfoHash(seed.number)
 		size := uint(100_000 + i)
-		torrents = append(torrents, model.Torrent{
+		torrent := model.Torrent{
 			InfoHash:    infoHash,
 			Name:        seed.name,
 			Size:        size,
@@ -382,7 +384,17 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 			CreatedAt:   publishedAt,
 			UpdatedAt:   publishedAt,
 			FilesStatus: model.FilesStatusNoInfo,
-		})
+		}
+		if seed.number == 1 {
+			v1 := fixedInfoHash(1)
+			var v2 protocol.InfoHashV2
+			for j := range v2 {
+				v2[j] = byte(j + 1)
+			}
+			torrent.InfoHashV1 = &v1
+			torrent.InfoHashV2 = &v2
+		}
+		torrents = append(torrents, torrent)
 
 		torrentContent := model.TorrentContent{
 			InfoHash:    infoHash,
@@ -1049,6 +1061,14 @@ func runGoSearchQueryOracle(
 		row := searchQueryResultRow{
 			InfoHash:    strings.ToLower(item.InfoHash.String()),
 			PublishedAt: item.PublishedAt.Unix(),
+		}
+		if item.Torrent.InfoHashV1 != nil {
+			s := item.Torrent.InfoHashV1.String()
+			row.InfoHashV1 = &s
+		}
+		if item.Torrent.InfoHashV2 != nil {
+			s := item.Torrent.InfoHashV2.String()
+			row.InfoHashV2 = &s
 		}
 		seeders := item.Torrent.Seeders()
 		if seeders.Valid {

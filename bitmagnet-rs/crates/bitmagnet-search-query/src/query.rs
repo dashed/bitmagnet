@@ -81,6 +81,8 @@ struct OrderedRow {
 #[derive(Default)]
 struct Hydration {
     name: Option<String>,
+    info_hash_v1: Option<[u8; 20]>,
+    info_hash_v2: Option<[u8; 32]>,
     release_year: Option<i32>,
     imdb_id: Option<String>,
     tmdb_id: Option<String>,
@@ -182,11 +184,15 @@ impl SearchQuery {
             std::collections::HashMap::with_capacity(hydration_rows.len());
         for row in hydration_rows {
             let id: String = row.try_get("id")?;
+            let info_hash_v1: Option<Vec<u8>> = row.try_get("info_hash_v1")?;
+            let info_hash_v2: Option<Vec<u8>> = row.try_get("info_hash_v2")?;
             let release_year: Option<i32> = row.try_get("release_year")?;
             hydration.insert(
                 id,
                 Hydration {
                     name: row.try_get("name")?,
+                    info_hash_v1: decode_fixed_hash::<20>("info_hash_v1", info_hash_v1)?,
+                    info_hash_v2: decode_fixed_hash::<32>("info_hash_v2", info_hash_v2)?,
                     release_year: release_year.filter(|year| *year != 0),
                     imdb_id: row.try_get("imdb_id")?,
                     tmdb_id: row.try_get("tmdb_id")?,
@@ -217,6 +223,8 @@ impl SearchQuery {
                 release_year: h.release_year,
                 imdb_id: h.imdb_id,
                 tmdb_id: h.tmdb_id,
+                info_hash_v1: h.info_hash_v1,
+                info_hash_v2: h.info_hash_v2,
             });
         }
         Ok(items)
@@ -319,7 +327,7 @@ const INNER_JOIN_TORRENTS: &str =
     "\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash";
 const LEFT_JOIN_CONTENT: &str = "\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id";
 const ORDERING_SELECT: &str = "SELECT torrent_contents.id AS id,\n       torrent_contents.info_hash AS info_hash,\n       torrent_contents.size AS size,\n       torrent_contents.content_type AS content_type,\n       floor(EXTRACT(EPOCH FROM torrent_contents.published_at))::bigint AS published_at,\n       torrent_contents.files_count::bigint AS files_count,\n       torrent_contents.video_resolution AS video_resolution,\n       torrent_contents.video_3d AS video_3d,\n       torrent_contents.video_codec AS video_codec,\n       torrent_contents.release_group AS release_group,\n       COALESCE(torrent_contents.episodes, '{}'::jsonb) AS episodes\nFROM torrent_contents";
-const HYDRATION_BY_ID_SQL: &str = "SELECT torrent_contents.id AS id,\n       torrents.name AS name,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,\n       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers\nFROM torrent_contents\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'\nWHERE torrent_contents.id = ANY($1::text[])";
+const HYDRATION_BY_ID_SQL: &str = "SELECT torrent_contents.id AS id,\n       torrents.name AS name,\n       torrents.info_hash_v1 AS info_hash_v1,\n       torrents.info_hash_v2 AS info_hash_v2,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,\n       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers\nFROM torrent_contents\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'\nWHERE torrent_contents.id = ANY($1::text[])";
 
 #[derive(Default)]
 struct BuildState {
@@ -582,6 +590,19 @@ impl From<DbEpisodes> for Episodes {
 
 fn decode_info_hash(raw: &[u8]) -> Result<InfoHash> {
     InfoHash::from_slice(raw).map_err(|error| decode_error(format!("info_hash: {error}")))
+}
+
+fn decode_fixed_hash<const N: usize>(
+    column: &str,
+    value: Option<Vec<u8>>,
+) -> Result<Option<[u8; N]>> {
+    value
+        .map(|bytes| {
+            <[u8; N]>::try_from(bytes.as_slice()).map_err(|_| {
+                decode_error(format!("{column}: expected {N} bytes, got {}", bytes.len()))
+            })
+        })
+        .transpose()
 }
 
 fn decode_content_type(value: Option<String>) -> Result<Option<ContentType>> {

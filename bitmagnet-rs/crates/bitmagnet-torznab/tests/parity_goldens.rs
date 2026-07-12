@@ -210,6 +210,8 @@ impl Fixture {
 
         FixtureItemFields {
             info_hash: fixture_info_hash(&self.id),
+            info_hash_v1: None,
+            info_hash_v2: None,
             name: self.title.clone(),
             size: self.size,
             content_type,
