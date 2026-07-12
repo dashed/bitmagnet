@@ -189,12 +189,35 @@ order — non-deterministic. **Parity fixtures MUST give matched rows distinct
 `published_at` (case 1) and distinct `ts_rank_cd` ranks (case 2)** or paginate
 unstably. Q3 seed design must guarantee this.
 
+### Deviations
+
 **FIND-2 does NOT apply here.** The lone-relevance→`seeders DESC` popularity-sort
 rewrite lives in `internal/gql/gqlmodel/torrent_content.go` (flag
 `POPULARITY_SORT_DEFAULT`, default OFF) and only fires on the **GraphQL** path.
 The Torznab adapter builds options directly and never traverses gqlmodel, so its
 relevance order is the raw `ts_rank_cd` order above. (The phase-1 ledger's "FIND-2
 where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
+
+- **`files` attr from `files_count`.** The crate projects `files_count` from
+  `torrent_contents.files_count`; Lane T emits the `files` attr from it. Live Go instead uses
+  `len(Torrent.Files)` which is empty under the D1 `torrent_files` read-disable, so live Go omits
+  `files`. Deliberate: the Rust behavior restores data the D1 cutover removed from Go's feed.
+- **Ordered path must be lean (two-query hydration).** Literal LIMIT was necessary but not
+  sufficient: a single statement that also carries the hydration LEFT JOINs + correlated
+  subselects still plans as a parallel Gather Merge that shuffles equal-rank ties per execution.
+  `fetch()` therefore runs a LEAN single-table membership query (torrent_contents-resident columns
+  + filter joins + literal LIMIT — serial plan, mirrors GORM/Go) and a SEPARATE hydration query
+  keyed on `torrent_contents.id = ANY($1)` (torrents.name, content year/imdb/tmdb, sources-max
+  seeders/leechers), merged in memory preserving query-1 order. **Single-statement joined
+  hydration is FORBIDDEN on any ordered+LIMITed path — binding precedent for Phase-2 Lane S.**
+- **OBSERVATION — explicit `published_at` order carries a `, info_hash DESC` tiebreak that Go's
+  logged statement lacked.** `build_query` appends `torrent_contents.info_hash` as a secondary
+  sort key on the explicit-`published_at` path; a `pg_stat_statements` capture showed Go emitting
+  plain `published_at DESC`. Evidence conflicts (`internal/database/search/order_torrent_content.go`
+  PublishedAt `Clauses()` DOES include an info_hash tiebreak, so a Go call-path emits it — the
+  plain form seen may be a different, e.g. GraphQL, path). No observable divergence in either live
+  gate round (every published_at-ordered query was set=1.0 and order-matched on unique data). Not
+  changed; first suspect if a future gate shows browse-query order drift on `published_at` ties.
 
 **CTE race strategy** (`doItems` / `shouldTryCteStrategy`): a performance
 optimisation that returns identical results to the default strategy. It triggers
@@ -242,7 +265,7 @@ pub enum OrderDirection { Ascending, Descending }
 // query.rs — the entry point + execution
 pub fn build_query(params: &TorznabSearchParams) -> Result<SearchQuery, SearchQueryError>;
 pub struct SearchQuery { /* sql(): &str ; binds(): &[Bind] */ }
-pub enum Bind { Bytea(Vec<u8>), Text(String), BigInt(i64), Tsquery(String) }
+pub enum Bind { Bytea(Vec<u8>), Text(String), Tsquery(String) }
 impl SearchQuery {
     pub async fn fetch_info_hashes(&self, pool: &PgPool) -> Result<Vec<InfoHash>>; // Q3 parity output
     pub async fn fetch(&self, pool: &PgPool) -> Result<Vec<SearchResultItem>>;     // rows for XML

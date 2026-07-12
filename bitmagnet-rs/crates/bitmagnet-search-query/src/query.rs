@@ -48,8 +48,6 @@ pub enum Bind {
     Bytea(Vec<u8>),
     /// A `text` value (content type, resolution, source, id, tag ...).
     Text(String),
-    /// A signed integer (`bigint`) value.
-    BigInt(i64),
     /// A pre-tokenised tsquery string, cast `::tsquery` at the placeholder.
     Tsquery(String),
 }
@@ -64,6 +62,30 @@ pub enum Bind {
 pub struct SearchQuery {
     sql: String,
     binds: Vec<Bind>,
+}
+
+struct OrderedRow {
+    id: String,
+    info_hash: InfoHash,
+    size: u64,
+    content_type: Option<ContentType>,
+    published_at: i64,
+    files_count: Option<u32>,
+    video_resolution: Option<VideoResolution>,
+    video_3d: Option<Video3D>,
+    video_codec: Option<String>,
+    release_group: Option<String>,
+    episodes: Episodes,
+}
+
+#[derive(Default)]
+struct Hydration {
+    name: Option<String>,
+    release_year: Option<i32>,
+    imdb_id: Option<String>,
+    tmdb_id: Option<String>,
+    seeders: Option<u32>,
+    leechers: Option<u32>,
 }
 
 impl SearchQuery {
@@ -94,7 +116,6 @@ impl SearchQuery {
             query = match bind {
                 Bind::Bytea(value) => query.bind(value),
                 Bind::Text(value) | Bind::Tsquery(value) => query.bind(value),
-                Bind::BigInt(value) => query.bind(*value),
             };
         }
 
@@ -108,80 +129,106 @@ impl SearchQuery {
     }
 
     /// Execute and return fully-hydrated result rows for Lane T's XML.
-    pub async fn fetch(&self, _pool: &PgPool) -> Result<Vec<SearchResultItem>> {
-        let sql = self.hydration_sql()?;
-        // `hydration_sql` only replaces the fixed SELECT/FROM prefix of the
-        // already-audited builder output; all dynamic values remain bound.
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+    pub async fn fetch(&self, pool: &PgPool) -> Result<Vec<SearchResultItem>> {
+        // Query 1 — lean, ordered membership. NO hydration joins/subselects, so the
+        // planner stays serial (a joined+subselect projection tips PG into a parallel
+        // Gather Merge whose tie order is nondeterministic). See CONTRACT.md "Deviations".
+        let ordering_sql = self.ordering_sql()?;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(ordering_sql));
         for bind in self.binds() {
             query = match bind {
                 Bind::Bytea(value) => query.bind(value),
                 Bind::Text(value) | Bind::Tsquery(value) => query.bind(value),
-                Bind::BigInt(value) => query.bind(*value),
             };
         }
+        let ordered_rows = query.fetch_all(pool).await?;
 
-        let rows = query.fetch_all(_pool).await?;
-        let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
+        let mut ordered: Vec<OrderedRow> = Vec::with_capacity(ordered_rows.len());
+        for row in ordered_rows {
             let raw_info_hash: Vec<u8> = row.try_get("info_hash")?;
             let content_type: Option<String> = row.try_get("content_type")?;
             let video_resolution: Option<String> = row.try_get("video_resolution")?;
             let video_3d: Option<String> = row.try_get("video_3d")?;
             let Json(db_episodes): Json<DbEpisodes> = row.try_get("episodes")?;
-            let release_year: Option<i32> = row.try_get("release_year")?;
 
-            items.push(SearchResultItem {
+            ordered.push(OrderedRow {
+                id: row.try_get("id")?,
                 info_hash: decode_info_hash(&raw_info_hash)?,
-                name: row
-                    .try_get::<Option<String>, _>("name")?
-                    .unwrap_or_default(),
                 size: decode_u64("size", row.try_get("size")?)?,
                 content_type: decode_content_type(content_type)?,
                 published_at: row.try_get("published_at")?,
-                seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
-                leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
+                // DEVIATION: `files` attr derives from denormalized files_count; live Go
+                // omits it under the D1 torrent_files read-disable. See CONTRACT.md.
                 files_count: decode_optional_u32("files_count", row.try_get("files_count")?)?,
                 video_resolution: decode_video_resolution(video_resolution)?,
                 video_3d: decode_video_3d(video_3d)?,
                 video_codec: row.try_get("video_codec")?,
                 release_group: row.try_get("release_group")?,
                 episodes: db_episodes.into(),
-                release_year: release_year.filter(|year| *year != 0),
-                imdb_id: row.try_get("imdb_id")?,
-                tmdb_id: row.try_get("tmdb_id")?,
+            });
+        }
+        if ordered.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Query 2 — hydration keyed by the exact per-row identity (tc.id). No ORDER
+        // BY/LIMIT, so its (possibly parallel) plan cannot affect membership or order.
+        let ids: Vec<String> = ordered.iter().map(|row| row.id.clone()).collect();
+        let hydration_rows = sqlx::query(sqlx::AssertSqlSafe(HYDRATION_BY_ID_SQL))
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?;
+        let mut hydration: std::collections::HashMap<String, Hydration> =
+            std::collections::HashMap::with_capacity(hydration_rows.len());
+        for row in hydration_rows {
+            let id: String = row.try_get("id")?;
+            let release_year: Option<i32> = row.try_get("release_year")?;
+            hydration.insert(
+                id,
+                Hydration {
+                    name: row.try_get("name")?,
+                    release_year: release_year.filter(|year| *year != 0),
+                    imdb_id: row.try_get("imdb_id")?,
+                    tmdb_id: row.try_get("tmdb_id")?,
+                    seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
+                    leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
+                },
+            );
+        }
+
+        // Merge preserving query-1 order.
+        let mut items = Vec::with_capacity(ordered.len());
+        for row in ordered {
+            let h = hydration.remove(&row.id).unwrap_or_default();
+            items.push(SearchResultItem {
+                info_hash: row.info_hash,
+                name: h.name.unwrap_or_default(),
+                size: row.size,
+                content_type: row.content_type,
+                published_at: row.published_at,
+                seeders: h.seeders,
+                leechers: h.leechers,
+                files_count: row.files_count,
+                video_resolution: row.video_resolution,
+                video_3d: row.video_3d,
+                video_codec: row.video_codec,
+                release_group: row.release_group,
+                episodes: row.episodes,
+                release_year: h.release_year,
+                imdb_id: h.imdb_id,
+                tmdb_id: h.tmdb_id,
             });
         }
         Ok(items)
     }
 
-    fn hydration_sql(&self) -> Result<String> {
+    fn ordering_sql(&self) -> Result<String> {
         let suffix = self.sql.strip_prefix(INFO_HASH_SELECT).ok_or_else(|| {
             SearchQueryError::InvalidParams(
                 "hydration requires SQL produced by build_query".to_owned(),
             )
         })?;
-        let torrent_join =
-            if suffix.contains(INNER_JOIN_TORRENTS) || suffix.contains(LEFT_JOIN_TORRENTS) {
-                ""
-            } else {
-                LEFT_JOIN_TORRENTS
-            };
-        let content_join = if suffix.contains(LEFT_JOIN_CONTENT) {
-            ""
-        } else {
-            LEFT_JOIN_CONTENT
-        };
-        let boundary = suffix
-            .find("\nWHERE ")
-            .or_else(|| suffix.find("\nORDER BY "));
-        let (joins_part, tail_part) = boundary
-            .map(|index| suffix.split_at(index))
-            .unwrap_or((suffix, ""));
-
-        Ok(format!(
-            "{HYDRATION_SELECT}{torrent_join}{joins_part}{content_join}{CONTENT_ATTR_JOINS}{tail_part}"
-        ))
+        Ok(format!("{ORDERING_SELECT}{suffix}"))
     }
 }
 
@@ -254,11 +301,14 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
         }
     }
 
-    let limit = state.push_bind(Bind::BigInt(i64::from(_params.limit)));
-    sql.push_str(&format!("\nLIMIT {limit}"));
+    // LIMIT/OFFSET are rendered as integer literals (not binds): a parameterised
+    // LIMIT drives PG to a generic parallel Gather-Merge plan whose worker merge
+    // order shuffles ties between identical requests. GORM inlines them as
+    // literals for the same reason. `limit`/`offset` are validated u32s — no
+    // injection surface. All other values remain bound.
+    sql.push_str(&format!("\nLIMIT {}", _params.limit));
     if let Some(offset) = _params.offset {
-        let offset = state.push_bind(Bind::BigInt(i64::from(offset)));
-        sql.push_str(&format!("\nOFFSET {offset}"));
+        sql.push_str(&format!("\nOFFSET {}", offset));
     }
 
     Ok(SearchQuery::new(sql, state.binds))
@@ -267,11 +317,9 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
 const INFO_HASH_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
 const INNER_JOIN_TORRENTS: &str =
     "\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash";
-const LEFT_JOIN_TORRENTS: &str =
-    "\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash";
 const LEFT_JOIN_CONTENT: &str = "\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id";
-const CONTENT_ATTR_JOINS: &str = "\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'";
-const HYDRATION_SELECT: &str = "SELECT torrent_contents.info_hash AS info_hash,\n       torrent_contents.size AS size,\n       torrent_contents.content_type AS content_type,\n       EXTRACT(EPOCH FROM torrent_contents.published_at)::bigint AS published_at,\n       torrent_contents.seeders::bigint AS seeders,\n       torrent_contents.leechers::bigint AS leechers,\n       torrent_contents.files_count::bigint AS files_count,\n       torrent_contents.video_resolution AS video_resolution,\n       torrent_contents.video_3d AS video_3d,\n       torrent_contents.video_codec AS video_codec,\n       torrent_contents.release_group AS release_group,\n       COALESCE(torrent_contents.episodes, '{}'::jsonb) AS episodes,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       torrents.name AS name\nFROM torrent_contents";
+const ORDERING_SELECT: &str = "SELECT torrent_contents.id AS id,\n       torrent_contents.info_hash AS info_hash,\n       torrent_contents.size AS size,\n       torrent_contents.content_type AS content_type,\n       floor(EXTRACT(EPOCH FROM torrent_contents.published_at))::bigint AS published_at,\n       torrent_contents.files_count::bigint AS files_count,\n       torrent_contents.video_resolution AS video_resolution,\n       torrent_contents.video_3d AS video_3d,\n       torrent_contents.video_codec AS video_codec,\n       torrent_contents.release_group AS release_group,\n       COALESCE(torrent_contents.episodes, '{}'::jsonb) AS episodes\nFROM torrent_contents";
+const HYDRATION_BY_ID_SQL: &str = "SELECT torrent_contents.id AS id,\n       torrents.name AS name,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,\n       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers\nFROM torrent_contents\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'\nWHERE torrent_contents.id = ANY($1::text[])";
 
 #[derive(Default)]
 struct BuildState {
@@ -623,8 +671,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.content_type IN ($1)\nORDER BY torrent_contents.published_at DESC\nLIMIT $2",
-            &[Bind::Text("movie".to_owned()), Bind::BigInt(100)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.content_type IN ($1)\nORDER BY torrent_contents.published_at DESC\nLIMIT 100",
+            &[Bind::Text("movie".to_owned())],
         );
     }
 
@@ -636,8 +684,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.tsv @@ $1::tsquery\nORDER BY ts_rank_cd(torrent_contents.tsv, $1::tsquery) DESC\nLIMIT $2",
-            &[Bind::Tsquery("foo".to_owned()), Bind::BigInt(50)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.tsv @@ $1::tsquery\nORDER BY ts_rank_cd(torrent_contents.tsv, $1::tsquery) DESC\nLIMIT 50",
+            &[Bind::Tsquery("foo".to_owned())],
         );
     }
 
@@ -649,12 +697,11 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nWHERE content.type = $1 AND content.source = $2 AND content.id IN ($3)\nORDER BY torrent_contents.published_at DESC\nLIMIT $4",
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nWHERE content.type = $1 AND content.source = $2 AND content.id IN ($3)\nORDER BY torrent_contents.published_at DESC\nLIMIT 25",
             &[
                 Bind::Text("movie".to_owned()),
                 Bind::Text("tmdb".to_owned()),
                 Bind::Text("603".to_owned()),
-                Bind::BigInt(25),
             ],
         );
     }
@@ -668,12 +715,11 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nWHERE EXISTS (SELECT 1 FROM content_attributes WHERE content_attributes.content_type = content.type AND content_attributes.content_source = content.source AND content_attributes.content_id = content.id AND content_attributes.source = $1 AND content_attributes.value IN ($2) AND content_attributes.content_type = $3)\nORDER BY torrent_contents.published_at DESC\nLIMIT $4",
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nWHERE EXISTS (SELECT 1 FROM content_attributes WHERE content_attributes.content_type = content.type AND content_attributes.content_source = content.source AND content_attributes.content_id = content.id AND content_attributes.source = $1 AND content_attributes.value IN ($2) AND content_attributes.content_type = $3)\nORDER BY torrent_contents.published_at DESC\nLIMIT 25",
             &[
                 Bind::Text("imdb".to_owned()),
                 Bind::Text("tt0133093".to_owned()),
                 Bind::Text("movie".to_owned()),
-                Bind::BigInt(25),
             ],
         );
     }
@@ -685,8 +731,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nWHERE EXISTS (SELECT 1 FROM torrent_tags WHERE torrent_tags.info_hash = torrents.info_hash AND torrent_tags.name IN ($1))\nORDER BY torrent_contents.published_at DESC\nLIMIT $2",
-            &[Bind::Text("x".to_owned()), Bind::BigInt(10)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nWHERE EXISTS (SELECT 1 FROM torrent_tags WHERE torrent_tags.info_hash = torrents.info_hash AND torrent_tags.name IN ($1))\nORDER BY torrent_contents.published_at DESC\nLIMIT 10",
+            &[Bind::Text("x".to_owned())],
         );
     }
 
@@ -697,8 +743,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.episodes #> '{1}' = '{}'::jsonb\nORDER BY torrent_contents.published_at DESC\nLIMIT $1",
-            &[Bind::BigInt(10)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.episodes #> '{1}' = '{}'::jsonb\nORDER BY torrent_contents.published_at DESC\nLIMIT 10",
+            &[],
         );
     }
 
@@ -710,8 +756,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.episodes #> '{2}' @> '{\"3\":{},\"4\":{}}'::jsonb\nORDER BY torrent_contents.published_at DESC\nLIMIT $1",
-            &[Bind::BigInt(10)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE torrent_contents.episodes #> '{2}' @> '{\"3\":{},\"4\":{}}'::jsonb\nORDER BY torrent_contents.published_at DESC\nLIMIT 10",
+            &[],
         );
     }
 
@@ -721,8 +767,8 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nORDER BY torrent_contents.published_at DESC\nLIMIT $1\nOFFSET $2",
-            &[Bind::BigInt(0), Bind::BigInt(0)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nORDER BY torrent_contents.published_at DESC\nLIMIT 0\nOFFSET 0",
+            &[],
         );
     }
 
@@ -730,13 +776,13 @@ mod tests {
     fn empty_and_is_true_and_empty_or_is_false() {
         assert_query(
             TorznabSearchParams::new(1).with_filter(Criteria::And(Vec::new())),
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE TRUE\nORDER BY torrent_contents.published_at DESC\nLIMIT $1",
-            &[Bind::BigInt(1)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE TRUE\nORDER BY torrent_contents.published_at DESC\nLIMIT 1",
+            &[],
         );
         assert_query(
             TorznabSearchParams::new(1).with_filter(Criteria::Or(Vec::new())),
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE FALSE\nORDER BY torrent_contents.published_at DESC\nLIMIT $1",
-            &[Bind::BigInt(1)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE FALSE\nORDER BY torrent_contents.published_at DESC\nLIMIT 1",
+            &[],
         );
     }
 
@@ -746,61 +792,54 @@ mod tests {
 
         assert_query(
             params,
-            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nORDER BY 0::bigint DESC\nLIMIT $1",
-            &[Bind::BigInt(5)],
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nORDER BY 0::bigint DESC\nLIMIT 5",
+            &[],
         );
     }
 
     #[test]
-    fn hydration_adds_left_torrents_join_only_when_missing() {
-        let browse = build_query(&TorznabSearchParams::new(1)).unwrap();
-        let browse_sql = browse.hydration_sql().unwrap();
-        assert!(browse_sql.contains(LEFT_JOIN_TORRENTS));
+    fn ordering_sql_is_lean_single_table() {
+        let query = build_query(&TorznabSearchParams::new(1)).unwrap();
+        let sql = query.ordering_sql().unwrap();
 
-        let tagged = build_query(
-            &TorznabSearchParams::new(1).with_filter(Criteria::TorrentTag(vec!["x".to_owned()])),
-        )
-        .unwrap();
-        let tagged_sql = tagged.hydration_sql().unwrap();
-        assert!(tagged_sql.contains(INNER_JOIN_TORRENTS));
-        assert!(!tagged_sql.contains(LEFT_JOIN_TORRENTS));
+        assert!(sql.contains("torrent_contents.id AS id"));
+        assert!(sql.contains("FROM torrent_contents"));
+        assert!(!sql.contains("LEFT JOIN content"));
+        assert!(!sql.contains("content_attributes"));
+        assert!(!sql.contains("torrents_torrent_sources"));
+        assert!(!sql.contains("LEFT JOIN torrents"));
+        assert!(!sql.contains("SELECT max("));
+        assert!(sql.contains("\nLIMIT 1"));
     }
 
     #[test]
-    fn hydration_adds_content_and_identifier_joins_without_duplicates() {
-        let browse = build_query(&TorznabSearchParams::new(1)).unwrap();
-        let browse_sql = browse.hydration_sql().unwrap();
-        assert!(browse_sql.contains(LEFT_JOIN_CONTENT));
-        assert!(browse_sql.contains("LEFT JOIN content_attributes ca_imdb"));
-        assert!(browse_sql.contains("LEFT JOIN content_attributes ca_tmdb"));
-        assert!(browse_sql.contains("AS release_year"));
-        assert!(browse_sql.contains("AS imdb_id"));
-        assert!(browse_sql.contains("AS tmdb_id"));
-
-        let identifier =
+    fn ordering_sql_keeps_filter_joins() {
+        let query =
             build_query(
                 &TorznabSearchParams::new(1).with_filter(Criteria::CanonicalIdentifier(vec![
                     content_ref(Some(ContentType::Movie), "tmdb", "603"),
                 ])),
             )
             .unwrap();
-        let identifier_sql = identifier.hydration_sql().unwrap();
-        assert_eq!(identifier_sql.matches("LEFT JOIN content ON").count(), 1);
+        let sql = query.ordering_sql().unwrap();
 
-        let content_index = identifier_sql.find("LEFT JOIN content ON").unwrap();
-        let imdb_index = identifier_sql
-            .find("LEFT JOIN content_attributes ca_imdb")
-            .unwrap();
-        let tmdb_index = identifier_sql
-            .find("LEFT JOIN content_attributes ca_tmdb")
-            .unwrap();
-        let tail_index = identifier_sql
-            .find("\nWHERE ")
-            .or_else(|| identifier_sql.find("\nORDER BY "))
-            .unwrap();
-        assert!(content_index < imdb_index);
-        assert!(imdb_index < tmdb_index);
-        assert!(tmdb_index < tail_index);
+        assert!(sql.contains("LEFT JOIN content ON"));
+        assert!(!sql.contains("content_attributes"));
+        assert!(!sql.contains("SELECT max("));
+        assert!(!sql.contains("torrents.name"));
+    }
+
+    #[test]
+    fn hydration_by_id_sql_shape() {
+        assert!(HYDRATION_BY_ID_SQL.contains("LEFT JOIN torrents"));
+        assert!(HYDRATION_BY_ID_SQL.contains("LEFT JOIN content ON"));
+        assert!(HYDRATION_BY_ID_SQL.contains("content_attributes ca_imdb"));
+        assert!(HYDRATION_BY_ID_SQL.contains("content_attributes ca_tmdb"));
+        assert!(HYDRATION_BY_ID_SQL.contains("SELECT max(s.seeders)"));
+        assert!(HYDRATION_BY_ID_SQL.contains("SELECT max(s.leechers)"));
+        assert!(HYDRATION_BY_ID_SQL.contains("torrent_contents.id = ANY($1::text[])"));
+        assert!(!HYDRATION_BY_ID_SQL.contains("ORDER BY"));
+        assert!(!HYDRATION_BY_ID_SQL.contains("LIMIT"));
     }
 
     #[test]
