@@ -4,3 +4,6 @@
 //! (0-diff gate via [`normalize`]) plus the read resolvers.
 
 pub mod normalize;
+pub mod schema;
+
+pub use schema::{schema, Schema};
