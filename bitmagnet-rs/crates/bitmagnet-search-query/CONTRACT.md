@@ -210,6 +210,14 @@ where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
   keyed on `torrent_contents.id = ANY($1)` (torrents.name, content year/imdb/tmdb, sources-max
   seeders/leechers), merged in memory preserving query-1 order. **Single-statement joined
   hydration is FORBIDDEN on any ordered+LIMITed path — binding precedent for Phase-2 Lane S.**
+- **OBSERVATION — explicit `published_at` order carries a `, info_hash DESC` tiebreak that Go's
+  logged statement lacked.** `build_query` appends `torrent_contents.info_hash` as a secondary
+  sort key on the explicit-`published_at` path; a `pg_stat_statements` capture showed Go emitting
+  plain `published_at DESC`. Evidence conflicts (`internal/database/search/order_torrent_content.go`
+  PublishedAt `Clauses()` DOES include an info_hash tiebreak, so a Go call-path emits it — the
+  plain form seen may be a different, e.g. GraphQL, path). No observable divergence in either live
+  gate round (every published_at-ordered query was set=1.0 and order-matched on unique data). Not
+  changed; first suspect if a future gate shows browse-query order drift on `published_at` ties.
 
 **CTE race strategy** (`doItems` / `shouldTryCteStrategy`): a performance
 optimisation that returns identical results to the default strategy. It triggers
