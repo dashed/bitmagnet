@@ -1,0 +1,48 @@
+enum ContentType {
+  audiobook
+  comic
+  ebook
+  game
+  movie
+  music
+  software
+  tv_show
+  xxx
+}
+
+input ContentTypeFacetInput {
+  aggregate: Boolean
+  filter: [ContentType]
+}
+
+scalar Date
+
+scalar DateTime
+
+scalar Duration
+
+enum FacetLogic {
+  and
+  or
+}
+
+scalar Hash20
+
+scalar Hash32
+
+input SizeRangeInput {
+  max: Int
+  min: Int
+}
+
+input TorrentReprocessInput {
+  apisDisabled: Boolean
+  classifierRematch: Boolean
+  classifierWorkflow: String
+  infoHashes: [Hash20!]!
+  localSearchDisabled: Boolean
+}
+
+scalar Void
+
+scalar Year
