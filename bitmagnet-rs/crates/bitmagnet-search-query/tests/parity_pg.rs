@@ -43,6 +43,9 @@ impl Driver for SearchQueryDriver {
                 .map(|item| {
                     serde_json::json!({
                         "info_hash": item.info_hash.to_string(),
+                        "published_at": item.published_at,
+                        "seeders": item.seeders,
+                        "leechers": item.leechers,
                         "release_year": item.release_year,
                         "imdb_id": item.imdb_id,
                         "tmdb_id": item.tmdb_id,
@@ -78,7 +81,7 @@ fn search_query_parity_via_live_postgres() {
             })
         })
     };
-    for field in ["release_year", "imdb_id", "tmdb_id"] {
+    for field in ["seeders", "leechers", "release_year", "imdb_id", "tmdb_id"] {
         assert!(
             has_non_null_field(field),
             "search-query parity corpus lacks a non-null {field} value"

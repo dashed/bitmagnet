@@ -209,6 +209,9 @@ type searchQueryScenario struct {
 
 type searchQueryResultRow struct {
 	InfoHash    string  `json:"info_hash"`
+	PublishedAt int64   `json:"published_at"`
+	Seeders     *int    `json:"seeders"`
+	Leechers    *int    `json:"leechers"`
 	ReleaseYear *int    `json:"release_year"`
 	ImdbID      *string `json:"imdb_id"`
 	TmdbID      *string `json:"tmdb_id"`
@@ -361,6 +364,9 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 		seenNames[seed.name] = struct{}{}
 
 		publishedAt := baseTime.Add(time.Duration(i) * time.Hour)
+		if seed.number == 3 {
+			publishedAt = publishedAt.Add(750 * time.Millisecond)
+		}
 		if _, exists := seenPublishedAt[publishedAt]; exists {
 			t.Fatalf("duplicate seed published_at %s", publishedAt)
 		}
@@ -387,6 +393,10 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 			PublishedAt: publishedAt,
 			Size:        size,
 			FilesCount:  model.NewNullUint(1),
+		}
+		if seed.number == 1 {
+			torrentContent.Seeders = model.NewNullUint(999)
+			torrentContent.Leechers = model.NewNullUint(999)
 		}
 		if seed.resolution != "" {
 			torrentContent.VideoResolution = model.NewNullVideoResolution(seed.resolution)
@@ -440,6 +450,17 @@ func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB)
 		Omit("ID", "Torrent", "Content").
 		Create(&torrentContents).Error; err != nil {
 		t.Fatalf("insert parity torrent contents: %v", err)
+	}
+
+	sources := []model.TorrentsTorrentSource{
+		{Source: "dht", InfoHash: fixedInfoHash(1), Seeders: model.NewNullUint(10), Leechers: model.NewNullUint(5), SeenCount: 1, CreatedAt: baseTime, UpdatedAt: baseTime},
+		{Source: "rarbg", InfoHash: fixedInfoHash(1), Seeders: model.NewNullUint(3), Leechers: model.NewNullUint(8), SeenCount: 1, CreatedAt: baseTime, UpdatedAt: baseTime},
+	}
+	if err := db.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Omit("TorrentSource").
+		Create(&sources).Error; err != nil {
+		t.Fatalf("insert parity torrent sources: %v", err)
 	}
 
 	attributes := []model.ContentAttribute{{
@@ -1026,7 +1047,18 @@ func runGoSearchQueryOracle(
 	rows := make([]searchQueryResultRow, 0, len(result.Items))
 	for _, item := range result.Items {
 		row := searchQueryResultRow{
-			InfoHash: strings.ToLower(item.InfoHash.String()),
+			InfoHash:    strings.ToLower(item.InfoHash.String()),
+			PublishedAt: item.PublishedAt.Unix(),
+		}
+		seeders := item.Torrent.Seeders()
+		if seeders.Valid {
+			value := int(seeders.Uint)
+			row.Seeders = &value
+		}
+		leechers := item.Torrent.Leechers()
+		if leechers.Valid {
+			value := int(leechers.Uint)
+			row.Leechers = &value
 		}
 		if !item.Content.ReleaseYear.IsNil() {
 			releaseYear := int(item.Content.ReleaseYear)
