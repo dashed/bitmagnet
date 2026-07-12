@@ -202,9 +202,14 @@ where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
   `torrent_contents.files_count`; Lane T emits the `files` attr from it. Live Go instead uses
   `len(Torrent.Files)` which is empty under the D1 `torrent_files` read-disable, so live Go omits
   `files`. Deliberate: the Rust behavior restores data the D1 cutover removed from Go's feed.
-- **LIMIT/OFFSET rendered as literals.** Parameterised LIMIT drives PG to a parallel Gather-Merge
-  plan that shuffles ties nondeterministically; literals (matching GORM) keep a serial,
-  order-stable plan. Applies to any future full search builder (Phase-2 Lane S).
+- **Ordered path must be lean (two-query hydration).** Literal LIMIT was necessary but not
+  sufficient: a single statement that also carries the hydration LEFT JOINs + correlated
+  subselects still plans as a parallel Gather Merge that shuffles equal-rank ties per execution.
+  `fetch()` therefore runs a LEAN single-table membership query (torrent_contents-resident columns
+  + filter joins + literal LIMIT — serial plan, mirrors GORM/Go) and a SEPARATE hydration query
+  keyed on `torrent_contents.id = ANY($1)` (torrents.name, content year/imdb/tmdb, sources-max
+  seeders/leechers), merged in memory preserving query-1 order. **Single-statement joined
+  hydration is FORBIDDEN on any ordered+LIMITed path — binding precedent for Phase-2 Lane S.**
 
 **CTE race strategy** (`doItems` / `shouldTryCteStrategy`): a performance
 optimisation that returns identical results to the default strategy. It triggers
