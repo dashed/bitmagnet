@@ -40,6 +40,11 @@ pub enum Criteria {
     VideoResolutionIn(Vec<VideoResolution>),
     /// `torrent_contents.video_3d IN (...)`.
     /// Go: `search.Video3DCriteria`.
+    ///
+    /// Explicitly renamed: the `snake_case` rule mangles `Video3DIn` to
+    /// `video3_d_in`, but the Go parity generator (and the natural, column-
+    /// aligned name) is `video_3d_in`.
+    #[serde(rename = "video_3d_in")]
     Video3DIn(Vec<Video3D>),
     /// Season/episode containment against the `torrent_contents.episodes`
     /// jsonb. Go: `search.TorrentContentEpisodesCriteria`.

@@ -35,11 +35,21 @@ impl Driver for SearchQueryDriver {
     fn run(&self, input: &Value) -> Result<Value> {
         let params: TorznabSearchParams = serde_json::from_value(input.clone())?;
         let query = bitmagnet_search_query::build_query(&params)?;
-        let hashes = self.handle.block_on(query.fetch_info_hashes(&self.pool))?;
+        let items = self.handle.block_on(query.fetch(&self.pool))?;
 
-        Ok(serde_json::to_value(
-            hashes.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        )?)
+        Ok(Value::Array(
+            items
+                .into_iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "info_hash": item.info_hash.to_string(),
+                        "release_year": item.release_year,
+                        "imdb_id": item.imdb_id,
+                        "tmdb_id": item.tmdb_id,
+                    })
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -59,6 +69,21 @@ fn search_query_parity_via_live_postgres() {
         "/../../../testdata/parity/searchquery/torznab_search.jsonl"
     ))
     .expect("load search-query parity corpus");
+
+    let has_non_null_field = |field: &str| {
+        fixtures.iter().any(|fixture| {
+            fixture.expected.as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row.get(field).is_some_and(|value| !value.is_null()))
+            })
+        })
+    };
+    for field in ["release_year", "imdb_id", "tmdb_id"] {
+        assert!(
+            has_non_null_field(field),
+            "search-query parity corpus lacks a non-null {field} value"
+        );
+    }
 
     // Driver::run is synchronous. Keep its Handle::block_on calls on this
     // plain test thread, outside an entered Tokio runtime, to avoid nesting.
