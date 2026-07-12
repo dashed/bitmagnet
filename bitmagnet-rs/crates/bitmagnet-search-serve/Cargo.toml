@@ -13,10 +13,13 @@ bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-proto = { path = "../bitmagnet-proto" }
 async-trait = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true }
+tonic = { workspace = true, features = ["transport"] }
+tonic-prost = { workspace = true }
+tower = "0.5"
+tracing = { workspace = true }
 
 [lints]
 workspace = true

@@ -2,14 +2,15 @@
 //!
 //! This crate is the search-serving tier that GraphQL resolvers call: the L1
 //! blob-refine composer, the L3 gRPC client, and the engine-level Tantivy-serve
-//! router decorator. C1 freezes their shared contract; later tasks implement the
-//! composer pipeline, RPC client, and serving logic.
+//! router decorator. C1 freezes their shared contract; C2 implements the L3 RPC
+//! client and its fail-closed background health poller.
 
 #![warn(missing_docs)]
 
 #[cfg(feature = "lane-s-stub")]
 pub mod api;
 pub mod candidates;
+pub mod client;
 pub mod config;
 #[cfg(feature = "lane-s-stub")]
 pub mod filters;
@@ -25,6 +26,7 @@ compile_error!(
 #[cfg(feature = "lane-s-stub")]
 pub use api::{Disabled, SearchServe};
 pub use candidates::{CandidateSource, HealthGate};
+pub use client::{Client, ClientConfig};
 pub use config::{
     ComposerConfig, DisabledServeRouter, ServeConfig, ServeMode, DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES, DEFAULT_MAX_REFINE_FILES,
@@ -33,7 +35,7 @@ pub use config::{
 };
 #[cfg(feature = "lane-s-stub")]
 pub use filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
-pub use health::{gate, HealthState};
+pub use health::{gate, poll_once, spawn_health_poller, HealthConfig, HealthState};
 #[cfg(feature = "lane-s-stub")]
 pub use pg::{
     AggregationItem, Aggregations, PgSearchBackend, QueryOptions, SearchOptions,
