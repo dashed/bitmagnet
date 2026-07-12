@@ -13,12 +13,15 @@
 //! and the bind model so Lane T can code against them today.
 
 use crate::criteria::{
-    ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D, VideoResolution,
+    ContentCollectionRef, ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D,
+    VideoResolution,
 };
 use crate::order::{OrderDirection, TorrentContentOrderField};
 use crate::params::TorznabSearchParams;
 use crate::result::SearchResultItem;
-use bitmagnet_model::{ContentType, InfoHash};
+use bitmagnet_model::{ContentType, FileType, InfoHash};
+use chrono::{DateTime, Datelike, Duration, Months, NaiveDate, NaiveDateTime, SecondsFormat};
+use chrono::{Timelike, Utc};
 use serde::Deserialize;
 use sqlx::{types::Json, PgPool, Row};
 use std::collections::BTreeMap;
@@ -40,10 +43,11 @@ pub type Result<T> = std::result::Result<T, SearchQueryError>;
 
 /// A single positional bind value for a `$N` placeholder, in declaration order.
 ///
-/// The variants cover exactly the column/parameter types the Torznab subset
-/// needs. `Tsquery` is bound as text and cast `::tsquery` in the SQL (Go binds
-/// the pre-tokenised tsquery string the same way — see
-/// `internal/database/query/query.go` `applyPre`).
+/// `Tsquery` and `Timestamp` are bound as text and cast to `::tsquery` and
+/// `::timestamptz` respectively at their placeholders. `TextArray` is bound as
+/// a PostgreSQL `text[]` and likewise carries an explicit `::text[]` cast in
+/// SQL. Go binds the pre-tokenised tsquery string the same way — see
+/// `internal/database/query/query.go` `applyPre`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bind {
     /// A `bytea` value (info hash / content id bytes).
@@ -52,6 +56,10 @@ pub enum Bind {
     Text(String),
     /// A pre-tokenised tsquery string, cast `::tsquery` at the placeholder.
     Tsquery(String),
+    /// An RFC3339 UTC timestamp string, cast `::timestamptz` at the placeholder.
+    Timestamp(String),
+    /// A PostgreSQL text array, cast `::text[]` at the placeholder.
+    TextArray(Vec<String>),
 }
 
 /// A parameterised SQL statement ready to run: the `$N`-placeholder SQL text
@@ -119,7 +127,10 @@ impl SearchQuery {
         for bind in self.binds() {
             query = match bind {
                 Bind::Bytea(value) => query.bind(value),
-                Bind::Text(value) | Bind::Tsquery(value) => query.bind(value),
+                Bind::Text(value) | Bind::Tsquery(value) | Bind::Timestamp(value) => {
+                    query.bind(value)
+                }
+                Bind::TextArray(value) => query.bind(value),
             };
         }
 
@@ -142,7 +153,10 @@ impl SearchQuery {
         for bind in self.binds() {
             query = match bind {
                 Bind::Bytea(value) => query.bind(value),
-                Bind::Text(value) | Bind::Tsquery(value) => query.bind(value),
+                Bind::Text(value) | Bind::Tsquery(value) | Bind::Timestamp(value) => {
+                    query.bind(value)
+                }
+                Bind::TextArray(value) => query.bind(value),
             };
         }
         let ordered_rows = query.fetch_all(pool).await?;
@@ -257,6 +271,11 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
         .map(RequiredJoins::from_criteria)
         .unwrap_or_default();
     let mut state = BuildState::default();
+    let config = crate::SearchBuildConfig::default();
+    let criteria_ctx = CriteriaCtx {
+        config: &config,
+        now: Utc::now(),
+    };
     let tsquery_placeholder = _params.query.as_ref().and_then(|raw| {
         (!raw.is_empty())
             .then(|| state.push_bind(Bind::Tsquery(bitmagnet_fts::app_query_to_tsquery(raw))))
@@ -267,7 +286,7 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
         where_conditions.push(format!("torrent_contents.tsv @@ {placeholder}::tsquery"));
     }
     if let Some(criteria) = &_params.filter {
-        where_conditions.push(criteria_sql(criteria, &mut state)?);
+        where_conditions.push(criteria_sql(criteria, &mut state, &criteria_ctx)?);
     }
 
     let mut sql = String::from(INFO_HASH_SELECT);
@@ -349,6 +368,11 @@ impl BuildState {
     }
 }
 
+struct CriteriaCtx<'a> {
+    config: &'a crate::SearchBuildConfig,
+    now: DateTime<Utc>,
+}
+
 #[derive(Default)]
 struct RequiredJoins {
     torrents: bool,
@@ -399,11 +423,15 @@ impl RequiredJoins {
     }
 }
 
-fn criteria_sql(criteria: &Criteria, state: &mut BuildState) -> Result<String> {
+fn criteria_sql(
+    criteria: &Criteria,
+    state: &mut BuildState,
+    ctx: &CriteriaCtx<'_>,
+) -> Result<String> {
     match criteria {
-        Criteria::And(children) => boolean_group(children, "AND", "TRUE", state),
-        Criteria::Or(children) => boolean_group(children, "OR", "FALSE", state),
-        Criteria::Not(child) => Ok(format!("NOT ({})", criteria_sql(child, state)?)),
+        Criteria::And(children) => boolean_group(children, "AND", "TRUE", state, ctx),
+        Criteria::Or(children) => boolean_group(children, "OR", "FALSE", state, ctx),
+        Criteria::Not(child) => Ok(format!("NOT ({})", criteria_sql(child, state, ctx)?)),
         Criteria::ContentTypeIn(types) => Ok(in_predicate(
             "torrent_contents.content_type",
             types
@@ -441,48 +469,91 @@ fn criteria_sql(criteria: &Criteria, state: &mut BuildState) -> Result<String> {
                 "EXISTS (SELECT 1 FROM torrent_tags WHERE torrent_tags.info_hash = torrents.info_hash AND torrent_tags.name IN ({placeholders}))"
             ))
         }
-        Criteria::TorrentSourceIn(_) => Err(SearchQueryError::InvalidParams(
-            "TorrentSourceIn: SQL builder pending (Lane S S2)".to_owned(),
+        Criteria::TorrentSourceIn(keys) => {
+            if keys.is_empty() {
+                return Ok("FALSE".to_owned());
+            }
+            let placeholders = keys
+                .iter()
+                .map(|key| state.push_bind(Bind::Text(key.clone())))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "EXISTS (SELECT 1 FROM torrents_torrent_sources WHERE torrents_torrent_sources.info_hash = torrent_contents.info_hash AND torrents_torrent_sources.source IN ({placeholders}))"
+            ))
+        }
+        Criteria::TorrentFileTypeIn(file_types) => {
+            let extensions = file_types
+                .iter()
+                .flat_map(|file_type| file_type_extensions(*file_type))
+                .map(|extension| (*extension).to_owned())
+                .collect::<Vec<_>>();
+            Ok(file_extension_sql(&extensions, state, ctx))
+        }
+        Criteria::FileExtensionIn(extensions) => Ok(file_extension_sql(extensions, state, ctx)),
+        Criteria::LanguageIn(ids) => {
+            if ids.is_empty() {
+                return Ok("TRUE".to_owned());
+            }
+            // Go interpolates array['id', ...]. A bound text[] has the same
+            // match set while preserving this crate's no-user-string-inlining rule.
+            let placeholder = state.push_bind(Bind::TextArray(ids.clone()));
+            Ok(format!(
+                "torrent_contents.languages ?| {placeholder}::text[]"
+            ))
+        }
+        Criteria::ContentGenre(refs) | Criteria::ContentCollection(refs) => {
+            Ok(content_collection_sql(refs, state))
+        }
+        Criteria::ReleaseYearIn(years) => {
+            if years.is_empty() {
+                Ok("FALSE".to_owned())
+            } else {
+                Ok(format!(
+                    "content.release_year IN ({})",
+                    years
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+        }
+        Criteria::VideoSourceIn(values) => Ok(in_predicate(
+            "torrent_contents.video_source",
+            values
+                .iter()
+                .map(|value| Bind::Text(value.as_str().to_owned())),
+            state,
         )),
-        Criteria::TorrentFileTypeIn(_) => Err(SearchQueryError::InvalidParams(
-            "TorrentFileTypeIn: SQL builder pending (Lane S S2)".to_owned(),
+        Criteria::VideoCodecIn(values) => Ok(in_predicate(
+            "torrent_contents.video_codec",
+            values
+                .iter()
+                .map(|value| Bind::Text(value.as_str().to_owned())),
+            state,
         )),
-        Criteria::FileExtensionIn(_) => Err(SearchQueryError::InvalidParams(
-            "FileExtensionIn: SQL builder pending (Lane S S2)".to_owned(),
+        Criteria::VideoModifierIn(values) => Ok(in_predicate(
+            "torrent_contents.video_modifier",
+            values
+                .iter()
+                .map(|value| Bind::Text(value.as_str().to_owned())),
+            state,
         )),
-        Criteria::LanguageIn(_) => Err(SearchQueryError::InvalidParams(
-            "LanguageIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::ContentGenre(_) => Err(SearchQueryError::InvalidParams(
-            "ContentGenre: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::ContentCollection(_) => Err(SearchQueryError::InvalidParams(
-            "ContentCollection: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::ReleaseYearIn(_) => Err(SearchQueryError::InvalidParams(
-            "ReleaseYearIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::VideoSourceIn(_) => Err(SearchQueryError::InvalidParams(
-            "VideoSourceIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::VideoCodecIn(_) => Err(SearchQueryError::InvalidParams(
-            "VideoCodecIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::VideoModifierIn(_) => Err(SearchQueryError::InvalidParams(
-            "VideoModifierIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::SizeRange { .. } => Err(SearchQueryError::InvalidParams(
-            "SizeRange: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::PublishedAt(_) => Err(SearchQueryError::InvalidParams(
-            "PublishedAt: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::TorrentContentInfoHashIn(_) => Err(SearchQueryError::InvalidParams(
-            "TorrentContentInfoHashIn: SQL builder pending (Lane S S2)".to_owned(),
-        )),
-        Criteria::IsNull(_) => Err(SearchQueryError::InvalidParams(
-            "IsNull: SQL builder pending (Lane S S2)".to_owned(),
-        )),
+        Criteria::SizeRange { min, max } => Ok(size_range_sql(*min, *max)),
+        Criteria::PublishedAt(time_frame) => published_at_sql(time_frame, state, ctx.now),
+        Criteria::TorrentContentInfoHashIn(hashes) => {
+            // Go emits DECODE('<hex>', 'hex') literals. Bound bytea values are
+            // result-equivalent and avoid inlining caller-provided hash text.
+            Ok(in_predicate(
+                "torrent_contents.info_hash",
+                hashes
+                    .iter()
+                    .map(|hash| Bind::Bytea(hash.as_bytes().to_vec())),
+                state,
+            ))
+        }
+        Criteria::IsNull(attribute) => Ok(format!("{} IS NULL", nullable_column(*attribute))),
     }
 }
 
@@ -491,13 +562,14 @@ fn boolean_group(
     operator: &str,
     empty: &str,
     state: &mut BuildState,
+    ctx: &CriteriaCtx<'_>,
 ) -> Result<String> {
     if children.is_empty() {
         return Ok(empty.to_owned());
     }
     let parts = children
         .iter()
-        .map(|child| criteria_sql(child, state))
+        .map(|child| criteria_sql(child, state, ctx))
         .collect::<Result<Vec<_>>>()?;
     Ok(format!("({})", parts.join(&format!(" {operator} "))))
 }
@@ -515,6 +587,365 @@ fn in_predicate(
         "FALSE".to_owned()
     } else {
         format!("{column} IN ({})", placeholders.join(", "))
+    }
+}
+
+fn file_extension_sql(
+    extensions: &[String],
+    state: &mut BuildState,
+    ctx: &CriteriaCtx<'_>,
+) -> String {
+    if extensions.is_empty() {
+        return "FALSE".to_owned();
+    }
+
+    let single_file = in_predicate(
+        "torrents.extension",
+        extensions.iter().cloned().map(Bind::Text),
+        state,
+    );
+    let multi_file = if ctx.config.file_extensions_jsonb {
+        let clauses = extensions
+            .iter()
+            .map(|extension| {
+                let json = serde_json::to_string(&[extension])
+                    .expect("serializing a string array cannot fail");
+                let placeholder = state.push_bind(Bind::Text(json));
+                format!("torrents.file_extensions @> {placeholder}::jsonb")
+            })
+            .collect::<Vec<_>>();
+        format!("({})", clauses.join(" OR "))
+    } else {
+        let predicate = in_predicate(
+            "torrent_files.extension",
+            extensions.iter().cloned().map(Bind::Text),
+            state,
+        );
+        format!(
+            "EXISTS (SELECT 1 FROM torrent_files WHERE torrent_files.info_hash = torrents.info_hash AND {predicate})"
+        )
+    };
+
+    format!("({single_file} OR {multi_file})")
+}
+
+const fn file_type_extensions(file_type: FileType) -> &'static [&'static str] {
+    match file_type {
+        FileType::Archive => &["7z", "bz2", "gz", "iso", "rar", "tar", "zip"],
+        FileType::Audio => &[
+            "aac", "dsf", "flac", "m4a", "m4b", "mid", "mp3", "ogg", "wav",
+        ],
+        FileType::Data => &["csv", "json", "xls", "xlsx", "xml"],
+        FileType::Document => &[
+            "azw", "azw3", "djvu", "doc", "docx", "epub", "htm", "html", "md", "mobi", "nfo",
+            "otf", "pdf", "ppt", "pptx", "rtf", "txt",
+        ],
+        FileType::Image => &[
+            "bmp", "dds", "gif", "ico", "jpeg", "jpg", "png", "psd", "svg", "tif", "tiff",
+        ],
+        FileType::Software => &[
+            "apk", "bat", "bin", "deb", "dll", "dmg", "exe", "jar", "lua", "msi", "package", "pkg",
+            "rpm", "sh",
+        ],
+        FileType::Subtitles => &["srt", "sub", "vtt"],
+        FileType::Video => &[
+            "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "vob", "wmv",
+        ],
+    }
+}
+
+struct ContentCollectionRefGroup<'a> {
+    collection_type: Option<&'a str>,
+    source: &'a str,
+    ids: Vec<&'a str>,
+}
+
+fn group_content_collection_refs(
+    refs: &[ContentCollectionRef],
+) -> Vec<ContentCollectionRefGroup<'_>> {
+    let mut groups: Vec<ContentCollectionRefGroup<'_>> = Vec::new();
+    for collection_ref in refs {
+        if let Some(group) = groups.iter_mut().find(|group| {
+            group.collection_type == collection_ref.collection_type.as_deref()
+                && group.source == collection_ref.source
+        }) {
+            if !group.ids.contains(&collection_ref.id.as_str()) {
+                group.ids.push(&collection_ref.id);
+            }
+        } else {
+            groups.push(ContentCollectionRefGroup {
+                collection_type: collection_ref.collection_type.as_deref(),
+                source: &collection_ref.source,
+                ids: vec![&collection_ref.id],
+            });
+        }
+    }
+    groups
+}
+
+fn content_collection_sql(refs: &[ContentCollectionRef], state: &mut BuildState) -> String {
+    let branches = group_content_collection_refs(refs)
+        .into_iter()
+        .map(|group| {
+            let collection_type = state.push_bind(Bind::Text(
+                group.collection_type.unwrap_or_default().to_owned(),
+            ));
+            let source = state.push_bind(Bind::Text(group.source.to_owned()));
+            let ids = group
+                .ids
+                .into_iter()
+                .map(|id| state.push_bind(Bind::Text(id.to_owned())))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "EXISTS (SELECT 1 FROM content_collections_content WHERE content_collections_content.content_type = torrent_contents.content_type AND content_collections_content.content_source = torrent_contents.content_source AND content_collections_content.content_id = torrent_contents.content_id AND content_collections_content.content_collection_type = {collection_type} AND content_collections_content.content_collection_source = {source} AND content_collections_content.content_collection_id IN ({ids}))"
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if branches.is_empty() {
+        "FALSE".to_owned()
+    } else {
+        format!(
+            "(torrent_contents.content_id IS NOT NULL AND {})",
+            or_branches(branches)
+        )
+    }
+}
+
+fn size_range_sql(min: Option<i64>, max: Option<i64>) -> String {
+    let mut predicates = Vec::with_capacity(2);
+    if let Some(min) = min {
+        predicates.push(format!("torrent_contents.size >= {min}"));
+    }
+    if let Some(max) = max {
+        predicates.push(format!("torrent_contents.size <= {max}"));
+    }
+
+    match predicates.as_slice() {
+        [] => "TRUE".to_owned(),
+        [predicate] => predicate.clone(),
+        _ => format!("({})", predicates.join(" AND ")),
+    }
+}
+
+fn published_at_sql(
+    time_frame: &str,
+    state: &mut BuildState,
+    now: DateTime<Utc>,
+) -> Result<String> {
+    let Some((start, end)) = parse_time_frame(time_frame, now)? else {
+        return Ok("TRUE".to_owned());
+    };
+    let start = state.push_bind(Bind::Timestamp(format_timestamp(start)));
+    let end = state.push_bind(Bind::Timestamp(format_timestamp(end)));
+    Ok(format!(
+        "(torrent_contents.published_at >= {start}::timestamptz AND torrent_contents.published_at <= {end}::timestamptz)"
+    ))
+}
+
+fn parse_time_frame(
+    time_frame: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+    let time_frame = time_frame.trim();
+    if time_frame.is_empty() {
+        return Ok(None);
+    }
+
+    if is_relative_time(time_frame) {
+        let duration = parse_relative_time(time_frame)?;
+        let start = now.checked_sub_signed(duration).ok_or_else(|| {
+            invalid_published_at("relative time is outside chrono's supported range")
+        })?;
+        return Ok(Some((start, now)));
+    }
+
+    let keyword_range = match time_frame {
+        "today" => Some((start_of_day(now.date_naive()), now)),
+        "yesterday" => {
+            let date = now.date_naive().pred_opt().ok_or_else(|| {
+                invalid_published_at("yesterday is outside chrono's supported range")
+            })?;
+            Some((start_of_day(date), end_of_day(date)))
+        }
+        "this week" => {
+            let date = start_of_week(now.date_naive())?;
+            Some((start_of_day(date), now))
+        }
+        "last week" => {
+            let this_week = start_of_week(now.date_naive())?;
+            let last_week = this_week
+                .checked_sub_signed(Duration::days(7))
+                .ok_or_else(|| invalid_published_at("last week is out of range"))?;
+            let end = start_of_day(this_week)
+                .checked_sub_signed(Duration::seconds(1))
+                .ok_or_else(|| invalid_published_at("last week is out of range"))?;
+            Some((start_of_day(last_week), end))
+        }
+        "this month" => {
+            let date = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .ok_or_else(|| invalid_published_at("this month is out of range"))?;
+            Some((start_of_day(date), now))
+        }
+        "last month" => {
+            let this_month = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .ok_or_else(|| invalid_published_at("this month is out of range"))?;
+            let last_month = this_month
+                .checked_sub_months(Months::new(1))
+                .ok_or_else(|| invalid_published_at("last month is out of range"))?;
+            let end = start_of_day(this_month)
+                .checked_sub_signed(Duration::seconds(1))
+                .ok_or_else(|| invalid_published_at("last month is out of range"))?;
+            Some((start_of_day(last_month), end))
+        }
+        "this year" => {
+            let date = NaiveDate::from_ymd_opt(now.year(), 1, 1)
+                .ok_or_else(|| invalid_published_at("this year is out of range"))?;
+            Some((start_of_day(date), now))
+        }
+        "last year" => {
+            let this_year = NaiveDate::from_ymd_opt(now.year(), 1, 1)
+                .ok_or_else(|| invalid_published_at("this year is out of range"))?;
+            let last_year = this_year
+                .checked_sub_months(Months::new(12))
+                .ok_or_else(|| invalid_published_at("last year is out of range"))?;
+            let end = start_of_day(this_year)
+                .checked_sub_signed(Duration::seconds(1))
+                .ok_or_else(|| invalid_published_at("last year is out of range"))?;
+            Some((start_of_day(last_year), end))
+        }
+        _ => None,
+    };
+    if keyword_range.is_some() {
+        return Ok(keyword_range);
+    }
+
+    if time_frame.contains(" to ") {
+        let parts = time_frame.split(" to ").collect::<Vec<_>>();
+        if parts.len() != 2 {
+            return Err(invalid_published_at(
+                "invalid date range format; expected 'start to end'",
+            ));
+        }
+        let start = parse_date_string(parts[0].trim())
+            .ok_or_else(|| invalid_published_at("could not parse date string"))?;
+        let mut end = parse_date_string(parts[1].trim())
+            .ok_or_else(|| invalid_published_at("could not parse date string"))?;
+        if end.hour() == 0 && end.minute() == 0 && end.second() == 0 {
+            end = end_of_day(end.date_naive());
+        }
+        return Ok(Some((start, end)));
+    }
+
+    if let Some(start) = parse_date_string(time_frame) {
+        return Ok(Some((start, end_of_day(start.date_naive()))));
+    }
+
+    Err(invalid_published_at("could not parse time frame"))
+}
+
+fn is_relative_time(value: &str) -> bool {
+    let Some((&unit, digits)) = value.as_bytes().split_last() else {
+        return false;
+    };
+    !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && matches!(unit, b's' | b'm' | b'h' | b'd' | b'w' | b'M' | b'y')
+}
+
+fn parse_relative_time(value: &str) -> Result<Duration> {
+    let (&unit, digits) = value
+        .as_bytes()
+        .split_last()
+        .ok_or_else(|| invalid_published_at("invalid relative time format"))?;
+    let digits = std::str::from_utf8(digits)
+        .map_err(|_| invalid_published_at("invalid relative time format"))?;
+    let value = digits
+        .parse::<i64>()
+        .map_err(|_| invalid_published_at("invalid relative time value"))?;
+    let seconds_per_unit = match unit {
+        b's' => 1,
+        b'm' => 60,
+        b'h' => 60 * 60,
+        b'd' => 24 * 60 * 60,
+        b'w' => 7 * 24 * 60 * 60,
+        b'M' => 30 * 24 * 60 * 60,
+        b'y' => 365 * 24 * 60 * 60,
+        _ => return Err(invalid_published_at("unknown relative time unit")),
+    };
+    let seconds = value
+        .checked_mul(seconds_per_unit)
+        .ok_or_else(|| invalid_published_at("relative time is out of range"))?;
+    Duration::try_seconds(seconds)
+        .ok_or_else(|| invalid_published_at("relative time is out of range"))
+}
+
+fn parse_date_string(value: &str) -> Option<DateTime<Utc>> {
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Some(start_of_day(date));
+    }
+    if let Ok(date_time) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ") {
+        return Some(DateTime::from_naive_utc_and_offset(date_time, Utc));
+    }
+    if let Ok(date_time) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Some(DateTime::from_naive_utc_and_offset(date_time, Utc));
+    }
+    for format in ["%Y/%m/%d", "%m/%d/%Y", "%-d-%b-%Y", "%b %-d, %Y"] {
+        if let Ok(date) = NaiveDate::parse_from_str(value, format) {
+            return Some(start_of_day(date));
+        }
+    }
+    None
+}
+
+fn start_of_week(date: NaiveDate) -> Result<NaiveDate> {
+    date.checked_sub_signed(Duration::days(i64::from(
+        date.weekday().num_days_from_monday(),
+    )))
+    .ok_or_else(|| invalid_published_at("week start is out of range"))
+}
+
+fn start_of_day(date: NaiveDate) -> DateTime<Utc> {
+    DateTime::from_naive_utc_and_offset(
+        date.and_hms_micro_opt(0, 0, 0, 0)
+            .expect("midnight is always valid"),
+        Utc,
+    )
+}
+
+fn end_of_day(date: NaiveDate) -> DateTime<Utc> {
+    DateTime::from_naive_utc_and_offset(
+        date.and_hms_micro_opt(23, 59, 59, 999_999)
+            .expect("end of day is always valid"),
+        Utc,
+    )
+}
+
+fn format_timestamp(value: DateTime<Utc>) -> String {
+    // The Go pg driver truncates time.Time nanoseconds to PostgreSQL's
+    // microsecond precision. Keep this explicit for the S5 parity harness:
+    // truncate, never round, and always render exactly six fractional digits.
+    let nanos = value.nanosecond() / 1_000 * 1_000;
+    value
+        .with_nanosecond(nanos)
+        .expect("a truncated nanosecond is valid")
+        .to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+fn invalid_published_at(message: &str) -> SearchQueryError {
+    SearchQueryError::InvalidParams(format!("published_at: {message}"))
+}
+
+const fn nullable_column(attribute: TorrentContentAttribute) -> &'static str {
+    match attribute {
+        TorrentContentAttribute::ContentType => "torrent_contents.content_type",
+        TorrentContentAttribute::VideoResolution => "torrent_contents.video_resolution",
+        TorrentContentAttribute::VideoSource => "torrent_contents.video_source",
+        TorrentContentAttribute::VideoCodec => "torrent_contents.video_codec",
+        TorrentContentAttribute::Video3D => "torrent_contents.video_3d",
+        TorrentContentAttribute::VideoModifier => "torrent_contents.video_modifier",
+        TorrentContentAttribute::ReleaseYear => "content.release_year",
     }
 }
 
@@ -736,6 +1167,7 @@ fn decode_error(message: String) -> SearchQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::criteria::{VideoCodec, VideoModifier, VideoSource};
     use crate::order::TorrentContentOrder;
 
     fn assert_query(params: TorznabSearchParams, sql: &str, binds: &[Bind]) {
@@ -750,6 +1182,47 @@ mod tests {
             source: source.to_owned(),
             id: id.to_owned(),
         }
+    }
+
+    fn collection_ref(
+        collection_type: Option<&str>,
+        source: &str,
+        id: &str,
+    ) -> ContentCollectionRef {
+        ContentCollectionRef {
+            collection_type: collection_type.map(str::to_owned),
+            source: source.to_owned(),
+            id: id.to_owned(),
+        }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        "2026-07-12T12:00:00Z".parse().unwrap()
+    }
+
+    fn assert_criteria_sql(
+        criteria: Criteria,
+        config: crate::SearchBuildConfig,
+        sql: &str,
+        binds: &[Bind],
+    ) {
+        assert_criteria_sql_at(criteria, config, fixed_now(), sql, binds);
+    }
+
+    fn assert_criteria_sql_at(
+        criteria: Criteria,
+        config: crate::SearchBuildConfig,
+        now: DateTime<Utc>,
+        sql: &str,
+        binds: &[Bind],
+    ) {
+        let mut state = BuildState::default();
+        let ctx = CriteriaCtx {
+            config: &config,
+            now,
+        };
+        assert_eq!(criteria_sql(&criteria, &mut state, &ctx).unwrap(), sql);
+        assert_eq!(state.binds, binds);
     }
 
     #[test]
@@ -943,5 +1416,450 @@ mod tests {
                 .add_episode(2, 3)
                 .add_episode(2, 4)
         );
+    }
+
+    #[test]
+    fn builds_torrent_source_exists_criteria() {
+        assert_criteria_sql(
+            Criteria::TorrentSourceIn(vec!["nyaa".to_owned(), "dht".to_owned()]),
+            crate::SearchBuildConfig::default(),
+            "EXISTS (SELECT 1 FROM torrents_torrent_sources WHERE torrents_torrent_sources.info_hash = torrent_contents.info_hash AND torrents_torrent_sources.source IN ($1, $2))",
+            &[
+                Bind::Text("nyaa".to_owned()),
+                Bind::Text("dht".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::TorrentSourceIn(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "FALSE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn builds_legacy_file_extension_criteria() {
+        assert_criteria_sql(
+            Criteria::FileExtensionIn(vec!["mkv".to_owned(), "mp4".to_owned()]),
+            crate::SearchBuildConfig::default(),
+            "(torrents.extension IN ($1, $2) OR EXISTS (SELECT 1 FROM torrent_files WHERE torrent_files.info_hash = torrents.info_hash AND torrent_files.extension IN ($3, $4)))",
+            &[
+                Bind::Text("mkv".to_owned()),
+                Bind::Text("mp4".to_owned()),
+                Bind::Text("mkv".to_owned()),
+                Bind::Text("mp4".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::FileExtensionIn(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "FALSE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn builds_jsonb_file_extension_criteria() {
+        let config = crate::SearchBuildConfig {
+            file_extensions_jsonb: true,
+            ..crate::SearchBuildConfig::default()
+        };
+        assert_criteria_sql(
+            Criteria::FileExtensionIn(vec!["mkv".to_owned(), "mp4".to_owned()]),
+            config,
+            "(torrents.extension IN ($1, $2) OR (torrents.file_extensions @> $3::jsonb OR torrents.file_extensions @> $4::jsonb))",
+            &[
+                Bind::Text("mkv".to_owned()),
+                Bind::Text("mp4".to_owned()),
+                Bind::Text(r#"["mkv"]"#.to_owned()),
+                Bind::Text(r#"["mp4"]"#.to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn expands_file_types_to_go_extension_lists() {
+        assert_criteria_sql(
+            Criteria::TorrentFileTypeIn(vec![FileType::Subtitles]),
+            crate::SearchBuildConfig::default(),
+            "(torrents.extension IN ($1, $2, $3) OR EXISTS (SELECT 1 FROM torrent_files WHERE torrent_files.info_hash = torrents.info_hash AND torrent_files.extension IN ($4, $5, $6)))",
+            &[
+                Bind::Text("srt".to_owned()),
+                Bind::Text("sub".to_owned()),
+                Bind::Text("vtt".to_owned()),
+                Bind::Text("srt".to_owned()),
+                Bind::Text("sub".to_owned()),
+                Bind::Text("vtt".to_owned()),
+            ],
+        );
+        assert_eq!(
+            file_type_extensions(FileType::Video),
+            &["avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "vob", "wmv"]
+        );
+    }
+
+    #[test]
+    fn binds_language_ids_as_text_array() {
+        assert_criteria_sql(
+            Criteria::LanguageIn(vec!["en".to_owned(), "fr".to_owned()]),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.languages ?| $1::text[]",
+            &[Bind::TextArray(vec!["en".to_owned(), "fr".to_owned()])],
+        );
+        assert_criteria_sql(
+            Criteria::LanguageIn(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "TRUE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn groups_content_collection_exists_criteria_deterministically() {
+        assert_criteria_sql(
+            Criteria::ContentCollection(vec![
+                collection_ref(Some("series"), "tmdb", "10"),
+                collection_ref(Some("genre"), "imdb", "thriller"),
+                collection_ref(Some("series"), "tmdb", "11"),
+                collection_ref(Some("series"), "tmdb", "10"),
+            ]),
+            crate::SearchBuildConfig::default(),
+            "(torrent_contents.content_id IS NOT NULL AND (EXISTS (SELECT 1 FROM content_collections_content WHERE content_collections_content.content_type = torrent_contents.content_type AND content_collections_content.content_source = torrent_contents.content_source AND content_collections_content.content_id = torrent_contents.content_id AND content_collections_content.content_collection_type = $1 AND content_collections_content.content_collection_source = $2 AND content_collections_content.content_collection_id IN ($3, $4)) OR EXISTS (SELECT 1 FROM content_collections_content WHERE content_collections_content.content_type = torrent_contents.content_type AND content_collections_content.content_source = torrent_contents.content_source AND content_collections_content.content_id = torrent_contents.content_id AND content_collections_content.content_collection_type = $5 AND content_collections_content.content_collection_source = $6 AND content_collections_content.content_collection_id IN ($7))))",
+            &[
+                Bind::Text("series".to_owned()),
+                Bind::Text("tmdb".to_owned()),
+                Bind::Text("10".to_owned()),
+                Bind::Text("11".to_owned()),
+                Bind::Text("genre".to_owned()),
+                Bind::Text("imdb".to_owned()),
+                Bind::Text("thriller".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::ContentCollection(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "FALSE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn content_genre_uses_content_collection_sql() {
+        assert_criteria_sql(
+            Criteria::ContentGenre(vec![collection_ref(Some("genre"), "tmdb", "28")]),
+            crate::SearchBuildConfig::default(),
+            "(torrent_contents.content_id IS NOT NULL AND EXISTS (SELECT 1 FROM content_collections_content WHERE content_collections_content.content_type = torrent_contents.content_type AND content_collections_content.content_source = torrent_contents.content_source AND content_collections_content.content_id = torrent_contents.content_id AND content_collections_content.content_collection_type = $1 AND content_collections_content.content_collection_source = $2 AND content_collections_content.content_collection_id IN ($3)))",
+            &[
+                Bind::Text("genre".to_owned()),
+                Bind::Text("tmdb".to_owned()),
+                Bind::Text("28".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn inlines_release_year_literals() {
+        assert_criteria_sql(
+            Criteria::ReleaseYearIn(vec![1999, 2024]),
+            crate::SearchBuildConfig::default(),
+            "content.release_year IN (1999, 2024)",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::ReleaseYearIn(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "FALSE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn builds_new_video_attribute_criteria() {
+        assert_criteria_sql(
+            Criteria::VideoSourceIn(vec![VideoSource::WebDl, VideoSource::BluRay]),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.video_source IN ($1, $2)",
+            &[
+                Bind::Text("WEBDL".to_owned()),
+                Bind::Text("BluRay".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::VideoCodecIn(vec![VideoCodec::H264, VideoCodec::X265]),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.video_codec IN ($1, $2)",
+            &[Bind::Text("H264".to_owned()), Bind::Text("x265".to_owned())],
+        );
+        assert_criteria_sql(
+            Criteria::VideoModifierIn(vec![VideoModifier::Remux, VideoModifier::RawHd]),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.video_modifier IN ($1, $2)",
+            &[
+                Bind::Text("REMUX".to_owned()),
+                Bind::Text("RAWHD".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn builds_all_size_range_shapes() {
+        assert_criteria_sql(
+            Criteria::SizeRange {
+                min: Some(100),
+                max: None,
+            },
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.size >= 100",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::SizeRange {
+                min: None,
+                max: Some(200),
+            },
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.size <= 200",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::SizeRange {
+                min: Some(100),
+                max: Some(200),
+            },
+            crate::SearchBuildConfig::default(),
+            "(torrent_contents.size >= 100 AND torrent_contents.size <= 200)",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::SizeRange {
+                min: None,
+                max: None,
+            },
+            crate::SearchBuildConfig::default(),
+            "TRUE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn builds_required_published_at_shapes() {
+        let sql = "(torrent_contents.published_at >= $1::timestamptz AND torrent_contents.published_at <= $2::timestamptz)";
+        assert_criteria_sql(
+            Criteria::PublishedAt("2023-01-15".to_owned()),
+            crate::SearchBuildConfig::default(),
+            sql,
+            &[
+                Bind::Timestamp("2023-01-15T00:00:00.000000Z".to_owned()),
+                Bind::Timestamp("2023-01-15T23:59:59.999999Z".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::PublishedAt("2023-01-15 to 2023-01-20".to_owned()),
+            crate::SearchBuildConfig::default(),
+            sql,
+            &[
+                Bind::Timestamp("2023-01-15T00:00:00.000000Z".to_owned()),
+                Bind::Timestamp("2023-01-20T23:59:59.999999Z".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::PublishedAt("7d".to_owned()),
+            crate::SearchBuildConfig::default(),
+            sql,
+            &[
+                Bind::Timestamp("2026-07-05T12:00:00.000000Z".to_owned()),
+                Bind::Timestamp("2026-07-12T12:00:00.000000Z".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::PublishedAt("today".to_owned()),
+            crate::SearchBuildConfig::default(),
+            sql,
+            &[
+                Bind::Timestamp("2026-07-12T00:00:00.000000Z".to_owned()),
+                Bind::Timestamp("2026-07-12T12:00:00.000000Z".to_owned()),
+            ],
+        );
+        assert_criteria_sql(
+            Criteria::PublishedAt(String::new()),
+            crate::SearchBuildConfig::default(),
+            "TRUE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn supports_all_go_published_at_keywords() {
+        let expected = [
+            (
+                "yesterday",
+                "2026-07-11T00:00:00.000000Z",
+                "2026-07-11T23:59:59.999999Z",
+            ),
+            (
+                "this week",
+                "2026-07-06T00:00:00.000000Z",
+                "2026-07-12T12:00:00.000000Z",
+            ),
+            (
+                "last week",
+                "2026-06-29T00:00:00.000000Z",
+                "2026-07-05T23:59:59.000000Z",
+            ),
+            (
+                "this month",
+                "2026-07-01T00:00:00.000000Z",
+                "2026-07-12T12:00:00.000000Z",
+            ),
+            (
+                "last month",
+                "2026-06-01T00:00:00.000000Z",
+                "2026-06-30T23:59:59.000000Z",
+            ),
+            (
+                "this year",
+                "2026-01-01T00:00:00.000000Z",
+                "2026-07-12T12:00:00.000000Z",
+            ),
+            (
+                "last year",
+                "2025-01-01T00:00:00.000000Z",
+                "2025-12-31T23:59:59.000000Z",
+            ),
+        ];
+        let sql = "(torrent_contents.published_at >= $1::timestamptz AND torrent_contents.published_at <= $2::timestamptz)";
+        for (keyword, start, end) in expected {
+            assert_criteria_sql(
+                Criteria::PublishedAt(keyword.to_owned()),
+                crate::SearchBuildConfig::default(),
+                sql,
+                &[
+                    Bind::Timestamp(start.to_owned()),
+                    Bind::Timestamp(end.to_owned()),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn supports_all_go_published_at_date_formats_and_microsecond_truncation() {
+        let cases = [
+            ("2023-01-15", "2023-01-15T00:00:00.000000Z"),
+            ("2023-01-15T12:34:56Z", "2023-01-15T12:34:56.000000Z"),
+            ("2023-01-15 12:34:56", "2023-01-15T12:34:56.000000Z"),
+            ("2023/01/15", "2023-01-15T00:00:00.000000Z"),
+            ("01/15/2023", "2023-01-15T00:00:00.000000Z"),
+            ("15-Jan-2023", "2023-01-15T00:00:00.000000Z"),
+            ("Jan 15, 2023", "2023-01-15T00:00:00.000000Z"),
+        ];
+        let sql = "(torrent_contents.published_at >= $1::timestamptz AND torrent_contents.published_at <= $2::timestamptz)";
+        for (time_frame, start) in cases {
+            assert_criteria_sql(
+                Criteria::PublishedAt(time_frame.to_owned()),
+                crate::SearchBuildConfig::default(),
+                sql,
+                &[
+                    Bind::Timestamp(start.to_owned()),
+                    Bind::Timestamp("2023-01-15T23:59:59.999999Z".to_owned()),
+                ],
+            );
+        }
+
+        let now = "2026-07-12T12:00:00.123456789Z".parse().unwrap();
+        assert_criteria_sql_at(
+            Criteria::PublishedAt("0s".to_owned()),
+            crate::SearchBuildConfig::default(),
+            now,
+            sql,
+            &[
+                Bind::Timestamp("2026-07-12T12:00:00.123456Z".to_owned()),
+                Bind::Timestamp("2026-07-12T12:00:00.123456Z".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn supports_all_go_relative_time_units_and_rejects_invalid_frames() {
+        assert_eq!(parse_relative_time("1s").unwrap(), Duration::seconds(1));
+        assert_eq!(parse_relative_time("1m").unwrap(), Duration::minutes(1));
+        assert_eq!(parse_relative_time("1h").unwrap(), Duration::hours(1));
+        assert_eq!(parse_relative_time("1d").unwrap(), Duration::days(1));
+        assert_eq!(parse_relative_time("1w").unwrap(), Duration::days(7));
+        assert_eq!(parse_relative_time("1M").unwrap(), Duration::days(30));
+        assert_eq!(parse_relative_time("1y").unwrap(), Duration::days(365));
+
+        let mut state = BuildState::default();
+        let config = crate::SearchBuildConfig::default();
+        let ctx = CriteriaCtx {
+            config: &config,
+            now: fixed_now(),
+        };
+        assert!(matches!(
+            criteria_sql(
+                &Criteria::PublishedAt("not a date".to_owned()),
+                &mut state,
+                &ctx
+            ),
+            Err(SearchQueryError::InvalidParams(_))
+        ));
+    }
+
+    #[test]
+    fn binds_torrent_content_info_hashes_as_bytea() {
+        assert_criteria_sql(
+            Criteria::TorrentContentInfoHashIn(vec![
+                InfoHash::new([0x11; 20]),
+                InfoHash::new([0x22; 20]),
+            ]),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.info_hash IN ($1, $2)",
+            &[Bind::Bytea(vec![0x11; 20]), Bind::Bytea(vec![0x22; 20])],
+        );
+        assert_criteria_sql(
+            Criteria::TorrentContentInfoHashIn(Vec::new()),
+            crate::SearchBuildConfig::default(),
+            "FALSE",
+            &[],
+        );
+    }
+
+    #[test]
+    fn builds_null_bucket_criteria() {
+        assert_criteria_sql(
+            Criteria::IsNull(TorrentContentAttribute::ContentType),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.content_type IS NULL",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::IsNull(TorrentContentAttribute::VideoCodec),
+            crate::SearchBuildConfig::default(),
+            "torrent_contents.video_codec IS NULL",
+            &[],
+        );
+        assert_criteria_sql(
+            Criteria::IsNull(TorrentContentAttribute::ReleaseYear),
+            crate::SearchBuildConfig::default(),
+            "content.release_year IS NULL",
+            &[],
+        );
+    }
+
+    #[test]
+    fn required_joins_cover_s2_leaves() {
+        let joins = RequiredJoins::from_criteria(&Criteria::And(vec![
+            Criteria::TorrentFileTypeIn(vec![FileType::Video]),
+            Criteria::ReleaseYearIn(vec![2026]),
+        ]));
+        assert!(joins.torrents);
+        assert!(joins.content);
+
+        let joins = RequiredJoins::from_criteria(&Criteria::And(vec![
+            Criteria::TorrentSourceIn(vec!["dht".to_owned()]),
+            Criteria::LanguageIn(vec!["en".to_owned()]),
+            Criteria::PublishedAt("today".to_owned()),
+        ]));
+        assert!(!joins.torrents);
+        assert!(!joins.content);
     }
 }
