@@ -12,7 +12,9 @@
 //! Q2 implements `build_query` and the fetch methods; Q1 fixes the signatures
 //! and the bind model so Lane T can code against them today.
 
-use crate::criteria::{ContentRef, Criteria, Episodes, Video3D, VideoResolution};
+use crate::criteria::{
+    ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D, VideoResolution,
+};
 use crate::order::{OrderDirection, TorrentContentOrderField};
 use crate::params::TorznabSearchParams;
 use crate::result::SearchResultItem;
@@ -265,7 +267,7 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
         where_conditions.push(format!("torrent_contents.tsv @@ {placeholder}::tsquery"));
     }
     if let Some(criteria) = &_params.filter {
-        where_conditions.push(criteria_sql(criteria, &mut state));
+        where_conditions.push(criteria_sql(criteria, &mut state)?);
     }
 
     let mut sql = String::from(INFO_HASH_SELECT);
@@ -304,6 +306,12 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
                     sql.push_str(&format!(
                         "torrent_contents.published_at {direction}, torrent_contents.info_hash {direction}"
                     ));
+                }
+                _ => {
+                    return Err(SearchQueryError::InvalidParams(format!(
+                        "order field not yet supported by build_query: {:?} (Lane S S4)",
+                        order.field
+                    )));
                 }
             }
         }
@@ -365,57 +373,116 @@ impl RequiredJoins {
             Criteria::CanonicalIdentifier(_) | Criteria::AlternativeIdentifier(_) => {
                 self.content = true;
             }
+            Criteria::ReleaseYearIn(_) | Criteria::IsNull(TorrentContentAttribute::ReleaseYear) => {
+                self.content = true;
+            }
             Criteria::TorrentTag(_) => self.torrents = true,
+            Criteria::TorrentFileTypeIn(_) | Criteria::FileExtensionIn(_) => {
+                self.torrents = true;
+            }
             Criteria::ContentTypeIn(_)
+            | Criteria::TorrentSourceIn(_)
+            | Criteria::LanguageIn(_)
+            | Criteria::ContentGenre(_)
+            | Criteria::ContentCollection(_)
             | Criteria::VideoResolutionIn(_)
+            | Criteria::VideoSourceIn(_)
+            | Criteria::VideoCodecIn(_)
             | Criteria::Video3DIn(_)
+            | Criteria::VideoModifierIn(_)
+            | Criteria::SizeRange { .. }
+            | Criteria::PublishedAt(_)
+            | Criteria::TorrentContentInfoHashIn(_)
+            | Criteria::IsNull(_)
             | Criteria::Episodes(_) => {}
         }
     }
 }
 
-fn criteria_sql(criteria: &Criteria, state: &mut BuildState) -> String {
+fn criteria_sql(criteria: &Criteria, state: &mut BuildState) -> Result<String> {
     match criteria {
         Criteria::And(children) => boolean_group(children, "AND", "TRUE", state),
         Criteria::Or(children) => boolean_group(children, "OR", "FALSE", state),
-        Criteria::Not(child) => format!("NOT ({})", criteria_sql(child, state)),
-        Criteria::ContentTypeIn(types) => in_predicate(
+        Criteria::Not(child) => Ok(format!("NOT ({})", criteria_sql(child, state)?)),
+        Criteria::ContentTypeIn(types) => Ok(in_predicate(
             "torrent_contents.content_type",
             types
                 .iter()
                 .map(|value| Bind::Text(value.as_str().to_owned())),
             state,
-        ),
-        Criteria::VideoResolutionIn(values) => in_predicate(
+        )),
+        Criteria::VideoResolutionIn(values) => Ok(in_predicate(
             "torrent_contents.video_resolution",
             values
                 .iter()
                 .map(|value| Bind::Text(value.as_str().to_owned())),
             state,
-        ),
-        Criteria::Video3DIn(values) => in_predicate(
+        )),
+        Criteria::Video3DIn(values) => Ok(in_predicate(
             "torrent_contents.video_3d",
             values
                 .iter()
                 .map(|value| Bind::Text(value.as_str().to_owned())),
             state,
-        ),
-        Criteria::Episodes(episodes) => episodes_sql(episodes),
-        Criteria::CanonicalIdentifier(refs) => canonical_identifier_sql(refs, state),
-        Criteria::AlternativeIdentifier(refs) => alternative_identifier_sql(refs, state),
+        )),
+        Criteria::Episodes(episodes) => Ok(episodes_sql(episodes)),
+        Criteria::CanonicalIdentifier(refs) => Ok(canonical_identifier_sql(refs, state)),
+        Criteria::AlternativeIdentifier(refs) => Ok(alternative_identifier_sql(refs, state)),
         Criteria::TorrentTag(names) => {
             if names.is_empty() {
-                return "FALSE".to_owned();
+                return Ok("FALSE".to_owned());
             }
             let placeholders = names
                 .iter()
                 .map(|name| state.push_bind(Bind::Text(name.clone())))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(
+            Ok(format!(
                 "EXISTS (SELECT 1 FROM torrent_tags WHERE torrent_tags.info_hash = torrents.info_hash AND torrent_tags.name IN ({placeholders}))"
-            )
+            ))
         }
+        Criteria::TorrentSourceIn(_) => Err(SearchQueryError::InvalidParams(
+            "TorrentSourceIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::TorrentFileTypeIn(_) => Err(SearchQueryError::InvalidParams(
+            "TorrentFileTypeIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::FileExtensionIn(_) => Err(SearchQueryError::InvalidParams(
+            "FileExtensionIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::LanguageIn(_) => Err(SearchQueryError::InvalidParams(
+            "LanguageIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::ContentGenre(_) => Err(SearchQueryError::InvalidParams(
+            "ContentGenre: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::ContentCollection(_) => Err(SearchQueryError::InvalidParams(
+            "ContentCollection: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::ReleaseYearIn(_) => Err(SearchQueryError::InvalidParams(
+            "ReleaseYearIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::VideoSourceIn(_) => Err(SearchQueryError::InvalidParams(
+            "VideoSourceIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::VideoCodecIn(_) => Err(SearchQueryError::InvalidParams(
+            "VideoCodecIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::VideoModifierIn(_) => Err(SearchQueryError::InvalidParams(
+            "VideoModifierIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::SizeRange { .. } => Err(SearchQueryError::InvalidParams(
+            "SizeRange: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::PublishedAt(_) => Err(SearchQueryError::InvalidParams(
+            "PublishedAt: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::TorrentContentInfoHashIn(_) => Err(SearchQueryError::InvalidParams(
+            "TorrentContentInfoHashIn: SQL builder pending (Lane S S2)".to_owned(),
+        )),
+        Criteria::IsNull(_) => Err(SearchQueryError::InvalidParams(
+            "IsNull: SQL builder pending (Lane S S2)".to_owned(),
+        )),
     }
 }
 
@@ -424,15 +491,15 @@ fn boolean_group(
     operator: &str,
     empty: &str,
     state: &mut BuildState,
-) -> String {
+) -> Result<String> {
     if children.is_empty() {
-        return empty.to_owned();
+        return Ok(empty.to_owned());
     }
     let parts = children
         .iter()
         .map(|child| criteria_sql(child, state))
-        .collect::<Vec<_>>();
-    format!("({})", parts.join(&format!(" {operator} ")))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(format!("({})", parts.join(&format!(" {operator} "))))
 }
 
 fn in_predicate(

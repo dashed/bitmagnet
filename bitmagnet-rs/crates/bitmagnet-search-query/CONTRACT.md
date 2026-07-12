@@ -324,3 +324,114 @@ strings; both sides compare hex. Binds use `Bind::Bytea(20 bytes)`.
   deterministic fixture rows + emits `{options → info-hash list}` via the REAL Go
   builder under the live-PG CI lane; Rust `#[ignore]` integration test consumes
   the same fixtures through `bitmagnet-diff` → 0 diffs.
+
+## Phase-2 contract (Lane S)
+
+Task S1 expands the public types to the full GraphQL torrent-content search
+surface. The existing Torznab SQL path remains frozen; the new leaves return an
+explicit `Lane S S2` pending error until their SQL lowering lands.
+
+### Criteria leaves
+
+`And`, `Or`, and `Not` compose the following complete leaf set. Facet filters
+containing the literal `"null"` compose `Or(<field>In(non-null values),
+IsNull(<field>))`.
+
+| Rust leaf | Go source / symbol | Intended SQL |
+|---|---|---|
+| `ContentTypeIn` | `criteria_torrent_content_type.go` `TorrentContentTypeCriteria` | `torrent_contents.content_type IN (...)` |
+| `TorrentSourceIn` | `facet_torrent_source.go` `TorrentSourceCriteria` | Correlated `EXISTS` on `torrents_torrent_sources`, matching `info_hash` and `source IN (...)` |
+| `TorrentFileTypeIn` | `criteria_torrent_file_type.go` `TorrentFileTypeCriteria` | Expand every `FileType.extensions()` value, then apply file-extension criteria |
+| `FileExtensionIn` | `criteria_torrent_file_extension.go` `TorrentFileExtensionCriteria` | `torrents.extension IN (...)` OR either legacy `EXISTS (torrent_files ... extension IN (...))` or gated `torrents.file_extensions @> '["ext"]'::jsonb` branches |
+| `LanguageIn` | `facet_torrent_content_language.go` `TorrentContentLanguageCriteria` | `torrent_contents.languages ?\| array['<id>', ...]` |
+| `ContentGenre` | `facet_torrent_content_genre.go` via `ContentCollectionCriteria` | Content-collection predicate with `collection_type = 'genre'` |
+| `ContentCollection` | `criteria_content_collection.go` `ContentCollectionCriteria` | Non-null `torrent_contents.content_id` AND an OR of correlated `EXISTS (content_collections_content ...)` branches |
+| `ReleaseYearIn` | `facet_release_year.go` `yearCondition` | Validated years `1000..=9999`, then `content.release_year IN (...)` |
+| `VideoResolutionIn` | `facet_torrent_content_video_resolution.go` | `torrent_contents.video_resolution IN (...)` |
+| `VideoSourceIn` | `facet_torrent_content_video_source.go` | `torrent_contents.video_source IN (...)` |
+| `VideoCodecIn` | `facet_torrent_content_video_codec.go` | `torrent_contents.video_codec IN (...)` |
+| `Video3DIn` | `facet_torrent_content_video_3d.go` | `torrent_contents.video_3d IN (...)` |
+| `VideoModifierIn` | `facet_torrent_content_video_modifier.go` | `torrent_contents.video_modifier IN (...)` |
+| `SizeRange` | `criteria_torrent_content_size.go` `TorrentContentSizeCriteria` | Optional inclusive `torrent_contents.size >= min` and `<= max` predicates |
+| `PublishedAt` | `criteria_torrent_content_published_at.go` `TorrentContentPublishedAtCriteria` | Parse the time frame, then apply inclusive `torrent_contents.published_at >= ...` and `<= ...` bounds |
+| `TorrentContentInfoHashIn` | `criteria_torrent_content_info_hash.go` `TorrentContentInfoHashCriteria` | `torrent_contents.info_hash IN (DECODE('<hex>', 'hex'), ...)`; empty input is `FALSE` |
+| `IsNull` | `facet_torrent_content_attribute.go` generic `Criteria`; `facet_release_year.go` | `torrent_contents.<attribute> IS NULL`, except `ReleaseYear` is `content.release_year IS NULL` |
+| `Episodes` | `criteria_torrent_content_episodes.go` `TorrentContentEpisodesCriteria` | JSONB season presence / episode containment predicates against `torrent_contents.episodes` |
+| `CanonicalIdentifier` | `criteria_content_identifier.go` `ContentCanonicalIdentifierCriteria` | Predicates on joined `content.type/source/id` |
+| `AlternativeIdentifier` | `criteria_content_identifier.go` `ContentAlternativeIdentifierCriteria` | Correlated `EXISTS` on `content_attributes` for joined content identifiers |
+| `TorrentTag` | `criteria_torrent_tag.go` `TorrentTagCriteria` | Correlated `EXISTS` on `torrent_tags`, via the `torrents` join |
+
+### Ordering and FIND-2
+
+The field strings and clauses come from
+`order_torrent_content_enum.go` and `TorrentContentOrderBy.Clauses()` in
+`order_torrent_content.go`.
+
+| Field | Serialized string | Primary expression | Tie-break |
+|---|---|---|---|
+| `Relevance` | `relevance` | `query_string_rank` (`ts_rank_cd(...)`) | none |
+| `PublishedAt` | `published_at` | `torrent_contents.published_at` | `torrent_contents.info_hash` |
+| `UpdatedAt` | `updated_at` | `torrent_contents.updated_at` | `torrent_contents.info_hash` |
+| `Size` | `size` | `torrent_contents.size` | `torrent_contents.info_hash` |
+| `FilesCount` | `files_count` | `COALESCE(torrent_contents.files_count, 0)` | `torrent_contents.info_hash` |
+| `Seeders` | `seeders` | `coalesce(torrent_contents.seeders, -1)` | `torrent_contents.info_hash` |
+| `Leechers` | `leechers` | `coalesce(torrent_contents.leechers, -1)` | `torrent_contents.info_hash` |
+| `Name` | `name` | `torrents.name` (requires the `torrents` join) | none |
+| `InfoHash` | `info_hash` | `torrent_contents.info_hash` | none (the primary is the key) |
+
+Every tie-break inherits the **same direction** as its primary expression. An
+empty GraphQL order uses the Go default browse order,
+`torrent_contents.published_at DESC`, as one column. FIND-2's flag-gated
+`popularity_sort_default` applies only to this GraphQL contract: with a query
+string, exactly one `relevance` clause rewrites to `seeders DESC`. It never
+applies to the direct Torznab path.
+
+### Search input, configuration, and pagination
+
+`SearchOptions` carries the free-text query, predicate tree, ordered clauses,
+facet requests, and an already-resolved `limit`/`offset` window. `None` means no
+limit, while `Some(0)` is an explicit zero limit. Lane G owns the Go
+`SearchParams.Option()` page arithmetic and supplies the resolved offset; this
+builder does not receive a page number. `total_count`, `has_next_page`, and
+`aggregation_budget` mirror the Go flags, with a default budget of `5000.0`.
+
+`SearchBuildConfig` is passed explicitly so query construction stays pure.
+`file_extensions_jsonb` is the effective `GateFileExtensionsJSONB` choice
+(including `DropCompatibleReads`); `popularity_sort_default` controls the
+GraphQL-only FIND-2 rewrite. Both default off.
+
+Torrent-content paging is **offset/limit**, not keyset/cursor pagination. When
+`has_next_page` is requested and a limit exists, Go `applyPost` queries
+`limit + 1`; `hasNextPage` removes that extra item and reports whether it was
+present. The roadmap's "cursor pagination" wording is a misnomer for this
+builder. The only actual cursor in this area belongs to L2 FileSearch and is out
+of scope.
+
+### Search result and facet aggregation model
+
+`SearchResult` mirrors Go `query.GenericResult`: total count plus estimate flag,
+has-next-page, ordered hydrated `SearchResultItem`s, and `Aggregations`.
+Aggregations are facet-key to group to value-key maps. Each value runs one
+`BudgetedCount`; the default budget is `5000.0`, budget exceed sets
+`is_estimate`, and zero-count values are dropped unless that value is selected.
+The crate returns deterministic `BTreeMap`s keyed by value. Natural sorting by
+the human label (`natsort.Compare` in `gqlmodel/facet.go`) remains Lane G's
+resolver concern.
+
+### Binding lean-membership rule
+
+Every ordered and limited membership query must remain a **lean,
+single-table** query: literal `LIMIT`, no hydration joins, and no hydration
+subselects. Hydration is a separate query keyed by the selected row ids and is
+merged in membership order. This is the binding Phase-1 deviation recorded
+above and governs every S4 ordered path.
+
+### S2-S5 pending
+
+S1 is types and documentation only. S2 replaces the new-criterion pending
+errors with SQL and feature-gated extension handling; S3 implements facet
+filtering and budgeted count-per-value aggregations; S4 implements the complete
+order list, FIND-2, offset/limit over-fetch, and lean membership/hydration paths;
+S5 assembles total-count and final `SearchResult` execution. Until those tasks
+land, Phase-1 Torznab criteria and its two order fields are the only executable
+builder surface.

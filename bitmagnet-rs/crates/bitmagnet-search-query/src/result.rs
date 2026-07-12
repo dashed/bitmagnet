@@ -1,6 +1,9 @@
-//! [`SearchResultItem`] — one hydrated result row, carrying everything Lane T
-//! needs to render a Torznab `<item>` (see `internal/torznab/adapter/
-//! search_result.go` for the fields consumed).
+//! Search result shapes for the Torznab row feed and Phase-2 GraphQL surface.
+//!
+//! [`SearchResultItem`] is one hydrated row carrying everything Lane T needs
+//! to render a Torznab `<item>` (see `internal/torznab/adapter/search_result.go`
+//! for the fields consumed). [`SearchResult`] wraps those rows with GraphQL
+//! pagination, count, and aggregation metadata.
 //!
 //! The v1 parity gate (Q3) only compares the ordered **info-hash list**, so the
 //! authoritative field for parity is [`SearchResultItem::info_hash`]. The
@@ -9,8 +12,30 @@
 //! to implement and Lane G's XML goldens to pin. The struct is `non_exhaustive`
 //! so fields can be added without breaking Lane T.
 
+use crate::aggregations::Aggregations;
 use crate::criteria::{Episodes, Video3D, VideoResolution};
 use bitmagnet_model::{ContentType, InfoHash};
+
+/// The GraphQL-surface search result.
+///
+/// Mirrors Go `query.GenericResult[TorrentContentResultItem]` in
+/// `internal/database/query/query.go` plus gqlmodel
+/// `TorrentContentSearchResult`. Lane S S3-S5 fill the count, pagination, and
+/// aggregation fields around the separately hydrated membership-query rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    /// Exact or budget-estimated total row count requested by `WithTotalCount`.
+    pub total_count: u64,
+    /// Whether the budgeted count SQL exceeded its budget and returned an
+    /// estimate.
+    pub total_count_is_estimate: bool,
+    /// Whether the `limit + 1` membership query found another page.
+    pub has_next_page: bool,
+    /// Ordered, hydrated result rows.
+    pub items: Vec<SearchResultItem>,
+    /// Count-per-value facet groups keyed by facet key.
+    pub aggregations: Aggregations,
+}
 
 /// A single search result row.
 #[derive(Debug, Clone, PartialEq, Eq)]
