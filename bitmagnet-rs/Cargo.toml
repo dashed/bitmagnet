@@ -10,6 +10,8 @@ members = [
     "crates/bitmagnet-filesearch",
     "crates/bitmagnet-shadow",
     "crates/bitmagnet-diff",
+    "crates/bitmagnet-search-query",
+    "crates/bitmagnet-torznab",
 ]
 
 [workspace.package]
