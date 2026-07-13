@@ -3,7 +3,7 @@
 use bitmagnet_proto::v1::SortBy;
 
 use crate::filters::{FileRowSort, FileRowsResult, Filters, PathGroup};
-use crate::pg::{QueryOptions, TorrentContentResult};
+use crate::pg::{empty_result, QueryOptions, SearchResult};
 
 /// Search-serving surface consumed by Lane G's GraphQL resolvers.
 ///
@@ -19,7 +19,7 @@ pub trait SearchServe: Send + Sync {
         limit: u32,
         offset: u32,
         sorts: Vec<SortBy>,
-    ) -> crate::Result<(TorrentContentResult, bool)>;
+    ) -> crate::Result<(SearchResult, bool)>;
 
     /// Collapses exact-refined L3 candidate matches by path.
     async fn collapse_paths(
@@ -84,8 +84,8 @@ impl SearchServe for Disabled {
         _limit: u32,
         _offset: u32,
         _sorts: Vec<SortBy>,
-    ) -> crate::Result<(TorrentContentResult, bool)> {
-        Ok((TorrentContentResult::default(), false))
+    ) -> crate::Result<(SearchResult, bool)> {
+        Ok((empty_result(), false))
     }
 
     async fn collapse_paths(

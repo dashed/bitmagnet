@@ -4,36 +4,24 @@
 //! blob-refine composer, the L3 gRPC client, and the engine-level Tantivy-serve
 //! router decorator. C1 freezes their shared contract; C2 implements the L3 RPC
 //! client and its fail-closed background health poller; C3 implements the
-//! bounded exact-refine composer behind the temporary Lane-S adapter seam.
+//! bounded exact-refine composer backed by Lane S's real PostgreSQL query API.
 
 #![warn(missing_docs)]
 
-#[cfg(feature = "lane-s-stub")]
 pub mod api;
 pub mod candidates;
 pub mod client;
-#[cfg(feature = "lane-s-stub")]
 pub mod composer;
 pub mod config;
-#[cfg(feature = "lane-s-stub")]
 pub mod filters;
 pub mod health;
 pub mod metrics;
-#[cfg(feature = "lane-s-stub")]
 pub mod pg;
-#[cfg(feature = "lane-s-stub")]
 pub mod refine;
 
-#[cfg(not(feature = "lane-s-stub"))]
-compile_error!(
-    "Lane S (bitmagnet-search-query S1) integration not yet wired; build with default feature lane-s-stub"
-);
-
-#[cfg(feature = "lane-s-stub")]
 pub use api::{Disabled, SearchServe};
 pub use candidates::{CandidateSource, HealthGate};
 pub use client::{Client, ClientConfig};
-#[cfg(feature = "lane-s-stub")]
 pub use composer::Composer;
 pub use config::{
     ComposerConfig, DisabledServeRouter, ServeConfig, ServeMode, DEFAULT_MAX_CANDIDATES,
@@ -41,19 +29,17 @@ pub use config::{
     DEFAULT_MIN_QUERY_LENGTH, DEFAULT_OVERSAMPLE_FACTOR, DEFAULT_REFINE_FILE_BUDGET,
     DEFAULT_RETAINED_FILE_BUDGET, DEFAULT_ROUTE_TIMEOUT,
 };
-#[cfg(feature = "lane-s-stub")]
 pub use filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
 pub use health::{
     gate, poll_once, poll_once_with_metrics, spawn_health_poller, spawn_health_poller_with_metrics,
     HealthConfig, HealthState,
 };
 pub use metrics::{PathsearchMetrics, RouteResult, ServeMetrics, ServeOutcome};
-#[cfg(feature = "lane-s-stub")]
 pub use pg::{
-    AggregationItem, Aggregations, PgSearchBackend, QueryOptions, SearchOptions,
-    TorrentContentResult, TorrentContentResultItem,
+    AggregationGroup, AggregationItem, Aggregations, Criteria, HydrateOptions, PgSearch,
+    PgSearchBackend, QueryOptions, SearchBuildConfig, SearchOptions, SearchRequest, SearchResult,
+    SearchResultItem,
 };
-#[cfg(feature = "lane-s-stub")]
 pub use refine::{
     distinct_matched_paths, files_for_refine, paginate, torrent_matches, torrent_refine,
     RefinePredicate,

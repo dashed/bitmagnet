@@ -13,9 +13,9 @@ use bitmagnet_proto::v1::{
     SuggestRequest, SuggestResponse,
 };
 use bitmagnet_search_serve::{
-    Aggregations, CandidateSource, Composer, ComposerConfig, Filters, PgSearchBackend,
-    QueryOptions, SearchOptions, SearchServe, TorrentContentResult, TorrentContentResultItem,
-    DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES,
+    Aggregations, CandidateSource, Composer, ComposerConfig, Criteria, Filters, HydrateOptions,
+    PgSearchBackend, QueryOptions, SearchOptions, SearchRequest, SearchResult, SearchResultItem,
+    SearchServe, DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES,
     DEFAULT_MAX_REFINE_FILES, DEFAULT_REFINE_FILE_BUDGET, DEFAULT_RETAINED_FILE_BUDGET,
 };
 
@@ -177,17 +177,15 @@ struct DiskPg {
 impl PgSearchBackend for DiskPg {
     async fn torrent_content(
         &self,
-        options: SearchOptions,
-    ) -> bitmagnet_search_serve::Result<TorrentContentResult> {
-        if !options.hydrate_files {
-            return Ok(TorrentContentResult {
-                aggregations: Aggregations::empty(),
-                ..TorrentContentResult::default()
-            });
+        request: SearchRequest,
+    ) -> bitmagnet_search_serve::Result<SearchResult> {
+        if !request.hydrate.files_data {
+            return Ok(empty_result());
         }
 
-        let mut items = Vec::with_capacity(options.info_hash_in.len());
-        for info_hash in options.info_hash_in {
+        let candidate_ids = candidate_ids(&request.options.filter);
+        let mut items = Vec::with_capacity(candidate_ids.len());
+        for info_hash in candidate_ids {
             let fixture = self.fixtures.get(&info_hash).ok_or_else(|| {
                 bitmagnet_search_serve::Error::Pg(format!(
                     "RSS fixture missing for candidate {info_hash}"
@@ -199,26 +197,26 @@ impl PgSearchBackend for DiskPg {
                     fixture.blob_path.display()
                 ))
             })?;
-            items.push(TorrentContentResultItem {
+            let name = format!("production-shaped-{info_hash}");
+            let size = u64::try_from(fixture.file_count).unwrap_or(u64::MAX) * 1_048_576;
+            let mut item = SearchResultItem::for_test(info_hash, &name, size);
+            item.torrent = Torrent {
                 info_hash,
-                torrent: Torrent {
-                    info_hash,
-                    name: format!("production-shaped-{info_hash}"),
-                    size: u64::try_from(fixture.file_count).unwrap_or(u64::MAX) * 1_048_576,
-                    private: false,
-                    files_status: FilesStatus::Multi,
-                    extension: None,
-                    files_count: u32::try_from(fixture.file_count).ok(),
-                    files_data: Some(files_data),
-                    file_extensions: vec!["mkv".to_owned()],
-                },
-                refine_files: Vec::new(),
-            });
+                name,
+                size,
+                private: false,
+                files_status: FilesStatus::Multi,
+                extension: None,
+                files_count: u32::try_from(fixture.file_count).ok(),
+                files_data: Some(files_data),
+                file_extensions: vec!["mkv".to_owned()],
+            };
+            items.push(item);
         }
 
-        Ok(TorrentContentResult {
+        Ok(SearchResult {
             items,
-            ..TorrentContentResult::default()
+            ..empty_result()
         })
     }
 
@@ -238,6 +236,37 @@ impl PgSearchBackend for DiskPg {
             })
             .collect())
     }
+}
+
+fn empty_result() -> SearchResult {
+    SearchResult {
+        total_count: 0,
+        total_count_is_estimate: false,
+        has_next_page: false,
+        items: Vec::new(),
+        aggregations: Aggregations::new(),
+    }
+}
+
+fn candidate_ids(filter: &Option<Criteria>) -> Vec<InfoHash> {
+    fn visit(criteria: &Criteria, out: &mut Vec<InfoHash>) {
+        match criteria {
+            Criteria::TorrentContentInfoHashIn(ids) => out.extend(ids.iter().copied()),
+            Criteria::And(children) | Criteria::Or(children) => {
+                for child in children {
+                    visit(child, out);
+                }
+            }
+            Criteria::Not(child) => visit(child, out),
+            _ => {}
+        }
+    }
+
+    let mut ids = Vec::new();
+    if let Some(filter) = filter {
+        visit(filter, &mut ids);
+    }
+    ids
 }
 
 #[tokio::main]
@@ -329,18 +358,15 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     };
     let composer = Composer::new(candidates, pg, config, None);
     let options = QueryOptions {
-        combined: SearchOptions {
-            hydrate_files: true,
-            ..SearchOptions::default()
-        },
-        refine: Some(SearchOptions {
-            hydrate_files: true,
-            ..SearchOptions::default()
-        }),
-        agg: SearchOptions {
-            with_facets: true,
-            ..SearchOptions::default()
-        },
+        combined: SearchRequest::new(
+            SearchOptions::default(),
+            HydrateOptions { files_data: true },
+        ),
+        refine: Some(SearchRequest::new(
+            SearchOptions::default(),
+            HydrateOptions { files_data: true },
+        )),
+        agg: SearchRequest::default(),
     };
 
     let baseline_rss_kib = proc_status_kib("VmRSS")?;
