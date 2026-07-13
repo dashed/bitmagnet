@@ -18,6 +18,7 @@ pub mod config;
 #[cfg(feature = "lane-s-stub")]
 pub mod filters;
 pub mod health;
+pub mod metrics;
 #[cfg(feature = "lane-s-stub")]
 pub mod pg;
 #[cfg(feature = "lane-s-stub")]
@@ -42,7 +43,11 @@ pub use config::{
 };
 #[cfg(feature = "lane-s-stub")]
 pub use filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
-pub use health::{gate, poll_once, spawn_health_poller, HealthConfig, HealthState};
+pub use health::{
+    gate, poll_once, poll_once_with_metrics, spawn_health_poller, spawn_health_poller_with_metrics,
+    HealthConfig, HealthState,
+};
+pub use metrics::{PathsearchMetrics, RouteResult, ServeMetrics, ServeOutcome};
 #[cfg(feature = "lane-s-stub")]
 pub use pg::{
     AggregationItem, Aggregations, PgSearchBackend, QueryOptions, SearchOptions,

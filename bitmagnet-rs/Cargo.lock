@@ -793,6 +793,7 @@ dependencies = [
  "bitmagnet-model",
  "bitmagnet-proto",
  "hyper-util",
+ "prometheus",
  "thiserror 2.0.18",
  "tokio",
  "tonic",

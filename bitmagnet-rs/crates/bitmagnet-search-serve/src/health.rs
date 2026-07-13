@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bitmagnet_proto::v1::path_search_health::ServingStatus;
 
 use crate::candidates::CandidateSource;
+use crate::metrics::PathsearchMetrics;
 
 /// Configuration for the background L3 health reporter ported from Go
 /// `searchfx.registerPathsearchHealthReporter`.
@@ -113,6 +114,20 @@ pub async fn poll_once<C: CandidateSource + ?Sized>(
     config: &HealthConfig,
     now_epoch: i64,
 ) {
+    poll_once_with_metrics(client, state, config, now_epoch, None).await;
+}
+
+/// Performs one L3 health poll and publishes the canonical C6 health metrics.
+///
+/// This is the production composition-root variant of [`poll_once`]. Tests and
+/// callers that intentionally omit metrics keep using the original function.
+pub async fn poll_once_with_metrics<C: CandidateSource + ?Sized>(
+    client: &C,
+    state: &HealthState,
+    config: &HealthConfig,
+    now_epoch: i64,
+    metrics: Option<&PathsearchMetrics>,
+) {
     let response = match client.health_check().await {
         Ok(response) => response,
         Err(error) => {
@@ -120,6 +135,10 @@ pub async fn poll_once<C: CandidateSource + ?Sized>(
             // to report "was N docs, last successful at T" across a blip.
             let (_, doc_count, watermark_epoch, last_success_epoch) = state.snapshot();
             state.set_healthy(false, doc_count, watermark_epoch, last_success_epoch);
+            if let Some(metrics) = metrics {
+                metrics.inc_health_check(false);
+                metrics.set_health(false, doc_count, watermark_epoch, last_success_epoch);
+            }
             tracing::warn!(
                 error = %error,
                 "pathsearch: L3 HealthCheck RPC failed; route failing closed"
@@ -144,6 +163,10 @@ pub async fn poll_once<C: CandidateSource + ?Sized>(
     }
 
     state.set_healthy(healthy, doc_count, watermark_epoch, now_epoch);
+    if let Some(metrics) = metrics {
+        metrics.inc_health_check(true);
+        metrics.set_health(healthy, doc_count, watermark_epoch, now_epoch);
+    }
 
     if healthy {
         tracing::debug!(doc_count, watermark_epoch, "pathsearch: L3 healthy");
@@ -174,6 +197,19 @@ pub fn spawn_health_poller<C: CandidateSource + 'static>(
     state: Arc<HealthState>,
     config: HealthConfig,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_health_poller_with_metrics(client, state, config, None)
+}
+
+/// Starts the background health poller with canonical C6 metrics attached.
+///
+/// The optional facade keeps disabled/test roots lightweight while allowing the
+/// GraphQL composition root to pass one registered shared instance.
+pub fn spawn_health_poller_with_metrics<C: CandidateSource + 'static>(
+    client: Arc<C>,
+    state: Arc<HealthState>,
+    config: HealthConfig,
+    metrics: Option<Arc<PathsearchMetrics>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let period = if config.interval.is_zero() {
             HealthConfig::default().interval
@@ -185,7 +221,14 @@ pub fn spawn_health_poller<C: CandidateSource + 'static>(
 
         loop {
             ticker.tick().await;
-            poll_once(client.as_ref(), state.as_ref(), &config, current_epoch()).await;
+            poll_once_with_metrics(
+                client.as_ref(),
+                state.as_ref(),
+                &config,
+                current_epoch(),
+                metrics.as_deref(),
+            )
+            .await;
         }
     })
 }
@@ -325,5 +368,35 @@ mod tests {
         };
         poll_once(&serving, &stale_state, &stale_config, 1_000).await;
         assert_eq!(stale_state.snapshot(), (false, 5, 900, 1_000));
+    }
+
+    #[tokio::test]
+    async fn metrics_follow_success_error_and_preserved_snapshot() {
+        let metrics = PathsearchMetrics::new();
+        let state = HealthState::new();
+        let serving = FakeCandidateSource::responding(health(ServingStatus::Serving, 5, 900));
+
+        poll_once_with_metrics(
+            &serving,
+            &state,
+            &HealthConfig::default(),
+            1_000,
+            Some(&metrics),
+        )
+        .await;
+        assert_eq!(metrics.health_check_count(true), 1);
+        assert_eq!(metrics.health_check_count(false), 0);
+        assert_eq!(metrics.health_snapshot(), (true, 5, 900, 1_000));
+
+        poll_once_with_metrics(
+            &FakeCandidateSource::erroring(),
+            &state,
+            &HealthConfig::default(),
+            1_100,
+            Some(&metrics),
+        )
+        .await;
+        assert_eq!(metrics.health_check_count(false), 1);
+        assert_eq!(metrics.health_snapshot(), (false, 5, 900, 1_000));
     }
 }

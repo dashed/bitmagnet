@@ -18,6 +18,7 @@ use crate::api::SearchServe;
 use crate::candidates::{CandidateSource, HealthGate};
 use crate::config::ComposerConfig;
 use crate::filters::{FileRowSort, FileRowsResult, Filters, PathGroup};
+use crate::metrics::{PathsearchMetrics, RouteResult};
 use crate::pg::{Aggregations, PgSearchBackend, QueryOptions, SearchOptions, TorrentContentResult};
 use crate::refine::{files_for_refine, paginate, torrent_matches, RefinePredicate};
 
@@ -35,6 +36,7 @@ pub struct Composer {
     config: ComposerConfig,
     health: Option<HealthGate>,
     refine_slots: Arc<Semaphore>,
+    metrics: Option<Arc<PathsearchMetrics>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +65,24 @@ impl Composer {
             config: config.normalized(),
             health,
             refine_slots: Arc::new(Semaphore::new(max_concurrent_refines)),
+            metrics: None,
+        }
+    }
+
+    /// Attaches the canonical C6 composer metrics facade.
+    ///
+    /// The constructor remains usable without metrics for focused tests and
+    /// disabled composition roots. Production should pass the value returned by
+    /// [`PathsearchMetrics::register`].
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<PathsearchMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn inc_route(&self, result: RouteResult) {
+        if let Some(metrics) = &self.metrics {
+            metrics.inc_route(result);
         }
     }
 
@@ -125,12 +145,14 @@ impl Composer {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch candidate call failed; falling back to PostgreSQL");
+                self.inc_route(RouteResult::Error);
                 return None;
             }
             Err(_) => {
                 tracing::warn!(
                     "pathsearch candidate call reached route deadline; falling back to PostgreSQL"
                 );
+                self.inc_route(RouteResult::Error);
                 return None;
             }
         };
@@ -169,6 +191,9 @@ impl Composer {
         ids.into_iter()
             .filter(|id| match counts.get(id).copied() {
                 Some(count) if count > i64::from(cap) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_refine_declined_oversized();
+                    }
                     tracing::warn!(
                         info_hash = %id,
                         file_count = count,
@@ -277,6 +302,9 @@ impl Composer {
             };
             let file_count = u64::try_from(files.len()).unwrap_or(u64::MAX);
             if file_count > file_cap {
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_refine_declined_oversized();
+                }
                 tracing::warn!(
                     info_hash = %item.info_hash,
                     file_count,
@@ -317,6 +345,9 @@ impl Composer {
         match timeout_at(deadline, self.pg.torrent_content(options)).await {
             Ok(Ok(result)) => result.aggregations,
             Ok(Err(error)) => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_refine_agg_error();
+                }
                 tracing::warn!(%error, "pathsearch refined-set aggregation failed; serving without facets");
                 Aggregations::empty()
             }
@@ -333,7 +364,12 @@ impl Composer {
         sorts: Vec<SortBy>,
     ) -> (TorrentContentResult, bool) {
         let predicate = filters.predicate();
-        if predicate.is_empty_substr() || !self.eligible(&filters.query) || !self.healthy() {
+        if predicate.is_empty_substr() || !self.eligible(&filters.query) {
+            self.inc_route(RouteResult::Ineligible);
+            return (TorrentContentResult::default(), false);
+        }
+        if !self.healthy() {
+            self.inc_route(RouteResult::Fallback);
             return (TorrentContentResult::default(), false);
         }
         let deadline = self.route_deadline(Instant::now());
@@ -345,6 +381,7 @@ impl Composer {
         };
         if ids.is_empty() {
             return if self.trust_empty() {
+                self.inc_route(RouteResult::Served);
                 (
                     TorrentContentResult {
                         total_count_is_estimate: true,
@@ -353,6 +390,7 @@ impl Composer {
                     true,
                 )
             } else {
+                self.inc_route(RouteResult::Fallback);
                 (TorrentContentResult::default(), false)
             };
         }
@@ -360,12 +398,17 @@ impl Composer {
             Ok(Ok(counts)) => counts,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch file-count probe failed; falling back to PostgreSQL");
+                self.inc_route(RouteResult::Error);
                 return (TorrentContentResult::default(), false);
             }
-            Err(_) => return (TorrentContentResult::default(), false),
+            Err(_) => {
+                self.inc_route(RouteResult::Error);
+                return (TorrentContentResult::default(), false);
+            }
         };
         let kept = self.decline_oversized(ids.clone(), &counts);
         if kept.is_empty() {
+            self.inc_route(RouteResult::Served);
             return (
                 TorrentContentResult {
                     total_count_is_estimate: true,
@@ -379,6 +422,10 @@ impl Composer {
             match self.acquire_refine_slot(deadline).await {
                 Some(permit) => Some(permit),
                 None => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_refine_shed();
+                    }
+                    self.inc_route(RouteResult::Served);
                     tracing::warn!(
                         "pathsearch refine slot unavailable; serving shed empty estimate"
                     );
@@ -412,7 +459,10 @@ impl Composer {
                     cap = RefineCap::Deadline;
                     break;
                 }
-                Err(_) => return (TorrentContentResult::default(), false),
+                Err(_) => {
+                    self.inc_route(RouteResult::Error);
+                    return (TorrentContentResult::default(), false);
+                }
             };
             match self.refine_chunk(
                 items,
@@ -426,10 +476,20 @@ impl Composer {
                     cap = reason;
                     break;
                 }
-                Err(()) => return (TorrentContentResult::default(), false),
+                Err(()) => {
+                    self.inc_route(RouteResult::Fallback);
+                    return (TorrentContentResult::default(), false);
+                }
             }
         }
         if cap != RefineCap::None {
+            if let Some(metrics) = &self.metrics {
+                match cap {
+                    RefineCap::Retained => metrics.inc_refine_retained_capped(),
+                    RefineCap::Deadline => metrics.inc_refine_deadline_capped(),
+                    RefineCap::None => {}
+                }
+            }
             tracing::warn!(
                 ?cap,
                 matches = refined.len(),
@@ -451,6 +511,7 @@ impl Composer {
         let page = paginate(refined, u64::from(offset), u64::from(limit));
         let consumed =
             u64::from(offset).saturating_add(u64::try_from(page.len()).unwrap_or(u64::MAX));
+        self.inc_route(RouteResult::Served);
         (
             TorrentContentResult {
                 items: page,
@@ -632,6 +693,7 @@ mod tests {
         delay: Duration,
         fail_counts: bool,
         fail_search: bool,
+        fail_on_search_call: Option<usize>,
     }
 
     impl FakePg {
@@ -644,6 +706,7 @@ mod tests {
                 delay: Duration::ZERO,
                 fail_counts: false,
                 fail_search: false,
+                fail_on_search_call: None,
             }
         }
 
@@ -658,11 +721,12 @@ mod tests {
             &self,
             options: SearchOptions,
         ) -> crate::Result<TorrentContentResult> {
-            self.calls
-                .lock()
-                .expect("calls mutex poisoned")
-                .push(options.clone());
-            if self.fail_search {
+            let search_call = {
+                let mut calls = self.calls.lock().expect("calls mutex poisoned");
+                calls.push(options.clone());
+                calls.len()
+            };
+            if self.fail_search || self.fail_on_search_call == Some(search_call) {
                 return Err(crate::Error::Pg("search failure".into()));
             }
             if options.hydrate_files
@@ -894,7 +958,9 @@ mod tests {
         cfg.max_refine_files = 3;
         cfg.refine_file_budget = 2;
         cfg.max_chunk_torrents = 1;
-        let composer = Composer::new(candidate_source, pg.clone(), cfg, None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidate_source, pg.clone(), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
 
         let (result, served) = search(&composer, 10, 0).await;
 
@@ -919,6 +985,8 @@ mod tests {
         assert!(hydrate_calls
             .iter()
             .all(|call| !call.info_hash_in.contains(&id(1))));
+        assert_eq!(metrics.refine_declined_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
 
     #[tokio::test]
@@ -931,7 +999,9 @@ mod tests {
         let mut cfg = config();
         cfg.refine_file_budget = 2;
         cfg.retained_file_budget = 2;
-        let composer = Composer::new(candidate_source, pg.clone(), cfg, None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidate_source, pg.clone(), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
 
         let (result, served) = search(&composer, 10, 0).await;
 
@@ -941,6 +1011,8 @@ mod tests {
         let calls = pg.calls();
         assert_eq!(calls.last().unwrap().info_hash_in, vec![id(1)]);
         assert!(!calls.last().unwrap().hydrate_files);
+        assert_eq!(metrics.retained_capped_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
 
     #[tokio::test]
@@ -956,7 +1028,9 @@ mod tests {
         let mut cfg = config();
         cfg.max_chunk_torrents = 1;
         cfg.route_timeout = Duration::from_millis(20);
-        let composer = Composer::new(candidate_source, pg, cfg, None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer =
+            Composer::new(candidate_source, pg, cfg, None).with_metrics(Arc::clone(&metrics));
 
         let (result, served) = search(&composer, 10, 0).await;
 
@@ -964,6 +1038,8 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].info_hash, id(1));
         assert!(result.total_count_is_estimate);
+        assert_eq!(metrics.deadline_capped_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
 
     #[tokio::test]
@@ -976,13 +1052,16 @@ mod tests {
         let mut cfg = config();
         cfg.max_chunk_torrents = 1;
         cfg.slot_wait = Duration::from_millis(1);
-        let composer = Composer::new(candidates, pg, cfg, None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
         let held = composer.refine_slots.acquire().await.unwrap();
 
         let (shed, served) = search(&composer, 10, 0).await;
 
         assert!(served);
         assert!(shed.items.is_empty());
+        assert_eq!(metrics.shed_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
         drop(held);
 
         let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
@@ -993,14 +1072,130 @@ mod tests {
         let mut cfg = config();
         cfg.max_chunk_torrents = 2;
         cfg.slot_wait = Duration::from_millis(1);
-        let composer = Composer::new(candidates, pg, cfg, None);
+        let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
         let held = composer.refine_slots.acquire().await.unwrap();
 
         let (fast, served) = search(&composer, 10, 0).await;
 
         assert!(served);
         assert_eq!(fast.items.len(), 2);
+        assert_eq!(metrics.shed_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 2);
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn refined_aggregation_error_serves_items_and_is_observable() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+        let mut fake_pg = FakePg::new(vec![item(1, 1, true)], HashMap::from([(id(1), 1)]));
+        fake_pg.fail_on_search_call = Some(2);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidates, Arc::new(fake_pg), config(), None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert_eq!(result.items.len(), 1);
+        assert!(result.aggregations.0.is_empty());
+        assert_eq!(metrics.agg_error_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
+        assert_eq!(metrics.route_count(RouteResult::Error), 0);
+    }
+
+    #[tokio::test]
+    async fn large_candidate_load_has_zero_unbounded_refines() {
+        const CANDIDATES: usize = 200;
+        const FILES_EACH: usize = 5;
+        const CHUNK_FILE_BUDGET: u32 = 25;
+        const RETAINED_FILE_BUDGET: u32 = 100;
+
+        let ids = (1..=CANDIDATES)
+            .map(|value| id(u8::try_from(value).expect("candidate id fits in u8")))
+            .collect::<Vec<_>>();
+        let items = (1..=CANDIDATES)
+            .map(|value| {
+                item(
+                    u8::try_from(value).expect("candidate id fits in u8"),
+                    FILES_EACH,
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let counts = ids
+            .iter()
+            .copied()
+            .map(|info_hash| (info_hash, i64::try_from(FILES_EACH).unwrap()))
+            .collect::<HashMap<_, _>>();
+        let candidate_source = Arc::new(FakeCandidates::returning(&ids, 1_000_000));
+        let pg = Arc::new(FakePg::new(items, counts.clone()));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.max_candidates = u32::try_from(CANDIDATES).unwrap();
+        cfg.max_decode_candidates = u32::try_from(CANDIDATES).unwrap();
+        cfg.max_refine_files = CHUNK_FILE_BUDGET;
+        cfg.refine_file_budget = CHUNK_FILE_BUDGET;
+        cfg.max_chunk_torrents = u32::try_from(CANDIDATES).unwrap();
+        cfg.retained_file_budget = RETAINED_FILE_BUDGET;
+        let composer = Composer::new(candidate_source.clone(), pg.clone(), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 50, 0).await;
+
+        assert!(served);
+        assert!(result.total_count_is_estimate);
+        assert_eq!(
+            candidate_source.requested_limit.load(Ordering::Relaxed),
+            200
+        );
+        assert_eq!(result.items.len(), 20);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.refine_files.len())
+                .sum::<usize>(),
+            usize::try_from(RETAINED_FILE_BUDGET).unwrap()
+        );
+        assert!(result
+            .items
+            .iter()
+            .all(|item| item.torrent.files_data.is_none()));
+
+        let hydrate_calls = pg
+            .calls()
+            .into_iter()
+            .filter(|call| call.hydrate_files)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hydrate_calls.len(),
+            5,
+            "four chunks fill the retained cap and only one bounded lookahead chunk may decode"
+        );
+        for call in &hydrate_calls {
+            let files = call
+                .info_hash_in
+                .iter()
+                .map(|info_hash| counts[info_hash])
+                .sum::<i64>();
+            assert!(
+                files <= i64::from(CHUNK_FILE_BUDGET),
+                "one hydration decoded {files} files above the chunk budget"
+            );
+            assert!(call.info_hash_in.len() <= 5);
+        }
+        assert_eq!(
+            hydrate_calls
+                .iter()
+                .map(|call| call.info_hash_in.len())
+                .sum::<usize>(),
+            25,
+            "the route must stop after one bounded lookahead chunk, not refine all 200 candidates"
+        );
+        assert_eq!(metrics.retained_capped_count(), 1);
+        assert_eq!(metrics.deadline_capped_count(), 0);
+        assert_eq!(metrics.shed_count(), 0);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
 
     #[tokio::test]
@@ -1013,13 +1208,16 @@ mod tests {
         let mut cfg = config();
         cfg.max_refine_files = 3;
         cfg.refine_file_budget = 3;
-        let composer = Composer::new(candidates, pg, cfg, None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
 
         let (result, served) = search(&composer, 10, 0).await;
 
         assert!(served);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].info_hash, id(2));
+        assert_eq!(metrics.refine_declined_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
 
     #[test]
