@@ -3,12 +3,15 @@ mod inputs;
 pub(crate) mod objects;
 mod roots;
 pub(crate) mod scalars;
+pub mod search;
+mod search_resolvers;
 
 use async_graphql::EmptySubscription;
 
 use crate::health::{HealthRuntime, RuntimeConfig};
 
 pub use roots::{Mutation, Query};
+pub use search::{SearchRuntime, SearchRuntimeData};
 
 /// Runtime version data available to GraphQL resolvers.
 pub struct Version(pub String);
@@ -27,6 +30,16 @@ pub fn schema() -> Schema {
 pub fn build_schema(version: String) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
+        .data(SearchRuntimeData::disabled())
+        .finish()
+}
+
+/// Build the GraphQL schema with a search runtime attached.
+#[must_use]
+pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRuntime>) -> Schema {
+    async_graphql::Schema::build(Query, Mutation, EmptySubscription)
+        .data(Version(version))
+        .data(SearchRuntimeData::new(search))
         .finish()
 }
 
@@ -41,6 +54,7 @@ pub fn build_runtime_schema(
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(HealthRuntime::new(pool, config))
+        .data(SearchRuntimeData::disabled())
         .finish()
 }
 
@@ -61,6 +75,24 @@ mod tests {
             response.errors
         );
         assert_eq!(response.data, value!({ "version": "t1.2.3" }));
+    }
+
+    #[tokio::test]
+    async fn mutations_remain_declared_but_are_explicitly_unserved() {
+        let response = build_schema("test".into())
+            .execute(
+                r#"mutation {
+                    torrent {
+                        delete(infoHashes: ["0123456789abcdef0123456789abcdef01234567"])
+                    }
+                }"#,
+            )
+            .await;
+
+        assert_eq!(response.errors.len(), 1);
+        assert!(response.errors[0]
+            .message
+            .contains("declared for SDL parity but is not served"));
     }
 
     #[tokio::test]

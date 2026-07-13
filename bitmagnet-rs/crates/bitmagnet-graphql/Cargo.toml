@@ -11,7 +11,10 @@ path = "src/main.rs"
 [dependencies]
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-db = { path = "../bitmagnet-db" }
+bitmagnet-model = { path = "../bitmagnet-model" }
+bitmagnet-proto = { path = "../bitmagnet-proto" }
 anyhow = { workspace = true }
+async-trait = "0.1"
 async-graphql = "7"
 async-graphql-axum = "7"
 async-graphql-parser = "7"

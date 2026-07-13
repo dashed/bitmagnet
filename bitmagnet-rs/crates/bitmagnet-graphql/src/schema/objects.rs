@@ -21,14 +21,14 @@ pub(crate) struct Content {
     pub(crate) popularity: Option<f64>,
     pub(crate) release_date: Option<Date>,
     pub(crate) release_year: Option<Year>,
-    pub(crate) runtime: Option<i32>,
+    pub(crate) runtime: Option<i64>,
     pub(crate) source: String,
     pub(crate) title: String,
     #[graphql(name = "type")]
     pub(crate) content_type: ContentType,
     pub(crate) updated_at: DateTime,
     pub(crate) vote_average: Option<f64>,
-    pub(crate) vote_count: Option<i32>,
+    pub(crate) vote_count: Option<i64>,
 }
 
 #[derive(SimpleObject)]
@@ -80,9 +80,9 @@ pub(crate) struct FileFacetAgg {
 
 #[derive(SimpleObject)]
 pub(crate) struct FileFacetBucketAgg {
-    pub(crate) count: i32,
+    pub(crate) count: i64,
     pub(crate) is_estimate: bool,
-    pub(crate) total_size: i32,
+    pub(crate) total_size: i64,
     pub(crate) value: String,
 }
 
@@ -94,11 +94,11 @@ pub(crate) struct FileSearchFacetsResult {
 #[derive(SimpleObject)]
 pub(crate) struct FileSearchItem {
     pub(crate) extension: String,
-    pub(crate) index: i32,
+    pub(crate) index: i64,
     #[graphql(name = "infoHash")]
     pub(crate) info_hash: Hash20,
     pub(crate) path: String,
-    pub(crate) size: i32,
+    pub(crate) size: i64,
     pub(crate) torrent_content: TorrentContent,
 }
 
@@ -106,7 +106,7 @@ pub(crate) struct FileSearchItem {
 pub(crate) struct FileSearchResult {
     pub(crate) has_next_page: bool,
     pub(crate) items: Vec<FileSearchItem>,
-    pub(crate) total_count: i32,
+    pub(crate) total_count: i64,
     pub(crate) total_count_is_estimate: bool,
 }
 
@@ -237,22 +237,22 @@ pub(crate) struct Torrent {
     pub(crate) file_type: Option<FileType>,
     pub(crate) file_types: Option<Vec<FileType>>,
     pub(crate) files: Option<Vec<TorrentFile>>,
-    pub(crate) files_count: Option<i32>,
+    pub(crate) files_count: Option<i64>,
     pub(crate) files_status: FilesStatus,
     pub(crate) has_files_info: bool,
     #[graphql(name = "infoHash")]
     pub(crate) info_hash: Hash20,
     #[graphql(name = "infoHashV2")]
     pub(crate) info_hash_v2: Option<Hash32>,
-    pub(crate) leechers: Option<i32>,
+    pub(crate) leechers: Option<i64>,
     #[graphql(name = "magnetUri")]
     pub(crate) magnet_uri: String,
     #[graphql(name = "metaVersion")]
-    pub(crate) meta_version: Option<i32>,
+    pub(crate) meta_version: Option<i64>,
     pub(crate) name: String,
-    pub(crate) seeders: Option<i32>,
+    pub(crate) seeders: Option<i64>,
     pub(crate) single_file: Option<bool>,
-    pub(crate) size: i32,
+    pub(crate) size: i64,
     pub(crate) sources: Vec<TorrentSourceInfo>,
     pub(crate) tag_names: Vec<String>,
     pub(crate) updated_at: DateTime,
@@ -273,17 +273,17 @@ pub(crate) struct TorrentContent {
     #[graphql(name = "dhtLastSeenAt")]
     pub(crate) dht_last_seen_at: Option<DateTime>,
     #[graphql(name = "dhtSeenCount")]
-    pub(crate) dht_seen_count: i32,
+    pub(crate) dht_seen_count: i64,
     pub(crate) episodes: Option<Episodes>,
     #[graphql(name = "id")]
     pub(crate) id: ID,
     #[graphql(name = "infoHash")]
     pub(crate) info_hash: Hash20,
     pub(crate) languages: Option<Vec<LanguageInfo>>,
-    pub(crate) leechers: Option<i32>,
+    pub(crate) leechers: Option<i64>,
     pub(crate) published_at: DateTime,
     pub(crate) release_group: Option<String>,
-    pub(crate) seeders: Option<i32>,
+    pub(crate) seeders: Option<i64>,
     pub(crate) title: String,
     pub(crate) torrent: Torrent,
     pub(crate) updated_at: DateTime,
@@ -324,7 +324,7 @@ pub(crate) struct TorrentContentSearchResult {
     pub(crate) aggregations: TorrentContentAggregations,
     pub(crate) has_next_page: Option<bool>,
     pub(crate) items: Vec<TorrentContent>,
-    pub(crate) total_count: i32,
+    pub(crate) total_count: i64,
     pub(crate) total_count_is_estimate: bool,
 }
 
@@ -333,11 +333,11 @@ pub(crate) struct TorrentFile {
     pub(crate) created_at: DateTime,
     pub(crate) extension: Option<String>,
     pub(crate) file_type: Option<FileType>,
-    pub(crate) index: i32,
+    pub(crate) index: i64,
     #[graphql(name = "infoHash")]
     pub(crate) info_hash: Hash20,
     pub(crate) path: String,
-    pub(crate) size: i32,
+    pub(crate) size: i64,
     pub(crate) updated_at: DateTime,
 }
 
@@ -353,7 +353,7 @@ pub(crate) struct TorrentFileTypeAgg {
 pub(crate) struct TorrentFilesQueryResult {
     pub(crate) has_next_page: Option<bool>,
     pub(crate) items: Vec<TorrentFile>,
-    pub(crate) total_count: i32,
+    pub(crate) total_count: i64,
 }
 
 #[derive(SimpleObject)]
@@ -394,10 +394,10 @@ pub(crate) struct TorrentSourceInfo {
     pub(crate) import_id: Option<String>,
     pub(crate) key: String,
     pub(crate) last_seen_at: DateTime,
-    pub(crate) leechers: Option<i32>,
+    pub(crate) leechers: Option<i64>,
     pub(crate) name: String,
-    pub(crate) seeders: Option<i32>,
-    pub(crate) seen_count: i32,
+    pub(crate) seeders: Option<i64>,
+    pub(crate) seen_count: i64,
 }
 
 #[derive(SimpleObject)]

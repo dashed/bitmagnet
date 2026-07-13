@@ -12,13 +12,18 @@ use super::inputs::{
 };
 use super::objects::{
     FileSearchFacetsResult, FileSearchResult, HealthCheck, PathTypeaheadResult,
-    QueueJobsAggregations, QueueJobsQueryResult, QueueMetricsQueryResult,
-    TorrentContentAggregations, TorrentContentCollapsePathsResult, TorrentContentSearchResult,
-    TorrentFilesQueryResult, TorrentListSourcesResult, TorrentMetricsQueryResult,
-    TorrentSuggestTagsResult, WorkersListAllQueryResult,
+    QueueJobsQueryResult, QueueMetricsQueryResult, TorrentContentCollapsePathsResult,
+    TorrentContentSearchResult, TorrentFilesQueryResult, TorrentListSourcesResult,
+    TorrentMetricsQueryResult, TorrentSuggestTagsResult, WorkersListAllQueryResult,
 };
 use super::scalars::{Hash20, Void};
 use super::Version;
+
+fn unserved<T>(surface: &str) -> async_graphql::Result<T> {
+    Err(async_graphql::Error::new(format!(
+        "{surface} is declared for SDL parity but is not served by the Phase-2 read API"
+    )))
+}
 
 pub struct Query;
 
@@ -98,24 +103,20 @@ pub(crate) struct QueueQuery;
 
 #[Object]
 impl QueueQuery {
-    async fn jobs(&self, input: QueueJobsQueryInput) -> QueueJobsQueryResult {
+    async fn jobs(
+        &self,
+        input: QueueJobsQueryInput,
+    ) -> async_graphql::Result<QueueJobsQueryResult> {
         let _ = &input;
-        QueueJobsQueryResult {
-            aggregations: QueueJobsAggregations {
-                queue: None,
-                status: None,
-            },
-            has_next_page: None,
-            items: Vec::new(),
-            total_count: 0,
-        }
+        unserved("queue.jobs")
     }
 
-    async fn metrics(&self, input: QueueMetricsQueryInput) -> QueueMetricsQueryResult {
+    async fn metrics(
+        &self,
+        input: QueueMetricsQueryInput,
+    ) -> async_graphql::Result<QueueMetricsQueryResult> {
         let _ = &input;
-        QueueMetricsQueryResult {
-            buckets: Vec::new(),
-        }
+        unserved("queue.metrics")
     }
 }
 
@@ -126,14 +127,14 @@ impl QueueMutation {
     async fn enqueue_reprocess_torrents_batch(
         &self,
         input: Option<QueueEnqueueReprocessTorrentsBatchInput>,
-    ) -> Option<Void> {
+    ) -> async_graphql::Result<Option<Void>> {
         let _ = &input;
-        None
+        unserved("queue mutation")
     }
 
-    async fn purge_jobs(&self, input: QueuePurgeJobsInput) -> Option<Void> {
+    async fn purge_jobs(&self, input: QueuePurgeJobsInput) -> async_graphql::Result<Option<Void>> {
         let _ = &input;
-        None
+        unserved("queue mutation")
     }
 }
 
@@ -141,33 +142,32 @@ pub(crate) struct TorrentQuery;
 
 #[Object]
 impl TorrentQuery {
-    async fn files(&self, input: TorrentFilesQueryInput) -> TorrentFilesQueryResult {
+    async fn files(
+        &self,
+        input: TorrentFilesQueryInput,
+    ) -> async_graphql::Result<TorrentFilesQueryResult> {
         let _ = &input;
-        TorrentFilesQueryResult {
-            has_next_page: None,
-            items: Vec::new(),
-            total_count: 0,
-        }
+        unserved("torrent.files")
     }
 
-    async fn list_sources(&self) -> TorrentListSourcesResult {
-        TorrentListSourcesResult {
-            sources: Vec::new(),
-        }
+    async fn list_sources(&self) -> async_graphql::Result<TorrentListSourcesResult> {
+        unserved("torrent.listSources")
     }
 
-    async fn metrics(&self, input: TorrentMetricsQueryInput) -> TorrentMetricsQueryResult {
+    async fn metrics(
+        &self,
+        input: TorrentMetricsQueryInput,
+    ) -> async_graphql::Result<TorrentMetricsQueryResult> {
         let _ = &input;
-        TorrentMetricsQueryResult {
-            buckets: Vec::new(),
-        }
+        unserved("torrent.metrics")
     }
 
-    async fn suggest_tags(&self, input: Option<SuggestTagsQueryInput>) -> TorrentSuggestTagsResult {
+    async fn suggest_tags(
+        &self,
+        input: Option<SuggestTagsQueryInput>,
+    ) -> async_graphql::Result<TorrentSuggestTagsResult> {
         let _ = &input;
-        TorrentSuggestTagsResult {
-            suggestions: Vec::new(),
-        }
+        unserved("torrent.suggestTags")
     }
 }
 
@@ -175,33 +175,41 @@ pub(crate) struct TorrentMutation;
 
 #[Object]
 impl TorrentMutation {
-    async fn delete(&self, info_hashes: Vec<Hash20>) -> Option<Void> {
+    async fn delete(&self, info_hashes: Vec<Hash20>) -> async_graphql::Result<Option<Void>> {
         let _ = &info_hashes;
-        None
+        unserved("torrent mutation")
     }
 
     async fn delete_tags(
         &self,
         info_hashes: Option<Vec<Hash20>>,
         tag_names: Option<Vec<String>>,
-    ) -> Option<Void> {
+    ) -> async_graphql::Result<Option<Void>> {
         let _ = (&info_hashes, &tag_names);
-        None
+        unserved("torrent mutation")
     }
 
-    async fn put_tags(&self, info_hashes: Vec<Hash20>, tag_names: Vec<String>) -> Option<Void> {
+    async fn put_tags(
+        &self,
+        info_hashes: Vec<Hash20>,
+        tag_names: Vec<String>,
+    ) -> async_graphql::Result<Option<Void>> {
         let _ = (&info_hashes, &tag_names);
-        None
+        unserved("torrent mutation")
     }
 
-    async fn reprocess(&self, input: TorrentReprocessInput) -> Option<Void> {
+    async fn reprocess(&self, input: TorrentReprocessInput) -> async_graphql::Result<Option<Void>> {
         let _ = &input;
-        None
+        unserved("torrent mutation")
     }
 
-    async fn set_tags(&self, info_hashes: Vec<Hash20>, tag_names: Vec<String>) -> Option<Void> {
+    async fn set_tags(
+        &self,
+        info_hashes: Vec<Hash20>,
+        tag_names: Vec<String>,
+    ) -> async_graphql::Result<Option<Void>> {
         let _ = (&info_hashes, &tag_names);
-        None
+        unserved("torrent mutation")
     }
 }
 
@@ -211,53 +219,42 @@ pub(crate) struct TorrentContentQuery;
 impl TorrentContentQuery {
     async fn collapse_paths(
         &self,
+        ctx: &Context<'_>,
         input: TorrentContentCollapsePathsInput,
-    ) -> TorrentContentCollapsePathsResult {
-        let _ = &input;
-        TorrentContentCollapsePathsResult { groups: Vec::new() }
+    ) -> async_graphql::Result<TorrentContentCollapsePathsResult> {
+        super::search_resolvers::collapse_paths(ctx, input).await
     }
 
-    async fn file_search(&self, input: FileSearchInput) -> FileSearchResult {
-        let _ = &input;
-        FileSearchResult {
-            has_next_page: false,
-            items: Vec::new(),
-            total_count: 0,
-            total_count_is_estimate: false,
-        }
+    async fn file_search(
+        &self,
+        ctx: &Context<'_>,
+        input: FileSearchInput,
+    ) -> async_graphql::Result<FileSearchResult> {
+        super::search_resolvers::file_search(ctx, input).await
     }
 
-    async fn file_search_facets(&self, input: FileSearchFacetsInput) -> FileSearchFacetsResult {
-        let _ = &input;
-        FileSearchFacetsResult { facets: Vec::new() }
+    async fn file_search_facets(
+        &self,
+        ctx: &Context<'_>,
+        input: FileSearchFacetsInput,
+    ) -> async_graphql::Result<FileSearchFacetsResult> {
+        super::search_resolvers::file_search_facets(ctx, input).await
     }
 
-    async fn path_typeahead(&self, input: PathTypeaheadInput) -> PathTypeaheadResult {
-        let _ = &input;
-        PathTypeaheadResult {
-            suggestions: Vec::new(),
-        }
+    async fn path_typeahead(
+        &self,
+        ctx: &Context<'_>,
+        input: PathTypeaheadInput,
+    ) -> async_graphql::Result<PathTypeaheadResult> {
+        super::search_resolvers::path_typeahead(ctx, input).await
     }
 
-    async fn search(&self, input: TorrentContentSearchQueryInput) -> TorrentContentSearchResult {
-        let _ = &input;
-        TorrentContentSearchResult {
-            aggregations: TorrentContentAggregations {
-                content_type: None,
-                genre: None,
-                language: None,
-                release_year: None,
-                torrent_file_type: None,
-                torrent_source: None,
-                torrent_tag: None,
-                video_resolution: None,
-                video_source: None,
-            },
-            has_next_page: None,
-            items: Vec::new(),
-            total_count: 0,
-            total_count_is_estimate: false,
-        }
+    async fn search(
+        &self,
+        ctx: &Context<'_>,
+        input: TorrentContentSearchQueryInput,
+    ) -> async_graphql::Result<TorrentContentSearchResult> {
+        super::search_resolvers::search(ctx, input).await
     }
 }
 
