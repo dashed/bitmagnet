@@ -56,6 +56,7 @@
 
 mod aggregations;
 mod criteria;
+mod facets;
 mod options;
 mod order;
 mod params;
@@ -67,6 +68,7 @@ pub use criteria::{
     ContentCollectionRef, ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D,
     VideoCodec, VideoModifier, VideoResolution, VideoSource,
 };
+pub use facets::fetch_aggregations;
 pub use options::{FacetRequest, SearchBuildConfig, SearchOptions, TorrentContentFacet};
 pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;

@@ -357,33 +357,57 @@ const ORDERING_SELECT: &str = "SELECT torrent_contents.id AS id,\n       torrent
 const HYDRATION_BY_ID_SQL: &str = "SELECT torrent_contents.id AS id,\n       torrents.name AS name,\n       torrents.info_hash_v1 AS info_hash_v1,\n       torrents.info_hash_v2 AS info_hash_v2,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,\n       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers\nFROM torrent_contents\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'\nWHERE torrent_contents.id = ANY($1::text[])";
 
 #[derive(Default)]
-struct BuildState {
+pub(crate) struct BuildState {
     binds: Vec<Bind>,
 }
 
 impl BuildState {
-    fn push_bind(&mut self, bind: Bind) -> String {
+    pub(crate) fn push_bind(&mut self, bind: Bind) -> String {
         self.binds.push(bind);
         format!("${}", self.binds.len())
     }
+
+    pub(crate) fn binds(&self) -> &[Bind] {
+        &self.binds
+    }
 }
 
-struct CriteriaCtx<'a> {
+pub(crate) struct CriteriaCtx<'a> {
     config: &'a crate::SearchBuildConfig,
     now: DateTime<Utc>,
 }
 
+impl<'a> CriteriaCtx<'a> {
+    pub(crate) const fn new(config: &'a crate::SearchBuildConfig, now: DateTime<Utc>) -> Self {
+        Self { config, now }
+    }
+}
+
 #[derive(Default)]
-struct RequiredJoins {
+pub(crate) struct RequiredJoins {
     torrents: bool,
     content: bool,
 }
 
 impl RequiredJoins {
-    fn from_criteria(criteria: &Criteria) -> Self {
+    pub(crate) fn from_criteria(criteria: &Criteria) -> Self {
         let mut joins = Self::default();
         joins.visit(criteria);
         joins
+    }
+
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.torrents |= other.torrents;
+        self.content |= other.content;
+    }
+
+    pub(crate) fn append_sql(&self, sql: &mut String) {
+        if self.torrents {
+            sql.push_str(INNER_JOIN_TORRENTS);
+        }
+        if self.content {
+            sql.push_str(LEFT_JOIN_CONTENT);
+        }
     }
 
     fn visit(&mut self, criteria: &Criteria) {
@@ -423,7 +447,7 @@ impl RequiredJoins {
     }
 }
 
-fn criteria_sql(
+pub(crate) fn criteria_sql(
     criteria: &Criteria,
     state: &mut BuildState,
     ctx: &CriteriaCtx<'_>,
