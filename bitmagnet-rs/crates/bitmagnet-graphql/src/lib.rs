@@ -8,5 +8,11 @@ pub mod normalize;
 pub mod schema;
 
 pub use health::RuntimeConfig;
+pub use schema::file_search_client::{
+    FileSearchClientConfig, L2FileHit, L2FileRowsResult, L2FileSearchBackend,
+    TonicFileSearchClient, MAX_L2_FILE_WINDOW,
+};
+pub use schema::lane_s::{LaneSSearchBackend, SqlxLaneSSearchBackend};
+pub use schema::runtime::{hydrate_l2_file_rows, PgL2SearchRuntime};
 pub use schema::{build_runtime_schema, build_schema, build_search_schema, schema, Schema};
 pub use schema::{SearchRuntime, SearchRuntimeData};

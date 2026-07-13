@@ -847,6 +847,7 @@ dependencies = [
  "bitmagnet-db",
  "bitmagnet-model",
  "bitmagnet-proto",
+ "bitmagnet-search-query",
  "chrono",
  "clap",
  "prometheus",
@@ -856,6 +857,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
  "tracing",
 ]
 
