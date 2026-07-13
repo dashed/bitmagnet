@@ -507,12 +507,20 @@ impl SearchQuery {
     }
 
     fn ordering_sql(&self) -> Result<String> {
-        let suffix = self.sql.strip_prefix(INFO_HASH_SELECT).ok_or_else(|| {
+        let sql_after_projection =
+            self.sql.strip_prefix(INFO_HASH_PROJECTION).ok_or_else(|| {
+                SearchQueryError::InvalidParams(
+                    "hydration requires SQL produced by build_query".to_owned(),
+                )
+            })?;
+        let from_offset = sql_after_projection.find(BASE_FROM).ok_or_else(|| {
             SearchQueryError::InvalidParams(
-                "hydration requires SQL produced by build_query".to_owned(),
+                "hydration query is missing the torrent_contents base relation".to_owned(),
             )
         })?;
-        let ordering_select = self.query_string_rank_placeholder().map_or_else(
+        let order_projections = &sql_after_projection[..from_offset];
+        let suffix = &sql_after_projection[from_offset + BASE_FROM.len()..];
+        let mut ordering_select = self.query_string_rank_placeholder().map_or_else(
             || ORDERING_SELECT.to_owned(),
             |placeholder| {
                 ORDERING_SELECT.replacen(
@@ -524,6 +532,10 @@ impl SearchQuery {
                 )
             },
         );
+        if !order_projections.is_empty() {
+            ordering_select =
+                ordering_select.replacen(BASE_FROM, &format!("{order_projections}{BASE_FROM}"), 1);
+        }
         Ok(format!("{ordering_select}{suffix}"))
     }
 
@@ -628,6 +640,8 @@ pub fn build_query(_params: &TorznabSearchParams) -> Result<SearchQuery> {
     Ok(SearchQuery::new(sql, state.binds))
 }
 
+const INFO_HASH_PROJECTION: &str = "SELECT torrent_contents.info_hash";
+const BASE_FROM: &str = "\nFROM torrent_contents";
 const INFO_HASH_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
 const INNER_JOIN_TORRENTS: &str =
     "\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash";
@@ -750,6 +764,10 @@ pub(crate) struct RequiredJoins {
 }
 
 impl RequiredJoins {
+    pub(crate) fn require_torrents(&mut self) {
+        self.torrents = true;
+    }
+
     pub(crate) fn from_criteria(criteria: &Criteria) -> Self {
         let mut joins = Self::default();
         joins.visit(criteria);

@@ -6,9 +6,11 @@
 //!
 //! Phase 2 expands the public contract to the full GraphQL torrent-content
 //! search surface through [`SearchOptions`], the complete [`Criteria`] and
-//! ordering enums, facet aggregation types, and [`SearchResult`]. Task S1 is
-//! types-only for that expansion; the binding SQL contract and S2-S5 staging
-//! are documented in `CONTRACT.md` §Phase-2.
+//! ordering enums, facet aggregation types, and [`SearchResult`].
+//! [`build_search_query`] constructs the lean GraphQL membership statement;
+//! [`search`] executes membership, hydration, optional count, pagination, and
+//! facet aggregation. The frozen Torznab entry point remains [`build_query`].
+//! The binding SQL contract is documented in `CONTRACT.md` §Phase-2.
 //!
 //! Lane contract (phase1-tasks.md): this crate owns query construction ONLY —
 //! no HTTP, no XML, no Torznab category logic (that is bitmagnet-torznab).
@@ -62,6 +64,7 @@ mod order;
 mod params;
 mod query;
 mod result;
+mod search;
 
 pub use aggregations::{AggregationGroup, AggregationItem, Aggregations, FacetLogic};
 pub use criteria::{
@@ -74,6 +77,7 @@ pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;
 pub use query::{build_query, Bind, HydrateOptions, Result, SearchQuery, SearchQueryError};
 pub use result::{SearchResult, SearchResultItem, TorrentSourceInfo};
+pub use search::{build_search_query, search};
 
 // Re-exported so Lane T and tests can name these without a direct
 // `bitmagnet-model` dependency.

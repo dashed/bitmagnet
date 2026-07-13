@@ -460,16 +460,42 @@ separate query keyed by selected row ids and merged in membership order. The
 large `files_data` blob is hydrator-gated and never touches this path. This is
 the binding Phase-1 deviation recorded above and governs every S4 ordered path.
 
-### S5 parity follow-up
+### S4/S5 implementation status
 
-The S-item expansion makes the full hydrated item contract available while S5
-still owns final `SearchResult` orchestration and differential evidence.
+S4 is implemented by `build_search_query` and `search`. The GraphQL builder is
+separate from the frozen Torznab entry point and now covers every order field,
+Go `InsertMap` order de-duplication, the flag-gated FIND-2 rewrite, literal
+`LIMIT`, `OFFSET`, `limit + 1` over-fetch, sentinel removal, optional budgeted
+total count, and count/aggregation estimate flags. Name ordering alone pulls in
+the `torrents` join; order-only joins are deliberately absent from count and
+facet SQL. An explicit zero limit skips item execution unless it is serving a
+one-row has-next-page probe.
 
-S5 differential parity must compare the **full expanded item field set**, not
-only the ordered info-hash list: nested/supplemental torrent-content fields,
-torrent scalars, optional content, sources/tags, derived title and DHT stats,
-and query rank. PostgreSQL/Go `published_at` values carry microsecond precision;
-the current public Rust field intentionally floors them to epoch seconds.
-Parity must normalize both sides to that documented precision (while retaining
-the original microsecond value in fixture diagnostics) rather than treating a
-sub-second difference as search membership drift.
+S5 is implemented by the integration-tagged Go generator
+`internal/parity/searchquery_phase2_gen_test.go`, the committed 17-case corpus
+`testdata/parity/searchquery/graphql_search.jsonl`, and the ignored Rust driver
+`tests/phase2_parity_pg.rs` using `bitmagnet-diff`. The corpus covers all nine
+orders, all nine required facets, FIND-2 on/off, AND/OR criteria, JSONB file
+extensions, exact and estimated counts, `limit + 1` paging, and a true
+`.750123` microsecond publication time. It compares the full expanded item:
+flat Torznab fields, nested torrent-content/torrent/content values, sources,
+tags, title, DHT statistics, external hashes/ids, episodes, and query rank.
+
+The Go query layer selects relevance as the private `_order_i` alias and does
+not scan that alias into `ResultItem.QueryStringRank`. The oracle therefore
+reads the identical `ts_rank_cd` expression for each already-selected row when
+normalizing the public Phase-2 rank field; membership and order still come only
+from the real Go search builder. Similarly, public `published_at` is compared
+at its documented floored epoch-second precision while the raw database
+microseconds remain in every fixture item as a diagnostic. Nil Go JSONB slices
+are normalized to the Rust empty-collection contract, and float32 metadata is
+normalized to Go's shortest round-trippable decimal representation.
+
+Run the live gate against one disposable PostgreSQL database, in order:
+
+```text
+POSTGRES_DSN=postgres://... go test -tags integration ./internal/parity \
+  -run '^TestGeneratePhase2SearchQueryParityFixtures$' -count=1
+BITMAGNET_POSTGRES_DSN=postgres://... cargo test -p bitmagnet-search-query \
+  --test phase2_parity_pg -- --ignored --nocapture
+```

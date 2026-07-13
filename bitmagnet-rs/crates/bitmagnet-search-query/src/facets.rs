@@ -19,7 +19,7 @@ use sqlx::{PgPool, Row};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-const BASE_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
+pub(crate) const BASE_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
 const BUDGETED_COUNT_SQL: &str = "SELECT count, budget_exceeded FROM budgeted_count($1, $2)";
 const TORRENT_SOURCE_VALUES_SQL: &str = "SELECT key, name FROM torrent_sources";
 const TORRENT_TAG_VALUES_SQL: &str = "SELECT DISTINCT name FROM torrent_tags";
@@ -191,8 +191,14 @@ pub async fn fetch_aggregations(
                 FacetLogic::Or => Criteria::Or(vec![value_criterion]),
             };
             let mut state = BuildState::default();
-            let inner_sql =
-                build_base_query(options, &ctx, current_facet, Some(&extra), &mut state)?;
+            let inner_sql = build_base_query(
+                options,
+                &ctx,
+                current_facet,
+                Some(&extra),
+                false,
+                &mut state,
+            )?;
             let inner_sql = inline_binds(&inner_sql, state.binds());
             let (count, budget_exceeded) =
                 budgeted_count(pool, &inner_sql, options.aggregation_budget).await?;
@@ -254,9 +260,13 @@ pub(crate) fn build_base_query(
     ctx: &CriteriaCtx<'_>,
     current_facet: Option<&str>,
     extra: Option<&Criteria>,
+    require_torrents_for_order: bool,
     state: &mut BuildState,
 ) -> Result<String> {
     let mut required_joins = RequiredJoins::default();
+    if require_torrents_for_order {
+        required_joins.require_torrents();
+    }
     let mut where_conditions = Vec::new();
 
     if let Some(query) = options.query.as_deref().filter(|query| !query.is_empty()) {
@@ -300,6 +310,23 @@ pub(crate) fn build_base_query(
         sql.push_str(&where_conditions.join("\n  AND "));
     }
     Ok(sql)
+}
+
+/// Execute Go's `doCount` query for the fully filtered result set.
+///
+/// Ordering-only joins are deliberately absent: Go calls `newSubQuery` with
+/// `withOrder=false` for counts, so a `name` sort must not widen the count SQL.
+pub(crate) async fn fetch_total_count(
+    pool: &PgPool,
+    options: &SearchOptions,
+    config: &SearchBuildConfig,
+    now: DateTime<Utc>,
+) -> Result<(u64, bool)> {
+    let ctx = CriteriaCtx::new(config, now);
+    let mut state = BuildState::default();
+    let inner_sql = build_base_query(options, &ctx, None, None, false, &mut state)?;
+    let inner_sql = inline_binds(&inner_sql, state.binds());
+    budgeted_count(pool, &inner_sql, options.aggregation_budget).await
 }
 
 fn facet_criteria(facet: &FacetRequest) -> Result<Criteria> {
@@ -1051,7 +1078,7 @@ mod tests {
         let ctx = CriteriaCtx::new(&config, fixed_now());
 
         let mut state = BuildState::default();
-        let sql = build_base_query(&options, &ctx, None, None, &mut state).unwrap();
+        let sql = build_base_query(&options, &ctx, None, None, false, &mut state).unwrap();
         let sql = inline_binds(&sql, state.binds());
         assert_eq!(
             sql,
@@ -1064,6 +1091,7 @@ mod tests {
             &ctx,
             Some(TorrentContentFacet::ContentType.key()),
             None,
+            false,
             &mut state,
         )
         .unwrap();
@@ -1088,6 +1116,7 @@ mod tests {
             &ctx,
             Some(TorrentContentFacet::ContentType.key()),
             Some(&extra),
+            false,
             &mut state,
         )
         .unwrap();
