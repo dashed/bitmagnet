@@ -18,6 +18,10 @@ tests:
       # 10 comparisons/min, all with a matching top result.
       - series: 'bitmagnet_graphql_shadow_comparisons_total'
         values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_sampled_total'
+        values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_admitted_total'
+        values: '0+10x120'
       - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
         values: '0+10x120'
       - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="false"}'
@@ -72,12 +76,20 @@ tests:
         exp_samples:
           - labels: '{__name__="graphql_shadow:total_count_match:ratio"}'
             value: 1
+      - expr: graphql_shadow:rust_success:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:rust_success:ratio"}'
+            value: 1
     alert_rule_test:
       - eval_time: 90m
         alertname: GraphQLShadowGateFailing
         exp_alerts: []
       - eval_time: 90m
         alertname: GraphQLShadowRustSlower
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: GraphQLShadowRustErrors
         exp_alerts: []
 
   # ---------------------------------------------------------------------------
@@ -86,6 +98,10 @@ tests:
   - interval: 1m
     input_series:
       - series: 'bitmagnet_graphql_shadow_comparisons_total'
+        values: '0+10x180'
+      - series: 'bitmagnet_graphql_shadow_sampled_total'
+        values: '0+10x180'
+      - series: 'bitmagnet_graphql_shadow_admitted_total'
         values: '0+10x180'
       - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
         values: '0+5x180'
@@ -151,7 +167,11 @@ tests:
     input_series:
       # ~5 comparisons over the whole window → increase1h well under 20.
       - series: 'bitmagnet_graphql_shadow_comparisons_total'
-        values: '0 0 0 0 0 1 1 1 2 2 3 3 4 4 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5'
+        values: '0+0.08x90'
+      - series: 'bitmagnet_graphql_shadow_sampled_total'
+        values: '0+0.08x90'
+      - series: 'bitmagnet_graphql_shadow_admitted_total'
+        values: '0+0.08x90'
       - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
         values: '0+0x90'
     promql_expr_test:
@@ -169,3 +189,58 @@ tests:
       - eval_time: 80m
         alertname: GraphQLShadowGateFailing
         exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # RUST ERRORS: admitted attempts without comparisons invalidate the gate and
+  # fire the dedicated success-ratio alert.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_admitted_total'
+        values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_comparisons_total'
+        values: '0+9x120'
+    promql_expr_test:
+      - expr: graphql_shadow:rust_success:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:rust_success:ratio"}'
+            value: 0.9
+      - expr: graphql_shadow:rust_success:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:rust_success:pass"}'
+            value: 0
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GraphQLShadowRustErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: bitmagnet-graphql-shadow
+            exp_annotations:
+              summary: GraphQL shadow Rust success ratio below 0.99
+              description: >
+                Fewer than 99% of admitted dark Rust attempts produced a valid comparison over the last hour. Missing/invalid handler timing, transport failures, GraphQL errors, or response projection failures invalidate the soak. Do NOT cut over.
+
+  # ---------------------------------------------------------------------------
+  # REFERENCE ERRORS: use 15m increase counts divided by sampled attempts. The
+  # old rate/clamp expression suppressed low-QPS failures.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_sampled_total'
+        values: '0+10x90'
+      - series: 'bitmagnet_graphql_shadow_reference_error_total'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: GraphQLShadowReferenceErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: bitmagnet-graphql-shadow
+            exp_annotations:
+              summary: GraphQL shadow captured-Go-response error rate above 5%
+              description: >
+                Over 5% of eligible shadow queries fail projection of the already-computed Go response. The comparison sample is degraded; investigate the query/projection contract before trusting the soak verdict.

@@ -6,6 +6,8 @@ import (
 )
 
 func TestCompareGraphQLIdentical(t *testing.T) {
+	t.Parallel()
+
 	res := GraphQLResult{
 		IDs:        []string{"a", "b", "c"},
 		TotalCount: 3,
@@ -13,6 +15,7 @@ func TestCompareGraphQLIdentical(t *testing.T) {
 			"content_type": {"movie": 2, "tv_show": 1},
 			"language":     {"en": 3},
 		},
+		ObservedFacets: map[string]bool{"content_type": true, "language": true},
 	}
 
 	c := CompareGraphQL(res, res, time.Millisecond, time.Millisecond)
@@ -29,8 +32,14 @@ func TestCompareGraphQLIdentical(t *testing.T) {
 		t.Errorf("total-count mismatch: match=%v delta=%d", c.TotalCountMatch, c.TotalCountDelta)
 	}
 
-	if !c.AllFacetsMatch || c.FacetsMatched != len(FacetKeys) {
-		t.Errorf("facets not all matched: all=%v matched=%d", c.AllFacetsMatch, c.FacetsMatched)
+	if c.AllFacetsObserved || c.AllFacetsMatch || c.FacetsObserved != 2 || c.FacetsMatched != 2 {
+		t.Errorf(
+			"facet observation mismatch: all_observed=%v all_match=%v observed=%d matched=%d",
+			c.AllFacetsObserved,
+			c.AllFacetsMatch,
+			c.FacetsObserved,
+			c.FacetsMatched,
+		)
 	}
 
 	if len(c.FacetDeltas) != 0 {
@@ -43,6 +52,8 @@ func TestCompareGraphQLIdentical(t *testing.T) {
 }
 
 func TestCompareGraphQLTotalCountDeltaSign(t *testing.T) {
+	t.Parallel()
+
 	// Convention: delta is reference(go) - candidate(rust).
 	rust := GraphQLResult{IDs: []string{"a"}, TotalCount: 90}
 	ref := GraphQLResult{IDs: []string{"a"}, TotalCount: 100}
@@ -63,6 +74,8 @@ func TestCompareGraphQLTotalCountDeltaSign(t *testing.T) {
 }
 
 func TestCompareGraphQLFacetDeltas(t *testing.T) {
+	t.Parallel()
+
 	rust := GraphQLResult{
 		IDs: []string{"a", "b"},
 		Facets: map[string]FacetCounts{
@@ -70,6 +83,7 @@ func TestCompareGraphQLFacetDeltas(t *testing.T) {
 			"language":     {"en": 10},                 // identical
 			"file_type":    {"video": 4},               // rust-only value "archive" absent
 		},
+		ObservedFacets: map[string]bool{"content_type": true, "language": true, "file_type": true},
 	}
 	ref := GraphQLResult{
 		IDs: []string{"a", "b"},
@@ -78,15 +92,16 @@ func TestCompareGraphQLFacetDeltas(t *testing.T) {
 			"language":     {"en": 10},
 			"file_type":    {"video": 4, "archive": 2},
 		},
+		ObservedFacets: map[string]bool{"content_type": true, "language": true, "file_type": true},
 	}
 
 	c := CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond)
 
-	if c.FacetMatch["language"] != true {
+	if !c.FacetMatch["language"] {
 		t.Error("language facet should match")
 	}
 
-	if c.FacetMatch["content_type"] != false || c.FacetMatch["file_type"] != false {
+	if c.FacetMatch["content_type"] || c.FacetMatch["file_type"] {
 		t.Error("content_type and file_type facets should not match")
 	}
 
@@ -109,14 +124,72 @@ func TestCompareGraphQLFacetDeltas(t *testing.T) {
 		t.Error("AllFacetsMatch = true despite facet diffs")
 	}
 
-	// Of the 9 facets: 6 are absent on both sides → they match (empty==empty);
-	// language matches; content_type and file_type do not. So 7 matched.
-	if c.FacetsMatched != 7 {
-		t.Errorf("FacetsMatched = %d, want 7", c.FacetsMatched)
+	// Six facets absent on both sides are unobserved and never enter a KPI
+	// denominator. Of the three observed facets, only language matches.
+	if c.FacetsObserved != 3 || c.FacetsMatched != 1 {
+		t.Errorf("FacetsObserved/Matched = %d/%d, want 3/1", c.FacetsObserved, c.FacetsMatched)
+	}
+}
+
+func TestCompareGraphQLOneSidedFacetPresenceIsObservedMismatch(t *testing.T) {
+	t.Parallel()
+
+	rust := GraphQLResult{
+		Facets:         map[string]FacetCounts{},
+		ObservedFacets: map[string]bool{},
+	}
+	ref := GraphQLResult{
+		Facets:         map[string]FacetCounts{"release_year": {"2026": 4}},
+		ObservedFacets: map[string]bool{"release_year": true},
+	}
+
+	comparison := CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond)
+	if !comparison.FacetObserved["release_year"] || comparison.FacetMatch["release_year"] {
+		t.Fatalf("one-sided facet observation was not recorded as a mismatch: %+v", comparison)
+	}
+
+	if comparison.FacetDeltas["release_year"]["2026"] != 4 {
+		t.Errorf("release_year delta = %v, want 2026:+4", comparison.FacetDeltas["release_year"])
+	}
+
+	if !comparison.IsDiscrepancy() {
+		t.Error("one-sided facet presence must be a discrepancy")
+	}
+}
+
+func TestCompareGraphQLOneSidedEmptyFacetIsObservedMismatch(t *testing.T) {
+	t.Parallel()
+
+	rust := GraphQLResult{
+		Facets:         map[string]FacetCounts{},
+		ObservedFacets: map[string]bool{},
+	}
+	ref := GraphQLResult{
+		Facets:         map[string]FacetCounts{"release_year": {}},
+		ObservedFacets: map[string]bool{"release_year": true},
+	}
+
+	comparison := CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond)
+	if !comparison.FacetObserved["release_year"] || comparison.FacetMatch["release_year"] {
+		t.Fatalf("one-sided empty facet was not recorded as a mismatch: %+v", comparison)
+	}
+
+	if comparison.FacetsObserved != 1 || comparison.FacetsMatched != 0 {
+		t.Errorf(
+			"FacetsObserved/Matched = %d/%d, want 1/0",
+			comparison.FacetsObserved,
+			comparison.FacetsMatched,
+		)
+	}
+
+	if !comparison.IsDiscrepancy() {
+		t.Error("one-sided empty facet presence must be a discrepancy")
 	}
 }
 
 func TestCompareGraphQLEstimateFlag(t *testing.T) {
+	t.Parallel()
+
 	rust := GraphQLResult{IDs: []string{"a"}, TotalCount: 500, TotalCountIsEstimate: true}
 	ref := GraphQLResult{IDs: []string{"a"}, TotalCount: 512, TotalCountIsEstimate: true}
 
@@ -132,6 +205,8 @@ func TestCompareGraphQLEstimateFlag(t *testing.T) {
 }
 
 func TestCompareGraphQLRankOrderMatters(t *testing.T) {
+	t.Parallel()
+
 	// Same set, different order: Top1 differs, Jaccard@20 stays 1.0.
 	rust := GraphQLResult{IDs: []string{"a", "b", "c"}, TotalCount: 3}
 	ref := GraphQLResult{IDs: []string{"c", "b", "a"}, TotalCount: 3}

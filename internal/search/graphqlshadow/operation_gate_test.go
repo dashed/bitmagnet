@@ -5,6 +5,8 @@ import (
 )
 
 func TestClassifyOperation(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name          string
 		query         string
@@ -74,21 +76,39 @@ func TestClassifyOperation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := ClassifyOperation(tt.query, tt.operationName)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("ClassifyOperation(%q, %q) = %v, want error", tt.query, tt.operationName, got)
+					t.Fatalf(
+						"ClassifyOperation(%q, %q) = %v, want error",
+						tt.query,
+						tt.operationName,
+						got,
+					)
 				}
 
 				return
 			}
 
 			if err != nil {
-				t.Fatalf("ClassifyOperation(%q, %q) unexpected error: %v", tt.query, tt.operationName, err)
+				t.Fatalf(
+					"ClassifyOperation(%q, %q) unexpected error: %v",
+					tt.query,
+					tt.operationName,
+					err,
+				)
 			}
 
 			if got != tt.want {
-				t.Errorf("ClassifyOperation(%q, %q) = %v, want %v", tt.query, tt.operationName, got, tt.want)
+				t.Errorf(
+					"ClassifyOperation(%q, %q) = %v, want %v",
+					tt.query,
+					tt.operationName,
+					got,
+					tt.want,
+				)
 			}
 		})
 	}
@@ -98,6 +118,8 @@ func TestClassifyOperation(t *testing.T) {
 // read-only query is eligible; every mutation, subscription, parse failure, and
 // ambiguous/missing operation must be ineligible (fail closed).
 func TestIsShadowEligibleFailsClosed(t *testing.T) {
+	t.Parallel()
+
 	eligible := []struct {
 		query, op string
 	}{
@@ -127,5 +149,127 @@ func TestIsShadowEligibleFailsClosed(t *testing.T) {
 		if IsShadowEligible(e.query, e.op) {
 			t.Errorf("IsShadowEligible(%q, %q) = true, want false (must fail closed)", e.query, e.op)
 		}
+	}
+}
+
+func TestIsComparableSearchOperation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		query         string
+		operationName string
+		variables     map[string]any
+		want          bool
+	}{
+		{
+			name: "direct complete search",
+			query: `query Search { torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate
+			  items { infoHash contentType contentSource contentId }
+			  aggregations { __typename }
+			} } }`,
+			operationName: "Search",
+			want:          true,
+		},
+		{
+			name: "canonical id and complete partial facet",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id }
+			  aggregations { releaseYear { value label count isEstimate } }
+			} } }`,
+			want: true,
+		},
+		{
+			name: "fragment-expanded search",
+			query: `query Search { ...Root }
+			  fragment Root on Query { torrentContent { search(input: {totalCount: true}) { ...Result } } }
+			  fragment Result on TorrentContentSearchResult {
+			    totalCount totalCountIsEstimate items { ...Identity } aggregations { __typename }
+			  }
+			  fragment Identity on TorrentContent { infoHash contentType contentSource contentId }`,
+			operationName: "Search",
+			want:          true,
+		},
+		{
+			name: "resolved totalCount variable true",
+			query: `query Search($count: Boolean) { torrentContent { search(input: {totalCount: $count}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } }`,
+			operationName: "Search",
+			variables:     map[string]any{"count": true},
+			want:          true,
+		},
+		{
+			name: "resolved totalCount variable false",
+			query: `query Search($count: Boolean) { torrentContent { search(input: {totalCount: $count}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } }`,
+			operationName: "Search",
+			variables:     map[string]any{"count": false},
+		},
+		{
+			name:  "unrelated query",
+			query: `{ version }`,
+		},
+		{
+			name: "missing totalCount input",
+			query: `{ torrentContent { search(input: {}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } }`,
+		},
+		{
+			name: "missing required result field",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount items { id } aggregations { __typename }
+			} } }`,
+		},
+		{
+			name: "missing identity field",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate
+			  items { infoHash contentType contentSource }
+			  aggregations { __typename }
+			} } }`,
+		},
+		{
+			name: "aliased response path",
+			query: `{ tc: torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } }`,
+		},
+		{
+			name: "aliased selected facet",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id }
+			  aggregations { years: releaseYear { value label count isEstimate } }
+			} } }`,
+		},
+		{
+			name: "incomplete selected facet",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id }
+			  aggregations { releaseYear { value count isEstimate } }
+			} } }`,
+		},
+		{
+			name:  "mutation",
+			query: `mutation { torrent { delete(infoHashes: []) } }`,
+		},
+		{
+			name:  "parse failure",
+			query: `not graphql`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := IsComparableSearchOperation(test.query, test.operationName, test.variables)
+			if got != test.want {
+				t.Errorf("IsComparableSearchOperation() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

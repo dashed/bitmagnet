@@ -1,8 +1,8 @@
 # GraphQL shadow numeric gate — Phase-2 Lane P (P3).
 #
 # Recording + alerting rules over the bitmagnet_graphql_shadow_* series emitted by
-# internal/search/graphqlshadow (the dark Rust GraphQL service's self-shadow, or
-# the Go-embedded fallback). They make the ≥7-day shadow soak machine-evaluable:
+# internal/search/graphqlshadow's Go-embedded response hook and dark Rust client.
+# They make the ≥7-day shadow soak machine-evaluable:
 # a single graphql_shadow:gate_pass series is 1 iff every phase6 §5 threshold is
 # met, and the soak verdict is `min_over_time(graphql_shadow:gate_pass[7d]) == 1`
 # (see docs/dev/rust-rewrite/phase2-graphql-shadow-gate.md).
@@ -13,6 +13,7 @@
 #   RBO mean                   >= 0.92
 #   exact total-count match    >= 0.95   (estimate totals excluded — see below)
 #   Rust p99 latency           <= Go reference p99 latency
+#   Rust success ratio         >= 0.99   (comparisons / admitted attempts)
 # plus a soak-validity floor: >= MIN_SAMPLES comparisons in the window, so a
 # low-traffic window reads as "not yet passing" rather than a spurious pass.
 #
@@ -29,6 +30,18 @@ groups:
     rules:
       - record: graphql_shadow:comparisons:increase1h
         expr: sum(increase(bitmagnet_graphql_shadow_comparisons_total[1h]))
+
+      - record: graphql_shadow:sampled:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_sampled_total[1h]))
+
+      - record: graphql_shadow:admitted:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_admitted_total[1h]))
+
+      - record: graphql_shadow:rust_success:ratio
+        expr: |
+          graphql_shadow:comparisons:increase1h
+          /
+          clamp_min(graphql_shadow:admitted:increase1h, 1)
 
       - record: graphql_shadow:top1_match:ratio
         expr: |
@@ -83,6 +96,9 @@ groups:
       - record: graphql_shadow:latency:pass
         expr: (graphql_shadow:rust_latency:p99 <= bool graphql_shadow:reference_latency:p99) or vector(0)
 
+      - record: graphql_shadow:rust_success:pass
+        expr: (graphql_shadow:rust_success:ratio >= bool 0.99) or vector(0)
+
       - record: graphql_shadow:volume:pass
         expr: (graphql_shadow:comparisons:increase1h >= bool 20) or vector(0)
 
@@ -96,6 +112,7 @@ groups:
           * graphql_shadow:rbo:pass
           * graphql_shadow:total_count_match:pass
           * graphql_shadow:latency:pass
+          * graphql_shadow:rust_success:pass
           * graphql_shadow:volume:pass
 
   - name: graphql_shadow_gate_alerts
@@ -164,6 +181,20 @@ groups:
           summary: GraphQL shadow Rust p99 latency exceeds Go reference
           description: "Rust p99 {{ $value | humanize }}s exceeds the Go reference p99 — the served path would regress latency."
 
+      - alert: GraphQLShadowRustErrors
+        expr: graphql_shadow:rust_success:ratio < 0.99 and graphql_shadow:admitted:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow Rust success ratio below 0.99
+          description: >
+            Fewer than 99% of admitted dark Rust attempts produced a valid
+            comparison over the last hour. Missing/invalid handler timing,
+            transport failures, GraphQL errors, or response projection failures
+            invalidate the soak. Do NOT cut over.
+
       - alert: GraphQLShadowFacetMismatch
         expr: graphql_shadow:all_facets_match:ratio < 0.95 and graphql_shadow:comparisons:increase1h >= 20
         for: 1h
@@ -179,20 +210,21 @@ groups:
 
       - alert: GraphQLShadowReferenceErrors
         expr: |
-          sum(rate(bitmagnet_graphql_shadow_reference_error_total[15m]))
+          sum(increase(bitmagnet_graphql_shadow_reference_error_total[15m]))
           /
-          clamp_min(sum(rate(bitmagnet_graphql_shadow_comparisons_total[15m])) + sum(rate(bitmagnet_graphql_shadow_reference_error_total[15m])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_sampled_total[15m])), 1)
           > 0.05
         for: 30m
         labels:
           severity: warning
           component: bitmagnet-graphql-shadow
         annotations:
-          summary: GraphQL shadow Go-reference error rate above 5%
+          summary: GraphQL shadow captured-Go-response error rate above 5%
           description: >
-            Over 5% of eligible shadow queries fail their Go /graphql reference
-            call. The comparison sample is degraded; investigate the reference
-            endpoint or the mirror before trusting the soak verdict.
+            Over 5% of eligible shadow queries fail projection of the
+            already-computed Go response. The comparison sample is degraded;
+            investigate the query/projection contract before trusting the soak
+            verdict.
 
   # Composer bound backstop (Lane C metrics). These reference the
   # bitmagnet_search_pathsearch_* series Lane C's C6 port emits; the exact names
