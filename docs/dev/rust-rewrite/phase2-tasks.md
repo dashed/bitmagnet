@@ -57,7 +57,7 @@ not to add scope.
 
 ---
 
-## Traffic reality — how the ≥7-day GraphQL shadow actually runs in THIS fleet
+## Traffic reality — how the ≥7-day GraphQL shadow runs in THIS fleet
 
 Unlike Phase 1 (the fleet has **no** Torznab client, so its shadow ran on a
 synthetic corpus), the GraphQL surface has **real, continuous traffic**: the
@@ -65,63 +65,60 @@ Angular webui (`/webui`), the React webui (`/app`), and Hermes all query the liv
 Go `/graphql`. That is the shadow population, and it must be sampled from
 production, not synthesised.
 
-**Mechanism (lead with this):** Traefik **request-mirroring**. The Rust GraphQL
-service ships **dark** (Lane I) as a second Kubernetes Service; a Traefik
-`mirroring` service copies a sampled fraction of live `/graphql` POSTs to it. The
-dark service runs a **shadow mode** in which, per mirrored request, it (a) executes
-its own resolvers, (b) issues the identical query to the live Go `/graphql` as the
-reference, and (c) runs a comparator over the two responses — diffing the
-**result-set** (ordered `InferID` list), the **9 facet counts**, and the
-**total-count** — emitting `graphql_shadow_*` metrics (the numeric gate feed). The
-Rust result is discarded; nothing is served. This keeps the **Go side entirely
-untouched** during the dark soak (the whole point of a dark deploy) and reuses the
-existing `internal/search/shadow` comparator math (Jaccard/RBO/Top1/count-delta,
-`comparator.go`) extended with facet-count + total-count diffs.
+**Selected mechanism (2026-07-12 reconciliation): Go-embedded, not Traefik
+mirroring.** The live Go GraphQL path measures its already-computed response and
+latency, then a bounded background hook samples eligible read-only operations,
+calls the dark Rust GraphQL Service with the same request, and compares Rust with
+the captured Go result. This avoids a second Go execution and the self-shadow's
+double-PG-read cost. The Rust result is discarded; nothing is served.
 
-**🚨 HARD SAFETY GATE — mutations must NEVER be double-executed (blocking, not a
-note).** Live `/graphql` traffic includes **mutations** (`QueueMutation.*`,
-`TorrentMutation.{delete,putTags,setTags,deleteTags,reprocess}`). The mirrored copy
-reaches the dark Rust service, and its self-shadow *issues a reference call to the
-live Go `/graphql`* — so a mutation reaching that reference call would **double-apply
-a prod side effect** (a second delete, a second reprocess enqueue). The self-shadow
-therefore MUST, in this order:
+Lane P already contains the reusable response projection, comparator,
+`bitmagnet_graphql_shadow_*` metrics, and operation classifier. It does **not** yet
+contain the selected runtime hook: the current `Driver` is the superseded
+self-shadow shape (execute Rust, then re-issue Go) and has no caller. Remaining P2
+work must add the Go operation/response hook, sampling, concurrency/load-shed
+bounds, Rust HTTP client, and propagation of the original Go latency. A
+"zero-cost ReferenceClient" closure that returns the captured result but times
+only the closure is invalid because it records near-zero Go latency and breaks the
+Rust-p99-vs-Go-p99 gate.
 
-1. **Parse the GraphQL operation type FIRST**, before any execution or reference
-   call. Anything that is not a read-only `query` operation (i.e. any `mutation`,
-   and any `subscription`) is **hard-dropped** — no Rust resolver execution, no Go
-   reference call, no comparison. Only `query` operations proceed.
-2. **Only re-issue READ (`query`) operations** to the Go reference endpoint.
+**🚨 HARD SAFETY GATE — classify before the Rust call.** Live `/graphql` traffic
+includes mutations. The embedded hook MUST parse/select the GraphQL operation
+first and hard-drop anything other than a read-only `query` before calling Rust.
+This remains load-bearing even though Go executes the primary request only once:
+the Rust mutation stubs may become real later. Parse failures and ambiguous
+multi-operation documents fail closed. The existing operation-gate tests are the
+starting proof; runtime-hook tests must assert zero Rust calls for mutations,
+subscriptions, and unclassifiable documents.
 
-This is a correctness gate on the comparator (Lane P, P2) AND the mirror wiring
-(Lane I, I2), verified by a test that a mutation document produces zero Go
-reference calls. It is the load-bearing safety property of the whole shadow
-mechanism.
+**Sampling + node-contention guard (06 R5):** use
+`context.WithoutCancel`/bounded timeout, a low sample rate, and a semaphore-capped
+runner modelled on `internal/search/router`. Lane I owns only the dark Service,
+Go→Rust egress, configuration, and observability plumbing. There is no Traefik
+mirror or mirrored-body buffer to configure.
 
-Additional mirror controls (Lane I, I2): a **kill-switch flag on the Traefik mirror**
-(Traefik-side, default off, single-revert), a **sampling-percentage knob**, and a
-**`maxBodySize` bound** (Traefik request-mirroring buffers request bodies to
-replay them — set `maxBodySize` sanely so large GraphQL POST bodies don't balloon
-proxy memory).
+---
 
-**Why not the P4-router pattern verbatim?** The existing search shadow
-(`internal/search/router`) is *Go-embedded* — the Go resolver samples and
-background-compares against the Tantivy sidecar. Reusing that shape for GraphQL
-would require editing the Go resolver to fan out to a Rust service, i.e. a Go
-change during the dark phase. Traefik-mirror + Rust-self-compare gets the same
-signal with zero Go delta. **Documented fallback** (if Traefik mirroring proves
-lossy on POST bodies or the self-reference fan-out doubles PG load unacceptably):
-a Go-embedded sampling comparator modelled on `router.go`'s `runShadow`
-(`context.WithoutCancel` background compare, `SampleRate ≪ 1`, semaphore-capped) —
-same numeric gate, at the cost of a temporary Go-side shadow hook. That fallback
-compares against the Go result the resolver **already computed**, so it needs no
-reference fan-out and the mutation-double-execute hazard does not arise for it.
-Lane P owns the comparator either way; Lane I owns the Traefik mirror wiring.
+## Reconciled execution status (2026-07-13)
 
-**Sampling + node-contention guard (06 R5):** the mirror runs at
-`SEARCH_SAMPLE_RATE`-style low fraction, semaphore-capped, off the ARC-CI peak, so
-the dark self-shadow (which doubles PG read load on the sampled slice) can't starve
-the live path on the single HEL1 node. Wire `NodeDiskIOSaturation` + live-path p99
-as soak abort signals.
+This table supersedes the original status cells in the detailed task-definition
+tables below. Those rows remain the scope contract, but were not kept current while
+the lane work was produced.
+
+| Lane | Verified / current tip | Current state | Remaining critical path |
+|---|---|---|---|
+| Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
+| S | `75d920c6` | **exact-tip verified** 2026-07-13: fmt, strict clippy, 40 search-query tests, Torznab check + 41 tests | expanded canonical result item, S4 ordering/paging/counts, S5 live-PG differential parity |
+| C | `4e4ee6ee` | **exact-tip verified** 2026-07-13: fmt, strict clippy, 25 tests; current tip is C3a pure refine only | C3b composer, C4, C6, C7, then replace `lane-s-stub` with real Lane S |
+| G | `e159f7bd` | **exact-tip verified** 2026-07-13: fmt, strict clippy, 4 tests including SDL parity, bin check | real composition root/resolvers, health/workers/routing, Dockerfile; regenerate workspace lockfile at integration |
+| P | `464ba7d6` | comparator/projection/metrics/gates verified; selected runtime mechanism **not implemented** | Go-embedded operation/response hook + Rust client + bounded runner + original Go latency |
+| G0/P1 | `244f66cd` | complete; reference only | none |
+| I | homelab `master` | not started | dark GraphQL role/image import/CNP/ServiceMonitor after final binary contract |
+
+**C5 status:** `watermark_epoch` is already complete in source and live. C5 is
+blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
+below every agreement threshold, so it remains dormant regardless of the formal
+2026-07-16 evaluation date.
 
 ---
 
@@ -176,7 +173,7 @@ config-struct **land EARLY** (C1) as Lane G's contract.
 | C2 | **L3 client + health snapshot.** Port `pathsearch/client.go` (the `PathCandidates`/`Suggest`/`HealthCheck` gRPC client on the Phase-0 tonic stack) + `pathsearch/health.go` (the lock-free cached health snapshot, fail-closed default). Reuse `bitmagnet-proto` `PathSearchService`. | ⬜ pending |
 | C3 | **The L1 blob-refine composer (the XL core).** Port `pathsearch/composer.go` (1426 LOC) + `refine.go` (218): the pipeline `candidates()` (L3 oversample+truncate) → `FileCounts()` cheap probe (PK point-lookup on `torrent_file_summary.file_count`, NO blob decode) → `declineOversized()` → `chunkByFileBudget()` → per-chunk `candidateRows()` (PG `IN()` + hydrate via Lane S) → `refineMatches()` (blob decode → exact substr/ext/size predicate) → Go-side `paginate()` → decode-free refined-set facet re-aggregation → estimated `TotalCount` from sidecar `candidate_total`. **All gate-7 bounds ported with their Go defaults** and re-derived for Rust's allocator (see §Gate thresholds): `MaxRefineFiles=300_000`, `RefineFileBudget=300_000`, `MaxChunkTorrents=1024`, `RetainedFileBudget=1_000_000`, `RouteTimeout=8s`, `MaxCandidates=2000`, `MaxConcurrentRefines=NumCPU`, the `SlotWait` load-shed. **Fail-safe-to-PG decorator semantics:** `served=false` / `refineFailLoud()` / zero-candidate-while-unhealthy → PG fallback; cap reasons (`capNone/capRetained/capDeadline`) serve the accumulated top-relevance prefix with `TotalCountIsEstimate=true`, never a PG broad-FTS wall. | ⬜ pending |
 | C4 | **File-grained variant + typeahead.** Port `pathsearch/file_rows.go` (585): `SearchFileRows` + `PathTypeahead`/`Suggest` (FileRow sort fields, `visitMatchingFiles`, `pageFileRows`) — backs the GraphQL `fileSearch` text route + `pathTypeahead`. | ⬜ pending |
-| C5 | **Tantivy-serve router-decorator (Phase-6 fold-in — GATED, see risks).** Port `router.go`'s serving branch per `phase6-tantivy-served-design.md §1–§4`: the eligibility gate (free-text + no structured filters via `canCompare` + relevance-only order + no facets), the freshness gate (cached `healthy && fresh` poller, `maxStaleness=2min`, reads `watermark_epoch` off `HealthCheckResponse`), and the serve path (Tantivy RPC under `ServeTimeout≈800ms` → hydrate hit info-hashes from PG via Lane S → `orderItemsByInferID` → `TotalHits` exact count, `TotalCountIsEstimate=false`). Fail-closed-to-PG on any error/timeout. **Precedence L3 → Tantivy → PG** (composer intercepts first; on `served=false` the residual hits the router). **GATED — do not serve until both P2-2 gates clear** (Go-side 00024 indexer + `watermark_epoch` proto; P4 shadow soak favorable ≥2026-07-16). If unmet at build time, Phase 2 ships without C5 and it follows on. | ⬜ blocked (Risk P2-2) |
+| C5 | **Tantivy-serve router-decorator (Phase-6 fold-in — GATED, see risks).** Port `router.go`'s serving branch per `phase6-tantivy-served-design.md §1–§4`: the eligibility gate (free-text + no structured filters via `canCompare` + relevance-only order + no facets), the freshness gate (cached `healthy && fresh` poller, `maxStaleness=2min`, reads `watermark_epoch` off `HealthCheckResponse`), and the serve path (Tantivy RPC under `ServeTimeout≈800ms` → hydrate hit info-hashes from PG via Lane S → `orderItemsByInferID` → `TotalHits` exact count, `TotalCountIsEstimate=false`). Fail-closed-to-PG on any error/timeout. **Precedence L3 → Tantivy → PG** (composer intercepts first; on `served=false` the residual hits the router). The incremental indexer and health-check watermark prerequisites are complete; do not serve until a fresh ≥7-day P4 shadow soak passes every quality threshold. | ⬜ blocked on search quality (Risk P2-2) |
 | C6 | **Composer + serve metrics.** Port `pathsearch/metrics.go` (292) + `router/metrics.go`: the `search_pathsearch_*` series (`route_total{result}`, `refine_declined_oversized_total`, `refine_retained_capped_total`, `refine_deadline_capped_total`, `refine_shed_total`, `refine_agg_error_total`, health/watermark gauges) and `search_serve_*` (`total{outcome}`, sidecar_healthy, watermark) on the Phase-0 `bitmagnet-common` metrics layer — metric-name parity gated by the Phase-0 metric-name golden. | ⬜ pending |
 | C7 | **Composer bound tests (the gate-7 backstop).** Port the Go composer bound tests (`composer_bound_test.go` 574, `composer_chunk_test.go` 983, `composer_route_test.go` 166) as Rust tests proving the bounds hold: oversized decline fail-loud, per-chunk file budget cap, retained-file-budget cap, route-deadline cap, load-shed, and **zero unbounded refines** under a synthetic large-torrent load. This is R8's review backstop for the XL piece. | ⬜ pending |
 
@@ -219,13 +216,14 @@ Owns: new Go-side parity test files in `internal/parity/**` (new files only),
 `internal/gql/schema_sdl_parity_test.go` (the existing Go-side SDL↔resolver guard),
 `testdata/parity/schema.graphql` (the Phase-0 B1 golden). Mirrors Phase-1 Lane G
 (goldens + gates), and owns the shadow **comparator** regardless of which shadow
-mechanism ships (Lane I owns the Traefik wiring).
+mechanism ships (Lane I owns only the dark-service deployment and Go-to-Rust
+egress/configuration).
 
 | # | Task | Status |
 |---|------|--------|
-| P1 | **SDL 0-diff golden gate.** Wire the Rust `bitmagnet-graphql::schema().sdl()` output through a normalizer that canonicalizes it to the SAME shape as the Phase-0 `testdata/parity/schema.graphql` golden (the P0 golden is a *normalized concatenation of the source `.graphqls` files*; async-graphql's printed SDL differs in field/type ordering, scalar/directive syntax, and description formatting — the normalizer MUST reconcile both to one canonical form). CI assert → **0 diffs**. This is Risk P2-1's control; **define the normalization rules explicitly** (they are the crux of the gate). | ⬜ pending |
-| P2 | **GraphQL shadow comparator.** Extend the `shadow.Compare` math (Jaccard@20/@50, RBO p=0.9, Top1, count-delta) with **per-facet-count diff** and **total-count diff** over the full GraphQL response; a driver that, given a query, diffs the Rust response vs the live Go `/graphql` reference and emits `graphql_shadow_*` metrics. Reused by whichever mechanism ships (Traefik-mirror self-shadow in the Rust service, or the Go-embedded fallback). **Enforces the mutation-double-execute safety gate (§Traffic reality):** parse operation type FIRST; hard-drop any non-`query` op before any Rust execution or Go reference call; unit test asserts a mutation document yields zero Go reference calls. | ⬜ pending |
-| P3 | **Numeric gate wiring + soak dashboard.** Wire the gate thresholds (§Gate thresholds) as a promql/alert bundle over the `graphql_shadow_*` series so the ≥7-day soak is machine-evaluable (Top1≥0.98, JaccardAt20≥0.90, RBO≥0.92, count-match≥0.95, Rust p99 ≤ Go p99), plus the composer-bound counters (zero `refine_*_capped` unexpected spikes / zero unbounded refines). Same evidential discipline as the Phase-1 shadow (a passing gate is the R8 review backstop). | ⬜ pending |
+| P1 | **SDL 0-diff golden gate.** Wire the Rust `bitmagnet-graphql::schema().sdl()` output through a normalizer that canonicalizes it to the SAME shape as the Phase-0 `testdata/parity/schema.graphql` golden (the P0 golden is a *normalized concatenation of the source `.graphqls` files*; async-graphql's printed SDL differs in field/type ordering, scalar/directive syntax, and description formatting — the normalizer MUST reconcile both to one canonical form). CI assert → **0 diffs**. This is Risk P2-1's control; **define the normalization rules explicitly** (they are the crux of the gate). | ✅ `464ba7d6` |
+| P2 | **GraphQL shadow comparator + embedded runtime hook.** The response projection, Jaccard/RBO/Top1/count metrics, and operation classifier are complete. Replace the uncalled self-shadow driver with a Go operation/response hook that captures the primary Go result and latency, classifies the selected operation before any Rust call, and asynchronously calls Rust under sampling, timeout, and semaphore limits. Unit tests must prove mutations, subscriptions, ambiguous documents, and parse failures make zero Rust calls. | 🟡 comparator complete; runtime hook pending |
+| P3 | **Numeric gate wiring + soak dashboard.** Wire the gate thresholds (§Gate thresholds) as a promql/alert bundle over the `graphql_shadow_*` series so the ≥7-day soak is machine-evaluable (Top1≥0.98, JaccardAt20≥0.90, RBO≥0.92, count-match≥0.95, Rust p99 ≤ Go p99), plus the composer-bound counters (zero `refine_*_capped` unexpected spikes / zero unbounded refines). Same evidential discipline as the Phase-1 shadow (a passing gate is the R8 review backstop). | ✅ `464ba7d6`; metric-name reconciliation waits on C6 |
 
 Estimate: **M, ~1–2 ew.** The SDL normalizer (P1) is the fiddly bit; the comparator
 extends existing math.
@@ -236,17 +234,17 @@ extends existing math.
 
 Owns (homelab repo): new `ansible/roles/bitmagnet-graphql/**`, a `graphql` image
 kind in `playbooks/bitmagnet_image_import.yml` + Makefile, the dark Kubernetes
-Service + the Traefik **mirroring** wiring for the shadow, all behind a default-off
-flag. Mirrors Phase-1 Lane I (the `bitmagnet-torznab` role pattern). **NO deploys,
-NO route flip, NO cutover** — cutover is USER-GATED and outside this ledger.
+Service, Go→Rust egress, and sampling/client configuration. Mirrors Phase-1 Lane I
+(the `bitmagnet-torznab` role pattern). **NO deploys, NO route flip, NO cutover** —
+cutover is USER-GATED and outside this ledger.
 
 | # | Task | Status |
 |---|------|--------|
-| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, resource limits sized so the dark self-shadow can't starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | ⬜ pending |
-| I2 | **Dark Service + Traefik shadow mirror.** Stand up the dark GraphQL Service and the Traefik `mirroring` service that copies a sampled fraction of live `/graphql` POSTs to it, behind `bitmagnet_graphql_shadow_enabled: false` (default off, **single-revert kill-switch**), with a sampling-percentage knob and a sane `maxBodySize` (Traefik mirroring buffers request bodies). The **mutation-double-execute safety gate** (§Traffic reality) is enforced Rust-side in the self-shadow, but the mirror wiring must document it as a precondition. The serve-cutover IngressRoute (route `/graphql` to Rust, Go kept warm; **mutations routed to Go** per Risk P2-3) is PREPARED behind a second default-off flag but NOT wired. | ⬜ pending |
+| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, and resource limits so dark comparisons cannot starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | ⬜ pending |
+| I2 | **Dark Service + embedded-shadow plumbing.** Stand up the internal-only dark GraphQL Service, allow Go→Rust egress, and provide default-off endpoint/sample-rate/timeout/concurrency settings with a single-revert kill switch. Do not add a Traefik mirror. The Go runtime hook must already enforce the operation gate before this can be enabled. A future serve-cutover route remains separate and user-gated. | ⬜ pending |
 
-Estimate: **S, ~0.5–1 ew.** Reuses the Phase-1 torznab role wholesale; the Traefik
-mirror is the only new mechanism.
+Estimate: **S, ~0.5–1 ew.** Reuses the Phase-1 torznab role wholesale; the new
+pieces are Go→Rust policy and embedded-shadow configuration.
 
 ---
 
@@ -268,8 +266,7 @@ mirror is the only new mechanism.
 - **Fixture roots — no overlap:** `testdata/parity/searchquery/` (Lane S),
   `testdata/parity/graphql/` (Lane P). Composer bound tests live in-crate (Lane C).
 - **`bitmagnet-proto` `watermark_epoch` addition** (needed by C5 Tantivy-serve
-  freshness) is a Go-side/proto prerequisite tracked under Risk P2-2 — NOT owned by
-  a build lane; the lead sequences it with the Go incremental indexer.
+  freshness) is already complete in `463d0d32` and present in the Phase-2 base.
 
 ---
 
@@ -316,55 +313,29 @@ mirror is the only new mechanism.
   **Scheduled (lead-approved):** the scalar+enum+nullability spike against P1's
   normalizer is **row G0** — the joint first move of Lanes G+P, before the resolver
   volume, so the gate mechanism is proven before the bulk port commits to it.
-- **P2-2 — Tantivy-serve (C5) is GATED on non-rewrite prerequisites (04 §4.2).**
-  Serving is conditional on **two independent gates**, both outside the build lanes:
-  1. **The Go-side serving prerequisites (phase6 §4).** The 00024 follow-contract
-     incremental indexer (so deletes/updates propagate — serving a stale index is a
-     correctness bug) **and** adding `watermark_epoch` to `SearchService`
-     `HealthCheckResponse` (proto change; today it carries only `{status, doc_count}`).
-     Both are Go/sidecar-track hardening, explicitly **not** rewrite work (04 §4.2
-     says keep prerequisites on the Go track).
-  2. **The P4 Tantivy shadow soak coming back favorable (≥2026-07-16).** The
-     re-instrumented Phase-4 shadow (comparator on `bitmagnet-0` + ServiceMonitor +
-     synthetic-traffic CronJob, shipped 2026-07-09) is running a **7-day soak whose
-     evaluation date is ≥2026-07-16** (homelab memory
-     `bitmagnet-remaining-work-audit-2026-07-09`). C5 must not cut over until that
-     soak's numeric gates (the same phase6 §5 thresholds this ledger uses) come back
-     favorable — an unfavorable soak points at a match-set defect (audit #1/#2) that
-     must be fixed in the Go/Tantivy engine *before* the Rust serve path inherits it.
+- **P2-2 — Tantivy-serve (C5) is QUALITY-GATED (04 §4.2).** The Go-side
+  prerequisites are complete: the 00024 follow-contract incremental indexer is live,
+  and `463d0d32` added `watermark_epoch` to `SearchService.HealthCheckResponse`.
+  Production reports a fresh watermark and the 2026-07-13 propagation probe passed.
+  The only remaining gate is a new, valid ≥7-day P4 main-search shadow soak meeting
+  every threshold. The current live evidence is not borderline: 3376 comparisons
+  yielded Jaccard@20 0.120, RBO 0.108, and Top1 1.42%, versus 0.90/0.92/0.98 gates.
+  Treat that as a ranking/membership defect, not as a date gate; repair it and restart
+  the soak before C5 can serve.
 
-  **Honest framing:** if either gate is unmet when Lane C reaches C5, **Phase 2
-  ships WITHOUT Tantivy-serve** — the full builder (S) + composer + L3 route
-  (C1-C4,C6,C7) + GraphQL API (G) is a valid, shippable partial (the read path is
-  Rust, L3 serves, PG is authoritative), and C5 becomes a gated follow-on the
-  moment both gates clear. **Status (lead-confirmed 2026-07-11):** gate (1)'s
-  *indexer half is LIVE* — the Tantivy sidecar revival (image `revival-20260703b`
-  on `:50051`, 48.5M docs) runs with **follow ON**, hardened at `shadow-20260709`,
-  and a watermark staleness gauge reads ~35s typical. So the freshness *data* exists
-  in prod today. What remains real prerequisite work: the **`watermark_epoch` is a
-  Prometheus gauge today, NOT a field on `SearchService` `HealthCheckResponse`** — the
-  proto addition (so the router's health poller can read it per §4) is genuine
-  remaining work, and **C5 stays blocked on it** (Cross-lane contracts already names
-  the proto change). Gate (2), the **P4 shadow soak verdict, is still pending
-  (eval ≥2026-07-16)** — the pre-2026-07-09 shadow evidence was ruled INVALID
-  (wrong pod, n=13 empty queries, unscraped — memory `tantivy-p3p4-audit-2026-07-03`),
-  so only the re-instrumented soak counts. Net: C5 is **in-scope but gated** on
-  {`watermark_epoch` proto lands} AND {P4 soak favorable ≥2026-07-16}. Also **open:**
-  does the serving service **embed** the Tantivy search
-  crate in-process (00 §2 / 06 Q6 recommendation — removes the gRPC hop once both
-  are Rust) or keep RPCing the sidecar (phase6's assumption)? For Phase 2, keep the
-  gRPC boundary (matches the sidecar it inherits); flag in-process embed as a
-  deferred optimization — this is the "Tantivy index ownership between
-  bitmagnet-search and the new service" question.
+  **Honest framing:** Phase 2 ships without Tantivy-serve if quality remains below
+  threshold. The full builder (S), composer/L3 route (C1-C4,C6,C7), and GraphQL API
+  (G) remain a valid shippable slice with PG authoritative. C5 stays dormant and
+  fail-closed-to-PG until a new soak passes. For Phase 2, retain the gRPC boundary to
+  the existing sidecar; embedding Tantivy in-process remains a deferred optimization.
 - **P2-3 — the SDL must declare mutations Phase 2 does not implement.** The 0-diff
   golden includes `mutation.graphqls` (`TorrentMutation.*`, `QueueMutation.*`), so
-  the code-first schema MUST declare the full Mutation type — but Phase 2 is
-  read-only. **Options:** (a) declare mutation resolvers that proxy to the live Go
-  `/graphql` (keeps the endpoint whole), or (b) the dark/served Rust service handles
-  only reads and Traefik routes mutation operations to Go (operation-level routing).
-  **Recommend (b)** for the dark soak + initial cutover — it avoids porting write
-  paths (Phase 3+ scope) while keeping the SDL whole; revisit when the write side
-  is ported. Either way the SDL declares them; only the routing differs.
+  the code-first schema MUST declare the full Mutation type while Phase 2 remains
+  read-only. During dark operation no live traffic is routed to Rust; the embedded
+  hook rejects mutations before its Rust call. Before any full endpoint cutover,
+  Rust mutation resolvers must proxy the original request to the warm Go endpoint
+  (or mutation implementations must land). Do not assume Traefik can inspect a
+  GraphQL POST body and route by operation type.
 - **P2-4 — dataloader parity.** Go has **no dataloaders** — N+1 is avoided by eager
   hydration in one SQL round-trip (`TorrentContentCoreJoins`, batch-hydrated
   `FileSearchItem.torrentContent`). async-graphql *offers* a `DataLoader`, but using
@@ -380,15 +351,11 @@ mirror is the only new mechanism.
   This is where deep human review (not just the parity corpus) is required — the
   corpus proves match-set parity, not memory-bound parity; C7 must assert the bounds
   under a synthetic large-torrent load.
-- **P2-6 — shadow doubles PG load on the sampled slice (06 R5).** The Traefik-mirror
-  self-shadow has the Rust service query BOTH its own resolvers AND live Go
-  `/graphql` (the reference) per mirrored request — doubling PG reads on the sampled
-  fraction, on the single HEL1 node that already flaps `NodeDiskIOSaturation`.
-  Control: low sample rate, semaphore cap, off-peak soak, resource limits, and
-  `NodeDiskIOSaturation`/live-p99 as abort signals. **Open:** if even the sampled
-  double-read is too costly, fall back to the Go-embedded comparator (compares
-  against the primary Go result it already computed — no reference fan-out), at the
-  cost of a temporary Go-side hook.
+- **P2-6 — shadow adds one sampled Rust/PG read (06 R5).** The selected Go-embedded
+  hook reuses the already-computed primary Go result and adds only the sampled Rust
+  execution; it must never re-issue the Go request. Control the remaining load with
+  a low sample rate, non-blocking semaphore admission, a hard timeout, off-peak
+  soak, resource limits, and `NodeDiskIOSaturation`/live-p99 abort signals.
 
 ---
 
@@ -405,5 +372,5 @@ mirror is the only new mechanism.
 
 Matches the roadmap's Phase-2 estimate (**10–16 ew**, §05 §3). The XL cost is Lane
 C's composer (C3) + its bound re-derivation (P2-5); the schedule risk is human
-review of that XL piece (06 R8), not LOC. If C5 (Tantivy-serve) is deferred on the
-P2-2 prerequisite, the phase lands at the lower end and C5 follows on.
+review of that XL piece (06 R8), not LOC. If C5 (Tantivy-serve) remains deferred by
+the P2-2 quality gate, the phase lands at the lower end and C5 follows on.
