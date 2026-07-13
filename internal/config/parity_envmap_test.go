@@ -34,11 +34,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bitmagnet-io/bitmagnet/internal/config"
-	"github.com/go-playground/validator/v10"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier"
+	"github.com/bitmagnet-io/bitmagnet/internal/config"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/cache"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/postgres"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
@@ -48,10 +46,12 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/logging"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/searchfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb"
 	"github.com/bitmagnet-io/bitmagnet/internal/torznab"
 	"github.com/bitmagnet-io/bitmagnet/internal/webui"
+	"github.com/go-playground/validator/v10"
 )
 
 // updateGolden regenerates the golden instead of asserting against it.
@@ -61,7 +61,7 @@ const configEnvMapGoldenRel = "testdata/parity/config-env-map.golden"
 
 // configSpecs is the deployed set of config root specs, one per
 // configfx.NewConfigModule call across the fx modules the application loads
-// (grep: `NewConfigModule` — 15 unique root keys; devfx re-registers "postgres"
+// (grep: `NewConfigModule` — 16 unique root keys; devfx re-registers "postgres"
 // with the same struct, so it adds no keys). Keep this list in lockstep with the
 // modules; a missing spec silently drops that section's env keys from the
 // contract, and the assert test below pins the known-good anchors as a tripwire.
@@ -76,6 +76,7 @@ func configSpecs() []config.Spec {
 		{Key: "tmdb", DefaultValue: tmdb.NewDefaultConfig()},
 		{Key: "metainfo_requester", DefaultValue: metainforequester.NewDefaultConfig()},
 		{Key: "search", DefaultValue: searchfx.NewDefaultConfig()},
+		{Key: "graphql_shadow", DefaultValue: graphqlshadow.NewDefaultConfig()},
 		{Key: "http_server", DefaultValue: httpserver.NewDefaultConfig()},
 		{Key: "classifier", DefaultValue: classifier.NewDefaultConfig()},
 		{Key: "dht_crawler", DefaultValue: dhtcrawler.NewDefaultConfig()},
@@ -108,6 +109,7 @@ func generateEnvMap(t *testing.T) []string {
 
 	// Dedupe (paths are unique, but the contract mandates "sorted unique").
 	out := lines[:0:0]
+
 	for i, ln := range lines {
 		if i == 0 || ln != lines[i-1] {
 			out = append(out, ln)
@@ -139,6 +141,8 @@ func goldenBytes(lines []string) []byte {
 
 // TestConfigEnvMapGolden regenerates (with -update) or asserts the env-map golden.
 func TestConfigEnvMapGolden(t *testing.T) {
+	t.Parallel()
+
 	lines := generateEnvMap(t)
 	got := goldenBytes(lines)
 	path := filepath.Join(repoRoot(t), configEnvMapGoldenRel)
@@ -176,8 +180,12 @@ func TestConfigEnvMapGolden(t *testing.T) {
 // is the walker's known-good check from the phase0 brief; the rest sample the
 // documented ~25-var deployed surface (§01 §2.6) across several root sections.
 func TestConfigEnvMapKnownGood(t *testing.T) {
+	t.Parallel()
+
 	byEnv := make(map[string]string)
-	for _, ln := range generateEnvMap(t) {
+
+	lines := generateEnvMap(t)
+	for _, ln := range lines {
 		parts := strings.SplitN(ln, "\t", 2)
 		if len(parts) != 2 {
 			t.Fatalf("malformed golden line %q", ln)
@@ -192,6 +200,12 @@ func TestConfigEnvMapKnownGood(t *testing.T) {
 		"SEARCH_FILE_SEARCH_ENABLED":            "search.file_search_enabled",
 		"SEARCH_PATHSEARCH_ENABLED":             "search.pathsearch_enabled",
 		"SEARCH_FEATURES_DROP_COMPATIBLE_READS": "search_features.drop_compatible_reads",
+		"GRAPHQL_SHADOW_ENABLED":                "graphql_shadow.enabled",
+		"GRAPHQL_SHADOW_ENDPOINT":               "graphql_shadow.endpoint",
+		"GRAPHQL_SHADOW_SAMPLE_RATE":            "graphql_shadow.sample_rate",
+		"GRAPHQL_SHADOW_TIMEOUT":                "graphql_shadow.timeout",
+		"GRAPHQL_SHADOW_MAX_CONCURRENT":         "graphql_shadow.max_concurrent",
+		"GRAPHQL_SHADOW_LOG_DISCREPANCIES":      "graphql_shadow.log_discrepancies",
 		"POSTGRES_HOST":                         "postgres.host",
 		"WEBUI_DEFAULT_FRONTEND":                "webui.default_frontend",
 	}
@@ -221,6 +235,7 @@ func repoRoot(t *testing.T) string {
 	}
 
 	dir := filepath.Dir(thisFile)
+
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir

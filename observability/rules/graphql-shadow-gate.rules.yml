@@ -1,0 +1,263 @@
+# GraphQL shadow numeric gate — Phase-2 Lane P (P3).
+#
+# Recording + alerting rules over the bitmagnet_graphql_shadow_* series emitted by
+# internal/search/graphqlshadow's Go-embedded response hook and dark Rust client.
+# They make the ≥7-day shadow soak machine-evaluable:
+# a single graphql_shadow:gate_pass series is 1 iff every phase6 §5 threshold is
+# met, and the soak verdict is `min_over_time(graphql_shadow:gate_pass[7d]) == 1`
+# (see docs/dev/rust-rewrite/phase2-graphql-shadow-gate.md).
+#
+# Thresholds (docs/dev/rust-rewrite/phase2-tasks.md §Gate thresholds):
+#   Top1Match ratio            >= 0.98
+#   JaccardAt20 mean           >= 0.90
+#   RBO mean                   >= 0.92
+#   exact total-count match    >= 0.95   (estimate totals excluded — see below)
+#   Rust p99 latency           <= Go reference p99 latency
+#   Rust success ratio         >= 0.99   (comparisons / admitted attempts)
+# plus a soak-validity floor: >= MIN_SAMPLES comparisons in the window, so a
+# low-traffic window reads as "not yet passing" rather than a spurious pass.
+#
+# WINDOW: all KPIs use a 1h rolling window (single source of truth below). The
+# gate then requires gate_pass to hold continuously across the whole soak, which
+# is what min_over_time(...[7d]) checks — so a transient 1h dip fails the soak.
+#
+# estimate totals: total_count matches are split by the `estimate` label. When a
+# search's total is a budgeted estimate the two engines legitimately differ, so
+# the count-match KPI is computed over estimate="false" (exact) rows only.
+groups:
+  - name: graphql_shadow_gate_kpis
+    interval: 1m
+    rules:
+      - record: graphql_shadow:comparisons:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_comparisons_total[1h]))
+
+      - record: graphql_shadow:sampled:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_sampled_total[1h]))
+
+      - record: graphql_shadow:admitted:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_admitted_total[1h]))
+
+      - record: graphql_shadow:rust_success:ratio
+        expr: |
+          graphql_shadow:comparisons:increase1h
+          /
+          clamp_min(graphql_shadow:admitted:increase1h, 1)
+
+      - record: graphql_shadow:top1_match:ratio
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_top1_match_total{matched="true"}[1h]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_top1_match_total[1h])), 1)
+
+      - record: graphql_shadow:jaccard20:mean
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_jaccard_sum{k="20"}[1h]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_jaccard_count{k="20"}[1h])), 1)
+
+      - record: graphql_shadow:rbo:mean
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_rbo_sum[1h]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_rbo_count[1h])), 1)
+
+      - record: graphql_shadow:total_count_match:ratio
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_total_count_match_total{matched="true",estimate="false"}[1h]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_total_count_match_total{estimate="false"}[1h])), 1)
+
+      - record: graphql_shadow:all_facets_match:ratio
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_all_facets_match_total{matched="true"}[1h]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_all_facets_match_total[1h])), 1)
+
+      - record: graphql_shadow:rust_latency:p99
+        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_rust_latency_seconds_bucket[1h])) by (le))
+
+      - record: graphql_shadow:reference_latency:p99
+        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_reference_latency_seconds_bucket[1h])) by (le))
+
+      # Per-KPI pass indicators (1/0). `>= bool` yields 1/0; `or vector(0)` makes
+      # a missing input read as fail so the composite is never a silent gap.
+      - record: graphql_shadow:top1_match:pass
+        expr: (graphql_shadow:top1_match:ratio >= bool 0.98) or vector(0)
+
+      - record: graphql_shadow:jaccard20:pass
+        expr: (graphql_shadow:jaccard20:mean >= bool 0.90) or vector(0)
+
+      - record: graphql_shadow:rbo:pass
+        expr: (graphql_shadow:rbo:mean >= bool 0.92) or vector(0)
+
+      - record: graphql_shadow:total_count_match:pass
+        expr: (graphql_shadow:total_count_match:ratio >= bool 0.95) or vector(0)
+
+      - record: graphql_shadow:latency:pass
+        expr: (graphql_shadow:rust_latency:p99 <= bool graphql_shadow:reference_latency:p99) or vector(0)
+
+      - record: graphql_shadow:rust_success:pass
+        expr: (graphql_shadow:rust_success:ratio >= bool 0.99) or vector(0)
+
+      - record: graphql_shadow:volume:pass
+        expr: (graphql_shadow:comparisons:increase1h >= bool 20) or vector(0)
+
+      # Composite gate: 1 iff every threshold holds AND the window had enough
+      # samples. Product of the empty-labelled pass indicators → a single 1/0
+      # series. The soak verdict is min_over_time(graphql_shadow:gate_pass[7d]).
+      - record: graphql_shadow:gate_pass
+        expr: |
+          graphql_shadow:top1_match:pass
+          * graphql_shadow:jaccard20:pass
+          * graphql_shadow:rbo:pass
+          * graphql_shadow:total_count_match:pass
+          * graphql_shadow:latency:pass
+          * graphql_shadow:rust_success:pass
+          * graphql_shadow:volume:pass
+
+  - name: graphql_shadow_gate_alerts
+    rules:
+      - alert: GraphQLShadowGateFailing
+        expr: graphql_shadow:gate_pass == 0 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow numeric gate is failing
+          description: >
+            One or more phase6 §5 gate thresholds is unmet over the last hour with
+            sufficient sample volume. The ≥7-day soak cannot pass while this holds.
+            Inspect the per-KPI graphql_shadow:*:pass series to see which failed;
+            the failing metric points at the defect. Do NOT cut over.
+
+      - alert: GraphQLShadowTop1Low
+        expr: graphql_shadow:top1_match:ratio < 0.98 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow Top1 match ratio below 0.98
+          description: "Top1 match ratio {{ $value }} < 0.98 — the Rust and Go top result disagree too often."
+
+      - alert: GraphQLShadowJaccardLow
+        expr: graphql_shadow:jaccard20:mean < 0.90 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow Jaccard@20 mean below 0.90
+          description: "Jaccard@20 mean {{ $value }} < 0.90 — the top-20 result sets diverge."
+
+      - alert: GraphQLShadowRBOLow
+        expr: graphql_shadow:rbo:mean < 0.92 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow RBO mean below 0.92
+          description: "RBO mean {{ $value }} < 0.92 — the ranked results diverge beyond the head."
+
+      - alert: GraphQLShadowCountMatchLow
+        expr: graphql_shadow:total_count_match:ratio < 0.95 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow exact total-count match below 0.95
+          description: "Exact total-count match {{ $value }} < 0.95 (estimate totals excluded)."
+
+      - alert: GraphQLShadowRustSlower
+        expr: graphql_shadow:rust_latency:p99 > graphql_shadow:reference_latency:p99 and graphql_shadow:comparisons:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow Rust p99 latency exceeds Go reference
+          description: "Rust p99 {{ $value | humanize }}s exceeds the Go reference p99 — the served path would regress latency."
+
+      - alert: GraphQLShadowRustErrors
+        expr: graphql_shadow:rust_success:ratio < 0.99 and graphql_shadow:admitted:increase1h >= 20
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow Rust success ratio below 0.99
+          description: >
+            Fewer than 99% of admitted dark Rust attempts produced a valid
+            comparison over the last hour. Missing/invalid handler timing,
+            transport failures, GraphQL errors, or response projection failures
+            invalidate the soak. Do NOT cut over.
+
+      - alert: GraphQLShadowFacetMismatch
+        expr: graphql_shadow:all_facets_match:ratio < 0.95 and graphql_shadow:comparisons:increase1h >= 20
+        for: 1h
+        labels:
+          severity: info
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow facet-count agreement below 0.95
+          description: >
+            The 9-facet all-match ratio {{ $value }} < 0.95. Not a
+            phase6 §5 gate threshold, but a supplementary signal — inspect the
+            per-facet graphql_shadow_facet_match_total{facet,matched} series.
+
+      - alert: GraphQLShadowReferenceErrors
+        expr: |
+          sum(increase(bitmagnet_graphql_shadow_reference_error_total[15m]))
+          /
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_sampled_total[15m])), 1)
+          > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow captured-Go-response error rate above 5%
+          description: >
+            Over 5% of eligible shadow queries fail projection of the
+            already-computed Go response. The comparison sample is degraded;
+            investigate the query/projection contract before trusting the soak
+            verdict.
+
+  # Composer bound backstop (Lane C metrics). These reference the
+  # bitmagnet_search_pathsearch_* series Lane C's C6 port emits; the exact names
+  # must be reconciled against internal/search/pathsearch/metrics.go once C6
+  # lands (coordinate via team lead). A spike here means the L1 refine pipeline
+  # is hitting its gate-7 caps under the shadow load — a memory/latency-bound
+  # regression the numeric gate would otherwise miss.
+  - name: graphql_shadow_composer_bounds
+    rules:
+      - alert: BitmagnetComposerRefineAggErrors
+        expr: sum(rate(bitmagnet_search_pathsearch_refine_agg_error_total[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: bitmagnet-pathsearch
+        annotations:
+          summary: L1 composer refine aggregation errors
+          description: "The refine pipeline is emitting aggregation errors — a decode-free re-aggregation defect."
+
+      - alert: BitmagnetComposerCapSpike
+        expr: |
+          sum(rate(bitmagnet_search_pathsearch_refine_retained_capped_total[15m]))
+          + sum(rate(bitmagnet_search_pathsearch_refine_deadline_capped_total[15m]))
+          + sum(rate(bitmagnet_search_pathsearch_refine_declined_oversized_total[15m]))
+          > 0.1
+        for: 30m
+        labels:
+          severity: info
+          component: bitmagnet-pathsearch
+        annotations:
+          summary: L1 composer gate-7 caps engaging frequently
+          description: >
+            Retained/deadline/oversized caps are engaging above the expected
+            baseline. Occasional caps are by-design fail-safe behaviour; a
+            sustained spike under shadow load warrants review against the C7
+            composer bound tests.

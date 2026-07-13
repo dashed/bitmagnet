@@ -25,6 +25,7 @@ query TorrentContentSearch(
       totalCountIsEstimate
       hasNextPage
       items {
+        id
         infoHash
         title
         contentType
@@ -75,6 +76,12 @@ query TorrentContentSearch(
           isEstimate
         }
         genre {
+          value
+          label
+          count
+          isEstimate
+        }
+        releaseYear {
           value
           label
           count
