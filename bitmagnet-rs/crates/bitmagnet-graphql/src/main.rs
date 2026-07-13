@@ -1,20 +1,23 @@
 //! Entry point for the PostgreSQL-backed GraphQL HTTP server.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::Html;
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bitmagnet_db::PgPool;
 use clap::Parser;
 use serde::Serialize;
 use tracing::{info, warn};
+
+const GRAPHQL_HANDLER_DURATION_HEADER: &str = "x-bitmagnet-graphql-handler-duration-us";
 
 /// `bitmagnet-graphql` — the PostgreSQL-backed GraphQL HTTP server.
 #[derive(Debug, Parser)]
@@ -87,12 +90,7 @@ async fn main() -> anyhow::Result<()> {
         pool,
         version,
     };
-    let app = Router::new()
-        .route("/", get(playground))
-        .route("/graphql", get(graphql_handler).post(graphql_handler))
-        .route("/livez", get(livez))
-        .route("/status", get(status))
-        .with_state(state);
+    let app = app(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "bitmagnet-graphql starting");
@@ -104,11 +102,44 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(playground))
+        .route(
+            "/graphql",
+            get(graphql_handler)
+                .post(graphql_handler)
+                .layer(middleware::from_fn(graphql_handler_duration)),
+        )
+        .route("/livez", get(livez))
+        .route("/status", get(status))
+        .with_state(state)
+}
+
 async fn graphql_handler(
     State(state): State<AppState>,
     request: GraphQLRequest,
 ) -> GraphQLResponse {
     state.schema.execute(request.into_inner()).await.into()
+}
+
+/// Measures the complete Axum `/graphql` route-service boundary: request body
+/// extraction, GraphQL parse/validation/execution, and eager response JSON
+/// serialization all run inside `next`. Router matching and transport writes
+/// happen outside this boundary.
+async fn graphql_handler_duration(request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let mut response = next.run(request).await;
+    let elapsed_us = started.elapsed().as_micros().max(1);
+
+    if let Ok(value) = HeaderValue::from_str(&elapsed_us.to_string()) {
+        response.headers_mut().insert(
+            HeaderName::from_static(GRAPHQL_HANDLER_DURATION_HEADER),
+            value,
+        );
+    }
+
+    response
 }
 
 async fn playground() -> Html<String> {
@@ -268,8 +299,11 @@ mod tests {
     use std::ffi::OsString;
 
     use clap::Parser;
+    use serde_json::{json, Value};
 
-    use super::{goose_mismatch, parse_go_duration, Args};
+    use super::{
+        app, goose_mismatch, parse_go_duration, AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
+    };
 
     struct ArgsEnvRestore {
         listen_addr: Option<OsString>,
@@ -316,6 +350,19 @@ mod tests {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
         }
+    }
+
+    fn assert_positive_duration_header(response: &reqwest::Response) {
+        let raw = response
+            .headers()
+            .get(GRAPHQL_HANDLER_DURATION_HEADER)
+            .expect("GraphQL handler duration header")
+            .to_str()
+            .expect("ASCII GraphQL handler duration header");
+        let micros = raw
+            .parse::<u128>()
+            .expect("integer GraphQL handler duration header");
+        assert!(micros > 0, "GraphQL handler duration must be positive");
     }
 
     #[test]
@@ -418,5 +465,90 @@ mod tests {
             std::time::Duration::ZERO
         );
         assert!(parse_go_duration("-9223372036854775809ns").is_err());
+    }
+
+    #[tokio::test]
+    async fn graphql_route_reports_handler_duration_for_success_and_errors_only() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+        let version = "test-version".to_owned();
+        let router = app(AppState {
+            schema: bitmagnet_graphql::build_schema(version.clone()),
+            pool,
+            version: version.clone(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind GraphQL test server");
+        let address = listener.local_addr().expect("GraphQL test server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve GraphQL test router");
+        });
+        let client = reqwest::Client::new();
+        let graphql_url = format!("http://{address}/graphql");
+
+        let success = client
+            .post(&graphql_url)
+            .json(&json!({"query": "{ version }"}))
+            .send()
+            .await
+            .expect("successful GraphQL request");
+        assert_eq!(success.status(), reqwest::StatusCode::OK);
+        assert_positive_duration_header(&success);
+        let success_body = success
+            .json::<Value>()
+            .await
+            .expect("successful GraphQL response JSON");
+        assert_eq!(success_body["data"]["version"], version);
+
+        let error = client
+            .post(&graphql_url)
+            .json(&json!({"query": "{ fieldThatDoesNotExist }"}))
+            .send()
+            .await
+            .expect("GraphQL validation-error request");
+        assert_eq!(error.status(), reqwest::StatusCode::OK);
+        assert_positive_duration_header(&error);
+        let error_body = error
+            .json::<Value>()
+            .await
+            .expect("GraphQL validation-error response JSON");
+        assert!(
+            error_body["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty()),
+            "GraphQL validation error response must contain errors"
+        );
+
+        let livez = client
+            .get(format!("http://{address}/livez"))
+            .send()
+            .await
+            .expect("livez request");
+        assert!(
+            livez
+                .headers()
+                .get(GRAPHQL_HANDLER_DURATION_HEADER)
+                .is_none(),
+            "non-GraphQL routes must not expose the GraphQL duration header"
+        );
+        let playground = client
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .expect("playground request");
+        assert!(
+            playground
+                .headers()
+                .get(GRAPHQL_HANDLER_DURATION_HEADER)
+                .is_none(),
+            "the playground must not expose the GraphQL duration header"
+        );
+
+        server.abort();
+        let _ = server.await;
     }
 }
