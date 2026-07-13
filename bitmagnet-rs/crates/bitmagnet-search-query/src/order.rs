@@ -1,4 +1,4 @@
-//! Result ordering — the subset Torznab selects.
+//! Result ordering for the Torznab and Phase-2 GraphQL search surfaces.
 //!
 //! Torznab only ever picks two orderings (see `internal/torznab/adapter/
 //! search_options.go`): when a free-text query is present it orders by
@@ -6,7 +6,9 @@
 //! `published_at`); with no query it inherits the default browse order
 //! (`published_at DESC`, single column) from
 //! `search.TorrentContentDefaultOption`. Direction is always descending on the
-//! served path, but it is modelled here for completeness / Phase-2 reuse.
+//! served path. GraphQL may select any of the nine fields ported from
+//! `internal/database/search/order_torrent_content_enum.go` and
+//! `order_torrent_content.go`; their SQL lowering is Lane S S4.
 //!
 //! The exact ORDER BY clause each variant expands to — including the tie-break
 //! columns and the `ts_rank_cd` select alias — is fixed by Q2 against
@@ -32,15 +34,18 @@ impl OrderDirection {
     }
 }
 
-/// The Torznab-reachable subset of `search.TorrentContentOrderBy`.
+/// The full `search.TorrentContentOrderBy` field set.
 ///
-/// The full Go enum has nine variants; Torznab only reaches these two. The
-/// generated clauses (from `TorrentContentOrderBy.Clauses`):
+/// Ported from `internal/database/search/order_torrent_content_enum.go` and
+/// `order_torrent_content.go` `TorrentContentOrderBy.Clauses`. For every field
+/// with an `info_hash` tie-break, the tie-break inherits the primary column's
+/// direction. Lane S S4 implements these documented clauses; the Phase-1
+/// [`crate::build_query`] accepts only relevance and published-at today.
 ///
-/// * [`TorrentContentOrder::Relevance`] → a single `query_string_rank` column
+/// * [`TorrentContentOrderField::Relevance`] → a single `query_string_rank` column
 ///   (`ts_rank_cd(torrent_contents.tsv, $tsquery)`), **no tie-break** — so
 ///   parity fixtures must give matched rows distinct ranks.
-/// * [`TorrentContentOrder::PublishedAt`] → `torrent_contents.published_at`
+/// * [`TorrentContentOrderField::PublishedAt`] → `torrent_contents.published_at`
 ///   **then `torrent_contents.info_hash`** as a deterministic tie-break.
 ///
 /// The default browse order (no explicit ordering, i.e. [`None`] in
@@ -50,8 +55,30 @@ impl OrderDirection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TorrentContentOrderField {
+    /// `query_string_rank` (`ts_rank_cd(...)`), with no tie-break.
     Relevance,
+    /// `torrent_contents.published_at`, then `torrent_contents.info_hash` in
+    /// the same direction.
     PublishedAt,
+    /// `torrent_contents.updated_at`, then `torrent_contents.info_hash` in the
+    /// same direction.
+    UpdatedAt,
+    /// `torrent_contents.size`, then `torrent_contents.info_hash` in the same
+    /// direction.
+    Size,
+    /// `COALESCE(torrent_contents.files_count, 0)`, then
+    /// `torrent_contents.info_hash` in the same direction.
+    FilesCount,
+    /// `coalesce(torrent_contents.seeders, -1)`, then
+    /// `torrent_contents.info_hash` in the same direction.
+    Seeders,
+    /// `coalesce(torrent_contents.leechers, -1)`, then
+    /// `torrent_contents.info_hash` in the same direction.
+    Leechers,
+    /// `torrents.name`, with no tie-break; requires the `torrents` join.
+    Name,
+    /// `torrent_contents.info_hash`, which is its own deterministic key.
+    InfoHash,
 }
 
 /// A resolved ordering choice: a field plus a direction.

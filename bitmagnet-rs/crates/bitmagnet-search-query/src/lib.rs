@@ -4,6 +4,14 @@
 //! Phase-0 differential harness — every predicate added here needs a fixture
 //! pair.
 //!
+//! Phase 2 expands the public contract to the full GraphQL torrent-content
+//! search surface through [`SearchOptions`], the complete [`Criteria`] and
+//! ordering enums, facet aggregation types, and [`SearchResult`].
+//! [`build_search_query`] constructs the lean GraphQL membership statement;
+//! [`search`] executes membership, hydration, optional count, pagination, and
+//! facet aggregation. The frozen Torznab entry point remains [`build_query`].
+//! The binding SQL contract is documented in `CONTRACT.md` §Phase-2.
+//!
 //! Lane contract (phase1-tasks.md): this crate owns query construction ONLY —
 //! no HTTP, no XML, no Torznab category logic (that is bitmagnet-torznab).
 //!
@@ -48,18 +56,31 @@
 //! (`gqlmodel/torrent_content.go`) — Torznab does NOT pass through gqlmodel, so
 //! FIND-2 does not apply on this path (see `CONTRACT.md` §Ordering).
 
+mod aggregations;
 mod criteria;
+mod facets;
+mod options;
 mod order;
 mod params;
 mod query;
 mod result;
+mod search;
 
-pub use criteria::{ContentRef, Criteria, Episodes, Video3D, VideoResolution};
+pub use aggregations::{AggregationGroup, AggregationItem, Aggregations, FacetLogic};
+pub use criteria::{
+    ContentCollectionRef, ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D,
+    VideoCodec, VideoModifier, VideoResolution, VideoSource,
+};
+pub use facets::fetch_aggregations;
+pub use options::{FacetRequest, SearchBuildConfig, SearchOptions, TorrentContentFacet};
 pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;
-pub use query::{build_query, Bind, Result, SearchQuery, SearchQueryError};
-pub use result::SearchResultItem;
+pub use query::{build_query, Bind, HydrateOptions, Result, SearchQuery, SearchQueryError};
+pub use result::{SearchResult, SearchResultItem, TorrentSourceInfo};
+pub use search::{build_search_query, search};
 
 // Re-exported so Lane T and tests can name these without a direct
 // `bitmagnet-model` dependency.
-pub use bitmagnet_model::{ContentType, InfoHash};
+pub use bitmagnet_model::{
+    Content, ContentType, FileType, FilesStatus, InfoHash, Torrent, TorrentContent,
+};
