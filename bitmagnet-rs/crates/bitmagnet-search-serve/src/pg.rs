@@ -27,7 +27,7 @@ const TORRENT_COUNTS_SQL: &str = "SELECT info_hash, files_count::bigint AS file_
 /// carries only the heavyweight hydration control that Lane S deliberately
 /// keeps separate from that contract. The concrete backend owns the stable
 /// server-side build configuration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SearchRequest {
     /// Structured search, order, facet, count, and page options.
     pub options: SearchOptions,
@@ -68,15 +68,6 @@ impl SearchRequest {
         request.options.has_next_page = false;
         request.hydrate = hydrate;
         request
-    }
-}
-
-impl Default for SearchRequest {
-    fn default() -> Self {
-        Self {
-            options: SearchOptions::default(),
-            hydrate: HydrateOptions::default(),
-        }
     }
 }
 

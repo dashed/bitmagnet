@@ -74,7 +74,7 @@ impl RefinePredicate {
 /// `internal/search/pathsearch/refine.go`. Crawl-path blobs can have an empty
 /// stored extension, so deriving it from the real path is required to mirror
 /// the PostgreSQL generated-column semantics.
-fn file_extension(file: &BlobFile) -> String {
+pub(crate) fn file_extension(file: &BlobFile) -> String {
     if file.extension.is_empty() {
         file_extension_from_path(&file.path).unwrap_or_default()
     } else {
@@ -85,7 +85,7 @@ fn file_extension(file: &BlobFile) -> String {
 /// Reports whether one file satisfies the exact-refine predicate.
 ///
 /// This ports Go's `matchFile` in `internal/search/pathsearch/refine.go`.
-fn match_file(file: &BlobFile, predicate: &RefinePredicate) -> bool {
+pub(crate) fn match_file(file: &BlobFile, predicate: &RefinePredicate) -> bool {
     if !predicate.substr.is_empty() && !file.path.to_lowercase().contains(&predicate.substr) {
         return false;
     }

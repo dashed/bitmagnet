@@ -6,10 +6,11 @@
 //! memory caps serve the accumulated relevance-ordered prefix as an estimate;
 //! they never turn a pathological path query into an unbounded PG fallback.
 
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bitmagnet_model::InfoHash;
+use bitmagnet_model::{BlobFile, InfoHash};
 use bitmagnet_proto::v1::{PathCandidatesRequest, SortBy, SuggestRequest};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::{timeout_at, Instant};
@@ -17,13 +18,15 @@ use tokio::time::{timeout_at, Instant};
 use crate::api::SearchServe;
 use crate::candidates::{CandidateSource, HealthGate};
 use crate::config::ComposerConfig;
-use crate::filters::{FileRowSort, FileRowsResult, Filters, PathGroup};
+use crate::filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
 use crate::metrics::{PathsearchMetrics, RouteResult};
 use crate::pg::{
     empty_result, Aggregations, HydrateOptions, PgSearchBackend, QueryOptions, SearchRequest,
     SearchResult, SearchResultItem,
 };
-use crate::refine::{files_for_refine, paginate, torrent_matches, RefinePredicate};
+use crate::refine::{
+    file_extension, files_for_refine, match_file, paginate, torrent_matches, RefinePredicate,
+};
 
 /// L3 path candidate composer backed by Lane-S PostgreSQL hydration.
 ///
@@ -46,6 +49,25 @@ enum RefineCap {
     None,
     Retained,
     Deadline,
+}
+
+/// One exact-matching file retained by the shared C4 visitor.
+///
+/// The hydrated item is shared across all of its matching files while the
+/// composer sorts or groups them. The raw blob and full decoded file list are
+/// deliberately not retained here: the file row itself is the public file
+/// payload, and the request-wide retained-file budget therefore bounds the
+/// live C4 result set independently of matches per torrent.
+struct MatchingFile {
+    file: BlobFile,
+    extension: String,
+    torrent_content: Arc<SearchResultItem>,
+}
+
+struct TypeaheadBucket {
+    text: String,
+    first_seen: usize,
+    torrents: HashSet<InfoHash>,
 }
 
 impl Composer {
@@ -289,6 +311,181 @@ impl Composer {
         }
     }
 
+    /// Runs the bounded candidate + chunked hydrate pipeline and retains every
+    /// exact-matching file in L3 candidate order.
+    ///
+    /// This is the Rust port of Go's `visitMatchingFiles`. Collapse, file rows,
+    /// and typeahead all share this path so none can bypass the candidate,
+    /// per-torrent, chunk, retained, concurrency, or whole-route bounds.
+    async fn collect_matching_files(
+        &self,
+        filters: &Filters,
+        options: &QueryOptions,
+        limit: u32,
+        offset: u32,
+        sorts: Vec<SortBy>,
+    ) -> (Vec<MatchingFile>, u64, bool) {
+        let predicate = filters.predicate();
+        if predicate.is_empty_substr() || !self.eligible(&filters.query) {
+            self.inc_route(RouteResult::Ineligible);
+            return (Vec::new(), 0, false);
+        }
+        if !self.healthy() {
+            self.inc_route(RouteResult::Fallback);
+            return (Vec::new(), 0, false);
+        }
+
+        let deadline = self.route_deadline(Instant::now());
+        let Some((ids, candidate_total)) = self
+            .candidate_ids(filters, limit, offset, sorts, deadline)
+            .await
+        else {
+            return (Vec::new(), 0, false);
+        };
+        if ids.is_empty() {
+            return if self.trust_empty() {
+                self.inc_route(RouteResult::Served);
+                (Vec::new(), candidate_total, true)
+            } else {
+                self.inc_route(RouteResult::Fallback);
+                (Vec::new(), 0, false)
+            };
+        }
+
+        let counts = match timeout_at(deadline, self.pg.file_counts(&ids)).await {
+            Ok(Ok(counts)) => counts,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "pathsearch file-row count probe failed; falling back to PostgreSQL");
+                self.inc_route(RouteResult::Error);
+                return (Vec::new(), 0, false);
+            }
+            Err(_) => {
+                self.inc_route(RouteResult::Error);
+                return (Vec::new(), 0, false);
+            }
+        };
+        let kept = self.decline_oversized(ids, &counts);
+        if kept.is_empty() {
+            self.inc_route(RouteResult::Served);
+            return (Vec::new(), candidate_total, true);
+        }
+        let chunks = self.chunk_by_file_budget(kept, &counts);
+        let _permit = if chunks.len() > 1 {
+            match self.acquire_refine_slot(deadline).await {
+                Some(permit) => Some(permit),
+                None => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_refine_shed();
+                    }
+                    tracing::warn!(
+                        query = filters.query,
+                        "pathsearch file-row refine slot unavailable; serving shed empty estimate"
+                    );
+                    self.inc_route(RouteResult::Served);
+                    return (Vec::new(), candidate_total, true);
+                }
+            }
+        } else {
+            None
+        };
+
+        let retained_budget = u64::from(self.config.retained_file_budget);
+        let file_cap = u64::from(self.effective_file_cap());
+        let mut matching = Vec::new();
+        let mut cap = RefineCap::None;
+
+        'refine: for chunk in chunks {
+            if Instant::now() >= deadline {
+                cap = RefineCap::Deadline;
+                break;
+            }
+            let items = match self
+                .hydrate_chunk(options.refine_request(), &chunk, deadline)
+                .await
+            {
+                Ok(items) => items,
+                Err(RefineCap::Deadline) => {
+                    cap = RefineCap::Deadline;
+                    break;
+                }
+                Err(_) => {
+                    self.inc_route(RouteResult::Error);
+                    return (Vec::new(), 0, false);
+                }
+            };
+
+            for mut item in items {
+                if Instant::now() >= deadline {
+                    cap = RefineCap::Deadline;
+                    break 'refine;
+                }
+                let Some(files) = files_for_refine(&item.torrent) else {
+                    tracing::warn!(
+                        info_hash = %item.info_hash,
+                        "pathsearch file-row candidate files unobtainable; falling back to PostgreSQL"
+                    );
+                    self.inc_route(RouteResult::Fallback);
+                    return (Vec::new(), 0, false);
+                };
+                let file_count = u64::try_from(files.len()).unwrap_or(u64::MAX);
+                if file_count > file_cap {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.inc_refine_declined_oversized();
+                    }
+                    tracing::warn!(
+                        info_hash = %item.info_hash,
+                        file_count,
+                        cap = file_cap,
+                        "pathsearch declining file-row candidate whose decoded file count exceeds cap"
+                    );
+                    continue;
+                }
+
+                // The file row is the file payload. Drop the raw blob and do
+                // not retain a second full decoded vector on every row.
+                item.torrent.files_data = None;
+                item.refine_files.clear();
+                let item = Arc::new(item);
+                for file in files {
+                    if Instant::now() >= deadline {
+                        cap = RefineCap::Deadline;
+                        break 'refine;
+                    }
+                    if !match_file(&file, &predicate) {
+                        continue;
+                    }
+                    let extension = file_extension(&file);
+                    matching.push(MatchingFile {
+                        file,
+                        extension,
+                        torrent_content: Arc::clone(&item),
+                    });
+                    if u64::try_from(matching.len()).unwrap_or(u64::MAX) >= retained_budget {
+                        cap = RefineCap::Retained;
+                        break 'refine;
+                    }
+                }
+            }
+        }
+
+        if let Some(metrics) = &self.metrics {
+            match cap {
+                RefineCap::Retained => metrics.inc_refine_retained_capped(),
+                RefineCap::Deadline => metrics.inc_refine_deadline_capped(),
+                RefineCap::None => {}
+            }
+        }
+        if cap != RefineCap::None {
+            tracing::warn!(
+                ?cap,
+                matches = matching.len(),
+                "pathsearch serving bounded file-match prefix"
+            );
+        }
+        self.inc_route(RouteResult::Served);
+        (matching, candidate_total, true)
+    }
+
     fn refine_chunk(
         &self,
         items: Vec<SearchResultItem>,
@@ -512,6 +709,136 @@ impl Composer {
     }
 }
 
+fn compare_matching_file(
+    left: &MatchingFile,
+    right: &MatchingFile,
+    sort: &FileRowSort,
+) -> Option<Ordering> {
+    match sort.field.to_lowercase().as_str() {
+        "size" => Some(left.file.size.cmp(&right.file.size)),
+        "path" => Some(left.file.path.cmp(&right.file.path)),
+        "extension" => Some(left.extension.cmp(&right.extension)),
+        "index" => Some(left.file.index.cmp(&right.file.index)),
+        "info_hash" | "infohash" => Some(
+            left.torrent_content
+                .info_hash
+                .cmp(&right.torrent_content.info_hash),
+        ),
+        "last_seen" | "dht_last_seen_at" | "dhtlastseenat" => Some(
+            left.torrent_content
+                .dht_last_seen_at
+                .cmp(&right.torrent_content.dht_last_seen_at),
+        ),
+        "seeders" => Some(
+            left.torrent_content
+                .seeders
+                .cmp(&right.torrent_content.seeders),
+        ),
+        "published_at" => Some(
+            left.torrent_content
+                .published_at
+                .cmp(&right.torrent_content.published_at),
+        ),
+        "updated_at" => Some(
+            left.torrent_content
+                .torrent_content_updated_at
+                .cmp(&right.torrent_content.torrent_content_updated_at),
+        ),
+        _ => None,
+    }
+}
+
+fn compare_matching_file_tie(left: &MatchingFile, right: &MatchingFile) -> Ordering {
+    left.file
+        .path
+        .cmp(&right.file.path)
+        .then_with(|| {
+            left.torrent_content
+                .info_hash
+                .cmp(&right.torrent_content.info_hash)
+        })
+        .then_with(|| left.file.index.cmp(&right.file.index))
+}
+
+fn sort_matching_file_rows(rows: &mut [MatchingFile], sort_by: &[FileRowSort]) {
+    let default_sort = FileRowSort {
+        field: "size".to_owned(),
+        descending: true,
+    };
+    let sorts = if sort_by.is_empty() {
+        std::slice::from_ref(&default_sort)
+    } else {
+        sort_by
+    };
+
+    rows.sort_by(|left, right| {
+        for sort in sorts {
+            let Some(ordering) = compare_matching_file(left, right, sort) else {
+                continue;
+            };
+            if ordering != Ordering::Equal {
+                return if sort.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+            }
+        }
+        compare_matching_file_tie(left, right)
+    });
+}
+
+fn page_matching_file_rows(
+    mut rows: Vec<MatchingFile>,
+    offset: u32,
+    limit: u32,
+) -> (Vec<MatchingFile>, bool) {
+    let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+    if offset >= rows.len() {
+        return (Vec::new(), false);
+    }
+    let mut page = rows.split_off(offset);
+    if limit == 0 {
+        return (page, false);
+    }
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let has_next_page = page.len() > limit;
+    if has_next_page {
+        page.truncate(limit);
+    }
+    (page, has_next_page)
+}
+
+fn next_path_segment(prefix: &str, path: &str) -> Option<String> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || path.is_empty() {
+        return None;
+    }
+    let lower_path = path.to_lowercase();
+    let lower_prefix = prefix.to_lowercase();
+    let start = lower_path.find(&lower_prefix)?;
+
+    let mut segment_start = start;
+    if let Some(slash) = prefix.rfind('/') {
+        segment_start = start.checked_add(slash)?.checked_add(1)?;
+    } else if let Some(slash) = path.get(..start)?.rfind('/') {
+        segment_start = slash + 1;
+    }
+    let after_prefix = start.checked_add(prefix.len())?;
+    if prefix.ends_with('/') {
+        segment_start = after_prefix;
+    }
+    let suffix = path.get(after_prefix..)?;
+    let segment_end = suffix
+        .find('/')
+        .map_or(path.len(), |slash| after_prefix + slash);
+    if segment_end < segment_start {
+        return None;
+    }
+    let segment = path.get(segment_start..segment_end)?;
+    (!segment.is_empty()).then(|| segment.to_owned())
+}
+
 #[async_trait::async_trait]
 impl SearchServe for Composer {
     async fn torrent_content(
@@ -529,33 +856,147 @@ impl SearchServe for Composer {
 
     async fn collapse_paths(
         &self,
-        _filters: Filters,
-        _options: QueryOptions,
-        _limit: u32,
-        _offset: u32,
-        _sorts: Vec<SortBy>,
+        filters: Filters,
+        options: QueryOptions,
+        limit: u32,
+        offset: u32,
+        sorts: Vec<SortBy>,
     ) -> crate::Result<(Vec<PathGroup>, bool)> {
-        Ok((Vec::new(), false))
+        let (matching, _, served) = self
+            .collect_matching_files(&filters, &options, limit, offset, sorts)
+            .await;
+        if !served {
+            return Ok((Vec::new(), false));
+        }
+
+        let mut groups = Vec::<PathGroup>::new();
+        let mut group_index = HashMap::<String, usize>::new();
+        let mut seen_torrent_path = HashSet::<(String, InfoHash)>::new();
+        for row in matching {
+            let info_hash = row.torrent_content.info_hash;
+            let path = row.file.path;
+            if !seen_torrent_path.insert((path.clone(), info_hash)) {
+                continue;
+            }
+            let index = if let Some(index) = group_index.get(&path).copied() {
+                index
+            } else {
+                let index = groups.len();
+                group_index.insert(path.clone(), index);
+                groups.push(PathGroup {
+                    path,
+                    info_hashes: Vec::new(),
+                });
+                index
+            };
+            groups[index].info_hashes.push(info_hash);
+        }
+
+        Ok((paginate(groups, u64::from(offset), u64::from(limit)), true))
     }
 
     async fn search_file_rows(
         &self,
-        _filters: Filters,
-        _options: QueryOptions,
-        _limit: u32,
-        _offset: u32,
-        _sort_by: Vec<FileRowSort>,
+        filters: Filters,
+        options: QueryOptions,
+        limit: u32,
+        offset: u32,
+        sort_by: Vec<FileRowSort>,
     ) -> crate::Result<(FileRowsResult, bool)> {
-        Ok((FileRowsResult::default(), false))
+        let (mut matching, candidate_total, served) = self
+            .collect_matching_files(
+                &filters,
+                &options,
+                limit.saturating_add(1),
+                offset,
+                Vec::new(),
+            )
+            .await;
+        if !served {
+            return Ok((FileRowsResult::default(), false));
+        }
+
+        sort_matching_file_rows(&mut matching, &sort_by);
+        let (page, has_next_page) = page_matching_file_rows(matching, offset, limit);
+        let rows = page
+            .into_iter()
+            .map(|row| FileRow {
+                info_hash: row.torrent_content.info_hash,
+                index: row.file.index,
+                path: row.file.path,
+                extension: row.extension,
+                size: row.file.size,
+                torrent_content: (*row.torrent_content).clone(),
+            })
+            .collect();
+
+        Ok((
+            FileRowsResult {
+                rows,
+                total_count: candidate_total,
+                total_count_is_estimate: true,
+                has_next_page,
+            },
+            true,
+        ))
     }
 
     async fn path_typeahead(
         &self,
-        _prefix: String,
-        _options: QueryOptions,
-        _limit: u32,
+        prefix: String,
+        options: QueryOptions,
+        limit: u32,
     ) -> crate::Result<(Vec<String>, bool)> {
-        Ok((Vec::new(), false))
+        let filters = Filters {
+            query: prefix.clone(),
+            ..Filters::default()
+        };
+        let (matching, _, served) = self
+            .collect_matching_files(&filters, &options, limit, 0, Vec::new())
+            .await;
+        if !served {
+            return Ok((Vec::new(), false));
+        }
+
+        let mut buckets = Vec::<TypeaheadBucket>::new();
+        let mut bucket_index = HashMap::<String, usize>::new();
+        for row in matching {
+            let Some(segment) = next_path_segment(&prefix, &row.file.path) else {
+                continue;
+            };
+            let key = segment.to_lowercase();
+            let index = if let Some(index) = bucket_index.get(&key).copied() {
+                index
+            } else {
+                let index = buckets.len();
+                bucket_index.insert(key, index);
+                buckets.push(TypeaheadBucket {
+                    text: segment,
+                    first_seen: index,
+                    torrents: HashSet::new(),
+                });
+                index
+            };
+            buckets[index]
+                .torrents
+                .insert(row.torrent_content.info_hash);
+        }
+        buckets.sort_by(|left, right| {
+            right
+                .torrents
+                .len()
+                .cmp(&left.torrents.len())
+                .then_with(|| left.first_seen.cmp(&right.first_seen))
+                .then_with(|| left.text.cmp(&right.text))
+        });
+        if limit > 0 {
+            buckets.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        }
+
+        Ok((
+            buckets.into_iter().map(|bucket| bucket.text).collect(),
+            true,
+        ))
     }
 
     async fn suggest(&self, prefix: String, limit: u32) -> crate::Result<(Vec<String>, bool)> {
@@ -834,6 +1275,21 @@ mod tests {
         };
         item.title = format!("preserved-title-{byte}");
         item
+    }
+
+    fn file(index: u32, path: &str, extension: &str, size: u64) -> BlobFile {
+        BlobFile {
+            index,
+            path: path.to_owned(),
+            extension: extension.to_owned(),
+            size,
+        }
+    }
+
+    fn item_with_files(byte: u8, files: Vec<BlobFile>) -> SearchResultItem {
+        let mut result = item(byte, files.len(), true);
+        result.torrent.files_data = Some(serialize_files(&files).unwrap());
+        result
     }
 
     fn query_options() -> QueryOptions {
@@ -1342,5 +1798,310 @@ mod tests {
         assert!(served);
         assert!(result.items.is_empty());
         assert!(result.total_count_is_estimate);
+    }
+
+    #[tokio::test]
+    async fn file_rows_exact_refine_sort_page_and_candidate_total_match_go() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3)], 42));
+        let pg = Arc::new(FakePg::new(
+            vec![
+                item_with_files(
+                    1,
+                    vec![
+                        file(0, "Movies/Zeta/movie.mkv", "mkv", 900),
+                        file(1, "Movies/Zeta/movie.txt", "txt", 1_200),
+                        file(2, "Movies/Zeta/tiny-movie.mkv", "mkv", 100),
+                    ],
+                ),
+                item_with_files(2, vec![file(0, "Movies/Other/other.mkv", "mkv", 800)]),
+                item_with_files(3, vec![file(0, "Movies/Alpha/movie.mkv", "", 500)]),
+            ],
+            HashMap::from([(id(1), 3), (id(2), 1), (id(3), 1)]),
+        ));
+        let composer = Composer::new(candidates.clone(), pg, config(), None);
+
+        let (result, served) = composer
+            .search_file_rows(
+                Filters {
+                    query: "movie".to_owned(),
+                    extensions: vec!["MKV".to_owned()],
+                    min_size: 200,
+                    max_size: 1_000,
+                },
+                query_options(),
+                1,
+                0,
+                vec![FileRowSort {
+                    field: "path".to_owned(),
+                    descending: false,
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert!(served);
+        assert_eq!(result.total_count, 42);
+        assert!(result.total_count_is_estimate);
+        assert!(result.has_next_page);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].info_hash, id(3));
+        assert_eq!(result.rows[0].path, "Movies/Alpha/movie.mkv");
+        assert_eq!(result.rows[0].extension, "mkv");
+        assert_eq!(result.rows[0].size, 500);
+        assert!(result.rows[0].torrent_content.torrent.files_data.is_none());
+        assert!(result.rows[0].torrent_content.refine_files.is_empty());
+        assert_eq!(candidates.requested_limit.load(Ordering::Relaxed), 8);
+    }
+
+    #[tokio::test]
+    async fn file_rows_default_size_and_torrent_field_sorts_are_deterministic() {
+        let mut missing = item_with_files(1, vec![file(0, "movie-missing.mkv", "mkv", 100)]);
+        missing.seeders = None;
+        missing.published_at = 10;
+        missing.torrent_content_updated_at = 30;
+        missing.dht_last_seen_at = None;
+        let mut newest = item_with_files(2, vec![file(0, "movie-new.mkv", "mkv", 900)]);
+        newest.seeders = Some(19);
+        newest.published_at = 30;
+        newest.torrent_content_updated_at = 10;
+        newest.dht_last_seen_at = Some(30);
+        let mut older = item_with_files(3, vec![file(0, "movie-old.mkv", "mkv", 500)]);
+        older.seeders = Some(8);
+        older.published_at = 20;
+        older.torrent_content_updated_at = 20;
+        older.dht_last_seen_at = Some(20);
+
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3)], 3));
+        let pg = Arc::new(FakePg::new(
+            vec![missing, newest, older],
+            HashMap::from([(id(1), 1), (id(2), 1), (id(3), 1)]),
+        ));
+        let composer = Composer::new(candidates, pg, config(), None);
+        let filters = Filters {
+            query: "movie".to_owned(),
+            ..Filters::default()
+        };
+
+        let (default, served) = composer
+            .search_file_rows(filters.clone(), query_options(), 3, 0, Vec::new())
+            .await
+            .unwrap();
+        assert!(served);
+        assert_eq!(
+            default
+                .rows
+                .iter()
+                .map(|row| row.info_hash)
+                .collect::<Vec<_>>(),
+            vec![id(2), id(3), id(1)]
+        );
+
+        for (field, expected) in [
+            ("last_seen", vec![id(2), id(3), id(1)]),
+            ("seeders", vec![id(2), id(3), id(1)]),
+            ("published_at", vec![id(2), id(3), id(1)]),
+            ("updated_at", vec![id(1), id(3), id(2)]),
+        ] {
+            let (result, served) = composer
+                .search_file_rows(
+                    filters.clone(),
+                    query_options(),
+                    3,
+                    0,
+                    vec![FileRowSort {
+                        field: field.to_owned(),
+                        descending: true,
+                    }],
+                )
+                .await
+                .unwrap();
+            assert!(served, "{field} route must serve");
+            assert_eq!(
+                result
+                    .rows
+                    .iter()
+                    .map(|row| row.info_hash)
+                    .collect::<Vec<_>>(),
+                expected,
+                "unexpected {field} ordering"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collapse_groups_exact_paths_across_chunks_in_candidate_order() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3)], 3));
+        let pg = Arc::new(FakePg::new(
+            vec![
+                item_with_files(
+                    1,
+                    vec![
+                        file(0, "a/Movie.mkv", "mkv", 1),
+                        file(1, "a/sample.txt", "txt", 1),
+                        file(2, "a/Movie.mkv", "mkv", 1),
+                    ],
+                ),
+                item_with_files(2, vec![file(0, "b/movie.mkv", "mkv", 2)]),
+                item_with_files(3, vec![file(0, "a/Movie.mkv", "mkv", 3)]),
+            ],
+            HashMap::from([(id(1), 3), (id(2), 1), (id(3), 1)]),
+        ));
+        let mut cfg = config();
+        cfg.max_chunk_torrents = 1;
+        let composer = Composer::new(candidates, pg, cfg, None);
+
+        let (groups, served) = composer
+            .collapse_paths(
+                Filters {
+                    query: "movie".to_owned(),
+                    ..Filters::default()
+                },
+                query_options(),
+                10,
+                0,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(served);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].path, "a/Movie.mkv");
+        assert_eq!(groups[0].info_hashes, vec![id(1), id(3)]);
+        assert_eq!(groups[1].path, "b/movie.mkv");
+        assert_eq!(groups[1].info_hashes, vec![id(2)]);
+    }
+
+    #[tokio::test]
+    async fn path_typeahead_dedupes_case_insensitively_and_counts_torrents() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3)], 3));
+        let pg = Arc::new(FakePg::new(
+            vec![
+                item_with_files(
+                    1,
+                    vec![
+                        file(0, "Movies/Inception/movie.mkv", "mkv", 1),
+                        file(1, "Movies/INCEPTION/sample.mkv", "mkv", 1),
+                    ],
+                ),
+                item_with_files(2, vec![file(0, "Movies/Interstellar/movie.mkv", "mkv", 1)]),
+                item_with_files(3, vec![file(0, "Movies/Inception/bonus.mkv", "mkv", 1)]),
+            ],
+            HashMap::from([(id(1), 2), (id(2), 1), (id(3), 1)]),
+        ));
+        let composer = Composer::new(candidates, pg, config(), None);
+
+        let (suggestions, served) = composer
+            .path_typeahead("Movies/I".to_owned(), query_options(), 2)
+            .await
+            .unwrap();
+
+        assert!(served);
+        assert_eq!(suggestions, vec!["Inception", "Interstellar"]);
+        assert_eq!(
+            next_path_segment("Movies/", "Movies/Inception/movie.mkv"),
+            Some("Inception".to_owned())
+        );
+        assert_eq!(
+            next_path_segment("ception", "Movies/Inception/movie.mkv"),
+            Some("Inception".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn c4_retained_budget_stops_after_one_bounded_lookahead_chunk() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3)], 3));
+        let pg = Arc::new(FakePg::new(
+            vec![item(1, 4, true), item(2, 4, true), item(3, 4, true)],
+            HashMap::from([(id(1), 4), (id(2), 4), (id(3), 4)]),
+        ));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.refine_file_budget = 4;
+        cfg.max_chunk_torrents = 1;
+        cfg.retained_file_budget = 5;
+        let composer =
+            Composer::new(candidates, pg.clone(), cfg, None).with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = composer
+            .search_file_rows(
+                Filters {
+                    query: "inception".to_owned(),
+                    ..Filters::default()
+                },
+                query_options(),
+                20,
+                0,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(served);
+        assert_eq!(result.rows.len(), 5);
+        assert!(result.total_count_is_estimate);
+        let hydrate_calls = pg
+            .calls()
+            .into_iter()
+            .filter(|call| call.hydrate.files_data)
+            .collect::<Vec<_>>();
+        assert_eq!(hydrate_calls.len(), 2);
+        assert!(hydrate_calls
+            .iter()
+            .all(|call| candidate_ids(&call.options.filter).len() == 1));
+        assert_eq!(metrics.retained_capped_count(), 1);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
+    }
+
+    #[tokio::test]
+    async fn c4_deadline_serves_accumulated_prefix_and_dependency_failure_falls_back() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
+        let mut fake_pg = FakePg::new(
+            vec![item(1, 1, true), item(2, 1, true)],
+            HashMap::from([(id(1), 1), (id(2), 1)]),
+        );
+        fake_pg.delayed_ids.insert(id(2));
+        fake_pg.delay = Duration::from_millis(100);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.max_chunk_torrents = 1;
+        cfg.route_timeout = Duration::from_millis(20);
+        let composer = Composer::new(candidates, Arc::new(fake_pg), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = composer
+            .search_file_rows(
+                Filters {
+                    query: "inception".to_owned(),
+                    ..Filters::default()
+                },
+                query_options(),
+                10,
+                0,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(served);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].info_hash, id(1));
+        assert_eq!(metrics.deadline_capped_count(), 1);
+
+        let mut failed = FakeCandidates::returning(&[id(1)], 1);
+        failed.fail = true;
+        let composer = Composer::new(
+            Arc::new(failed),
+            Arc::new(FakePg::new(
+                vec![item(1, 1, true)],
+                HashMap::from([(id(1), 1)]),
+            )),
+            config(),
+            None,
+        );
+        let (_, served) = composer
+            .path_typeahead("inception".to_owned(), query_options(), 10)
+            .await
+            .unwrap();
+        assert!(!served);
     }
 }
