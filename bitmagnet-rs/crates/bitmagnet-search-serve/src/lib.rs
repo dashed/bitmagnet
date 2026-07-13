@@ -17,6 +17,8 @@ pub mod filters;
 pub mod health;
 #[cfg(feature = "lane-s-stub")]
 pub mod pg;
+#[cfg(feature = "lane-s-stub")]
+pub mod refine;
 
 #[cfg(not(feature = "lane-s-stub"))]
 compile_error!(
@@ -40,6 +42,11 @@ pub use health::{gate, poll_once, spawn_health_poller, HealthConfig, HealthState
 pub use pg::{
     AggregationItem, Aggregations, PgSearchBackend, QueryOptions, SearchOptions,
     TorrentContentResult, TorrentContentResultItem,
+};
+#[cfg(feature = "lane-s-stub")]
+pub use refine::{
+    distinct_matched_paths, files_for_refine, paginate, torrent_matches, torrent_refine,
+    RefinePredicate,
 };
 
 /// Errors produced by the search-serving contract and its future implementations.

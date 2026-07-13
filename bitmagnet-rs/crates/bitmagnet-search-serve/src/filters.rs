@@ -2,8 +2,9 @@
 
 /// Typed exact-refine inputs extracted from a resolver's search request.
 ///
-/// This is data only in C1; the predicate logic from Go's
-/// `pathsearch.Filters.predicate` belongs to the later composer implementation.
+/// The exact predicate derived from these inputs is implemented in
+/// [`crate::refine`], mirroring Go's `pathsearch.Filters.predicate` in
+/// `internal/search/pathsearch/refine.go`.
 #[derive(Debug, Clone, Default)]
 pub struct Filters {
     /// Raw path substring or free text; required for the L3 route.
