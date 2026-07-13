@@ -1,5 +1,7 @@
 use async_graphql::{Context, Object};
 
+use crate::health::{HealthRuntime, HealthSnapshot};
+
 use super::enums::HealthStatus;
 use super::inputs::{
     FileSearchFacetsInput, FileSearchInput, PathTypeaheadInput,
@@ -22,8 +24,19 @@ pub struct Query;
 
 #[Object]
 impl Query {
-    async fn health(&self) -> HealthQuery {
-        HealthQuery
+    async fn health(&self, ctx: &Context<'_>) -> HealthQuery {
+        let snapshot = match ctx.data_opt::<HealthRuntime>() {
+            Some(runtime) => runtime.health().await,
+            None => HealthSnapshot {
+                status: HealthStatus::Unknown,
+                checks: Vec::new(),
+            },
+        };
+
+        HealthQuery {
+            status: snapshot.status,
+            checks: snapshot.into_graphql_checks(),
+        }
     }
 
     async fn queue(&self) -> QueueQuery {
@@ -42,8 +55,13 @@ impl Query {
         Ok(ctx.data::<Version>()?.0.clone())
     }
 
-    async fn workers(&self) -> WorkersQuery {
-        WorkersQuery
+    async fn workers(&self, ctx: &Context<'_>) -> WorkersQuery {
+        let workers = match ctx.data_opt::<HealthRuntime>() {
+            Some(runtime) => runtime.workers().await,
+            None => Vec::new(),
+        };
+
+        WorkersQuery { workers }
     }
 }
 
@@ -60,16 +78,19 @@ impl Mutation {
     }
 }
 
-pub(crate) struct HealthQuery;
+pub(crate) struct HealthQuery {
+    status: HealthStatus,
+    checks: Vec<HealthCheck>,
+}
 
 #[Object]
 impl HealthQuery {
     async fn checks(&self) -> Vec<HealthCheck> {
-        Vec::new()
+        self.checks.clone()
     }
 
     async fn status(&self) -> HealthStatus {
-        HealthStatus::Unknown
+        self.status
     }
 }
 
@@ -240,13 +261,15 @@ impl TorrentContentQuery {
     }
 }
 
-pub(crate) struct WorkersQuery;
+pub(crate) struct WorkersQuery {
+    workers: Vec<super::objects::Worker>,
+}
 
 #[Object]
 impl WorkersQuery {
     async fn list_all(&self) -> WorkersListAllQueryResult {
         WorkersListAllQueryResult {
-            workers: Vec::new(),
+            workers: self.workers.clone(),
         }
     }
 }

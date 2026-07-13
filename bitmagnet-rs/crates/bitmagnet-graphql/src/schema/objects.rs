@@ -118,7 +118,7 @@ pub(crate) struct GenreAgg {
     pub(crate) value: String,
 }
 
-#[derive(SimpleObject)]
+#[derive(Clone, SimpleObject)]
 pub(crate) struct HealthCheck {
     pub(crate) error: Option<String>,
     pub(crate) key: String,
@@ -429,7 +429,7 @@ pub(crate) struct VideoSourceAgg {
     pub(crate) value: Option<VideoSource>,
 }
 
-#[derive(SimpleObject)]
+#[derive(Clone, SimpleObject)]
 pub(crate) struct Worker {
     pub(crate) key: String,
     pub(crate) started: bool,

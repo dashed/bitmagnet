@@ -1,10 +1,12 @@
-mod enums;
+pub(crate) mod enums;
 mod inputs;
-mod objects;
+pub(crate) mod objects;
 mod roots;
-mod scalars;
+pub(crate) mod scalars;
 
 use async_graphql::EmptySubscription;
+
+use crate::health::{HealthRuntime, RuntimeConfig};
 
 pub use roots::{Mutation, Query};
 
@@ -28,11 +30,26 @@ pub fn build_schema(version: String) -> Schema {
         .finish()
 }
 
+/// Build the runtime GraphQL schema with database health and optional peer
+/// federation attached.
+#[must_use]
+pub fn build_runtime_schema(
+    version: String,
+    pool: bitmagnet_db::PgPool,
+    config: RuntimeConfig,
+) -> Schema {
+    async_graphql::Schema::build(Query, Mutation, EmptySubscription)
+        .data(Version(version))
+        .data(HealthRuntime::new(pool, config))
+        .finish()
+}
+
 #[cfg(test)]
 mod tests {
     use async_graphql::value;
 
-    use super::build_schema;
+    use super::{build_runtime_schema, build_schema};
+    use crate::health::RuntimeConfig;
 
     #[tokio::test]
     async fn build_schema_injects_version_into_query_resolver() {
@@ -44,5 +61,31 @@ mod tests {
             response.errors
         );
         assert_eq!(response.data, value!({ "version": "t1.2.3" }));
+    }
+
+    #[tokio::test]
+    async fn runtime_schema_reports_the_started_http_worker_without_peers() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+        let response = build_runtime_schema("test".into(), pool, RuntimeConfig::default())
+            .execute("{ workers { listAll { workers { key started } } } }")
+            .await;
+
+        assert!(
+            response.errors.is_empty(),
+            "workers query returned errors: {:?}",
+            response.errors
+        );
+        assert_eq!(
+            response.data,
+            value!({
+                "workers": {
+                    "listAll": {
+                        "workers": [{ "key": "http_server", "started": true }]
+                    }
+                }
+            })
+        );
     }
 }

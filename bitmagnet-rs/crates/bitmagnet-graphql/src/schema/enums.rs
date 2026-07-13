@@ -66,7 +66,8 @@ pub(crate) enum FilesStatus {
     Single,
 }
 
-#[derive(async_graphql::Enum, Copy, Clone, Eq, PartialEq)]
+#[derive(async_graphql::Enum, Copy, Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum HealthStatus {
     #[graphql(name = "down")]
     Down,

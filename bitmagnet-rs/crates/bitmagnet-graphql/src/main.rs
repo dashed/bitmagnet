@@ -1,6 +1,7 @@
 //! Entry point for the PostgreSQL-backed GraphQL HTTP server.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Context;
 use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
@@ -29,6 +30,19 @@ struct Args {
     /// Goose migration version the database must have applied.
     #[arg(long, env = "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION")]
     expected_goose_version: Option<i64>,
+
+    /// Comma-delimited peer GraphQL endpoints used for federated health.
+    #[arg(long, env = "HEALTH_PEER_GRAPHQL_URLS", value_delimiter = ',')]
+    health_peer_graphql_urls: Vec<String>,
+
+    /// Per-peer health request timeout (Go duration syntax, for example 1500ms).
+    #[arg(
+        long,
+        env = "HEALTH_PEER_TIMEOUT",
+        default_value = "1500ms",
+        value_parser = parse_go_duration
+    )]
+    health_peer_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -60,7 +74,14 @@ async fn main() -> anyhow::Result<()> {
     let _metrics = bitmagnet_common::metrics::maybe_spawn_metrics_server().await?;
     let version =
         std::env::var("BITMAGNET_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
-    let schema = bitmagnet_graphql::build_schema(version.clone());
+    let schema = bitmagnet_graphql::build_runtime_schema(
+        version.clone(),
+        pool.clone(),
+        bitmagnet_graphql::RuntimeConfig {
+            peer_graphql_urls: args.health_peer_graphql_urls,
+            peer_timeout: args.health_peer_timeout,
+        },
+    );
     let state = AppState {
         schema,
         pool,
@@ -156,17 +177,105 @@ fn goose_mismatch(expected: i64, detected: Option<i64>) -> Option<String> {
     }
 }
 
+fn parse_go_duration(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+    let (negative, mut remaining) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    if remaining == "0" {
+        return Ok(Duration::ZERO);
+    }
+    let mut nanos = 0_u128;
+    let mut parsed_parts = 0_u32;
+
+    while !remaining.is_empty() {
+        let whole_len = remaining.bytes().take_while(u8::is_ascii_digit).count();
+        let whole = &remaining[..whole_len];
+        remaining = &remaining[whole_len..];
+
+        let fraction = if let Some(after_dot) = remaining.strip_prefix('.') {
+            let fraction_len = after_dot.bytes().take_while(u8::is_ascii_digit).count();
+            let fraction = &after_dot[..fraction_len];
+            remaining = &after_dot[fraction_len..];
+            fraction
+        } else {
+            ""
+        };
+        if whole.is_empty() && fraction.is_empty() {
+            return Err(format!("invalid duration {value:?}"));
+        }
+        let whole = if whole.is_empty() {
+            0
+        } else {
+            whole
+                .parse::<u128>()
+                .map_err(|error| format!("invalid duration {value:?}: {error}"))?
+        };
+
+        let (unit, scale) = [
+            ("ns", 1_u128),
+            ("us", 1_000_u128),
+            ("µs", 1_000_u128),
+            ("μs", 1_000_u128),
+            ("ms", 1_000_000_u128),
+            ("s", 1_000_000_000_u128),
+            ("m", 60_000_000_000_u128),
+            ("h", 3_600_000_000_000_u128),
+        ]
+        .into_iter()
+        .find(|(unit, _)| remaining.starts_with(unit))
+        .ok_or_else(|| format!("invalid duration {value:?}"))?;
+        remaining = &remaining[unit.len()..];
+
+        let whole_nanos = whole
+            .checked_mul(scale)
+            .ok_or_else(|| format!("invalid duration {value:?}"))?;
+        let fraction_nanos = fraction.bytes().rev().fold(0_u128, |acc, digit| {
+            (scale * u128::from(digit - b'0') + acc) / 10
+        });
+        let part_nanos = whole_nanos
+            .checked_add(fraction_nanos)
+            .ok_or_else(|| format!("invalid duration {value:?}"))?;
+        nanos = nanos
+            .checked_add(part_nanos)
+            .ok_or_else(|| format!("invalid duration {value:?}"))?;
+        parsed_parts += 1;
+    }
+
+    let max_nanos = if negative {
+        1_u128 << 63
+    } else {
+        (1_u128 << 63) - 1
+    };
+    if parsed_parts == 0 || nanos > max_nanos {
+        return Err(format!("invalid duration {value:?}"));
+    }
+
+    // Go accepts negative durations; the peer configuration treats every
+    // non-positive value as the 1500ms default. Duration cannot represent a
+    // negative value, so preserve that effective behavior as zero here.
+    if negative {
+        return Ok(Duration::ZERO);
+    }
+
+    Ok(Duration::from_nanos(nanos as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
 
     use clap::Parser;
 
-    use super::{goose_mismatch, Args};
+    use super::{goose_mismatch, parse_go_duration, Args};
 
     struct ArgsEnvRestore {
         listen_addr: Option<OsString>,
         expected_goose_version: Option<OsString>,
+        health_peer_graphql_urls: Option<OsString>,
+        health_peer_timeout: Option<OsString>,
     }
 
     impl ArgsEnvRestore {
@@ -176,9 +285,13 @@ mod tests {
                 expected_goose_version: std::env::var_os(
                     "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
                 ),
+                health_peer_graphql_urls: std::env::var_os("HEALTH_PEER_GRAPHQL_URLS"),
+                health_peer_timeout: std::env::var_os("HEALTH_PEER_TIMEOUT"),
             };
             std::env::remove_var("LISTEN_ADDR");
             std::env::remove_var("BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION");
+            std::env::remove_var("HEALTH_PEER_GRAPHQL_URLS");
+            std::env::remove_var("HEALTH_PEER_TIMEOUT");
             restore
         }
     }
@@ -190,6 +303,11 @@ mod tests {
                 "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
                 self.expected_goose_version.take(),
             );
+            restore_env(
+                "HEALTH_PEER_GRAPHQL_URLS",
+                self.health_peer_graphql_urls.take(),
+            );
+            restore_env("HEALTH_PEER_TIMEOUT", self.health_peer_timeout.take());
         }
     }
 
@@ -208,6 +326,11 @@ mod tests {
             Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse");
         assert_eq!(defaults.listen_addr, "0.0.0.0:3337");
         assert_eq!(defaults.expected_goose_version, None);
+        assert!(defaults.health_peer_graphql_urls.is_empty());
+        assert_eq!(
+            defaults.health_peer_timeout,
+            std::time::Duration::from_millis(1_500)
+        );
 
         let overridden = Args::try_parse_from([
             "bitmagnet-graphql",
@@ -215,10 +338,22 @@ mod tests {
             "127.0.0.1:43337",
             "--expected-goose-version",
             "2026071201",
+            "--health-peer-graphql-urls",
+            "http://peer-a/graphql,http://peer-b/graphql",
+            "--health-peer-timeout",
+            "2.5s",
         ])
         .expect("explicit GraphQL arguments parse");
         assert_eq!(overridden.listen_addr, "127.0.0.1:43337");
         assert_eq!(overridden.expected_goose_version, Some(2_026_071_201));
+        assert_eq!(
+            overridden.health_peer_graphql_urls,
+            ["http://peer-a/graphql", "http://peer-b/graphql"]
+        );
+        assert_eq!(
+            overridden.health_peer_timeout,
+            std::time::Duration::from_millis(2_500)
+        );
     }
 
     #[test]
@@ -232,5 +367,56 @@ mod tests {
             goose_mismatch(42, None).as_deref(),
             Some("goose schema version mismatch: detected=none, expected=42")
         );
+    }
+
+    #[test]
+    fn go_duration_parser_accepts_compound_fractional_and_non_positive_values() {
+        assert_eq!(
+            parse_go_duration("0.25s").expect("fractional seconds"),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            parse_go_duration("1m30.5s").expect("compound duration"),
+            std::time::Duration::from_millis(90_500)
+        );
+        assert_eq!(
+            parse_go_duration("0").expect("zero"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            parse_go_duration("-1s").expect("negative fallback"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            parse_go_duration("+0").expect("positive signed zero"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            parse_go_duration("-0").expect("negative signed zero"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            parse_go_duration("0.9ns").expect("sub-nanosecond truncation"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            parse_go_duration("1.9ns").expect("fractional nanosecond truncation"),
+            std::time::Duration::from_nanos(1)
+        );
+        assert!(parse_go_duration("1500").is_err());
+    }
+
+    #[test]
+    fn go_duration_parser_enforces_the_signed_int64_nanosecond_range() {
+        assert_eq!(
+            parse_go_duration("9223372036854775807ns").expect("maximum positive duration"),
+            std::time::Duration::from_nanos(i64::MAX as u64)
+        );
+        assert!(parse_go_duration("9223372036854775808ns").is_err());
+        assert_eq!(
+            parse_go_duration("-9223372036854775808ns").expect("minimum negative duration"),
+            std::time::Duration::ZERO
+        );
+        assert!(parse_go_duration("-9223372036854775809ns").is_err());
     }
 }
