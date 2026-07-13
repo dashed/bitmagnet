@@ -571,10 +571,13 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -582,10 +585,15 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -604,6 +612,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -684,6 +693,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-fts"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "bitmagnet-graphql"
+version = "0.1.0"
+
+[[package]]
 name = "bitmagnet-model"
 version = "0.1.0"
 dependencies = [
@@ -752,12 +772,34 @@ dependencies = [
 name = "bitmagnet-search-query"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bitmagnet-db",
+ "bitmagnet-diff",
+ "bitmagnet-fts",
  "bitmagnet-model",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "bitmagnet-search-serve"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitmagnet-common",
+ "bitmagnet-model",
+ "bitmagnet-proto",
+ "hyper-util",
+ "prometheus",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -784,11 +826,24 @@ name = "bitmagnet-torznab"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "axum",
  "bitmagnet-common",
+ "bitmagnet-db",
  "bitmagnet-search-query",
+ "chrono",
+ "clap",
+ "form_urlencoded",
+ "prometheus",
+ "quick-xml",
+ "serde",
  "serde_json",
+ "sha1 0.10.7",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -1000,7 +1055,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -2977,6 +3034,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.39.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3486,6 +3552,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3508,6 +3585,17 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -3736,7 +3824,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "serde",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.18",
