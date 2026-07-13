@@ -3,7 +3,8 @@
 //! This crate is the search-serving tier that GraphQL resolvers call: the L1
 //! blob-refine composer, the L3 gRPC client, and the engine-level Tantivy-serve
 //! router decorator. C1 freezes their shared contract; C2 implements the L3 RPC
-//! client and its fail-closed background health poller.
+//! client and its fail-closed background health poller; C3 implements the
+//! bounded exact-refine composer behind the temporary Lane-S adapter seam.
 
 #![warn(missing_docs)]
 
@@ -11,6 +12,8 @@
 pub mod api;
 pub mod candidates;
 pub mod client;
+#[cfg(feature = "lane-s-stub")]
+pub mod composer;
 pub mod config;
 #[cfg(feature = "lane-s-stub")]
 pub mod filters;
@@ -29,6 +32,8 @@ compile_error!(
 pub use api::{Disabled, SearchServe};
 pub use candidates::{CandidateSource, HealthGate};
 pub use client::{Client, ClientConfig};
+#[cfg(feature = "lane-s-stub")]
+pub use composer::Composer;
 pub use config::{
     ComposerConfig, DisabledServeRouter, ServeConfig, ServeMode, DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES, DEFAULT_MAX_REFINE_FILES,

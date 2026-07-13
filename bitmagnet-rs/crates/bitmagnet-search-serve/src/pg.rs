@@ -36,6 +36,14 @@ pub struct TorrentContentResultItem {
     pub info_hash: bitmagnet_model::InfoHash,
     /// Hydrated torrent, including the `files_data` blob when requested.
     pub torrent: bitmagnet_model::Torrent,
+    /// Decoded files retained only for an exact-refined match.
+    ///
+    /// The temporary adapter initializes this empty. The composer decodes the
+    /// blob once, clears `torrent.files_data`, and moves the decoded files here
+    /// after the match and retained-budget checks pass. The real Lane-S adapter
+    /// must preserve this seam, and Lane G's GraphQL mapper consumes it for the
+    /// public `Torrent.files` field.
+    pub refine_files: Vec<bitmagnet_model::BlobFile>,
     // Passthrough content fields Lane S hydrates are opaque to the composer.
 }
 
@@ -95,16 +103,28 @@ impl QueryOptions {
     }
 }
 
-/// PostgreSQL dependency required by the future L3/L1 composer.
+/// PostgreSQL dependency required by the L3/L1 composer.
+///
+/// This is the deliberately narrow real-Lane-S adapter seam. Its implementation
+/// owns conversion between Lane S's eventual full `SearchOptions`/`SearchResult`
+/// types and this crate; the composer never introspects criteria, ordering, or
+/// facet definitions. `file_counts` remains a Lane-C operation and must mirror
+/// Go's blob-free two-step lookup: `torrent_file_summary.file_count` by its
+/// `info_hash` primary key, then `torrents.files_count` for missing summaries.
+/// The result adapter initializes `TorrentContentResultItem::refine_files`
+/// empty; after composition it maps that field to Lane G's `Torrent.files`.
 #[async_trait::async_trait]
 pub trait PgSearchBackend: Send + Sync {
     /// Hydrates and filters candidate rows using the supplied Lane S options.
+    /// The adapter must preserve all non-page filters and must not add a page
+    /// window; the composer paginates only after exact refine.
     async fn torrent_content(&self, options: SearchOptions) -> crate::Result<TorrentContentResult>;
 
     /// Reads authoritative per-torrent file counts without decoding file blobs.
     ///
     /// This is gate7-4's cheap pre-decode probe against
-    /// `torrent_file_summary`; an absent ID is absent from the returned map.
+    /// `torrent_file_summary`, with `torrents.files_count` as the blob-free
+    /// fallback; an ID missing from both sources is absent from the map.
     async fn file_counts(
         &self,
         ids: &[bitmagnet_model::InfoHash],
