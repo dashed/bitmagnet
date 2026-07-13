@@ -1,4 +1,4 @@
-use async_graphql::Object;
+use async_graphql::{Context, Object};
 
 use super::enums::HealthStatus;
 use super::inputs::{
@@ -16,6 +16,7 @@ use super::objects::{
     TorrentSuggestTagsResult, WorkersListAllQueryResult,
 };
 use super::scalars::{Hash20, Void};
+use super::Version;
 
 pub struct Query;
 
@@ -37,8 +38,8 @@ impl Query {
         TorrentContentQuery
     }
 
-    async fn version(&self) -> String {
-        String::new()
+    async fn version(&self, ctx: &Context<'_>) -> async_graphql::Result<String> {
+        Ok(ctx.data::<Version>()?.0.clone())
     }
 
     async fn workers(&self) -> WorkersQuery {

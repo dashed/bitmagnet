@@ -6,4 +6,4 @@
 pub mod normalize;
 pub mod schema;
 
-pub use schema::{schema, Schema};
+pub use schema::{build_schema, schema, Schema};
