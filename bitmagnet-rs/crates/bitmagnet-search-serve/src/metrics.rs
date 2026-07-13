@@ -387,6 +387,11 @@ fn int_counter_vec(name: &str, help: &str, labels: &[&str]) -> prometheus::IntCo
 mod tests {
     use super::*;
 
+    const PHASE_ZERO_METRIC_GOLDEN: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../testdata/parity/metric-names.golden"
+    ));
+
     fn contract_lines(collectors: Vec<Box<dyn prometheus::core::Collector>>) -> Vec<String> {
         let mut lines = collectors
             .iter()
@@ -407,23 +412,13 @@ mod tests {
         actual.extend(contract_lines(ServeMetrics::new().collectors()));
         actual.sort();
 
-        let expected = [
-            "bitmagnet_search_pathsearch_doc_count{}",
-            "bitmagnet_search_pathsearch_health_checks_total{result}",
-            "bitmagnet_search_pathsearch_healthy{}",
-            "bitmagnet_search_pathsearch_last_success_epoch_seconds{}",
-            "bitmagnet_search_pathsearch_refine_agg_error_total{}",
-            "bitmagnet_search_pathsearch_refine_deadline_capped_total{}",
-            "bitmagnet_search_pathsearch_refine_declined_oversized_total{}",
-            "bitmagnet_search_pathsearch_refine_retained_capped_total{}",
-            "bitmagnet_search_pathsearch_refine_shed_total{}",
-            "bitmagnet_search_pathsearch_route_total{result}",
-            "bitmagnet_search_pathsearch_watermark_epoch_seconds{}",
-            "bitmagnet_search_serve_sidecar_healthy{}",
-            "bitmagnet_search_serve_total{outcome}",
-            "bitmagnet_search_serve_watermark_epoch_seconds{}",
-        ];
+        let expected = PHASE_ZERO_METRIC_GOLDEN
+            .lines()
+            .filter(|line| line.starts_with(PATH_PREFIX) || line.starts_with(SERVE_PREFIX))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
 
+        assert!(!expected.is_empty(), "Phase-0 metric golden lost Lane C");
         assert_eq!(actual, expected);
     }
 

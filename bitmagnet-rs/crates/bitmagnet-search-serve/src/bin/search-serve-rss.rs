@@ -23,11 +23,15 @@ const LIVE_MAX_FILES_PER_TORRENT: usize = 88_561;
 const CHUNK_TORRENTS: usize = 3;
 const RETAINED_TORRENTS: usize = 12;
 const HARNESS_ROUTE_TIMEOUT: Duration = Duration::from_secs(300);
+const VARIABLE_PATH_BYTES: [usize; 4] = [39, 128, 512, 1_024];
+const LONG_PATH_BYTES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Chunk,
     Retained,
+    VariablePathRetained,
+    LongPathRetained,
 }
 
 impl Scenario {
@@ -35,8 +39,11 @@ impl Scenario {
         match value {
             "chunk" => Ok(Self::Chunk),
             "retained" => Ok(Self::Retained),
+            "variable-path-retained" => Ok(Self::VariablePathRetained),
+            "long-path-retained" => Ok(Self::LongPathRetained),
             _ => Err(format!(
-                "invalid scenario {value:?}; expected chunk or retained"
+                "invalid scenario {value:?}; expected chunk, retained, \
+                 variable-path-retained, or long-path-retained"
             )),
         }
     }
@@ -45,13 +52,17 @@ impl Scenario {
         match self {
             Self::Chunk => "chunk",
             Self::Retained => "retained",
+            Self::VariablePathRetained => "variable-path-retained",
+            Self::LongPathRetained => "long-path-retained",
         }
     }
 
     fn torrent_count(self) -> usize {
         match self {
             Self::Chunk => CHUNK_TORRENTS,
-            Self::Retained => RETAINED_TORRENTS,
+            Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
+                RETAINED_TORRENTS
+            }
         }
     }
 
@@ -60,7 +71,55 @@ impl Scenario {
             Self::Chunk => CHUNK_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
             // Eleven torrents fit below the retained cap. The twelfth is
             // decoded as one bounded lookahead before the composer stops.
-            Self::Retained => RETAINED_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
+            Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
+                RETAINED_TORRENTS * LIVE_MAX_FILES_PER_TORRENT
+            }
+        }
+    }
+
+    fn path_bytes(self, file_index: usize) -> usize {
+        match self {
+            Self::Chunk | Self::Retained => 39,
+            Self::VariablePathRetained => {
+                VARIABLE_PATH_BYTES[file_index % VARIABLE_PATH_BYTES.len()]
+            }
+            Self::LongPathRetained => LONG_PATH_BYTES,
+        }
+    }
+
+    fn path_shape(self) -> &'static str {
+        match self {
+            Self::Chunk | Self::Retained => "fixed-39",
+            Self::VariablePathRetained => "cycle-39-128-512-1024",
+            Self::LongPathRetained => "fixed-1024",
+        }
+    }
+
+    fn path_byte_stats(self) -> (usize, usize, f64) {
+        let (minimum, maximum, total) = (0..LIVE_MAX_FILES_PER_TORRENT).fold(
+            (usize::MAX, 0_usize, 0_u64),
+            |(minimum, maximum, total), file_index| {
+                let bytes = self.path_bytes(file_index);
+                (
+                    minimum.min(bytes),
+                    maximum.max(bytes),
+                    total.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX)),
+                )
+            },
+        );
+        (
+            minimum,
+            maximum,
+            total as f64 / LIVE_MAX_FILES_PER_TORRENT as f64,
+        )
+    }
+
+    fn expected_retained_files(self) -> usize {
+        match self {
+            Self::Chunk => CHUNK_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
+            Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
+                11 * LIVE_MAX_FILES_PER_TORRENT
+            }
         }
     }
 }
@@ -193,7 +252,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 fn parent_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     let requested = arg_value(args, "--scenario").unwrap_or("all");
     let scenarios = match requested {
-        "all" => vec![Scenario::Chunk, Scenario::Retained],
+        "all" => vec![
+            Scenario::Chunk,
+            Scenario::Retained,
+            Scenario::VariablePathRetained,
+            Scenario::LongPathRetained,
+        ],
         value => vec![Scenario::parse(value)?],
     };
 
@@ -205,12 +269,14 @@ fn parent_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(&fixture_dir)?;
 
     let result = (|| -> Result<(), Box<dyn Error>> {
-        generate_fixtures(&fixture_dir, RETAINED_TORRENTS)?;
         let executable = std::env::current_exe()?;
         for scenario in scenarios {
+            let scenario_fixture_dir = fixture_dir.join(scenario.name());
+            std::fs::create_dir_all(&scenario_fixture_dir)?;
+            generate_fixtures(&scenario_fixture_dir, scenario.torrent_count(), scenario)?;
             let output = Command::new(&executable)
                 .args(["--child", "--scenario", scenario.name(), "--fixture-dir"])
-                .arg(&fixture_dir)
+                .arg(&scenario_fixture_dir)
                 .output()?;
             if !output.status.success() {
                 return Err(format!(
@@ -301,10 +367,7 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|item| item.refine_files.len())
         .sum::<usize>();
-    let expected_retained = match scenario {
-        Scenario::Chunk => CHUNK_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
-        Scenario::Retained => 11 * LIVE_MAX_FILES_PER_TORRENT,
-    };
+    let expected_retained = scenario.expected_retained_files();
     if retained_files != expected_retained {
         return Err(format!(
             "{} retained {retained_files} files; expected {expected_retained}",
@@ -325,12 +388,15 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     let peak_delta_kib = peak_rss_kib.saturating_sub(baseline_rss_kib);
     let rss_delta_bytes_per_peak_file =
         (peak_delta_kib as f64 * 1024.0) / scenario.decoded_file_upper_bound() as f64;
+    let (path_bytes_min, path_bytes_max, path_bytes_mean) = scenario.path_byte_stats();
 
     println!(
         concat!(
             "{{\"scenario\":\"{}\",\"target_os\":\"{}\",\"target_arch\":\"{}\",",
             "\"profile\":\"{}\",\"allocator\":\"std-system\",\"fixture_source\":",
             "\"live p50=6 p90=54 p99=743 max=88561; high-fanout max-files stress\",",
+            "\"path_shape\":\"{}\",\"path_bytes_min\":{},\"path_bytes_max\":{},",
+            "\"path_bytes_mean\":{:.3},",
             "\"torrents\":{},\"files_per_torrent\":{},\"raw_blob_bytes\":{},",
             "\"max_refine_files\":{},\"chunk_file_budget\":{},",
             "\"retained_file_budget\":{},\"route_timeout_seconds\":{},",
@@ -347,6 +413,10 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
         } else {
             "release"
         },
+        scenario.path_shape(),
+        path_bytes_min,
+        path_bytes_max,
+        path_bytes_mean,
         scenario.torrent_count(),
         LIVE_MAX_FILES_PER_TORRENT,
         raw_blob_bytes,
@@ -368,12 +438,16 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn generate_fixtures(directory: &Path, count: usize) -> Result<(), Box<dyn Error>> {
+fn generate_fixtures(
+    directory: &Path,
+    count: usize,
+    scenario: Scenario,
+) -> Result<(), Box<dyn Error>> {
     for torrent_index in 0..count {
         let files = (0..LIVE_MAX_FILES_PER_TORRENT)
             .map(|file_index| BlobFile {
                 index: u32::try_from(file_index).unwrap_or(u32::MAX),
-                path: format!("inception/collection-{torrent_index:02}/disc-{file_index:06}.mkv"),
+                path: fixture_path(torrent_index, file_index, scenario.path_bytes(file_index)),
                 extension: "mkv".to_owned(),
                 size: 734_003_200_u64.saturating_add(file_index as u64),
             })
@@ -385,6 +459,17 @@ fn generate_fixtures(directory: &Path, count: usize) -> Result<(), Box<dyn Error
         )?;
     }
     Ok(())
+}
+
+fn fixture_path(torrent_index: usize, file_index: usize, target_bytes: usize) -> String {
+    let prefix = format!("inception/t{torrent_index:02}/f{file_index:06}-");
+    let suffix = ".mkv";
+    let fixed_bytes = prefix.len().saturating_add(suffix.len());
+    assert!(
+        target_bytes >= fixed_bytes,
+        "fixture path target {target_bytes} is shorter than unique prefix+suffix {fixed_bytes}"
+    );
+    format!("{prefix}{}{suffix}", "x".repeat(target_bytes - fixed_bytes))
 }
 
 fn read_fixture_metadata(directory: &Path, count: usize) -> Result<Vec<Fixture>, Box<dyn Error>> {
@@ -427,4 +512,45 @@ fn proc_status_kib(field: &str) -> Result<u64, Box<dyn Error>> {
         .ok_or_else(|| format!("malformed {field} line: {line}"))?
         .parse::<u64>()?;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_scenarios_are_exact_length_unique_and_matchable() {
+        for scenario in [
+            Scenario::Chunk,
+            Scenario::Retained,
+            Scenario::VariablePathRetained,
+            Scenario::LongPathRetained,
+        ] {
+            for file_index in 0..8 {
+                let path = fixture_path(7, file_index, scenario.path_bytes(file_index));
+                assert_eq!(path.len(), scenario.path_bytes(file_index));
+                assert!(path.starts_with("inception/"));
+                assert!(path.ends_with(".mkv"));
+                assert_ne!(path, fixture_path(8, file_index, path.len()));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_scenarios_preserve_one_bounded_lookahead_contract() {
+        for scenario in [
+            Scenario::Retained,
+            Scenario::VariablePathRetained,
+            Scenario::LongPathRetained,
+        ] {
+            assert_eq!(
+                scenario.decoded_file_upper_bound(),
+                12 * LIVE_MAX_FILES_PER_TORRENT
+            );
+            assert_eq!(
+                scenario.expected_retained_files(),
+                11 * LIVE_MAX_FILES_PER_TORRENT
+            );
+        }
+    }
 }
