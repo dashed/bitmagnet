@@ -1,6 +1,7 @@
 pub(crate) mod enums;
 pub mod file_search_client;
 mod inputs;
+pub mod lane_c;
 pub mod lane_s;
 pub(crate) mod objects;
 mod roots;
@@ -61,12 +62,51 @@ pub fn build_runtime_schema(
         .finish()
 }
 
+/// Build the runtime GraphQL schema with database health, optional peer
+/// federation, and the fully composed search runtime attached.
+#[must_use]
+pub fn build_runtime_search_schema(
+    version: String,
+    pool: bitmagnet_db::PgPool,
+    config: RuntimeConfig,
+    search: std::sync::Arc<dyn SearchRuntime>,
+) -> Schema {
+    async_graphql::Schema::build(Query, Mutation, EmptySubscription)
+        .data(Version(version))
+        .data(HealthRuntime::new(pool, config))
+        .data(SearchRuntimeData::new(search))
+        .finish()
+}
+
 #[cfg(test)]
 mod tests {
-    use async_graphql::value;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
-    use super::{build_runtime_schema, build_schema};
+    use async_graphql::value;
+    use async_trait::async_trait;
+
+    use super::{build_runtime_schema, build_runtime_search_schema, build_schema};
     use crate::health::RuntimeConfig;
+    use crate::schema::search::{self, SearchRequest, SearchResult, SearchRuntime};
+
+    struct FakeSearchRuntime {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SearchRuntime for FakeSearchRuntime {
+        async fn pg_torrent_content(
+            &self,
+            _request: SearchRequest,
+        ) -> search::Result<SearchResult> {
+            self.called.store(true, Ordering::Relaxed);
+            Ok(SearchResult {
+                total_count: 17,
+                ..SearchResult::default()
+            })
+        }
+    }
 
     #[tokio::test]
     async fn build_schema_injects_version_into_query_resolver() {
@@ -120,6 +160,42 @@ mod tests {
                         "workers": [{ "key": "http_server", "started": true }]
                     }
                 }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_search_schema_keeps_health_and_injects_search_runtime() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+        let called = Arc::new(AtomicBool::new(false));
+        let search: Arc<dyn SearchRuntime> = Arc::new(FakeSearchRuntime {
+            called: Arc::clone(&called),
+        });
+        let response =
+            build_runtime_search_schema("test".into(), pool, RuntimeConfig::default(), search)
+                .execute(
+                    "{ workers { listAll { workers { key started } } } \
+             torrentContent { search(input: {}) { totalCount } } }",
+                )
+                .await;
+
+        assert!(
+            response.errors.is_empty(),
+            "combined runtime query returned errors: {:?}",
+            response.errors
+        );
+        assert!(called.load(Ordering::Relaxed));
+        assert_eq!(
+            response.data,
+            value!({
+                "workers": {
+                    "listAll": {
+                        "workers": [{ "key": "http_server", "started": true }]
+                    }
+                },
+                "torrentContent": { "search": { "totalCount": 17 } }
             })
         );
     }

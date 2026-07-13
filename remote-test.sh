@@ -2,7 +2,8 @@
 # Remote Rust gate for the Phase-2 integration branch.
 #
 # The local machine is CPU/RAM constrained. This transfers the Rust workspace
-# and parity fixtures to a Coder workspace while preserving its target cache.
+# and its complete test fixture tree to a Coder workspace while preserving its
+# target cache.
 #
 # Usage: ./remote-test.sh [cargo-subcommand-args...]
 # Environment overrides: REMOTE_TEST_WS, REMOTE_TEST_DIR, CARGO_BUILD_JOBS.
@@ -13,14 +14,14 @@ WS="${REMOTE_TEST_WS:-coder.bm-fu}"
 REMOTE_DIR="${REMOTE_TEST_DIR:-p2int}"
 JOBS="${CARGO_BUILD_JOBS:-4}"
 
-echo "==> [1/3] transfer bitmagnet-rs + parity fixtures -> ${WS}:${REMOTE_DIR}/"
-ssh "$WS" "mkdir -p ~/${REMOTE_DIR}/bitmagnet-rs ~/${REMOTE_DIR}/testdata/parity && rm -rf ~/${REMOTE_DIR}/bitmagnet-rs/crates ~/${REMOTE_DIR}/bitmagnet-rs/Cargo.toml ~/${REMOTE_DIR}/bitmagnet-rs/Cargo.lock"
+echo "==> [1/3] transfer bitmagnet-rs + test fixtures -> ${WS}:${REMOTE_DIR}/"
+ssh "$WS" "mkdir -p ~/${REMOTE_DIR}/bitmagnet-rs && rm -rf ~/${REMOTE_DIR}/bitmagnet-rs/crates ~/${REMOTE_DIR}/bitmagnet-rs/Cargo.toml ~/${REMOTE_DIR}/bitmagnet-rs/Cargo.lock ~/${REMOTE_DIR}/testdata"
 tar czf - -C "$REPO_ROOT" \
   --exclude='.git' --exclude='.jj' --exclude='target' --exclude='node_modules' \
   bitmagnet-rs \
   | ssh "$WS" "tar xzf - -C ~/${REMOTE_DIR}/"
-if [ -d "$REPO_ROOT/testdata/parity" ]; then
-  tar czf - -C "$REPO_ROOT" testdata/parity \
+if [ -d "$REPO_ROOT/testdata" ]; then
+  tar czf - -C "$REPO_ROOT" testdata \
     | ssh "$WS" "tar xzf - -C ~/${REMOTE_DIR}/"
 fi
 

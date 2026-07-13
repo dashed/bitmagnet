@@ -10,7 +10,12 @@
 # endpoint and credential through environment variables.
 
 # ---- builder ----------------------------------------------------------------
-FROM rust:1.95-slim-bookworm AS builder
+FROM rust:1.97-slim-bookworm AS builder
+
+# The workspace-level rust-toolchain file names the moving "stable" channel.
+# Override it in the image build so a later stable release cannot silently
+# change the production compiler underneath the locked dependency graph.
+ENV RUSTUP_TOOLCHAIN=1.97.0
 
 # bitmagnet-graphql composes the generated L2/L3 tonic clients, so the shared
 # bitmagnet-proto build script requires protoc even though this image serves

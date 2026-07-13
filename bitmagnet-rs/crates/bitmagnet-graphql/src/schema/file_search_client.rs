@@ -27,7 +27,8 @@ const DEFAULT_FILE_LIMIT: u32 = 20;
 pub struct FileSearchClientConfig {
     /// Tonic endpoint, such as `http://bitmagnet-filesearch.bitmagnet.svc:50052`.
     pub endpoint: String,
-    /// Hard deadline independently applied to every unary RPC.
+    /// Hard deadline for one logical operation. `SearchFiles` and its optional
+    /// count share it; zero leaves the deadline to the caller context.
     pub timeout: Duration,
     /// Maximum cursorless `offset + limit` window. Zero selects the safe
     /// default of [`MAX_L2_FILE_WINDOW`]; larger values are rejected.
@@ -56,6 +57,9 @@ impl FileSearchClientConfig {
 /// L2 client and protocol errors.
 #[derive(Debug, thiserror::Error)]
 pub enum FileSearchClientError {
+    /// The L2 backend construction switch is off.
+    #[error("file search is disabled")]
+    Disabled,
     /// The endpoint was empty.
     #[error("filesearch: empty endpoint")]
     EmptyEndpoint,
@@ -67,9 +71,6 @@ pub enum FileSearchClientError {
         /// Parser error.
         message: String,
     },
-    /// A hard timeout is mandatory.
-    #[error("filesearch: timeout must be positive")]
-    ZeroTimeout,
     /// The configured cursorless window exceeded the absolute safety ceiling.
     #[error(
         "filesearch: max_rows exceeds the absolute safety ceiling: max_rows={max_rows} maximum={maximum}"
@@ -229,6 +230,25 @@ pub trait L2FileSearchBackend: Send + Sync {
     async fn path_typeahead(&self, request: &FilePathTypeaheadRequest) -> Result<Vec<String>>;
 }
 
+/// Fail-closed L2 backend used when `SEARCH_FILE_SEARCH_ENABLED=false`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DisabledFileSearchBackend;
+
+#[async_trait]
+impl L2FileSearchBackend for DisabledFileSearchBackend {
+    async fn search_files(&self, _request: &FileSearchRequest) -> Result<L2FileRowsResult> {
+        Err(FileSearchClientError::Disabled)
+    }
+
+    async fn facets(&self, _request: &FileFacetsRequest) -> Result<FileFacetsResult> {
+        Err(FileSearchClientError::Disabled)
+    }
+
+    async fn path_typeahead(&self, _request: &FilePathTypeaheadRequest) -> Result<Vec<String>> {
+        Err(FileSearchClientError::Disabled)
+    }
+}
+
 /// Bounded L2 client over a fakeable RPC implementation.
 pub struct TonicFileSearchClient<R = TonicFileSearchRpc> {
     rpc: R,
@@ -240,9 +260,6 @@ impl TonicFileSearchClient<TonicFileSearchRpc> {
     /// Create a lazy production channel. A missing URI scheme is normalized to
     /// `http://`, matching the in-cluster plaintext service.
     pub fn connect(config: FileSearchClientConfig) -> Result<Self> {
-        if config.timeout.is_zero() {
-            return Err(FileSearchClientError::ZeroTimeout);
-        }
         let max_rows = normalize_max_rows(config.max_rows)?;
         let endpoint = normalize_endpoint(&config.endpoint)?;
         let channel = Endpoint::from_shared(endpoint.clone())
@@ -263,9 +280,6 @@ impl<R> TonicFileSearchClient<R> {
 
     /// Wrap an RPC implementation with an explicit cursorless window.
     pub fn with_rpc_and_max_rows(rpc: R, timeout: Duration, max_rows: u32) -> Result<Self> {
-        if timeout.is_zero() {
-            return Err(FileSearchClientError::ZeroTimeout);
-        }
         Ok(Self {
             rpc,
             timeout,
@@ -279,17 +293,35 @@ impl<R> TonicFileSearchClient<R> {
         self.max_rows
     }
 
-    async fn timed<T, F>(&self, operation: &'static str, future: F) -> Result<T>
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        if self.timeout.is_zero() {
+            None
+        } else {
+            let now = tokio::time::Instant::now();
+            Some(now.checked_add(self.timeout).unwrap_or(now))
+        }
+    }
+
+    async fn timed_at<T, F>(
+        &self,
+        operation: &'static str,
+        deadline: Option<tokio::time::Instant>,
+        future: F,
+    ) -> Result<T>
     where
         F: Future<Output = std::result::Result<T, Status>>,
     {
-        tokio::time::timeout(self.timeout, future)
-            .await
-            .map_err(|_| FileSearchClientError::Timeout {
-                operation,
-                timeout: self.timeout,
-            })?
-            .map_err(|source| FileSearchClientError::Rpc { operation, source })
+        let result = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, future)
+                .await
+                .map_err(|_| FileSearchClientError::Timeout {
+                    operation,
+                    timeout: self.timeout,
+                })?
+        } else {
+            future.await
+        };
+        result.map_err(|source| FileSearchClientError::Rpc { operation, source })
     }
 }
 
@@ -326,9 +358,14 @@ where
             request.min_size,
             request.max_size,
         );
+        // Match Go's one FileSearch context: SearchFiles and its optional
+        // CountFiles call share one absolute deadline rather than each getting
+        // the full timeout independently.
+        let deadline = self.deadline();
         let response = self
-            .timed(
+            .timed_at(
                 "SearchFiles",
+                deadline,
                 self.rpc.search_files(SearchFilesRequest {
                     filters: Some(filters.clone()),
                     pagination: Some(FilePagination {
@@ -356,8 +393,9 @@ where
             (0, false)
         } else {
             let count = self
-                .timed(
+                .timed_at(
                     "CountFiles",
+                    deadline,
                     self.rpc.count_files(CountFilesRequest {
                         filters: Some(filters),
                         collapse_to_torrent: false,
@@ -407,8 +445,9 @@ where
 
     async fn facets(&self, request: &FileFacetsRequest) -> Result<FileFacetsResult> {
         let response = self
-            .timed(
+            .timed_at(
                 "Facets",
+                self.deadline(),
                 self.rpc.facets(FacetsRequest {
                     filters: Some(file_filters(
                         &request.query,
@@ -503,6 +542,8 @@ mod tests {
         count_response: CountFilesResponse,
         facets_response: FacetsResponse,
         hang_search: bool,
+        search_delay: Duration,
+        count_delay: Duration,
     }
 
     #[async_trait]
@@ -514,6 +555,7 @@ mod tests {
             if self.hang_search {
                 return std::future::pending().await;
             }
+            tokio::time::sleep(self.search_delay).await;
             *self.search_request.lock().expect("search request lock") = Some(request);
             Ok(self.search_response.clone())
         }
@@ -523,6 +565,7 @@ mod tests {
             request: CountFilesRequest,
         ) -> std::result::Result<CountFilesResponse, Status> {
             self.count_calls.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(self.count_delay).await;
             *self.count_request.lock().expect("count request lock") = Some(request);
             Ok(self.count_response)
         }
@@ -572,11 +615,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_timeout() {
-        let error = TonicFileSearchClient::with_rpc(Arc::new(FakeRpc::default()), Duration::ZERO)
-            .err()
-            .expect("zero timeout must fail");
-        assert!(matches!(error, FileSearchClientError::ZeroTimeout));
+    fn zero_timeout_leaves_deadline_to_caller() {
+        TonicFileSearchClient::with_rpc(Arc::new(FakeRpc::default()), Duration::ZERO)
+            .expect("zero timeout leaves the deadline to the caller");
     }
 
     #[tokio::test]
@@ -813,6 +854,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_and_count_share_one_go_compatible_deadline() {
+        let client = TonicFileSearchClient::with_rpc(
+            Arc::new(FakeRpc {
+                search_delay: Duration::from_millis(35),
+                count_delay: Duration::from_millis(35),
+                ..FakeRpc::default()
+            }),
+            Duration::from_millis(50),
+        )
+        .expect("client");
+        let error = client
+            .search_files(&FileSearchRequest {
+                limit: 1,
+                ..FileSearchRequest::default()
+            })
+            .await
+            .expect_err("the second RPC must share the first RPC's deadline");
+
+        assert!(matches!(
+            error,
+            FileSearchClientError::Timeout {
+                operation: "CountFiles",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn facets_preserve_backend_order_and_structured_filters() {
         let rpc = Arc::new(FakeRpc {
             facets_response: FacetsResponse {
@@ -866,5 +935,29 @@ mod tests {
         assert_eq!(result.facets[0].buckets[0].value, "mkv");
         assert_eq!(result.facets[0].buckets[0].count, 7);
         assert_eq!(result.facets[0].buckets[1].value, "mp4");
+    }
+
+    #[tokio::test]
+    async fn disabled_backend_rejects_every_l2_surface() {
+        let backend = DisabledFileSearchBackend;
+
+        assert!(matches!(
+            backend.search_files(&FileSearchRequest::default()).await,
+            Err(FileSearchClientError::Disabled)
+        ));
+        assert!(matches!(
+            backend.facets(&FileFacetsRequest::default()).await,
+            Err(FileSearchClientError::Disabled)
+        ));
+        assert!(matches!(
+            backend
+                .path_typeahead(&FilePathTypeaheadRequest {
+                    prefix: "ab".to_owned(),
+                    prefix_like_pattern: "ab%".to_owned(),
+                    limit: 5,
+                })
+                .await,
+            Err(FileSearchClientError::Disabled)
+        ));
     }
 }

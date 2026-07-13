@@ -1,6 +1,7 @@
 //! Entry point for the PostgreSQL-backed GraphQL HTTP server.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -13,7 +14,7 @@ use axum::response::{Html, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bitmagnet_db::PgPool;
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -46,6 +47,411 @@ struct Args {
         value_parser = parse_go_duration
     )]
     health_peer_timeout: Duration,
+
+    #[command(flatten)]
+    search: SearchArgs,
+}
+
+/// Go-compatible search backend and feature configuration.
+#[derive(Debug, ClapArgs)]
+struct SearchArgs {
+    /// Enable the L2 file-search backend.
+    #[arg(
+        long,
+        env = "SEARCH_FILE_SEARCH_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    file_search_enabled: bool,
+
+    /// L2 file-search gRPC endpoint.
+    #[arg(
+        long,
+        env = "SEARCH_FILE_SEARCH_ADDRESS",
+        default_value = "bitmagnet-filesearch.bitmagnet.svc:50052"
+    )]
+    file_search_address: String,
+
+    /// Hard deadline for each L2 file-search RPC.
+    #[arg(
+        long,
+        env = "SEARCH_FILE_SEARCH_TIMEOUT",
+        default_value = "5s",
+        value_parser = parse_go_duration
+    )]
+    file_search_timeout: Duration,
+
+    /// Maximum cursorless L2 result window.
+    #[arg(long, env = "SEARCH_FILE_SEARCH_MAX_ROWS", default_value_t = 500)]
+    file_search_max_rows: u32,
+
+    /// Route eligible file-search text through L3 exact refine.
+    #[arg(
+        long,
+        env = "SEARCH_FILE_SEARCH_ROUTE_TEXT",
+        default_value_t = true,
+        value_parser = parse_go_bool
+    )]
+    file_search_route_text: bool,
+
+    /// Enable the L3 pathsearch plus L1 exact-refine composer.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    pathsearch_enabled: bool,
+
+    /// Enable candidate-derived path typeahead.
+    #[arg(
+        long,
+        env = "SEARCH_PATH_TYPEAHEAD_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    path_typeahead_enabled: bool,
+
+    /// Enable `collapse:path` through the L3 composer.
+    #[arg(
+        long,
+        env = "SEARCH_PATH_COLLAPSE_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    path_collapse_enabled: bool,
+
+    /// L3 pathsearch gRPC address.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_ADDRESS",
+        default_value = "bitmagnet-pathsearch.bitmagnet.svc:50053"
+    )]
+    pathsearch_address: String,
+
+    /// Per-RPC pathsearch deadline.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_TIMEOUT",
+        default_value = "5s",
+        value_parser = parse_go_duration
+    )]
+    pathsearch_timeout: Duration,
+
+    /// Minimum broad-gram query length.
+    #[arg(long, env = "SEARCH_PATHSEARCH_MIN_QUERY_LENGTH", default_value_t = 3)]
+    pathsearch_min_query_length: i32,
+
+    /// Candidate-page oversampling factor.
+    #[arg(long, env = "SEARCH_PATHSEARCH_OVERSAMPLE", default_value_t = 4)]
+    pathsearch_oversample: u32,
+
+    /// Absolute candidate memory bound.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_CANDIDATES",
+        default_value_t = 2_000
+    )]
+    pathsearch_max_candidates: u32,
+
+    /// Per-request candidate decode bound.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_DECODE_CANDIDATES",
+        default_value_t = 200
+    )]
+    pathsearch_max_decode_candidates: u32,
+
+    /// Background L3 health-check cadence.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_HEALTH_INTERVAL",
+        default_value = "15s",
+        value_parser = parse_go_duration
+    )]
+    pathsearch_health_interval: Duration,
+
+    /// Maximum accepted L3 watermark lag; zero disables the lag gate.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_WATERMARK_LAG",
+        default_value = "0",
+        value_parser = parse_go_duration
+    )]
+    pathsearch_max_watermark_lag: Duration,
+
+    /// Per-torrent file-count refine cap.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_REFINE_FILES",
+        default_value_t = 300_000
+    )]
+    pathsearch_max_refine_files: u32,
+
+    /// Cumulative decoded-file budget per refine chunk.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_REFINE_FILE_BUDGET",
+        default_value_t = 300_000
+    )]
+    pathsearch_refine_file_budget: u32,
+
+    /// Maximum torrents in one refine chunk.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS",
+        default_value_t = 1_024
+    )]
+    pathsearch_max_chunk_torrents: u32,
+
+    /// Cumulative retained decoded-file budget per request.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET",
+        default_value_t = 1_000_000
+    )]
+    pathsearch_retained_file_budget: u32,
+
+    /// End-to-end L3 candidate plus exact-refine deadline.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_ROUTE_TIMEOUT",
+        default_value = "8s",
+        value_parser = parse_go_duration
+    )]
+    pathsearch_route_timeout: Duration,
+
+    /// Maximum concurrent expensive multi-chunk refines; zero uses CPU count.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES",
+        default_value_t = 0
+    )]
+    pathsearch_max_concurrent_refines: i32,
+
+    /// Time a multi-chunk refine waits for a concurrency slot.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_SLOT_WAIT",
+        default_value = "0",
+        value_parser = parse_go_duration
+    )]
+    pathsearch_slot_wait: Duration,
+
+    /// Enable the drop-compatible read path; this implies JSONB file-extension
+    /// predicates exactly as it does in Go.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_drop_compatible_reads: bool,
+
+    /// Enable Lane-S's JSONB file-extension predicate.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_file_extensions_jsonb: bool,
+
+    /// Rewrite lone relevance ordering to popularity.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_popularity_sort_default: bool,
+
+    /// Expose file-search GraphQL reads.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_file_search_enabled: bool,
+
+    /// Expose file-search facet aggregation.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_FILE_SEARCH_FACETS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_file_search_facets_enabled: bool,
+
+    /// Prefer the L3 Suggest RPC for file-path typeahead.
+    #[arg(
+        long,
+        env = "SEARCH_FEATURES_FILE_SEARCH_TYPEAHEAD_RPC_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    features_file_search_typeahead_rpc_enabled: bool,
+}
+
+fn parse_go_bool(value: &str) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(format!("invalid Go boolean {value:?}")),
+    }
+}
+
+struct SearchRuntimeLifecycle {
+    runtime: Arc<dyn bitmagnet_graphql::SearchRuntime>,
+    pathsearch_health_poller: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SearchRuntimeLifecycle {
+    async fn shutdown(mut self) {
+        if let Some(handle) = self.pathsearch_health_poller.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for SearchRuntimeLifecycle {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.pathsearch_health_poller {
+            handle.abort();
+        }
+    }
+}
+
+fn build_search_runtime(
+    pool: PgPool,
+    args: &SearchArgs,
+    pathsearch_metrics: Arc<bitmagnet_search_serve::PathsearchMetrics>,
+) -> anyhow::Result<SearchRuntimeLifecycle> {
+    use bitmagnet_graphql::schema::file_search_client::L2FileSearchBackend;
+    use bitmagnet_graphql::schema::lane_s::LaneSSearchBackend;
+    use bitmagnet_graphql::schema::search::{SearchBuildConfig, SearchFeatures, SearchRuntime};
+    use bitmagnet_search_serve::{CandidateSource, PgSearchBackend, SearchServe};
+
+    let features = SearchFeatures {
+        file_search_enabled: args.features_file_search_enabled,
+        file_search_facets_enabled: args.features_file_search_facets_enabled,
+        file_search_typeahead_rpc_enabled: args.features_file_search_typeahead_rpc_enabled,
+    };
+    let build_config = SearchBuildConfig {
+        file_extensions_jsonb: args.features_drop_compatible_reads
+            || args.features_file_extensions_jsonb,
+        popularity_sort_default: args.features_popularity_sort_default,
+    };
+
+    let lane_s: Arc<dyn LaneSSearchBackend> =
+        Arc::new(bitmagnet_graphql::SqlxLaneSSearchBackend::new(pool.clone()));
+    let l2: Arc<dyn L2FileSearchBackend> = if args.file_search_enabled {
+        let client = bitmagnet_graphql::TonicFileSearchClient::connect(
+            bitmagnet_graphql::FileSearchClientConfig::new(
+                args.file_search_address.clone(),
+                args.file_search_timeout,
+            )
+            .with_max_rows(args.file_search_max_rows),
+        )
+        .context("construct L2 filesearch client")?;
+        Arc::new(client)
+    } else {
+        Arc::new(bitmagnet_graphql::DisabledFileSearchBackend)
+    };
+    let base: Arc<dyn SearchRuntime> = Arc::new(bitmagnet_graphql::PgL2SearchRuntime::new(
+        lane_s,
+        l2,
+        features,
+        build_config,
+    ));
+
+    let (lane_c, pathsearch_health_poller): (
+        Arc<dyn SearchServe>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = if args.pathsearch_enabled {
+        let composer_config = bitmagnet_search_serve::ComposerConfig {
+            min_query_length: u32::try_from(args.pathsearch_min_query_length).unwrap_or(0),
+            oversample_factor: args.pathsearch_oversample,
+            max_candidates: args.pathsearch_max_candidates,
+            max_decode_candidates: args.pathsearch_max_decode_candidates,
+            typeahead_enabled: args.path_typeahead_enabled,
+            file_search_route_text: args.file_search_route_text,
+            collapse_enabled: args.path_collapse_enabled,
+            max_refine_files: args.pathsearch_max_refine_files,
+            refine_file_budget: args.pathsearch_refine_file_budget,
+            max_chunk_torrents: args.pathsearch_max_chunk_torrents,
+            retained_file_budget: args.pathsearch_retained_file_budget,
+            route_timeout: args.pathsearch_route_timeout,
+            max_concurrent_refines: usize::try_from(args.pathsearch_max_concurrent_refines)
+                .unwrap_or(0),
+            slot_wait: args.pathsearch_slot_wait,
+        };
+        let normalized = composer_config.normalized();
+        anyhow::ensure!(
+            normalized.max_decode_candidates <= normalized.max_candidates,
+            "pathsearch max_decode_candidates must not exceed max_candidates"
+        );
+        anyhow::ensure!(
+            normalized.max_refine_files <= normalized.refine_file_budget,
+            "pathsearch max_refine_files must not exceed refine_file_budget"
+        );
+        anyhow::ensure!(
+            normalized.refine_file_budget <= normalized.retained_file_budget,
+            "pathsearch refine_file_budget must not exceed retained_file_budget"
+        );
+
+        let candidate_client = Arc::new(
+            bitmagnet_search_serve::Client::connect(bitmagnet_search_serve::ClientConfig {
+                address: args.pathsearch_address.clone(),
+                timeout: args.pathsearch_timeout,
+            })
+            .context("construct L3 pathsearch client")?,
+        );
+        let health_state = Arc::new(bitmagnet_search_serve::HealthState::new());
+        let health_gate = bitmagnet_search_serve::gate(Arc::clone(&health_state));
+
+        let lane_s_build = bitmagnet_search_serve::SearchBuildConfig {
+            file_extensions_jsonb: build_config.file_extensions_jsonb,
+            popularity_sort_default: build_config.popularity_sort_default,
+        };
+        let pg: Arc<dyn PgSearchBackend> =
+            Arc::new(bitmagnet_search_serve::PgSearch::new(pool, lane_s_build));
+        let candidates: Arc<dyn CandidateSource> = candidate_client.clone();
+        let composer = bitmagnet_search_serve::Composer::new(
+            candidates,
+            pg,
+            composer_config,
+            Some(health_gate),
+        )
+        .with_metrics(Arc::clone(&pathsearch_metrics));
+
+        // Go's hostile/non-positive override falls back to the older shared
+        // 30-second reporter cadence, even though the authored default is 15s.
+        let health_interval = if args.pathsearch_health_interval.is_zero() {
+            Duration::from_secs(30)
+        } else {
+            args.pathsearch_health_interval
+        };
+        let poller = bitmagnet_search_serve::spawn_health_poller_with_metrics(
+            candidate_client,
+            health_state,
+            bitmagnet_search_serve::HealthConfig {
+                interval: health_interval,
+                max_watermark_lag: args.pathsearch_max_watermark_lag,
+            },
+            Some(pathsearch_metrics),
+        );
+        (Arc::new(composer), Some(poller))
+    } else {
+        (Arc::new(bitmagnet_search_serve::Disabled), None)
+    };
+
+    Ok(SearchRuntimeLifecycle {
+        runtime: Arc::new(bitmagnet_graphql::LaneCSearchRuntime::new(base, lane_c)),
+        pathsearch_health_poller,
+    })
 }
 
 #[derive(Clone)]
@@ -73,17 +479,24 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = bitmagnet_db::connect(&bitmagnet_db::DbConfig::from_env()?).await?;
     assert_goose_version(&pool, args.expected_goose_version).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
 
+    // Register both C6 metric families exactly once, even while the serving
+    // routes are disabled, so their zero-valued series are present at startup.
+    let pathsearch_metrics = Arc::new(bitmagnet_search_serve::PathsearchMetrics::register());
+    let _serve_metrics = bitmagnet_search_serve::ServeMetrics::register();
     let _metrics = bitmagnet_common::metrics::maybe_spawn_metrics_server().await?;
+    let search_runtime = build_search_runtime(pool.clone(), &args.search, pathsearch_metrics)?;
     let version =
         std::env::var("BITMAGNET_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
-    let schema = bitmagnet_graphql::build_runtime_schema(
+    let schema = bitmagnet_graphql::build_runtime_search_schema(
         version.clone(),
         pool.clone(),
         bitmagnet_graphql::RuntimeConfig {
             peer_graphql_urls: args.health_peer_graphql_urls,
             peer_timeout: args.health_peer_timeout,
         },
+        Arc::clone(&search_runtime.runtime),
     );
     let state = AppState {
         schema,
@@ -92,11 +505,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = app(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "bitmagnet-graphql starting");
-    axum::serve(listener, app)
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(bitmagnet_common::serve::shutdown_signal())
-        .await?;
+        .await;
+    search_runtime.shutdown().await;
+    serve_result?;
 
     info!("bitmagnet-graphql stopped");
     Ok(())
@@ -284,9 +698,9 @@ fn parse_go_duration(value: &str) -> Result<Duration, String> {
         return Err(format!("invalid duration {value:?}"));
     }
 
-    // Go accepts negative durations; the peer configuration treats every
-    // non-positive value as the 1500ms default. Duration cannot represent a
-    // negative value, so preserve that effective behavior as zero here.
+    // Go accepts negative durations, while Duration cannot represent them.
+    // Preserve the shared `<= 0` branch as zero; each consumer then applies
+    // its own Go-compatible fallback or caller-owned-deadline behavior.
     if negative {
         return Ok(Duration::ZERO);
     }
@@ -297,51 +711,77 @@ fn parse_go_duration(value: &str) -> Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
 
     use clap::Parser;
     use serde_json::{json, Value};
 
     use super::{
-        app, goose_mismatch, parse_go_duration, AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
+        app, build_search_runtime, goose_mismatch, parse_go_duration, AppState, Args,
+        GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ARGS_ENV_KEYS: [&str; 33] = [
+        "LISTEN_ADDR",
+        "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
+        "HEALTH_PEER_GRAPHQL_URLS",
+        "HEALTH_PEER_TIMEOUT",
+        "SEARCH_FILE_SEARCH_ENABLED",
+        "SEARCH_FILE_SEARCH_ADDRESS",
+        "SEARCH_FILE_SEARCH_TIMEOUT",
+        "SEARCH_FILE_SEARCH_MAX_ROWS",
+        "SEARCH_FILE_SEARCH_ROUTE_TEXT",
+        "SEARCH_PATHSEARCH_ENABLED",
+        "SEARCH_PATH_TYPEAHEAD_ENABLED",
+        "SEARCH_PATH_COLLAPSE_ENABLED",
+        "SEARCH_PATHSEARCH_ADDRESS",
+        "SEARCH_PATHSEARCH_TIMEOUT",
+        "SEARCH_PATHSEARCH_MIN_QUERY_LENGTH",
+        "SEARCH_PATHSEARCH_OVERSAMPLE",
+        "SEARCH_PATHSEARCH_MAX_CANDIDATES",
+        "SEARCH_PATHSEARCH_MAX_DECODE_CANDIDATES",
+        "SEARCH_PATHSEARCH_HEALTH_INTERVAL",
+        "SEARCH_PATHSEARCH_MAX_WATERMARK_LAG",
+        "SEARCH_PATHSEARCH_MAX_REFINE_FILES",
+        "SEARCH_PATHSEARCH_REFINE_FILE_BUDGET",
+        "SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS",
+        "SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET",
+        "SEARCH_PATHSEARCH_ROUTE_TIMEOUT",
+        "SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES",
+        "SEARCH_PATHSEARCH_SLOT_WAIT",
+        "SEARCH_FEATURES_DROP_COMPATIBLE_READS",
+        "SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB",
+        "SEARCH_FEATURES_POPULARITY_SORT_DEFAULT",
+        "SEARCH_FEATURES_FILE_SEARCH_ENABLED",
+        "SEARCH_FEATURES_FILE_SEARCH_FACETS_ENABLED",
+        "SEARCH_FEATURES_FILE_SEARCH_TYPEAHEAD_RPC_ENABLED",
+    ];
+
     struct ArgsEnvRestore {
-        listen_addr: Option<OsString>,
-        expected_goose_version: Option<OsString>,
-        health_peer_graphql_urls: Option<OsString>,
-        health_peer_timeout: Option<OsString>,
+        values: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl ArgsEnvRestore {
         fn clear() -> Self {
-            let restore = Self {
-                listen_addr: std::env::var_os("LISTEN_ADDR"),
-                expected_goose_version: std::env::var_os(
-                    "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
-                ),
-                health_peer_graphql_urls: std::env::var_os("HEALTH_PEER_GRAPHQL_URLS"),
-                health_peer_timeout: std::env::var_os("HEALTH_PEER_TIMEOUT"),
-            };
-            std::env::remove_var("LISTEN_ADDR");
-            std::env::remove_var("BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION");
-            std::env::remove_var("HEALTH_PEER_GRAPHQL_URLS");
-            std::env::remove_var("HEALTH_PEER_TIMEOUT");
-            restore
+            let values = ARGS_ENV_KEYS
+                .into_iter()
+                .map(|name| {
+                    let value = std::env::var_os(name);
+                    std::env::remove_var(name);
+                    (name, value)
+                })
+                .collect();
+            Self { values }
         }
     }
 
     impl Drop for ArgsEnvRestore {
         fn drop(&mut self) {
-            restore_env("LISTEN_ADDR", self.listen_addr.take());
-            restore_env(
-                "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
-                self.expected_goose_version.take(),
-            );
-            restore_env(
-                "HEALTH_PEER_GRAPHQL_URLS",
-                self.health_peer_graphql_urls.take(),
-            );
-            restore_env("HEALTH_PEER_TIMEOUT", self.health_peer_timeout.take());
+            for (name, value) in self.values.drain(..) {
+                restore_env(name, value);
+            }
         }
     }
 
@@ -367,6 +807,7 @@ mod tests {
 
     #[test]
     fn args_parse_defaults_and_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _restore = ArgsEnvRestore::clear();
 
         let defaults =
@@ -378,6 +819,41 @@ mod tests {
             defaults.health_peer_timeout,
             std::time::Duration::from_millis(1_500)
         );
+        assert!(!defaults.search.file_search_enabled);
+        assert_eq!(
+            defaults.search.file_search_address,
+            "bitmagnet-filesearch.bitmagnet.svc:50052"
+        );
+        assert_eq!(defaults.search.file_search_timeout.as_secs(), 5);
+        assert_eq!(defaults.search.file_search_max_rows, 500);
+        assert!(defaults.search.file_search_route_text);
+        assert!(!defaults.search.pathsearch_enabled);
+        assert!(!defaults.search.path_typeahead_enabled);
+        assert!(!defaults.search.path_collapse_enabled);
+        assert_eq!(
+            defaults.search.pathsearch_address,
+            "bitmagnet-pathsearch.bitmagnet.svc:50053"
+        );
+        assert_eq!(defaults.search.pathsearch_timeout.as_secs(), 5);
+        assert_eq!(defaults.search.pathsearch_min_query_length, 3);
+        assert_eq!(defaults.search.pathsearch_oversample, 4);
+        assert_eq!(defaults.search.pathsearch_max_candidates, 2_000);
+        assert_eq!(defaults.search.pathsearch_max_decode_candidates, 200);
+        assert_eq!(defaults.search.pathsearch_health_interval.as_secs(), 15);
+        assert!(defaults.search.pathsearch_max_watermark_lag.is_zero());
+        assert_eq!(defaults.search.pathsearch_max_refine_files, 300_000);
+        assert_eq!(defaults.search.pathsearch_refine_file_budget, 300_000);
+        assert_eq!(defaults.search.pathsearch_max_chunk_torrents, 1_024);
+        assert_eq!(defaults.search.pathsearch_retained_file_budget, 1_000_000);
+        assert_eq!(defaults.search.pathsearch_route_timeout.as_secs(), 8);
+        assert_eq!(defaults.search.pathsearch_max_concurrent_refines, 0);
+        assert!(defaults.search.pathsearch_slot_wait.is_zero());
+        assert!(!defaults.search.features_drop_compatible_reads);
+        assert!(!defaults.search.features_file_extensions_jsonb);
+        assert!(!defaults.search.features_popularity_sort_default);
+        assert!(!defaults.search.features_file_search_enabled);
+        assert!(!defaults.search.features_file_search_facets_enabled);
+        assert!(!defaults.search.features_file_search_typeahead_rpc_enabled);
 
         let overridden = Args::try_parse_from([
             "bitmagnet-graphql",
@@ -401,6 +877,192 @@ mod tests {
             overridden.health_peer_timeout,
             std::time::Duration::from_millis(2_500)
         );
+    }
+
+    #[test]
+    fn search_args_parse_go_compatible_environment_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _restore = ArgsEnvRestore::clear();
+        let values = [
+            ("SEARCH_FILE_SEARCH_ENABLED", "1"),
+            ("SEARCH_FILE_SEARCH_ADDRESS", "files.test:15052"),
+            ("SEARCH_FILE_SEARCH_TIMEOUT", "-1s"),
+            ("SEARCH_FILE_SEARCH_MAX_ROWS", "321"),
+            ("SEARCH_FILE_SEARCH_ROUTE_TEXT", "0"),
+            ("SEARCH_PATHSEARCH_ENABLED", "1"),
+            ("SEARCH_PATH_TYPEAHEAD_ENABLED", "1"),
+            ("SEARCH_PATH_COLLAPSE_ENABLED", "0"),
+            ("SEARCH_PATHSEARCH_ADDRESS", "paths.test:15053"),
+            ("SEARCH_PATHSEARCH_TIMEOUT", "2.5s"),
+            ("SEARCH_PATHSEARCH_MIN_QUERY_LENGTH", "-3"),
+            ("SEARCH_PATHSEARCH_OVERSAMPLE", "7"),
+            ("SEARCH_PATHSEARCH_MAX_CANDIDATES", "701"),
+            ("SEARCH_PATHSEARCH_MAX_DECODE_CANDIDATES", "77"),
+            ("SEARCH_PATHSEARCH_HEALTH_INTERVAL", "0"),
+            ("SEARCH_PATHSEARCH_MAX_WATERMARK_LAG", "1m"),
+            ("SEARCH_PATHSEARCH_MAX_REFINE_FILES", "7001"),
+            ("SEARCH_PATHSEARCH_REFINE_FILE_BUDGET", "7002"),
+            ("SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS", "73"),
+            ("SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET", "7003"),
+            ("SEARCH_PATHSEARCH_ROUTE_TIMEOUT", "7s"),
+            ("SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES", "-4"),
+            ("SEARCH_PATHSEARCH_SLOT_WAIT", "-2s"),
+            ("SEARCH_FEATURES_DROP_COMPATIBLE_READS", "1"),
+            ("SEARCH_FEATURES_GATE_FILE_EXTENSIONS_JSONB", "0"),
+            ("SEARCH_FEATURES_POPULARITY_SORT_DEFAULT", "1"),
+            ("SEARCH_FEATURES_FILE_SEARCH_ENABLED", "1"),
+            ("SEARCH_FEATURES_FILE_SEARCH_FACETS_ENABLED", "1"),
+            ("SEARCH_FEATURES_FILE_SEARCH_TYPEAHEAD_RPC_ENABLED", "0"),
+        ];
+        for (name, value) in values {
+            std::env::set_var(name, value);
+        }
+
+        let args = Args::try_parse_from(["bitmagnet-graphql"])
+            .expect("Go-compatible search environment parses");
+        assert!(args.search.file_search_enabled);
+        assert_eq!(args.search.file_search_address, "files.test:15052");
+        assert!(args.search.file_search_timeout.is_zero());
+        assert_eq!(args.search.file_search_max_rows, 321);
+        assert!(!args.search.file_search_route_text);
+        assert!(args.search.pathsearch_enabled);
+        assert!(args.search.path_typeahead_enabled);
+        assert!(!args.search.path_collapse_enabled);
+        assert_eq!(args.search.pathsearch_address, "paths.test:15053");
+        assert_eq!(args.search.pathsearch_timeout.as_millis(), 2_500);
+        assert_eq!(args.search.pathsearch_min_query_length, -3);
+        assert_eq!(args.search.pathsearch_oversample, 7);
+        assert_eq!(args.search.pathsearch_max_candidates, 701);
+        assert_eq!(args.search.pathsearch_max_decode_candidates, 77);
+        assert!(args.search.pathsearch_health_interval.is_zero());
+        assert_eq!(args.search.pathsearch_max_watermark_lag.as_secs(), 60);
+        assert_eq!(args.search.pathsearch_max_refine_files, 7_001);
+        assert_eq!(args.search.pathsearch_refine_file_budget, 7_002);
+        assert_eq!(args.search.pathsearch_max_chunk_torrents, 73);
+        assert_eq!(args.search.pathsearch_retained_file_budget, 7_003);
+        assert_eq!(args.search.pathsearch_route_timeout.as_secs(), 7);
+        assert_eq!(args.search.pathsearch_max_concurrent_refines, -4);
+        assert!(args.search.pathsearch_slot_wait.is_zero());
+        assert!(args.search.features_drop_compatible_reads);
+        assert!(!args.search.features_file_extensions_jsonb);
+        assert!(args.search.features_popularity_sort_default);
+        assert!(args.search.features_file_search_enabled);
+        assert!(args.search.features_file_search_facets_enabled);
+        assert!(!args.search.features_file_search_typeahead_rpc_enabled);
+    }
+
+    #[tokio::test]
+    async fn disabled_builder_does_not_dial_or_spawn_and_preserves_double_gate() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+        };
+        args.search.features_drop_compatible_reads = true;
+        args.search.features_file_search_enabled = true;
+        args.search.features_file_search_facets_enabled = true;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+        let lifecycle = build_search_runtime(
+            pool,
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .expect("disabled backends construct without dialing");
+
+        assert!(lifecycle.pathsearch_health_poller.is_none());
+        assert!(!lifecycle.runtime.healthy());
+        assert!(!lifecycle.runtime.typeahead_enabled());
+        assert!(lifecycle.runtime.features().file_search_enabled);
+        assert!(lifecycle.runtime.features().file_search_facets_enabled);
+        assert!(
+            lifecycle
+                .runtime
+                .search_build_config()
+                .file_extensions_jsonb
+        );
+        let error = lifecycle
+            .runtime
+            .file_search(bitmagnet_graphql::schema::search::FileSearchRequest::default())
+            .await
+            .expect_err("product-on plus backend-off must fail loud");
+        assert!(error.to_string().contains("file search is disabled"));
+    }
+
+    #[tokio::test]
+    async fn incompatible_pathsearch_budget_orderings_fail_before_dialing() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+        };
+        args.search.pathsearch_enabled = true;
+        args.search.pathsearch_address = "127.0.0.1:1".to_owned();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+
+        args.search.pathsearch_max_candidates = 100;
+        args.search.pathsearch_max_decode_candidates = 101;
+        let error = build_search_runtime(
+            pool.clone(),
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .err()
+        .expect("decode budget ordering must fail closed");
+        assert!(error.to_string().contains("max_decode_candidates"));
+
+        args.search.pathsearch_max_candidates = 2_000;
+        args.search.pathsearch_max_decode_candidates = 200;
+        args.search.pathsearch_max_refine_files = 300_001;
+        args.search.pathsearch_refine_file_budget = 300_000;
+        let error = build_search_runtime(
+            pool.clone(),
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .err()
+        .expect("per-torrent budget ordering must fail closed");
+        assert!(error.to_string().contains("max_refine_files"));
+
+        args.search.pathsearch_max_refine_files = 300_000;
+        args.search.pathsearch_refine_file_budget = 1_000_001;
+        args.search.pathsearch_retained_file_budget = 1_000_000;
+        let error = build_search_runtime(
+            pool,
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .err()
+        .expect("retained budget ordering must fail closed");
+        assert!(error.to_string().contains("refine_file_budget"));
+    }
+
+    #[tokio::test]
+    async fn enabled_builder_owns_and_drains_the_health_poller() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+        };
+        args.search.pathsearch_enabled = true;
+        args.search.pathsearch_address = "127.0.0.1:1".to_owned();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/bitmagnet")
+            .expect("lazy postgres pool");
+        let lifecycle = build_search_runtime(
+            pool,
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .expect("enabled builder constructs lazy pathsearch client");
+
+        assert!(lifecycle.pathsearch_health_poller.is_some());
+        tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.shutdown())
+            .await
+            .expect("health poller shutdown must not detach or hang");
     }
 
     #[test]

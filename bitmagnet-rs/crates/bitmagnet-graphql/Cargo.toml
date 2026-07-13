@@ -14,6 +14,7 @@ bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-proto = { path = "../bitmagnet-proto" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
+bitmagnet-search-serve = { path = "../bitmagnet-search-serve" }
 anyhow = { workspace = true }
 async-trait = "0.1"
 async-graphql = "7"
