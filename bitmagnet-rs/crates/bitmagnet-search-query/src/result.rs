@@ -14,7 +14,9 @@
 
 use crate::aggregations::Aggregations;
 use crate::criteria::{Episodes, Video3D, VideoResolution};
-use bitmagnet_model::{Content, ContentType, FilesStatus, InfoHash, Torrent, TorrentContent};
+use bitmagnet_model::{
+    BlobFile, Content, ContentType, FilesStatus, InfoHash, Torrent, TorrentContent,
+};
 use serde::{Deserialize, Serialize};
 
 /// The GraphQL-surface search result.
@@ -104,6 +106,13 @@ pub struct SearchResultItem {
     /// `HydrateTorrentContentTorrent`. `files_data` is `None` unless
     /// [`crate::HydrateOptions::files_data`] is enabled.
     pub torrent: Torrent,
+    /// Decoded file rows retained only by the L3/L1 composer while it serves an
+    /// exact-refined result. Normal PostgreSQL search results leave this empty;
+    /// [`Torrent`]'s `files_data` remains the optional hydration input from
+    /// which the composer builds it. The GraphQL mapper, not serde, decides
+    /// whether these internal rows are exposed through the API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refine_files: Vec<BlobFile>,
     /// `torrents.created_at` as Unix seconds, supplemental to [`Torrent`].
     pub torrent_created_at: i64,
     /// `torrents.updated_at` as Unix seconds, supplemental to [`Torrent`].
@@ -222,6 +231,7 @@ impl SearchResultItem {
             torrent_content_created_at: 0,
             torrent_content_updated_at: 0,
             torrent,
+            refine_files: Vec::new(),
             torrent_created_at: 0,
             torrent_updated_at: 0,
             torrent_meta_version: None,
@@ -416,7 +426,11 @@ mod tests {
         item.torrent_tags = vec!["trusted".to_owned()];
 
         let encoded = serde_json::to_vec(&item).unwrap();
+        assert!(!encoded
+            .windows(b"refineFiles".len())
+            .any(|window| window == b"refineFiles"));
         let decoded: SearchResultItem = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.refine_files.is_empty());
         assert_eq!(decoded, item);
     }
 }

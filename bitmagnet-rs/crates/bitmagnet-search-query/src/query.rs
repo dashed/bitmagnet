@@ -489,6 +489,7 @@ impl SearchQuery {
                 torrent_content_created_at: h.torrent_content_created_at,
                 torrent_content_updated_at: h.torrent_content_updated_at,
                 torrent,
+                refine_files: Vec::new(),
                 torrent_created_at: h.torrent_created_at,
                 torrent_updated_at: h.torrent_updated_at,
                 torrent_meta_version: h.torrent_meta_version,
