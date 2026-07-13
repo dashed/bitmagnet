@@ -72,9 +72,11 @@ pub use facets::fetch_aggregations;
 pub use options::{FacetRequest, SearchBuildConfig, SearchOptions, TorrentContentFacet};
 pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;
-pub use query::{build_query, Bind, Result, SearchQuery, SearchQueryError};
-pub use result::{SearchResult, SearchResultItem};
+pub use query::{build_query, Bind, HydrateOptions, Result, SearchQuery, SearchQueryError};
+pub use result::{SearchResult, SearchResultItem, TorrentSourceInfo};
 
 // Re-exported so Lane T and tests can name these without a direct
 // `bitmagnet-model` dependency.
-pub use bitmagnet_model::{ContentType, FileType, InfoHash};
+pub use bitmagnet_model::{
+    Content, ContentType, FileType, FilesStatus, InfoHash, Torrent, TorrentContent,
+};

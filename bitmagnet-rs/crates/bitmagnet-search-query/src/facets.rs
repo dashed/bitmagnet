@@ -811,7 +811,7 @@ fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn natural_cmp(left: &str, right: &str) -> Ordering {
+pub(crate) fn natural_cmp(left: &str, right: &str) -> Ordering {
     let mut left = left;
     let mut right = right;
 

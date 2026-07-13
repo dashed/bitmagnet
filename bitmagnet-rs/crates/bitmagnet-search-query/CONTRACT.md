@@ -269,6 +269,8 @@ pub enum Bind { Bytea(Vec<u8>), Text(String), Tsquery(String) }
 impl SearchQuery {
     pub async fn fetch_info_hashes(&self, pool: &PgPool) -> Result<Vec<InfoHash>>; // Q3 parity output
     pub async fn fetch(&self, pool: &PgPool) -> Result<Vec<SearchResultItem>>;     // rows for XML
+    pub async fn fetch_with(&self, pool: &PgPool, options: HydrateOptions)
+        -> Result<Vec<SearchResultItem>>; // expanded rows; files_data is opt-in
 }
 
 // result.rs — one hydrated row (non_exhaustive); info_hash is the parity key
@@ -418,20 +420,56 @@ The crate returns deterministic `BTreeMap`s keyed by value. Natural sorting by
 the human label (`natsort.Compare` in `gqlmodel/facet.go`) remains Lane G's
 resolver concern.
 
+`SearchResultItem` is additive over the frozen Torznab row. The original flat
+fields (`name`, `size`, `content_type`, `published_at`, sources-max
+`seeders`/`leechers`, `files_count`, video fields, episodes, external ids, and
+v1/v2 hashes) remain unchanged, so `bitmagnet-torznab::result_map` produces the
+same XML. The Phase-2 expansion additionally carries:
+
+- `torrent_content`, `torrent`, and optional `content` values built from the
+  corresponding Go hydration rows;
+- Go `TorrentContent.Title()`, DHT seen statistics, and query-string rank;
+- keyed torrent source and tag collections; and
+- explicit supplemental scalar fields for associations/timestamps/meta/video
+  values that the shared Rust `bitmagnet-model` intentionally omits.
+
+That last split is deliberate: Lane S does not mutate `bitmagnet-model` merely
+to reproduce GORM associations. Lane G/C must map both the nested model values
+and the clearly named supplemental fields on `SearchResultItem`.
+
+Seeder semantics are intentionally split. The frozen flat `seeders` and
+`leechers` values remain `max(torrents_torrent_sources.*)` for byte-exact
+Torznab behavior. `torrent_content.seeders` and `.leechers` come from the
+denormalized `torrent_contents` columns used by GraphQL.
+
+`SearchQuery::fetch()` delegates to `fetch_with(...,
+HydrateOptions::default())`. The default leaves `torrent.files_data = None`.
+Only `HydrateOptions { files_data: true }` projects `torrents.files_data`, and
+that projection is added to the id-keyed hydration query, never the ordered
+membership query. Source and tag associations are likewise loaded by
+info-hash-keyed follow-up queries.
+
 ### Binding lean-membership rule
 
 Every ordered and limited membership query must remain a **lean,
 single-table** query: literal `LIMIT`, no hydration joins, and no hydration
-subselects. Hydration is a separate query keyed by the selected row ids and is
-merged in membership order. This is the binding Phase-1 deviation recorded
-above and governs every S4 ordered path.
+subselects. The sole additive projection is `ts_rank_cd(...) AS
+query_string_rank` when a tsquery exists; it is the same single-table expression
+already used for relevance ordering. All other expanded fields are loaded in a
+separate query keyed by selected row ids and merged in membership order. The
+large `files_data` blob is hydrator-gated and never touches this path. This is
+the binding Phase-1 deviation recorded above and governs every S4 ordered path.
 
-### S2-S5 pending
+### S5 parity follow-up
 
-S1 is types and documentation only. S2 replaces the new-criterion pending
-errors with SQL and feature-gated extension handling; S3 implements facet
-filtering and budgeted count-per-value aggregations; S4 implements the complete
-order list, FIND-2, offset/limit over-fetch, and lean membership/hydration paths;
-S5 assembles total-count and final `SearchResult` execution. Until those tasks
-land, Phase-1 Torznab criteria and its two order fields are the only executable
-builder surface.
+The S-item expansion makes the full hydrated item contract available while S5
+still owns final `SearchResult` orchestration and differential evidence.
+
+S5 differential parity must compare the **full expanded item field set**, not
+only the ordered info-hash list: nested/supplemental torrent-content fields,
+torrent scalars, optional content, sources/tags, derived title and DHT stats,
+and query rank. PostgreSQL/Go `published_at` values carry microsecond precision;
+the current public Rust field intentionally floors them to epoch seconds.
+Parity must normalize both sides to that documented precision (while retaining
+the original microsecond value in fixture diagnostics) rather than treating a
+sub-second difference as search membership drift.

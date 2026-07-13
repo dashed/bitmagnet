@@ -16,15 +16,26 @@ use crate::criteria::{
     ContentCollectionRef, ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D,
     VideoResolution,
 };
+use crate::facets::natural_cmp;
 use crate::order::{OrderDirection, TorrentContentOrderField};
 use crate::params::TorznabSearchParams;
-use crate::result::SearchResultItem;
-use bitmagnet_model::{ContentType, FileType, InfoHash};
+use crate::result::{derive_title, dht_seen_stats, SearchResultItem, TorrentSourceInfo};
+use bitmagnet_model::{
+    Content, ContentType, FileType, FilesStatus, InfoHash, Torrent, TorrentContent,
+};
 use chrono::{DateTime, Datelike, Duration, Months, NaiveDate, NaiveDateTime, SecondsFormat};
 use chrono::{Timelike, Utc};
 use serde::Deserialize;
 use sqlx::{types::Json, PgPool, Row};
 use std::collections::BTreeMap;
+
+/// Controls optional, heavyweight result hydration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HydrateOptions {
+    /// Load `torrents.files_data`. Off by default so the blob never reaches
+    /// the ordered membership path or consumers that do not need file refine.
+    pub files_data: bool,
+}
 
 /// Errors from building or running a search query.
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +97,7 @@ struct OrderedRow {
     video_codec: Option<String>,
     release_group: Option<String>,
     episodes: Episodes,
+    query_string_rank: f64,
 }
 
 #[derive(Default)]
@@ -98,6 +110,15 @@ struct Hydration {
     tmdb_id: Option<String>,
     seeders: Option<u32>,
     leechers: Option<u32>,
+    torrent_content: Option<TorrentContent>,
+    torrent_content_video_modifier: Option<String>,
+    torrent_content_created_at: i64,
+    torrent_content_updated_at: i64,
+    torrent: Option<Torrent>,
+    torrent_created_at: i64,
+    torrent_updated_at: i64,
+    torrent_meta_version: Option<u16>,
+    content: Option<Content>,
 }
 
 impl SearchQuery {
@@ -145,10 +166,21 @@ impl SearchQuery {
 
     /// Execute and return fully-hydrated result rows for Lane T's XML.
     pub async fn fetch(&self, pool: &PgPool) -> Result<Vec<SearchResultItem>> {
+        self.fetch_with(pool, HydrateOptions::default()).await
+    }
+
+    /// Execute and return fully-hydrated result rows, optionally loading the
+    /// heavyweight `torrents.files_data` blob in the id-keyed hydration pass.
+    pub async fn fetch_with(
+        &self,
+        pool: &PgPool,
+        options: HydrateOptions,
+    ) -> Result<Vec<SearchResultItem>> {
         // Query 1 — lean, ordered membership. NO hydration joins/subselects, so the
         // planner stays serial (a joined+subselect projection tips PG into a parallel
         // Gather Merge whose tie order is nondeterministic). See CONTRACT.md "Deviations".
         let ordering_sql = self.ordering_sql()?;
+        let has_query_string_rank = self.query_string_rank_placeholder().is_some();
         let mut query = sqlx::query(sqlx::AssertSqlSafe(ordering_sql));
         for bind in self.binds() {
             query = match bind {
@@ -183,6 +215,11 @@ impl SearchQuery {
                 video_codec: row.try_get("video_codec")?,
                 release_group: row.try_get("release_group")?,
                 episodes: db_episodes.into(),
+                query_string_rank: if has_query_string_rank {
+                    f64::from(row.try_get::<f32, _>("query_string_rank")?)
+                } else {
+                    0.0
+                },
             });
         }
         if ordered.is_empty() {
@@ -192,7 +229,8 @@ impl SearchQuery {
         // Query 2 — hydration keyed by the exact per-row identity (tc.id). No ORDER
         // BY/LIMIT, so its (possibly parallel) plan cannot affect membership or order.
         let ids: Vec<String> = ordered.iter().map(|row| row.id.clone()).collect();
-        let hydration_rows = sqlx::query(sqlx::AssertSqlSafe(HYDRATION_BY_ID_SQL))
+        let hydration_sql = hydration_by_id_sql(options);
+        let hydration_rows = sqlx::query(sqlx::AssertSqlSafe(hydration_sql))
             .bind(&ids)
             .fetch_all(pool)
             .await?;
@@ -203,10 +241,99 @@ impl SearchQuery {
             let info_hash_v1: Option<Vec<u8>> = row.try_get("info_hash_v1")?;
             let info_hash_v2: Option<Vec<u8>> = row.try_get("info_hash_v2")?;
             let release_year: Option<i32> = row.try_get("release_year")?;
+            let raw_tc_info_hash: Vec<u8> = row.try_get("tc_info_hash")?;
+            let tc_info_hash = decode_info_hash(&raw_tc_info_hash)?;
+            let tc_content_type = decode_content_type(row.try_get("tc_content_type")?)?;
+            let tc_size = decode_u64("tc_size", row.try_get("tc_size")?)?;
+            let tc_seeders = decode_optional_u32("tc_seeders", row.try_get("tc_seeders")?)?;
+            let tc_leechers = decode_optional_u32("tc_leechers", row.try_get("tc_leechers")?)?;
+            let tc_files_count =
+                decode_optional_u32("tc_files_count", row.try_get("tc_files_count")?)?;
+            let Json(tc_languages): Json<Vec<String>> = row.try_get("tc_languages")?;
+            let torrent_content = TorrentContent {
+                id: id.clone(),
+                info_hash: tc_info_hash,
+                content_type: tc_content_type,
+                content_source: row.try_get("tc_content_source")?,
+                content_id: row.try_get("tc_content_id")?,
+                languages: tc_languages,
+                video_resolution: row.try_get("tc_video_resolution")?,
+                video_source: row.try_get("tc_video_source")?,
+                video_codec: row.try_get("tc_video_codec")?,
+                release_group: row.try_get("tc_release_group")?,
+                seeders: tc_seeders,
+                leechers: tc_leechers,
+                published_at: row.try_get("tc_published_at")?,
+                size: tc_size,
+                files_count: tc_files_count,
+            };
+
+            let torrent_name: Option<String> = row.try_get("name")?;
+            let torrent = if let Some(name) = torrent_name.clone() {
+                let raw_files_status: String = row.try_get("torrent_files_status")?;
+                let files_status = raw_files_status
+                    .parse::<FilesStatus>()
+                    .map_err(|error| decode_error(format!("torrent_files_status: {error}")))?;
+                let Json(file_extensions): Json<Vec<String>> =
+                    row.try_get("torrent_file_extensions")?;
+                Some(Torrent {
+                    info_hash: tc_info_hash,
+                    name,
+                    size: decode_u64("torrent_size", row.try_get("torrent_size")?)?,
+                    private: row.try_get("torrent_private")?,
+                    files_status,
+                    extension: row.try_get("torrent_extension")?,
+                    files_count: decode_optional_u32(
+                        "torrent_files_count",
+                        row.try_get("torrent_files_count")?,
+                    )?,
+                    files_data: if options.files_data {
+                        row.try_get("torrent_files_data")?
+                    } else {
+                        None
+                    },
+                    file_extensions,
+                })
+            } else {
+                None
+            };
+
+            let content_type = decode_content_type(row.try_get("content_type_value")?)?;
+            let content_source: Option<String> = row.try_get("content_source_value")?;
+            let content_id: Option<String> = row.try_get("content_id_value")?;
+            let content_title: Option<String> = row.try_get("content_title")?;
+            let content = match (content_type, content_source, content_id, content_title) {
+                (Some(content_type), Some(source), Some(id), Some(title)) if !id.is_empty() => {
+                    Some(Content {
+                        content_type,
+                        source,
+                        id,
+                        title,
+                        release_year: decode_optional_u32(
+                            "content_release_year",
+                            row.try_get("content_release_year")?,
+                        )?,
+                        original_language: row.try_get("content_original_language")?,
+                        original_title: row.try_get("content_original_title")?,
+                        overview: row.try_get("content_overview")?,
+                        runtime: decode_optional_u32(
+                            "content_runtime",
+                            row.try_get("content_runtime")?,
+                        )?,
+                        popularity: row.try_get("content_popularity")?,
+                        vote_average: row.try_get("content_vote_average")?,
+                        vote_count: decode_optional_u32(
+                            "content_vote_count",
+                            row.try_get("content_vote_count")?,
+                        )?,
+                    })
+                }
+                _ => None,
+            };
             hydration.insert(
                 id,
                 Hydration {
-                    name: row.try_get("name")?,
+                    name: torrent_name,
                     info_hash_v1: decode_fixed_hash::<20>("info_hash_v1", info_hash_v1)?,
                     info_hash_v2: decode_fixed_hash::<32>("info_hash_v2", info_hash_v2)?,
                     release_year: release_year.filter(|year| *year != 0),
@@ -214,17 +341,133 @@ impl SearchQuery {
                     tmdb_id: row.try_get("tmdb_id")?,
                     seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
                     leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
+                    torrent_content: Some(torrent_content),
+                    torrent_content_video_modifier: row.try_get("tc_video_modifier")?,
+                    torrent_content_created_at: row.try_get("tc_created_at")?,
+                    torrent_content_updated_at: row.try_get("tc_updated_at")?,
+                    torrent,
+                    torrent_created_at: row
+                        .try_get::<Option<i64>, _>("torrent_created_at")?
+                        .unwrap_or(0),
+                    torrent_updated_at: row
+                        .try_get::<Option<i64>, _>("torrent_updated_at")?
+                        .unwrap_or(0),
+                    torrent_meta_version: decode_optional_u16(
+                        "torrent_meta_version",
+                        row.try_get("torrent_meta_version")?,
+                    )?,
+                    content,
                 },
             );
+        }
+
+        let info_hashes: Vec<Vec<u8>> = ordered
+            .iter()
+            .map(|row| row.info_hash.as_slice().to_vec())
+            .collect();
+        let source_rows = sqlx::query(sqlx::AssertSqlSafe(TORRENT_SOURCES_BY_INFO_HASH_SQL))
+            .bind(&info_hashes)
+            .fetch_all(pool)
+            .await?;
+        let mut sources_by_hash: std::collections::HashMap<InfoHash, Vec<TorrentSourceInfo>> =
+            std::collections::HashMap::new();
+        for source_row in source_rows {
+            let raw_info_hash: Vec<u8> = source_row.try_get("info_hash")?;
+            let info_hash = decode_info_hash(&raw_info_hash)?;
+            sources_by_hash
+                .entry(info_hash)
+                .or_default()
+                .push(TorrentSourceInfo {
+                    key: source_row.try_get("source")?,
+                    name: source_row
+                        .try_get::<Option<String>, _>("source_name")?
+                        .unwrap_or_default(),
+                    import_id: source_row.try_get("import_id")?,
+                    seeders: decode_optional_u32(
+                        "source_seeders",
+                        source_row.try_get("source_seeders")?,
+                    )?,
+                    leechers: decode_optional_u32(
+                        "source_leechers",
+                        source_row.try_get("source_leechers")?,
+                    )?,
+                    published_at: source_row.try_get("source_published_at")?,
+                    seen_count: decode_u32(
+                        "source_seen_count",
+                        source_row.try_get("source_seen_count")?,
+                    )?,
+                    first_seen_at: source_row.try_get("source_created_at")?,
+                    last_seen_at: source_row.try_get("source_updated_at")?,
+                });
+        }
+
+        let tag_rows = sqlx::query(sqlx::AssertSqlSafe(TORRENT_TAGS_BY_INFO_HASH_SQL))
+            .bind(&info_hashes)
+            .fetch_all(pool)
+            .await?;
+        let mut tags_by_hash: std::collections::HashMap<InfoHash, Vec<String>> =
+            std::collections::HashMap::new();
+        for tag_row in tag_rows {
+            let raw_info_hash: Vec<u8> = tag_row.try_get("info_hash")?;
+            tags_by_hash
+                .entry(decode_info_hash(&raw_info_hash)?)
+                .or_default()
+                .push(tag_row.try_get("name")?);
+        }
+        for tags in tags_by_hash.values_mut() {
+            tags.sort_by(|left, right| natural_cmp(left, right));
         }
 
         // Merge preserving query-1 order.
         let mut items = Vec::with_capacity(ordered.len());
         for row in ordered {
             let h = hydration.remove(&row.id).unwrap_or_default();
+            let name = h.name.clone().unwrap_or_default();
+            // A torrent can have multiple torrent_content rows, so every row
+            // sharing an info hash gets the same keyed association preload.
+            let torrent_sources = sources_by_hash
+                .get(&row.info_hash)
+                .cloned()
+                .unwrap_or_default();
+            let torrent_tags = tags_by_hash
+                .get(&row.info_hash)
+                .cloned()
+                .unwrap_or_default();
+            let (dht_seen_count, dht_first_seen_at, dht_last_seen_at) =
+                dht_seen_stats(&torrent_sources);
+            let content = h.content;
+            let title = derive_title(&name, content.as_ref(), &row.episodes);
+            let torrent_content = h.torrent_content.unwrap_or_else(|| TorrentContent {
+                id: row.id.clone(),
+                info_hash: row.info_hash,
+                content_type: row.content_type,
+                content_source: None,
+                content_id: None,
+                languages: Vec::new(),
+                video_resolution: row.video_resolution.map(|value| value.as_str().to_owned()),
+                video_source: None,
+                video_codec: row.video_codec.clone(),
+                release_group: row.release_group.clone(),
+                seeders: None,
+                leechers: None,
+                published_at: row.published_at,
+                size: row.size,
+                files_count: row.files_count,
+            });
+            let torrent = h.torrent.unwrap_or_else(|| Torrent {
+                info_hash: row.info_hash,
+                name: name.clone(),
+                size: row.size,
+                private: false,
+                files_status: FilesStatus::NoInfo,
+                extension: None,
+                files_count: row.files_count,
+                files_data: None,
+                file_extensions: Vec::new(),
+            });
             items.push(SearchResultItem {
                 info_hash: row.info_hash,
-                name: h.name.unwrap_or_default(),
+                name,
                 size: row.size,
                 content_type: row.content_type,
                 published_at: row.published_at,
@@ -241,6 +484,22 @@ impl SearchQuery {
                 tmdb_id: h.tmdb_id,
                 info_hash_v1: h.info_hash_v1,
                 info_hash_v2: h.info_hash_v2,
+                torrent_content,
+                torrent_content_video_modifier: h.torrent_content_video_modifier,
+                torrent_content_created_at: h.torrent_content_created_at,
+                torrent_content_updated_at: h.torrent_content_updated_at,
+                torrent,
+                torrent_created_at: h.torrent_created_at,
+                torrent_updated_at: h.torrent_updated_at,
+                torrent_meta_version: h.torrent_meta_version,
+                torrent_sources,
+                torrent_tags,
+                content,
+                title,
+                dht_seen_count,
+                dht_first_seen_at,
+                dht_last_seen_at,
+                query_string_rank: row.query_string_rank,
             });
         }
         Ok(items)
@@ -252,7 +511,26 @@ impl SearchQuery {
                 "hydration requires SQL produced by build_query".to_owned(),
             )
         })?;
-        Ok(format!("{ORDERING_SELECT}{suffix}"))
+        let ordering_select = self.query_string_rank_placeholder().map_or_else(
+            || ORDERING_SELECT.to_owned(),
+            |placeholder| {
+                ORDERING_SELECT.replacen(
+                    "\nFROM torrent_contents",
+                    &format!(
+                        ",\n       ts_rank_cd(torrent_contents.tsv, ${placeholder}::tsquery) AS query_string_rank\nFROM torrent_contents"
+                    ),
+                    1,
+                )
+            },
+        );
+        Ok(format!("{ordering_select}{suffix}"))
+    }
+
+    fn query_string_rank_placeholder(&self) -> Option<usize> {
+        self.binds
+            .iter()
+            .position(|bind| matches!(bind, Bind::Tsquery(_)))
+            .map(|index| index + 1)
     }
 }
 
@@ -354,7 +632,88 @@ const INNER_JOIN_TORRENTS: &str =
     "\nINNER JOIN torrents ON torrent_contents.info_hash = torrents.info_hash";
 const LEFT_JOIN_CONTENT: &str = "\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id";
 const ORDERING_SELECT: &str = "SELECT torrent_contents.id AS id,\n       torrent_contents.info_hash AS info_hash,\n       torrent_contents.size AS size,\n       torrent_contents.content_type AS content_type,\n       floor(EXTRACT(EPOCH FROM torrent_contents.published_at))::bigint AS published_at,\n       torrent_contents.files_count::bigint AS files_count,\n       torrent_contents.video_resolution AS video_resolution,\n       torrent_contents.video_3d AS video_3d,\n       torrent_contents.video_codec AS video_codec,\n       torrent_contents.release_group AS release_group,\n       COALESCE(torrent_contents.episodes, '{}'::jsonb) AS episodes\nFROM torrent_contents";
-const HYDRATION_BY_ID_SQL: &str = "SELECT torrent_contents.id AS id,\n       torrents.name AS name,\n       torrents.info_hash_v1 AS info_hash_v1,\n       torrents.info_hash_v2 AS info_hash_v2,\n       NULLIF(content.release_year, 0) AS release_year,\n       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,\n       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,\n       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,\n       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers\nFROM torrent_contents\nLEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nLEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'\nLEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'\nWHERE torrent_contents.id = ANY($1::text[])";
+const HYDRATION_SELECT: &str = r#"SELECT torrent_contents.id AS id,
+       torrent_contents.info_hash AS tc_info_hash,
+       torrent_contents.content_type::text AS tc_content_type,
+       torrent_contents.content_source AS tc_content_source,
+       torrent_contents.content_id AS tc_content_id,
+       COALESCE(torrent_contents.languages, '[]'::jsonb) AS tc_languages,
+       torrent_contents.video_resolution::text AS tc_video_resolution,
+       torrent_contents.video_source::text AS tc_video_source,
+       torrent_contents.video_codec::text AS tc_video_codec,
+       torrent_contents.video_modifier::text AS tc_video_modifier,
+       torrent_contents.release_group AS tc_release_group,
+       floor(EXTRACT(EPOCH FROM torrent_contents.created_at))::bigint AS tc_created_at,
+       floor(EXTRACT(EPOCH FROM torrent_contents.updated_at))::bigint AS tc_updated_at,
+       torrent_contents.seeders::bigint AS tc_seeders,
+       torrent_contents.leechers::bigint AS tc_leechers,
+       floor(EXTRACT(EPOCH FROM torrent_contents.published_at))::bigint AS tc_published_at,
+       torrent_contents.size::bigint AS tc_size,
+       torrent_contents.files_count::bigint AS tc_files_count,
+       torrents.name AS name,
+       torrents.size::bigint AS torrent_size,
+       torrents.private AS torrent_private,
+       floor(EXTRACT(EPOCH FROM torrents.created_at))::bigint AS torrent_created_at,
+       floor(EXTRACT(EPOCH FROM torrents.updated_at))::bigint AS torrent_updated_at,
+       torrents.files_status::text AS torrent_files_status,
+       torrents.extension AS torrent_extension,
+       torrents.files_count::bigint AS torrent_files_count,
+       COALESCE(torrents.file_extensions, '[]'::jsonb) AS torrent_file_extensions,
+       torrents.info_hash_v1 AS info_hash_v1,
+       torrents.info_hash_v2 AS info_hash_v2,
+       torrents.meta_version::bigint AS torrent_meta_version,
+       content.type::text AS content_type_value,
+       content.source AS content_source_value,
+       content.id AS content_id_value,
+       content.title AS content_title,
+       NULLIF(content.release_year, 0)::bigint AS content_release_year,
+       content.original_language::text AS content_original_language,
+       content.original_title AS content_original_title,
+       content.overview AS content_overview,
+       content.runtime::bigint AS content_runtime,
+       content.popularity::real AS content_popularity,
+       content.vote_average::real AS content_vote_average,
+       content.vote_count::bigint AS content_vote_count,
+       NULLIF(content.release_year, 0) AS release_year,
+       CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,
+       CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,
+       (SELECT max(s.seeders)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS seeders,
+       (SELECT max(s.leechers)::bigint FROM torrents_torrent_sources s WHERE s.info_hash = torrent_contents.info_hash) AS leechers"#;
+const HYDRATION_FROM: &str = r#"
+FROM torrent_contents
+LEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash
+LEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id
+LEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'
+LEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'
+WHERE torrent_contents.id = ANY($1::text[])"#;
+const TORRENT_SOURCES_BY_INFO_HASH_SQL: &str = r#"SELECT s.source AS source,
+       s.info_hash AS info_hash,
+       s.import_id AS import_id,
+       s.seeders::bigint AS source_seeders,
+       s.leechers::bigint AS source_leechers,
+       floor(EXTRACT(EPOCH FROM s.published_at))::bigint AS source_published_at,
+       floor(EXTRACT(EPOCH FROM s.created_at))::bigint AS source_created_at,
+       floor(EXTRACT(EPOCH FROM s.updated_at))::bigint AS source_updated_at,
+       s.seen_count::bigint AS source_seen_count,
+       torrent_sources.name AS source_name
+FROM torrents_torrent_sources s
+LEFT JOIN torrent_sources ON torrent_sources.key = s.source
+WHERE s.info_hash = ANY($1::bytea[])
+ORDER BY s.info_hash, s.source"#;
+
+const TORRENT_TAGS_BY_INFO_HASH_SQL: &str = r#"SELECT info_hash, name
+FROM torrent_tags
+WHERE info_hash = ANY($1::bytea[])
+ORDER BY info_hash, name"#;
+
+fn hydration_by_id_sql(options: HydrateOptions) -> String {
+    let files_column = if options.files_data {
+        ",\n       torrents.files_data AS torrent_files_data"
+    } else {
+        ""
+    };
+    format!("{HYDRATION_SELECT}{files_column}{HYDRATION_FROM}")
+}
 
 #[derive(Default)]
 pub(crate) struct BuildState {
@@ -1181,6 +1540,20 @@ fn decode_optional_u32(column: &str, value: Option<i64>) -> Result<Option<u32>> 
         .transpose()
 }
 
+fn decode_u32(column: &str, value: i64) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| decode_error(format!("{column}: out-of-range bigint value {value}")))
+}
+
+fn decode_optional_u16(column: &str, value: Option<i64>) -> Result<Option<u16>> {
+    value
+        .map(|value| {
+            u16::try_from(value)
+                .map_err(|_| decode_error(format!("{column}: out-of-range bigint value {value}")))
+        })
+        .transpose()
+}
+
 fn decode_error(message: String) -> SearchQueryError {
     SearchQueryError::Db(sqlx::Error::Decode(Box::new(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -1395,6 +1768,23 @@ mod tests {
         assert!(!sql.contains("LEFT JOIN torrents"));
         assert!(!sql.contains("SELECT max("));
         assert!(sql.contains("\nLIMIT 1"));
+        assert!(!sql.contains("query_string_rank"));
+    }
+
+    #[test]
+    fn ordering_sql_projects_rank_only_for_tsquery() {
+        let query = build_query(
+            &TorznabSearchParams::new(1)
+                .with_query("matrix")
+                .with_order(TorrentContentOrder::relevance_desc()),
+        )
+        .unwrap();
+        let sql = query.ordering_sql().unwrap();
+
+        assert!(sql.contains("ts_rank_cd(torrent_contents.tsv, $1::tsquery) AS query_string_rank"));
+        assert!(!sql.contains("LEFT JOIN torrents"));
+        assert!(!sql.contains("LEFT JOIN content"));
+        assert!(!sql.contains("SELECT max("));
     }
 
     #[test]
@@ -1416,15 +1806,52 @@ mod tests {
 
     #[test]
     fn hydration_by_id_sql_shape() {
-        assert!(HYDRATION_BY_ID_SQL.contains("LEFT JOIN torrents"));
-        assert!(HYDRATION_BY_ID_SQL.contains("LEFT JOIN content ON"));
-        assert!(HYDRATION_BY_ID_SQL.contains("content_attributes ca_imdb"));
-        assert!(HYDRATION_BY_ID_SQL.contains("content_attributes ca_tmdb"));
-        assert!(HYDRATION_BY_ID_SQL.contains("SELECT max(s.seeders)"));
-        assert!(HYDRATION_BY_ID_SQL.contains("SELECT max(s.leechers)"));
-        assert!(HYDRATION_BY_ID_SQL.contains("torrent_contents.id = ANY($1::text[])"));
-        assert!(!HYDRATION_BY_ID_SQL.contains("ORDER BY"));
-        assert!(!HYDRATION_BY_ID_SQL.contains("LIMIT"));
+        let sql = hydration_by_id_sql(HydrateOptions::default());
+        assert!(sql.contains("LEFT JOIN torrents"));
+        assert!(sql.contains("LEFT JOIN content ON"));
+        assert!(sql.contains("content_attributes ca_imdb"));
+        assert!(sql.contains("content_attributes ca_tmdb"));
+        assert!(sql.contains("SELECT max(s.seeders)"));
+        assert!(sql.contains("SELECT max(s.leechers)"));
+        assert!(sql.contains("torrent_contents.id = ANY($1::text[])"));
+        assert!(sql.contains("torrent_contents.languages"));
+        assert!(sql.contains("torrent_contents.video_source"));
+        assert!(sql.contains("torrent_contents.video_modifier"));
+        assert!(sql.contains("torrents.file_extensions"));
+        assert!(sql.contains("torrents.meta_version"));
+        assert!(sql.contains("content.original_language"));
+        assert!(sql.contains("content.popularity::real"));
+        assert!(sql.contains("content.vote_average::real"));
+        assert!(sql.contains("content.vote_average"));
+        assert!(!sql.contains("torrent_files_data"));
+        assert!(!sql.contains("ORDER BY"));
+        assert!(!sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn files_data_is_gated_to_id_keyed_hydration() {
+        let default_sql = hydration_by_id_sql(HydrateOptions::default());
+        let files_sql = hydration_by_id_sql(HydrateOptions { files_data: true });
+
+        assert!(!default_sql.contains("torrents.files_data"));
+        assert!(files_sql.contains("torrents.files_data AS torrent_files_data"));
+        assert!(!ORDERING_SELECT.contains("files_data"));
+        assert!(!TORRENT_SOURCES_BY_INFO_HASH_SQL.contains("files_data"));
+        assert!(!TORRENT_TAGS_BY_INFO_HASH_SQL.contains("files_data"));
+    }
+
+    #[test]
+    fn source_and_tag_hydration_are_info_hash_keyed() {
+        assert!(TORRENT_SOURCES_BY_INFO_HASH_SQL.contains("s.info_hash = ANY($1::bytea[])"));
+        assert!(TORRENT_SOURCES_BY_INFO_HASH_SQL.contains("LEFT JOIN torrent_sources"));
+        assert!(TORRENT_TAGS_BY_INFO_HASH_SQL.contains("info_hash = ANY($1::bytea[])"));
+    }
+
+    #[test]
+    fn tag_names_follow_go_natural_order() {
+        let mut tags = ["tag10", "tag2", "tag1"];
+        tags.sort_by(|left, right| natural_cmp(left, right));
+        assert_eq!(tags, ["tag1", "tag2", "tag10"]);
     }
 
     #[test]

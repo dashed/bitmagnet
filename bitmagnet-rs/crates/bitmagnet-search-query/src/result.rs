@@ -14,7 +14,8 @@
 
 use crate::aggregations::Aggregations;
 use crate::criteria::{Episodes, Video3D, VideoResolution};
-use bitmagnet_model::{ContentType, InfoHash};
+use bitmagnet_model::{Content, ContentType, FilesStatus, InfoHash, Torrent, TorrentContent};
+use serde::{Deserialize, Serialize};
 
 /// The GraphQL-surface search result.
 ///
@@ -22,7 +23,7 @@ use bitmagnet_model::{ContentType, InfoHash};
 /// `internal/database/query/query.go` plus gqlmodel
 /// `TorrentContentSearchResult`. Lane S S3-S5 fill the count, pagination, and
 /// aggregation fields around the separately hydrated membership-query rows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchResult {
     /// Exact or budget-estimated total row count requested by `WithTotalCount`.
     pub total_count: u64,
@@ -38,7 +39,8 @@ pub struct SearchResult {
 }
 
 /// A single search result row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct SearchResultItem {
     /// The torrent info hash — the parity key and the Torznab `guid` /
@@ -54,9 +56,9 @@ pub struct SearchResultItem {
     /// `EXTRACT(EPOCH ...)::bigint` house style in `bitmagnet-db`. Lane T
     /// formats it as the RSS date.
     pub published_at: i64,
-    /// `torrent_contents.seeders`.
+    /// Maximum source-row seeders, preserved for Torznab byte parity.
     pub seeders: Option<u32>,
-    /// `torrent_contents.leechers`.
+    /// Maximum source-row leechers, preserved for Torznab byte parity.
     pub leechers: Option<u32>,
     /// `torrent_contents.files_count`.
     pub files_count: Option<u32>,
@@ -85,6 +87,74 @@ pub struct SearchResultItem {
     /// `torrents.info_hash_v2` (32-byte SHA-256), if present. Drives the
     /// `xt=urn:btmh:1220<hex>` multihash magnet topic for v2/hybrid torrents.
     pub info_hash_v2: Option<[u8; 32]>,
+    /// The scalar `torrent_contents` row used by Go's embedded
+    /// `model.TorrentContent`. Fields not represented by the shared Rust model
+    /// remain available on this item (episodes/video 3D above and the explicit
+    /// supplemental fields below).
+    pub torrent_content: TorrentContent,
+    /// `torrent_contents.video_modifier`, supplemental to [`TorrentContent`].
+    pub torrent_content_video_modifier: Option<String>,
+    /// `torrent_contents.created_at` as Unix seconds, supplemental to
+    /// [`TorrentContent`].
+    pub torrent_content_created_at: i64,
+    /// `torrent_contents.updated_at` as Unix seconds, supplemental to
+    /// [`TorrentContent`].
+    pub torrent_content_updated_at: i64,
+    /// The scalar `torrents` row hydrated by Go's
+    /// `HydrateTorrentContentTorrent`. `files_data` is `None` unless
+    /// [`crate::HydrateOptions::files_data`] is enabled.
+    pub torrent: Torrent,
+    /// `torrents.created_at` as Unix seconds, supplemental to [`Torrent`].
+    pub torrent_created_at: i64,
+    /// `torrents.updated_at` as Unix seconds, supplemental to [`Torrent`].
+    pub torrent_updated_at: i64,
+    /// `torrents.meta_version`, supplemental to [`Torrent`].
+    pub torrent_meta_version: Option<u16>,
+    /// Source association rows normally preloaded into Go `Torrent.Sources`.
+    pub torrent_sources: Vec<TorrentSourceInfo>,
+    /// Tag names normally preloaded into Go `Torrent.Tags`.
+    pub torrent_tags: Vec<String>,
+    /// Hydrated content metadata. `None` when the content join has no row,
+    /// matching gqlmodel's `if item.Content.ID != ""` guard.
+    pub content: Option<Content>,
+    /// Go `TorrentContent.Title()` derivation.
+    pub title: String,
+    /// DHT source observation count (Go `DHTSeenStatsFromTorrent`).
+    pub dht_seen_count: i32,
+    /// DHT source `created_at` as Unix seconds.
+    pub dht_first_seen_at: Option<i64>,
+    /// DHT source `updated_at` as Unix seconds.
+    pub dht_last_seen_at: Option<i64>,
+    /// `ts_rank_cd` from the lean membership query, or `0.0` for browse
+    /// queries without a tsquery.
+    pub query_string_rank: f64,
+}
+
+/// Crate-local equivalent of gqlmodel `TorrentSourceInfo`.
+///
+/// `bitmagnet_model::Torrent` intentionally omits GORM associations, so the
+/// query crate carries the keyed source preload separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentSourceInfo {
+    /// `torrents_torrent_sources.source`.
+    pub key: String,
+    /// Human-readable `torrent_sources.name`.
+    pub name: String,
+    /// Import identifier, when the source supplied one.
+    pub import_id: Option<String>,
+    /// Source-specific seeder count.
+    pub seeders: Option<u32>,
+    /// Source-specific leecher count.
+    pub leechers: Option<u32>,
+    /// Source-specific publication time as Unix seconds.
+    pub published_at: Option<i64>,
+    /// Number of times this source has observed the torrent.
+    pub seen_count: u32,
+    /// Source row `created_at` as Unix seconds.
+    pub first_seen_at: i64,
+    /// Source row `updated_at` as Unix seconds.
+    pub last_seen_at: i64,
 }
 
 impl SearchResultItem {
@@ -99,9 +169,38 @@ impl SearchResultItem {
     #[doc(hidden)]
     #[must_use]
     pub fn for_test(info_hash: InfoHash, name: impl Into<String>, size: u64) -> Self {
+        let name = name.into();
+        let torrent = Torrent {
+            info_hash,
+            name: name.clone(),
+            size,
+            private: false,
+            files_status: FilesStatus::NoInfo,
+            extension: None,
+            files_count: None,
+            files_data: None,
+            file_extensions: Vec::new(),
+        };
+        let torrent_content = TorrentContent {
+            id: String::new(),
+            info_hash,
+            content_type: None,
+            content_source: None,
+            content_id: None,
+            languages: Vec::new(),
+            video_resolution: None,
+            video_source: None,
+            video_codec: None,
+            release_group: None,
+            seeders: None,
+            leechers: None,
+            published_at: 0,
+            size,
+            files_count: None,
+        };
         Self {
             info_hash,
-            name: name.into(),
+            name: name.clone(),
             size,
             content_type: None,
             published_at: 0,
@@ -118,6 +217,206 @@ impl SearchResultItem {
             tmdb_id: None,
             info_hash_v1: None,
             info_hash_v2: None,
+            torrent_content,
+            torrent_content_video_modifier: None,
+            torrent_content_created_at: 0,
+            torrent_content_updated_at: 0,
+            torrent,
+            torrent_created_at: 0,
+            torrent_updated_at: 0,
+            torrent_meta_version: None,
+            torrent_sources: Vec::new(),
+            torrent_tags: Vec::new(),
+            content: None,
+            title: name,
+            dht_seen_count: 0,
+            dht_first_seen_at: None,
+            dht_last_seen_at: None,
+            query_string_rank: 0.0,
         }
+    }
+}
+
+pub(crate) fn derive_title(name: &str, content: Option<&Content>, episodes: &Episodes) -> String {
+    let Some(content) =
+        content.filter(|content| !content.id.is_empty() && !content.title.is_empty())
+    else {
+        return name.to_owned();
+    };
+
+    let mut parts = vec![content.title.clone()];
+    if let Some(original_title) = content
+        .original_title
+        .as_deref()
+        .filter(|original_title| *original_title != content.title)
+    {
+        parts.push(format!("/ {original_title}"));
+    }
+    if let Some(release_year) = content.release_year {
+        parts.push(format!("({release_year})"));
+    }
+    if !episodes.is_empty() {
+        parts.push(episodes_label(episodes));
+    }
+    parts.join(" ")
+}
+
+pub(crate) fn dht_seen_stats(sources: &[TorrentSourceInfo]) -> (i32, Option<i64>, Option<i64>) {
+    sources
+        .iter()
+        .find(|source| source.key == "dht")
+        .map_or((0, None, None), |source| {
+            (
+                i32::try_from(source.seen_count).unwrap_or(i32::MAX),
+                Some(source.first_seen_at),
+                Some(source.last_seen_at),
+            )
+        })
+}
+
+fn episodes_label(episodes: &Episodes) -> String {
+    let whole_seasons: Vec<i32> = episodes
+        .0
+        .iter()
+        .filter_map(|(season, values)| values.is_empty().then_some(*season))
+        .collect();
+    let mut whole_ranges = std::collections::BTreeMap::new();
+    for (start, end) in contiguous_ranges(&whole_seasons) {
+        whole_ranges.insert(start, format!("S{}", format_range(start, end)));
+    }
+
+    episodes
+        .0
+        .iter()
+        .filter_map(|(season, values)| {
+            if values.is_empty() {
+                whole_ranges.get(season).cloned()
+            } else {
+                let mut values = values.clone();
+                values.sort_unstable();
+                values.dedup();
+                let episode_parts = contiguous_ranges(&values)
+                    .into_iter()
+                    .map(|(start, end)| format!("E{}", format_range(start, end)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("S{season:02}{episode_parts}"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn contiguous_ranges(values: &[i32]) -> Vec<(i32, i32)> {
+    let mut ranges = Vec::new();
+    let Some(&first) = values.first() else {
+        return ranges;
+    };
+    let mut start = first;
+    let mut end = first;
+    for &value in &values[1..] {
+        if value == end + 1 {
+            end = value;
+        } else {
+            ranges.push((start, end));
+            start = value;
+            end = value;
+        }
+    }
+    ranges.push((start, end));
+    ranges
+}
+
+fn format_range(start: i32, end: i32) -> String {
+    if start == end {
+        format!("{start:02}")
+    } else {
+        format!("{start:02}-{end:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn content(title: &str) -> Content {
+        Content {
+            content_type: ContentType::TvShow,
+            source: "tmdb".to_owned(),
+            id: "123".to_owned(),
+            title: title.to_owned(),
+            release_year: Some(2024),
+            original_language: Some("ja".to_owned()),
+            original_title: Some("Original".to_owned()),
+            overview: None,
+            runtime: Some(24),
+            popularity: Some(1.5),
+            vote_average: Some(8.0),
+            vote_count: Some(100),
+        }
+    }
+
+    #[test]
+    fn title_matches_go_content_and_torrent_fallbacks() {
+        let episodes = Episodes::new()
+            .add_season(1)
+            .add_season(2)
+            .add_episode(4, 3)
+            .add_episode(4, 4)
+            .add_episode(4, 6);
+        assert_eq!(
+            derive_title("raw torrent", Some(&content("Localized")), &episodes),
+            "Localized / Original (2024) S01-02, S04E03-04,E06"
+        );
+        assert_eq!(derive_title("raw torrent", None, &episodes), "raw torrent");
+
+        let mut empty = content("");
+        empty.original_title = None;
+        assert_eq!(
+            derive_title("raw torrent", Some(&empty), &episodes),
+            "raw torrent"
+        );
+    }
+
+    #[test]
+    fn dht_stats_use_only_dht_source() {
+        let sources = vec![
+            TorrentSourceInfo {
+                key: "tracker".to_owned(),
+                name: "Tracker".to_owned(),
+                import_id: None,
+                seeders: Some(1),
+                leechers: Some(2),
+                published_at: None,
+                seen_count: 99,
+                first_seen_at: 10,
+                last_seen_at: 20,
+            },
+            TorrentSourceInfo {
+                key: "dht".to_owned(),
+                name: "DHT".to_owned(),
+                import_id: None,
+                seeders: None,
+                leechers: None,
+                published_at: None,
+                seen_count: 7,
+                first_seen_at: 30,
+                last_seen_at: 40,
+            },
+        ];
+        assert_eq!(dht_seen_stats(&sources), (7, Some(30), Some(40)));
+    }
+
+    #[test]
+    fn expanded_item_json_round_trips() {
+        let mut item = SearchResultItem::for_test(InfoHash::new([0x11; 20]), "name", 42);
+        item.content = Some(content("Title"));
+        item.title = derive_title(&item.name, item.content.as_ref(), &item.episodes);
+        item.query_string_rank = 0.75;
+        item.torrent_tags = vec!["trusted".to_owned()];
+
+        let encoded = serde_json::to_vec(&item).unwrap();
+        let decoded: SearchResultItem = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, item);
     }
 }
