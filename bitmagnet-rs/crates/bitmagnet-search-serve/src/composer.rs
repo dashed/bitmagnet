@@ -19,14 +19,16 @@ use crate::candidates::{CandidateSource, HealthGate};
 use crate::config::ComposerConfig;
 use crate::filters::{FileRowSort, FileRowsResult, Filters, PathGroup};
 use crate::metrics::{PathsearchMetrics, RouteResult};
-use crate::pg::{Aggregations, PgSearchBackend, QueryOptions, SearchOptions, TorrentContentResult};
+use crate::pg::{
+    empty_result, Aggregations, HydrateOptions, PgSearchBackend, QueryOptions, SearchRequest,
+    SearchResult, SearchResultItem,
+};
 use crate::refine::{files_for_refine, paginate, torrent_matches, RefinePredicate};
 
 /// L3 path candidate composer backed by Lane-S PostgreSQL hydration.
 ///
-/// [`PgSearchBackend`] is the Lane-S adapter seam. The default `lane-s-stub`
-/// feature supplies its temporary option/result types; integration only needs
-/// to re-point that module to Lane S while preserving the two backend methods.
+/// [`PgSearchBackend`] is the real Lane-S adapter seam. Candidate shaping
+/// preserves structured query controls while removing inherited pagination.
 /// The file-count limits are conservative contract bounds, not allocator
 /// acceptance evidence; Rust heap sizing under production-shaped blobs remains
 /// a required load-measurement gate.
@@ -88,6 +90,12 @@ impl Composer {
 
     fn trust_empty(&self) -> bool {
         self.health.as_ref().is_none_or(|gate| gate())
+    }
+
+    fn empty_estimate() -> SearchResult {
+        let mut result = empty_result();
+        result.total_count_is_estimate = true;
+        result
     }
 
     fn candidate_budget(&self, limit: u32, offset: u32) -> u32 {
@@ -248,9 +256,9 @@ impl Composer {
 
     fn ordered_chunk_items(
         &self,
-        mut result: TorrentContentResult,
+        mut result: SearchResult,
         ids: &[InfoHash],
-    ) -> Vec<crate::pg::TorrentContentResultItem> {
+    ) -> Vec<SearchResultItem> {
         let mut ranks = HashMap::with_capacity(ids.len());
         for (rank, id) in ids.iter().copied().enumerate() {
             ranks.entry(id).or_insert(rank);
@@ -266,14 +274,12 @@ impl Composer {
 
     async fn hydrate_chunk(
         &self,
-        options: &SearchOptions,
+        request: &SearchRequest,
         ids: &[InfoHash],
         deadline: Instant,
-    ) -> Result<Vec<crate::pg::TorrentContentResultItem>, RefineCap> {
-        let mut options = options.with_info_hash_in(ids);
-        options.hydrate_files = true;
-        options.with_facets = false;
-        match timeout_at(deadline, self.pg.torrent_content(options)).await {
+    ) -> Result<Vec<SearchResultItem>, RefineCap> {
+        let request = request.for_candidates(ids, HydrateOptions { files_data: true });
+        match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => Ok(self.ordered_chunk_items(result, ids)),
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch candidate hydration failed; falling back to PostgreSQL");
@@ -285,10 +291,10 @@ impl Composer {
 
     fn refine_chunk(
         &self,
-        items: Vec<crate::pg::TorrentContentResultItem>,
+        items: Vec<SearchResultItem>,
         predicate: &RefinePredicate,
         deadline: Instant,
-        refined: &mut Vec<crate::pg::TorrentContentResultItem>,
+        refined: &mut Vec<SearchResultItem>,
         retained_files: &mut u64,
     ) -> Result<RefineCap, ()> {
         let file_cap = u64::from(self.effective_file_cap());
@@ -332,26 +338,25 @@ impl Composer {
 
     async fn refined_aggregations(
         &self,
-        options: &SearchOptions,
-        refined: &[crate::pg::TorrentContentResultItem],
+        request: &SearchRequest,
+        refined: &[SearchResultItem],
         deadline: Instant,
     ) -> Aggregations {
         if refined.is_empty() || Instant::now() >= deadline {
-            return Aggregations::empty();
+            return Aggregations::new();
         }
         let ids: Vec<InfoHash> = refined.iter().map(|item| item.info_hash).collect();
-        let mut options = options.with_info_hash_in(&ids);
-        options.hydrate_files = false;
-        match timeout_at(deadline, self.pg.torrent_content(options)).await {
+        let request = request.for_candidates(&ids, HydrateOptions { files_data: false });
+        match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => result.aggregations,
             Ok(Err(error)) => {
                 if let Some(metrics) = &self.metrics {
                     metrics.inc_refine_agg_error();
                 }
                 tracing::warn!(%error, "pathsearch refined-set aggregation failed; serving without facets");
-                Aggregations::empty()
+                Aggregations::new()
             }
-            Err(_) => Aggregations::empty(),
+            Err(_) => Aggregations::new(),
         }
     }
 
@@ -362,36 +367,30 @@ impl Composer {
         limit: u32,
         offset: u32,
         sorts: Vec<SortBy>,
-    ) -> (TorrentContentResult, bool) {
+    ) -> (SearchResult, bool) {
         let predicate = filters.predicate();
         if predicate.is_empty_substr() || !self.eligible(&filters.query) {
             self.inc_route(RouteResult::Ineligible);
-            return (TorrentContentResult::default(), false);
+            return (empty_result(), false);
         }
         if !self.healthy() {
             self.inc_route(RouteResult::Fallback);
-            return (TorrentContentResult::default(), false);
+            return (empty_result(), false);
         }
         let deadline = self.route_deadline(Instant::now());
         let Some((ids, candidate_total)) = self
             .candidate_ids(&filters, limit, offset, sorts, deadline)
             .await
         else {
-            return (TorrentContentResult::default(), false);
+            return (empty_result(), false);
         };
         if ids.is_empty() {
             return if self.trust_empty() {
                 self.inc_route(RouteResult::Served);
-                (
-                    TorrentContentResult {
-                        total_count_is_estimate: true,
-                        ..TorrentContentResult::default()
-                    },
-                    true,
-                )
+                (Self::empty_estimate(), true)
             } else {
                 self.inc_route(RouteResult::Fallback);
-                (TorrentContentResult::default(), false)
+                (empty_result(), false)
             };
         }
         let counts = match timeout_at(deadline, self.pg.file_counts(&ids)).await {
@@ -399,23 +398,17 @@ impl Composer {
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch file-count probe failed; falling back to PostgreSQL");
                 self.inc_route(RouteResult::Error);
-                return (TorrentContentResult::default(), false);
+                return (empty_result(), false);
             }
             Err(_) => {
                 self.inc_route(RouteResult::Error);
-                return (TorrentContentResult::default(), false);
+                return (empty_result(), false);
             }
         };
         let kept = self.decline_oversized(ids.clone(), &counts);
         if kept.is_empty() {
             self.inc_route(RouteResult::Served);
-            return (
-                TorrentContentResult {
-                    total_count_is_estimate: true,
-                    ..TorrentContentResult::default()
-                },
-                true,
-            );
+            return (Self::empty_estimate(), true);
         }
         let chunks = self.chunk_by_file_budget(kept, &counts);
         let _permit = if chunks.len() > 1 {
@@ -429,13 +422,7 @@ impl Composer {
                     tracing::warn!(
                         "pathsearch refine slot unavailable; serving shed empty estimate"
                     );
-                    return (
-                        TorrentContentResult {
-                            total_count_is_estimate: true,
-                            ..TorrentContentResult::default()
-                        },
-                        true,
-                    );
+                    return (Self::empty_estimate(), true);
                 }
             }
         } else {
@@ -451,7 +438,7 @@ impl Composer {
                 break;
             }
             let items = match self
-                .hydrate_chunk(options.refine_options(), &chunk, deadline)
+                .hydrate_chunk(options.refine_request(), &chunk, deadline)
                 .await
             {
                 Ok(items) => items,
@@ -461,7 +448,7 @@ impl Composer {
                 }
                 Err(_) => {
                     self.inc_route(RouteResult::Error);
-                    return (TorrentContentResult::default(), false);
+                    return (empty_result(), false);
                 }
             };
             match self.refine_chunk(
@@ -478,7 +465,7 @@ impl Composer {
                 }
                 Err(()) => {
                     self.inc_route(RouteResult::Fallback);
-                    return (TorrentContentResult::default(), false);
+                    return (empty_result(), false);
                 }
             }
         }
@@ -513,7 +500,7 @@ impl Composer {
             u64::from(offset).saturating_add(u64::try_from(page.len()).unwrap_or(u64::MAX));
         self.inc_route(RouteResult::Served);
         (
-            TorrentContentResult {
+            SearchResult {
                 items: page,
                 total_count,
                 total_count_is_estimate: true,
@@ -534,7 +521,7 @@ impl SearchServe for Composer {
         limit: u32,
         offset: u32,
         sorts: Vec<SortBy>,
-    ) -> crate::Result<(TorrentContentResult, bool)> {
+    ) -> crate::Result<(SearchResult, bool)> {
         Ok(self
             .compose_torrent_content(filters, options, limit, offset, sorts)
             .await)
@@ -629,7 +616,11 @@ mod tests {
     };
 
     use super::*;
-    use crate::pg::{AggregationItem, TorrentContentResultItem};
+    use bitmagnet_search_query::{
+        AggregationGroup, AggregationItem, FacetLogic, FacetRequest, TorrentContentFacet,
+    };
+
+    use crate::pg::{Criteria, SearchOptions};
 
     struct FakeCandidates {
         response: PathCandidatesResponse,
@@ -686,9 +677,9 @@ mod tests {
     }
 
     struct FakePg {
-        items: Vec<TorrentContentResultItem>,
+        items: Vec<SearchResultItem>,
         counts: HashMap<InfoHash, i64>,
-        calls: Mutex<Vec<SearchOptions>>,
+        calls: Mutex<Vec<SearchRequest>>,
         delayed_ids: HashSet<InfoHash>,
         delay: Duration,
         fail_counts: bool,
@@ -697,7 +688,7 @@ mod tests {
     }
 
     impl FakePg {
-        fn new(items: Vec<TorrentContentResultItem>, counts: HashMap<InfoHash, i64>) -> Self {
+        fn new(items: Vec<SearchResultItem>, counts: HashMap<InfoHash, i64>) -> Self {
             Self {
                 items,
                 counts,
@@ -710,37 +701,32 @@ mod tests {
             }
         }
 
-        fn calls(&self) -> Vec<SearchOptions> {
+        fn calls(&self) -> Vec<SearchRequest> {
             self.calls.lock().expect("calls mutex poisoned").clone()
         }
     }
 
     #[async_trait::async_trait]
     impl PgSearchBackend for FakePg {
-        async fn torrent_content(
-            &self,
-            options: SearchOptions,
-        ) -> crate::Result<TorrentContentResult> {
+        async fn torrent_content(&self, request: SearchRequest) -> crate::Result<SearchResult> {
             let search_call = {
                 let mut calls = self.calls.lock().expect("calls mutex poisoned");
-                calls.push(options.clone());
+                calls.push(request.clone());
                 calls.len()
             };
             if self.fail_search || self.fail_on_search_call == Some(search_call) {
                 return Err(crate::Error::Pg("search failure".into()));
             }
-            if options.hydrate_files
-                && options
-                    .info_hash_in
-                    .iter()
-                    .any(|id| self.delayed_ids.contains(id))
+            let candidate_ids = candidate_ids(&request.options.filter);
+            if request.hydrate.files_data
+                && candidate_ids.iter().any(|id| self.delayed_ids.contains(id))
             {
                 tokio::time::sleep(self.delay).await;
             }
 
             // Deliberately reverse the PG-natural row order: the composer must
             // restore the L3 relevance order before exact refine.
-            let selected: HashSet<InfoHash> = options.info_hash_in.iter().copied().collect();
+            let selected: HashSet<InfoHash> = candidate_ids.iter().copied().collect();
             let mut items: Vec<_> = self
                 .items
                 .iter()
@@ -748,27 +734,36 @@ mod tests {
                 .filter(|item| selected.contains(&item.info_hash))
                 .cloned()
                 .collect();
-            if !options.hydrate_files {
+            if !request.hydrate.files_data {
                 for item in &mut items {
                     item.torrent.files_data = None;
                 }
             }
-            let aggregations = if options.with_facets {
-                Aggregations(BTreeMap::from([(
+            let aggregations = if request.options.facets.iter().any(|facet| facet.aggregate) {
+                Aggregations::from([(
                     "content_type".into(),
-                    vec![AggregationItem {
-                        value: "movie".into(),
-                        label: None,
-                        count: u64::try_from(items.len()).unwrap_or(u64::MAX),
-                    }],
-                )]))
+                    AggregationGroup {
+                        label: "Content type".into(),
+                        logic: FacetLogic::Or,
+                        items: BTreeMap::from([(
+                            "movie".into(),
+                            AggregationItem {
+                                label: "Movie".into(),
+                                count: u64::try_from(items.len()).unwrap_or(u64::MAX),
+                                is_estimate: false,
+                            },
+                        )]),
+                    },
+                )])
             } else {
-                Aggregations::empty()
+                Aggregations::new()
             };
-            Ok(TorrentContentResult {
+            Ok(SearchResult {
                 items,
+                total_count: 0,
+                total_count_is_estimate: false,
+                has_next_page: false,
                 aggregations,
-                ..TorrentContentResult::default()
             })
         }
 
@@ -787,6 +782,27 @@ mod tests {
         InfoHash::new([byte; bitmagnet_model::INFO_HASH_LEN])
     }
 
+    fn candidate_ids(filter: &Option<Criteria>) -> Vec<InfoHash> {
+        fn visit(criteria: &Criteria, out: &mut Vec<InfoHash>) {
+            match criteria {
+                Criteria::TorrentContentInfoHashIn(ids) => out.extend(ids.iter().copied()),
+                Criteria::And(children) | Criteria::Or(children) => {
+                    for child in children {
+                        visit(child, out);
+                    }
+                }
+                Criteria::Not(child) => visit(child, out),
+                _ => {}
+            }
+        }
+
+        let mut ids = Vec::new();
+        if let Some(filter) = filter {
+            visit(filter, &mut ids);
+        }
+        ids
+    }
+
     fn files(count: usize, matches: bool) -> Vec<BlobFile> {
         (0..count)
             .map(|index| BlobFile {
@@ -802,39 +818,44 @@ mod tests {
             .collect()
     }
 
-    fn item(byte: u8, file_count: usize, matches: bool) -> TorrentContentResultItem {
+    fn item(byte: u8, file_count: usize, matches: bool) -> SearchResultItem {
         let info_hash = id(byte);
-        TorrentContentResultItem {
+        let mut item = SearchResultItem::for_test(info_hash, format!("torrent-{byte}"), 100);
+        item.torrent = Torrent {
             info_hash,
-            torrent: Torrent {
-                info_hash,
-                name: format!("torrent-{byte}"),
-                size: 100,
-                private: false,
-                files_status: FilesStatus::Multi,
-                extension: None,
-                files_count: u32::try_from(file_count).ok(),
-                files_data: Some(serialize_files(&files(file_count, matches)).unwrap()),
-                file_extensions: vec!["mkv".into()],
-            },
-            refine_files: Vec::new(),
-        }
+            name: format!("torrent-{byte}"),
+            size: 100,
+            private: false,
+            files_status: FilesStatus::Multi,
+            extension: None,
+            files_count: u32::try_from(file_count).ok(),
+            files_data: Some(serialize_files(&files(file_count, matches)).unwrap()),
+            file_extensions: vec!["mkv".into()],
+        };
+        item.title = format!("preserved-title-{byte}");
+        item
     }
 
     fn query_options() -> QueryOptions {
+        let aggregate_facet = FacetRequest {
+            facet: TorrentContentFacet::ContentType,
+            aggregate: true,
+            logic: None,
+            filter: Default::default(),
+        };
         QueryOptions {
-            combined: SearchOptions {
-                hydrate_files: true,
-                ..SearchOptions::default()
-            },
-            refine: Some(SearchOptions {
-                hydrate_files: true,
-                ..SearchOptions::default()
-            }),
-            agg: SearchOptions {
-                with_facets: true,
-                ..SearchOptions::default()
-            },
+            combined: SearchRequest::new(
+                SearchOptions::default().with_facets([aggregate_facet.clone()]),
+                HydrateOptions { files_data: true },
+            ),
+            refine: Some(SearchRequest::new(
+                SearchOptions::default(),
+                HydrateOptions { files_data: true },
+            )),
+            agg: SearchRequest::new(
+                SearchOptions::default().with_facets([aggregate_facet]),
+                HydrateOptions::default(),
+            ),
         }
     }
 
@@ -845,7 +866,7 @@ mod tests {
         }
     }
 
-    async fn search(composer: &Composer, limit: u32, offset: u32) -> (TorrentContentResult, bool) {
+    async fn search(composer: &Composer, limit: u32, offset: u32) -> (SearchResult, bool) {
         composer
             .torrent_content(
                 Filters {
@@ -875,20 +896,24 @@ mod tests {
         assert!(served);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].info_hash, id(3));
+        assert_eq!(result.items[0].title, "preserved-title-3");
         assert!(result.items[0].torrent.files_data.is_none());
         assert_eq!(result.items[0].refine_files.len(), 1);
         assert_eq!(result.items[0].refine_files[0].path, "inception/part-0.mkv");
         assert_eq!(result.total_count, 2);
         assert!(result.total_count_is_estimate);
         assert!(result.has_next_page);
-        assert_eq!(result.aggregations.0["content_type"][0].count, 2);
+        assert_eq!(result.aggregations["content_type"].items["movie"].count, 2);
         let calls = pg.calls();
         assert_eq!(calls.len(), 2);
-        assert!(calls[0].hydrate_files);
-        assert!(!calls[0].with_facets);
-        assert!(!calls[1].hydrate_files);
-        assert!(calls[1].with_facets);
-        assert_eq!(calls[1].info_hash_in, vec![id(3), id(2)]);
+        assert!(calls[0].hydrate.files_data);
+        assert!(
+            calls[0].options.facets.is_empty(),
+            "even a one-chunk route must use refine, not candidate-set combined facets"
+        );
+        assert!(!calls[1].hydrate.files_data);
+        assert!(calls[1].options.facets[0].aggregate);
+        assert_eq!(candidate_ids(&calls[1].options.filter), vec![id(3), id(2)]);
     }
 
     #[test]
@@ -976,15 +1001,15 @@ mod tests {
         let hydrate_calls: Vec<_> = pg
             .calls()
             .into_iter()
-            .filter(|call| call.hydrate_files)
+            .filter(|call| call.hydrate.files_data)
             .collect();
         assert_eq!(hydrate_calls.len(), 2);
         assert!(hydrate_calls
             .iter()
-            .all(|call| call.info_hash_in.len() == 1));
+            .all(|call| candidate_ids(&call.options.filter).len() == 1));
         assert!(hydrate_calls
             .iter()
-            .all(|call| !call.info_hash_in.contains(&id(1))));
+            .all(|call| !candidate_ids(&call.options.filter).contains(&id(1))));
         assert_eq!(metrics.refine_declined_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
@@ -1009,8 +1034,11 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].info_hash, id(1));
         let calls = pg.calls();
-        assert_eq!(calls.last().unwrap().info_hash_in, vec![id(1)]);
-        assert!(!calls.last().unwrap().hydrate_files);
+        assert_eq!(
+            candidate_ids(&calls.last().unwrap().options.filter),
+            vec![id(1)]
+        );
+        assert!(!calls.last().unwrap().hydrate.files_data);
         assert_eq!(metrics.retained_capped_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
@@ -1097,7 +1125,7 @@ mod tests {
 
         assert!(served);
         assert_eq!(result.items.len(), 1);
-        assert!(result.aggregations.0.is_empty());
+        assert!(result.aggregations.is_empty());
         assert_eq!(metrics.agg_error_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
         assert_eq!(metrics.route_count(RouteResult::Error), 0);
@@ -1165,7 +1193,7 @@ mod tests {
         let hydrate_calls = pg
             .calls()
             .into_iter()
-            .filter(|call| call.hydrate_files)
+            .filter(|call| call.hydrate.files_data)
             .collect::<Vec<_>>();
         assert_eq!(
             hydrate_calls.len(),
@@ -1173,21 +1201,18 @@ mod tests {
             "four chunks fill the retained cap and only one bounded lookahead chunk may decode"
         );
         for call in &hydrate_calls {
-            let files = call
-                .info_hash_in
-                .iter()
-                .map(|info_hash| counts[info_hash])
-                .sum::<i64>();
+            let ids = candidate_ids(&call.options.filter);
+            let files = ids.iter().map(|info_hash| counts[info_hash]).sum::<i64>();
             assert!(
                 files <= i64::from(CHUNK_FILE_BUDGET),
                 "one hydration decoded {files} files above the chunk budget"
             );
-            assert!(call.info_hash_in.len() <= 5);
+            assert!(ids.len() <= 5);
         }
         assert_eq!(
             hydrate_calls
                 .iter()
-                .map(|call| call.info_hash_in.len())
+                .map(|call| candidate_ids(&call.options.filter).len())
                 .sum::<usize>(),
             25,
             "the route must stop after one bounded lookahead chunk, not refine all 200 candidates"

@@ -49,7 +49,7 @@ pub struct FileRow {
     /// File size in bytes.
     pub size: u64,
     /// Hydrated torrent-content row associated with this file.
-    pub torrent_content: crate::pg::TorrentContentResultItem,
+    pub torrent_content: crate::pg::SearchResultItem,
 }
 
 /// File-search-shaped result produced by the future pathsearch composer.

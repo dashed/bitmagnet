@@ -4,17 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
-[features]
-default = ["lane-s-stub"]
-lane-s-stub = []
-
 [dependencies]
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-proto = { path = "../bitmagnet-proto" }
+bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 async-trait = "0.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 prometheus = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport"] }
