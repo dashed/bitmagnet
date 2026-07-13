@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the Phase-2 PostgreSQL-backed GraphQL read service.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.graphql \
+#     -t bitmagnet-graphql bitmagnet-rs
+#
+# Builder and runtime use Debian bookworm so the linked glibc matches. The
+# runtime is deliberately small and non-root; Kubernetes supplies every
+# endpoint and credential through environment variables.
+
+# ---- builder ----------------------------------------------------------------
+FROM rust:1.95-slim-bookworm AS builder
+
+# bitmagnet-graphql composes the generated L2/L3 tonic clients, so the shared
+# bitmagnet-proto build script requires protoc even though this image serves
+# HTTP rather than gRPC.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the complete Rust workspace; .dockerignore excludes target/VCS noise.
+COPY . .
+
+RUN cargo build --locked --release -p bitmagnet-graphql
+
+# ---- runtime ----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# SQLx and the federated-health HTTP client use rustls; only CA roots are
+# needed. No compiler, shell tooling, or database migration binary is shipped.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
+
+COPY --from=builder /build/target/release/bitmagnet-graphql /usr/local/bin/bitmagnet-graphql
+
+# Prometheus remains disabled unless BITMAGNET_METRICS_ADDR is set.
+ENV LISTEN_ADDR=0.0.0.0:3337
+
+USER 65532:65532
+EXPOSE 3337 9090
+ENTRYPOINT ["/usr/local/bin/bitmagnet-graphql"]
