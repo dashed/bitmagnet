@@ -90,6 +90,26 @@ func TestMetricsEmitAllFacetsOnlyForCompleteUnion(t *testing.T) {
 	}
 }
 
+func TestMetricsExcludeUndefinedEmptyTop1(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	empty := GraphQLResult{}
+
+	m.observe(CompareGraphQL(empty, empty, time.Millisecond, time.Millisecond))
+
+	if got := testutil.CollectAndCount(m.top1Match); got != 0 {
+		t.Fatalf("top1_match series count after empty/empty = %d, want 0", got)
+	}
+
+	refOnly := GraphQLResult{IDs: []string{"a"}, TotalCount: 1}
+	m.observe(CompareGraphQL(empty, refOnly, time.Millisecond, time.Millisecond))
+
+	if got := testutil.ToFloat64(m.top1Match.WithLabelValues("false")); got != 1 {
+		t.Errorf("top1_match{matched=false} after one-sided empty = %v, want 1", got)
+	}
+}
+
 // TestMetricsNilSafe confirms every driver-invoked method tolerates a nil
 // receiver (the driver may run without metrics).
 func TestMetricsNilSafe(t *testing.T) {

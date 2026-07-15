@@ -48,11 +48,13 @@ type Comparison struct {
 }
 
 // IsDiscrepancy reports whether the two engines disagreed in a way worth
-// surfacing: the top result differs, the top-20 sets are not identical, or the
-// engines returned a different number of results. A query for which both
-// engines agree at the head and on result count returns false.
+// surfacing: a comparable top result differs, the top-20 sets are not
+// identical, or the engines returned a different number of results. Two empty
+// result sets have no top result to compare and are not a discrepancy.
 func (c Comparison) IsDiscrepancy() bool {
-	return !c.Top1Match || c.JaccardAt20 < 1.0 || c.PGCount != c.TantivyCount
+	top1Differs := (c.PGCount > 0 || c.TantivyCount > 0) && !c.Top1Match
+
+	return top1Differs || c.JaccardAt20 < 1.0 || c.PGCount != c.TantivyCount
 }
 
 // Compare computes the similarity metrics for a single query, given the ordered

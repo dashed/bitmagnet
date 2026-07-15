@@ -51,6 +51,21 @@ func TestCompareGraphQLIdentical(t *testing.T) {
 	}
 }
 
+func TestCompareGraphQLEmptyResultsAreNotDiscrepancy(t *testing.T) {
+	t.Parallel()
+
+	empty := GraphQLResult{}
+	c := CompareGraphQL(empty, empty, time.Millisecond, time.Millisecond)
+
+	if c.Top1Match {
+		t.Error("Top1Match = true with no rank-0 result")
+	}
+
+	if c.IsDiscrepancy() {
+		t.Error("IsDiscrepancy = true for identical empty results")
+	}
+}
+
 func TestCompareGraphQLTotalCountDeltaSign(t *testing.T) {
 	t.Parallel()
 

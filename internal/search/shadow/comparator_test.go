@@ -88,6 +88,7 @@ func TestCompareEmptyBoth(t *testing.T) {
 	assert.False(t, c.Top1Match) // no top result exists
 	assert.Equal(t, 0, c.PGCount)
 	assert.Equal(t, 0, c.TantivyCount)
+	assert.False(t, c.IsDiscrepancy())
 }
 
 func TestCompareOneEmpty(t *testing.T) {
@@ -191,4 +192,7 @@ func TestIsDiscrepancy(t *testing.T) {
 
 	differentCount := Compare([]string{"a", "b", "c"}, []string{"a"}, time.Millisecond, time.Millisecond)
 	assert.True(t, differentCount.IsDiscrepancy())
+
+	empty := Compare(nil, nil, time.Millisecond, time.Millisecond)
+	assert.False(t, empty.IsDiscrepancy())
 }

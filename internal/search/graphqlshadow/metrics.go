@@ -88,7 +88,7 @@ func NewMetrics() *Metrics {
 		}),
 		top1Match: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "top1_match_total",
-			Help: "Comparisons broken down by whether the top (rank-0) result matched.",
+			Help: "Comparisons with at least one returned item, broken down by whether the top (rank-0) result matched.",
 		}, []string{"matched"}),
 		resultCountDelta: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "result_count_delta",
@@ -142,7 +142,13 @@ func (m *Metrics) observe(c GraphQLComparison) {
 	m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
 	m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
 	m.rbo.Observe(c.RBO)
-	m.top1Match.WithLabelValues(boolLabel(c.Top1Match)).Inc()
+
+	// Empty/empty has no rank-0 result, so it is not Top-1 evidence. One-sided
+	// emptiness remains a comparable mismatch and enters the denominator.
+	if c.PGCount > 0 || c.TantivyCount > 0 {
+		m.top1Match.WithLabelValues(boolLabel(c.Top1Match)).Inc()
+	}
+
 	m.resultCountDelta.Observe(float64(c.PGCount - c.TantivyCount))
 	m.totalCountDelta.Observe(float64(c.TotalCountDelta))
 	m.totalCountMatch.WithLabelValues(boolLabel(c.TotalCountMatch), boolLabel(c.TotalCountIsEstimate)).Inc()
