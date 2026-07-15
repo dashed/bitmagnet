@@ -1,6 +1,9 @@
 package graphqlshadow
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -290,5 +293,45 @@ func TestIsComparableSearchOperation(t *testing.T) {
 				t.Errorf("IsComparableSearchOperation() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+// TestProductionReactSearchOperationIsComparable binds the admission gate to
+// the real query document shipped by the embedded React UI. A frontend edit
+// that makes production searches ineligible must fail here instead of silently
+// driving the comparison population to zero during a soak.
+func TestProductionReactSearchOperationIsComparable(t *testing.T) {
+	t.Parallel()
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "../../.."))
+	operationPath := filepath.Join(
+		repoRoot,
+		"webui-react/src/graphql/operations/TorrentContentSearch.graphql",
+	)
+
+	query, err := os.ReadFile(operationPath)
+	if err != nil {
+		t.Fatalf("read production React search operation: %v", err)
+	}
+
+	if !IsComparableSearchOperation(
+		string(query),
+		"TorrentContentSearch",
+		map[string]any{"totalCount": true},
+	) {
+		t.Fatal("production React TorrentContentSearch operation is not shadow-comparable")
+	}
+
+	if IsComparableSearchOperation(
+		string(query),
+		"TorrentContentSearch",
+		map[string]any{"totalCount": false},
+	) {
+		t.Fatal("production React search with totalCount=false must remain ineligible")
 	}
 }

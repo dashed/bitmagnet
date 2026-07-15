@@ -17,6 +17,7 @@ package prometheus_test
 // metric structs directly … document what's covered vs not"):
 //
 //   COVERED (constructed via dependency-free constructors, then Describe'd):
+//     - graphql_shadow_*                               (graphqlshadow.NewMetrics)
 //     - search_shadow_* + search_tantivy_doc_count   (shadow.NewMetrics)
 //     - search_pathsearch_*                            (pathsearch.NewMetrics)
 //     - search_serve_*                                 (router.NewServeMetrics)
@@ -47,15 +48,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"go.uber.org/zap"
-
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/consistency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/router"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/shadow"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 var updateMetricGolden = flag.Bool("update", false, "update parity golden files")
@@ -75,6 +76,7 @@ func coveredCollectors(t *testing.T) []prometheus.Collector {
 	nop := zap.NewNop().Sugar()
 
 	var cs []prometheus.Collector
+	cs = append(cs, graphqlshadow.NewMetrics().Collectors()...)
 	cs = append(cs, shadow.NewMetrics().Collectors()...)
 	cs = append(cs, pathsearch.NewMetrics().Collectors()...)
 	cs = append(cs, router.NewServeMetrics().Collectors()...)
@@ -115,6 +117,7 @@ func metricLines(t *testing.T) []string {
 	registry := prometheus.NewRegistry()
 
 	var lines []string
+
 	for _, c := range collectors {
 		if err := registry.Register(c); err != nil {
 			t.Fatalf("register collector: %v", err)
@@ -134,6 +137,7 @@ func metricLines(t *testing.T) []string {
 	sort.Strings(lines)
 
 	out := lines[:0:0]
+
 	for i, ln := range lines {
 		if i == 0 || ln != lines[i-1] {
 			out = append(out, ln)
@@ -154,6 +158,7 @@ func metricLine(t *testing.T, desc *prometheus.Desc) string {
 	}
 
 	var keys []string
+
 	if vl := reVarLabels.FindStringSubmatch(s); vl != nil && strings.TrimSpace(vl[1]) != "" {
 		for _, k := range strings.Split(vl[1], ",") {
 			if k = strings.TrimSpace(k); k != "" {
@@ -173,6 +178,8 @@ func metricGoldenBytes(lines []string) []byte {
 
 // TestMetricNamesGolden regenerates (with -update) or asserts the metric golden.
 func TestMetricNamesGolden(t *testing.T) {
+	t.Parallel()
+
 	lines := metricLines(t)
 	got := metricGoldenBytes(lines)
 	path := filepath.Join(repoRootMetrics(t), metricNamesGoldenRel)
@@ -205,12 +212,21 @@ func TestMetricNamesGolden(t *testing.T) {
 // TestMetricNamesKnownGood pins the fork-critical series (§01 §2.5, the highest
 // drift risk) with their exact label sets.
 func TestMetricNamesKnownGood(t *testing.T) {
+	t.Parallel()
+
 	have := make(map[string]bool)
 	for _, ln := range metricLines(t) {
 		have[ln] = true
 	}
 
 	required := []string{
+		"bitmagnet_graphql_shadow_comparisons_total{}",
+		"bitmagnet_graphql_shadow_sampled_total{}",
+		"bitmagnet_graphql_shadow_admitted_total{}",
+		"bitmagnet_graphql_shadow_dropped_total{}",
+		"bitmagnet_graphql_shadow_jaccard{k}",
+		"bitmagnet_graphql_shadow_rust_latency_seconds{}",
+		"bitmagnet_graphql_shadow_reference_latency_seconds{}",
 		"bitmagnet_search_shadow_jaccard{k}",
 		"bitmagnet_search_shadow_rbo{}",
 		"bitmagnet_search_shadow_top1_match_total{matched}",
@@ -233,7 +249,10 @@ func TestMetricNamesKnownGood(t *testing.T) {
 // updated too. It asserts the golden does NOT yet contain them (so accidental
 // partial coverage is caught and the header note stays truthful).
 func TestMetricNamesUncoveredTracked(t *testing.T) {
+	t.Parallel()
+
 	have := make(map[string]bool)
+
 	for _, ln := range metricLines(t) {
 		name := ln[:strings.IndexByte(ln, '{')]
 		have[name] = true
@@ -265,6 +284,7 @@ func repoRootMetrics(t *testing.T) string {
 	}
 
 	dir := filepath.Dir(thisFile)
+
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			return dir

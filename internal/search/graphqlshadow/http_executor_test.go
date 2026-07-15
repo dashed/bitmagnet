@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,6 +88,7 @@ func TestHTTPExecutorRejectsHTTPAndGraphQLErrors(t *testing.T) {
 			t.Parallel()
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set(handlerDurationHeader, "10")
 				w.WriteHeader(test.status)
 				_, _ = w.Write([]byte(test.body))
@@ -116,6 +118,8 @@ func TestHTTPExecutorRequiresPositiveHandlerDuration(t *testing.T) {
 			t.Parallel()
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+
 				if value != "" {
 					w.Header().Set(handlerDurationHeader, value)
 				}
@@ -127,6 +131,82 @@ func TestHTTPExecutorRequiresPositiveHandlerDuration(t *testing.T) {
 			executor := &HTTPExecutor{endpoint: server.URL, client: server.Client()}
 			if _, err := executor.Execute(context.Background(), Request{Query: comparableQuery}); err == nil {
 				t.Fatal("Execute returned nil error")
+			}
+		})
+	}
+}
+
+func TestNewHTTPExecutorDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+
+	var followed atomic.Bool
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		followed.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(handlerDurationHeader, "10")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer target.Close()
+
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	cfg := NewDefaultConfig()
+	cfg.Endpoint = redirect.URL
+
+	if _, err := NewHTTPExecutor(cfg).Execute(
+		context.Background(),
+		Request{Query: comparableQuery},
+	); err == nil {
+		t.Fatal("Execute followed redirect or returned nil error")
+	}
+
+	if followed.Load() {
+		t.Fatal("dark GraphQL client followed a redirect")
+	}
+}
+
+func TestHTTPExecutorValidatesResponseContentType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		contentType string
+		wantErr     bool
+	}{
+		{name: "graphql response JSON", contentType: "application/graphql-response+json; charset=utf-8"},
+		{name: "missing", contentType: "", wantErr: true},
+		{name: "plain text", contentType: "text/plain", wantErr: true},
+		{name: "malformed", contentType: "not a media type", wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if test.contentType != "" {
+					w.Header().Set("Content-Type", test.contentType)
+				}
+
+				w.Header().Set(handlerDurationHeader, "10")
+				_, _ = w.Write([]byte(`{"data":{"torrentContent":{"search":{` +
+					`"totalCount":0,"totalCountIsEstimate":false,"items":[],"aggregations":{}}}}}`))
+			}))
+			defer server.Close()
+
+			executor := &HTTPExecutor{endpoint: server.URL, client: server.Client()}
+
+			_, err := executor.Execute(context.Background(), Request{Query: comparableQuery})
+			if test.wantErr && err == nil {
+				t.Fatal("Execute returned nil error")
+			}
+
+			if !test.wantErr && err != nil {
+				t.Fatalf("Execute error: %v", err)
 			}
 		})
 	}
