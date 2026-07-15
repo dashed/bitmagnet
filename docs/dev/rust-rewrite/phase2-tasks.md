@@ -98,7 +98,7 @@ mirror or mirrored-body buffer to configure.
 
 ---
 
-## Reconciled execution status (2026-07-13)
+## Reconciled execution status (2026-07-14)
 
 This table supersedes the original status cells in the detailed task-definition
 tables below. Those rows remain the scope contract, but were not kept current while
@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | `3addfd5c` | S/C/G/P merged; real S+C composition, L2/L3 clients, fail-closed health lifecycle, env parity, Docker image, and exact-tree remote gates green | P2-5 byte envelope/RSS admission; G3 point reads; dark deployment/soak; deploy-branch merge |
+| Integration | runtime/gate `4eec31de` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and a fail-closed integrated RSS harness are pushed | run the integrated four-client GraphQL/sqlx gate on a suitable amd64 Docker host; G3 point reads; dark deployment/soak; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
-| C | `5811a752` + adapter `e6244af3` + C4 `14698fce` | C1-C4/C6/C7 integrated; real PostgreSQL adapter and count-bounded composer gates green | P2-5 path-byte/RSS acceptance blocks deployment; C5 remains quality-gated |
-| G | `9829a1a6` + L2 `2036361b` + integration `3addfd5c` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, and container complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` | Go-embedded hook complete: one Go execution, query/projection gate, bounded Rust client, comparable latency, validity metrics/rules/dashboard; race/lint/typecheck/promtool green | low-rate dark soak after deployment admission; optional redirect/content-type hardening |
+| C | byte envelope `deb351d7`; evidence `d173f2e6` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits now close the owned-path defect; release Linux component RSS scenarios pass | integrated GraphQL/sqlx RSS acceptance still blocks deployment; C5 remains quality-gated |
+| G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
+| P | `7c5c7eea` + strict gate `90fc6845` | Go-embedded hook executes Go once and now admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings fail closed | low-rate dark soak after deployment admission; optional redirect/content-type hardening |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | homelab `f97c1c0` | fail-closed dark role/image import/CNP/ServiceMonitor and default-off Go shadow plumbing committed; not deployed | RSS acceptance + real image pin, then separately authorized dark deployment/soak |
+| I | homelab `6f3ee63` | fail-closed dark role/image import/CNP/ServiceMonitor, default-off shadow plumbing, and all three byte-budget envs are committed and pushed; not deployed | integrated RSS acceptance + real image pin, then separately authorized dark deployment/soak |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -146,6 +146,44 @@ below every agreement threshold, so it remains dormant regardless of the formal
   orderings that Go accepts and caps dynamically; production values satisfy the
   stricter ordering and rejection tests pin it. The L2 tonic client does not
   support Go's Unix-socket target syntax; production uses a ClusterIP endpoint.
+
+### P2-5 byte-envelope closeout and remaining admission gate (2026-07-14)
+
+- `deb351d7` bounds compressed SQL input and streaming zstd/MessagePack output,
+  fallible decode growth, decoded MessagePack plus owned path/extension bytes per
+  chunk, and retained owned strings per request. Every route, including the
+  single-chunk path, now holds the refine semaphore. GraphQL lookahead retains
+  files only when `torrent.files` is selected.
+- The selected envelope is 64 MiB per compressed/decompressed blob, 128 MiB
+  decoded allocation per chunk, and 64 MiB retained owned strings per request,
+  with four concurrent refines. Homelab `6f3ee63` wires and validates those exact
+  values while keeping both enablement and RSS admission false.
+- Release Linux x86_64 component evidence in `d173f2e6` covers chunk pressure,
+  retained pressure, the accepted 650-byte-path positive control, mixed lengths,
+  and adversarial 1024-byte paths. The accepted control retained 88,561 files at
+  about 128,076 KiB peak without a cap; the 1024-byte case retained zero and
+  peaked at about 69,656 KiB after a bounded cap, versus the old approximately
+  1.24 GiB unbounded result.
+- The relevant package gates pass: GraphQL 44 library + 9 binary + SDL parity;
+  model 26 plus fixtures; search-query 52; search-serve 63 plus both RSS binaries
+  and the live-adapter target. Focused all-target clippy denies warnings, Cargo
+  formatting is clean, and the focused Go shadow/HTTP tests pass.
+- `bench/graphql-rss` at `4eec31de` builds the exact GraphQL image and exercises
+  real PostgreSQL/sqlx hydration, a fresh L3 mock per case, four simultaneous
+  clients, minimal versus `torrent.files` projections, and kernel cgroup-v2 RSS/
+  OOM evidence. It requires amd64, three repeats, a fixed 8 GiB cgroup and 6 GiB
+  peak ceiling, source-linked images, immutable image IDs, stable workspace
+  provenance, verified cleanup, and complete response/barrier/state evidence.
+  A forced-RLS hook was dynamically proven with four distinct PostgreSQL
+  backends after the composer semaphore; the helper Docker context is 39.46 kB.
+  An independent exact-commit re-review found no remaining code blockers after
+  all nine original findings closed; 12/12 harness unit tests, Python compile,
+  shell syntax, dynamic TERM normalization, and fail-closed cleanup probes pass.
+- The full integrated gate has **not** run. The disposable Coder Docker server
+  reports 12,749,656,064 bytes, below the unchanged 12 GiB prerequisite, and its
+  nested-overlay builder is unsuitable. Preflight exits 2 before creating gate
+  containers. No production node was used as a benchmark host. Therefore
+  `bitmagnet_graphql_rss_gate_accepted=false` remains the correct admission state.
 
 ---
 
@@ -198,11 +236,11 @@ config-struct **land EARLY** (C1) as Lane G's contract.
 |---|------|--------|
 | C1 | **Contract-first trait + config (commit EARLY).** Define the resolver-callable trait (`TorrentContent`, `SearchFileRows`, `Suggest`/typeahead, `CollapsePaths`), the `(result, served: bool)` return shape, and the full `ComposerConfig`/`ServeConfig` knob struct (every `SEARCH_PATHSEARCH_*` env + the Phase-6 `SEARCH_*` serve knobs) with defaults. Lane G codes against this; until it lands, Lane G builds against an in-crate stub behind a feature flag (Phase-1 Lane-T pattern). | ✅ `4e4ee6ee` |
 | C2 | **L3 client + health snapshot.** Port `pathsearch/client.go` (the `PathCandidates`/`Suggest`/`HealthCheck` gRPC client on the Phase-0 tonic stack) + `pathsearch/health.go` (the lock-free cached health snapshot, fail-closed default). Reuse `bitmagnet-proto` `PathSearchService`. | ✅ `4e4ee6ee` |
-| C3 | **The L1 blob-refine composer (the XL core).** Port `pathsearch/composer.go` (1426 LOC) + `refine.go` (218): the pipeline `candidates()` (L3 oversample+truncate) → `FileCounts()` cheap probe (PK point-lookup on `torrent_file_summary.file_count`, NO blob decode) → `declineOversized()` → `chunkByFileBudget()` → per-chunk `candidateRows()` (PG `IN()` + hydrate via Lane S) → `refineMatches()` (blob decode → exact substr/ext/size predicate) → Go-side `paginate()` → decode-free refined-set facet re-aggregation → estimated `TotalCount` from sidecar `candidate_total`. **All gate-7 bounds ported with their Go defaults** and re-derived for Rust's allocator (see §Gate thresholds): `MaxRefineFiles=300_000`, `RefineFileBudget=300_000`, `MaxChunkTorrents=1024`, `RetainedFileBudget=1_000_000`, `RouteTimeout=8s`, `MaxCandidates=2000`, `MaxConcurrentRefines=NumCPU`, the `SlotWait` load-shed. **Fail-safe-to-PG decorator semantics:** `served=false` / `refineFailLoud()` / zero-candidate-while-unhealthy → PG fallback; cap reasons (`capNone/capRetained/capDeadline`) serve the accumulated top-relevance prefix with `TotalCountIsEstimate=true`, never a PG broad-FTS wall. | 🟡 implementation complete through `5811a752`; real Lane-S adapter `e6244af3`; P2-5 path-byte/RSS deployment acceptance remains open |
+| C3 | **The L1 blob-refine composer (the XL core).** Port `pathsearch/composer.go` (1426 LOC) + `refine.go` (218): the pipeline `candidates()` (L3 oversample+truncate) → `FileCounts()` cheap probe (PK point-lookup on `torrent_file_summary.file_count`, NO blob decode) → `declineOversized()` → `chunkByFileBudget()` → per-chunk `candidateRows()` (PG `IN()` + hydrate via Lane S) → `refineMatches()` (blob decode → exact substr/ext/size predicate) → Go-side `paginate()` → decode-free refined-set facet re-aggregation → estimated `TotalCount` from sidecar `candidate_total`. **All gate-7 bounds ported with their Go defaults** and re-derived for Rust's allocator (see §Gate thresholds): `MaxRefineFiles=300_000`, `RefineFileBudget=300_000`, `MaxChunkTorrents=1024`, `RetainedFileBudget=1_000_000`, `RouteTimeout=8s`, `MaxCandidates=2000`, `MaxConcurrentRefines=NumCPU`, the `SlotWait` load-shed. **Fail-safe-to-PG decorator semantics:** `served=false` / `refineFailLoud()` / zero-candidate-while-unhealthy → PG fallback; cap reasons (`capNone/capRetained/capDeadline`) serve the accumulated top-relevance prefix with `TotalCountIsEstimate=true`, never a PG broad-FTS wall. | 🟡 implementation + real adapter complete; byte envelope `deb351d7` and component RSS evidence `d173f2e6` pass; integrated GraphQL/sqlx cgroup admission remains open |
 | C4 | **File-grained variant + typeahead.** Port `pathsearch/file_rows.go` (585): `SearchFileRows` + `PathTypeahead`/`Suggest` (FileRow sort fields, `visitMatchingFiles`, `pageFileRows`) — backs the GraphQL `fileSearch` text route + `pathTypeahead`. | ✅ `14698fce`, merged at `89465794` |
 | C5 | **Tantivy-serve router-decorator (Phase-6 fold-in — GATED, see risks).** Port `router.go`'s serving branch per `phase6-tantivy-served-design.md §1–§4`: the eligibility gate (free-text + no structured filters via `canCompare` + relevance-only order + no facets), the freshness gate (cached `healthy && fresh` poller, `maxStaleness=2min`, reads `watermark_epoch` off `HealthCheckResponse`), and the serve path (Tantivy RPC under `ServeTimeout≈800ms` → hydrate hit info-hashes from PG via Lane S → `orderItemsByInferID` → `TotalHits` exact count, `TotalCountIsEstimate=false`). Fail-closed-to-PG on any error/timeout. **Precedence L3 → Tantivy → PG** (composer intercepts first; on `served=false` the residual hits the router). The incremental indexer and health-check watermark prerequisites are complete; do not serve until a fresh ≥7-day P4 shadow soak passes every quality threshold. | ⬜ blocked on search quality (Risk P2-2) |
 | C6 | **Composer + serve metrics.** Port `pathsearch/metrics.go` (292) + `router/metrics.go`: the `search_pathsearch_*` series (`route_total{result}`, `refine_declined_oversized_total`, `refine_retained_capped_total`, `refine_deadline_capped_total`, `refine_shed_total`, `refine_agg_error_total`, health/watermark gauges) and `search_serve_*` (`total{outcome}`, sidecar_healthy, watermark) on the Phase-0 `bitmagnet-common` metrics layer — metric-name parity gated by the Phase-0 metric-name golden. | ✅ `efcbfabd`; shared composer/poller metrics registered once at `3addfd5c` |
-| C7 | **Composer bound tests (the gate-7 backstop).** Port the Go composer bound tests (`composer_bound_test.go` 574, `composer_chunk_test.go` 983, `composer_route_test.go` 166) as Rust tests proving the bounds hold: oversized decline fail-loud, per-chunk file budget cap, retained-file-budget cap, route-deadline cap, load-shed, and **zero unbounded refines** under a synthetic large-torrent load. This is R8's review backstop for the XL piece. | ✅ functional/count bounds `efcbfabd`; RSS shapes `5811a752`; byte-envelope admission remains P2-5 |
+| C7 | **Composer bound tests (the gate-7 backstop).** Port the Go composer bound tests (`composer_bound_test.go` 574, `composer_chunk_test.go` 983, `composer_route_test.go` 166) as Rust tests proving the bounds hold: oversized decline fail-loud, per-chunk file budget cap, retained-file-budget cap, route-deadline cap, load-shed, and **zero unbounded refines** under a synthetic large-torrent load. This is R8's review backstop for the XL piece. | 🟡 functional/count/byte bounds and component RSS shapes pass through `d173f2e6`; exact four-client GraphQL/sqlx cgroup gate remains P2-5 deployment admission |
 
 Estimate: **XL, ~4–6 ew** (the tentpole of Phase 2). C3 is the irreducible cost —
 the chunked exact-refine pipeline with intricate memory/latency bounds is
@@ -267,8 +305,8 @@ cutover is USER-GATED and outside this ledger.
 
 | # | Task | Status |
 |---|------|--------|
-| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, and resource limits so dark comparisons cannot starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | 🟡 implementation committed in homelab `f97c1c0`; RSS=false and placeholder-image assertions block deployment |
-| I2 | **Dark Service + embedded-shadow plumbing.** Stand up the internal-only dark GraphQL Service, allow Go→Rust egress, and provide default-off endpoint/sample-rate/timeout/concurrency settings with a single-revert kill switch. Do not add a Traefik mirror. The Go runtime hook must already enforce the operation gate before this can be enabled. A future serve-cutover route remains separate and user-gated. | 🟡 internal-only Service/CNP and six default-off Go shadow envs committed in homelab `f97c1c0`; not deployed or enabled |
+| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, and resource limits so dark comparisons cannot starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | 🟡 homelab `6f3ee63`; role and byte-budget envs pass offline validation, while RSS=false and placeholder-image assertions still block deployment |
+| I2 | **Dark Service + embedded-shadow plumbing.** Stand up the internal-only dark GraphQL Service, allow Go→Rust egress, and provide default-off endpoint/sample-rate/timeout/concurrency settings with a single-revert kill switch. Do not add a Traefik mirror. The Go runtime hook must already enforce the operation gate before this can be enabled. A future serve-cutover route remains separate and user-gated. | 🟡 internal-only Service/CNP and six default-off Go shadow envs committed through homelab `6f3ee63`; not deployed or enabled |
 
 Estimate: **S, ~0.5–1 ew.** Reuses the Phase-1 torznab role wholesale; the new
 pieces are Go→Rust policy and embedded-shadow configuration.
@@ -312,10 +350,12 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   `RefineFileBudget=300_000` (count bound per chunk),
   `RetainedFileBudget=1_000_000` (count bound per request), `RouteTimeout=8s`
   (whole route), `ServeTimeout≈800ms` (Tantivy serve RPC, phase6 §6).
-  **Fail-loud accounting parity; zero unbounded count refines.** Rust RSS
-  measurement disproved the old byte estimates: one fixed-1024-byte retained-cap
-  request reached about 1.24 GiB, and owned path bytes remain unbounded by the
-  count knobs. See Risk P2-5; deployment admission stays closed.
+  Rust adds a 64 MiB compressed/decompressed per-blob ceiling, 128 MiB
+  MessagePack-plus-owned-string allocation budget per chunk, and 64 MiB retained
+  owned-string budget per request. **Fail-loud accounting parity; zero unbounded
+  count or owned-path refines.** Component RSS evidence passes. The separate
+  repeated four-client GraphQL/sqlx 8 GiB-cgroup gate (6 GiB peak ceiling) still
+  has to pass before deployment admission can open; see Risk P2-5.
 - **Rollback (all served paths):** env/route flip to the Go endpoint (kept warm);
   the composer + Tantivy-serve are decorators → PG-only fallback is intrinsic
   (fail-safe-to-PG, phase6 §6).
@@ -369,23 +409,22 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   mirror Go's eager-hydration model exactly (no async-graphql DataLoader) so the
   shadow compares like-for-like and the single-round-trip contract holds.
 - **P2-5 — the composer's bounded-memory refine in Rust (06 R8, the XL review
-  risk).** The gate-7 byte budgets (`RefineFileBudget` ~300MB transient at ~1KB/file,
-  `RetainedFileBudget` ~200MB at ~200B/file) are calibrated to **Go's** slice/GC
-  layout. A Rust `Vec<u8>` blob-decode + retained-match set has a different memory
-  profile; C3 must **re-measure the per-file cost under Rust and re-derive the
-  budgets to preserve the same worst-case RSS**, not copy the Go byte figures blind.
-  `43a22125` fixes the representation mismatch found in review: retained matches
-  move their decoded `Vec<BlobFile>` into an explicit result carrier and clear the
-  raw blob. C7's count/deadline/load-shed tests are green, and `5811a752` recorded
-  allocator/RSS shapes: fixed-39-byte paths peaked at 46,816 KiB (chunk) and
-  159,436 KiB (retained); mixed 39/128/512/1024-byte paths peaked at 595,748 KiB;
-  one fixed-1024-byte retained-cap request peaked at 1,270,160 KiB (~1.24 GiB).
-  These runs prove the count caps execute, but also prove they do **not** bound
-  owned path bytes. Deployment acceptance therefore requires bounded
-  decompression plus decoded/retained byte budgets, or an enforced upstream
-  maximum path size plus an integrated GraphQL/sqlx max-concurrency RSS proof
-  under the selected pod limit and node headroom. Until then
-  `bitmagnet_graphql_rss_gate_accepted=false` is a hard blocker.
+  risk).** The original Go-derived count budgets did not bound Rust-owned path
+  bytes: one fixed-1024-byte retained-cap request reached 1,270,160 KiB (~1.24
+  GiB). `deb351d7` closes that implementation defect with bounded streaming
+  decompression, fallible growth, compressed/decompressed preflight, decoded
+  allocation accounting, retained owned-string accounting, and semaphore coverage
+  on every refine route. `d173f2e6` records release Linux x86_64 component runs
+  showing the adversarial 1024-byte case capped at about 69,656 KiB while an
+  accepted near-budget positive control remains functional.
+
+  The remaining risk is deployment admission, not an unbounded known code path.
+  `4eec31de` provides the exact-image, real-sqlx, four-client cgroup-v2 harness and
+  fails closed on provenance, concurrency, response semantics, OOM/state evidence,
+  cleanup, architecture, repeats, and threshold downgrades. No suitable non-prod
+  amd64 Docker host with the required 12 GiB has run it yet. Keep
+  `bitmagnet_graphql_rss_gate_accepted=false` until the repeated 8 GiB-cgroup run
+  passes its 6 GiB peak ceiling and its JSONL receives review.
 - **P2-6 — shadow adds one sampled Rust/PG read (06 R5).** The selected Go-embedded
   hook reuses the already-computed primary Go result and adds only the sampled Rust
   execution; it must never re-issue the Go request. Control the remaining load with
