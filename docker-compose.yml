@@ -145,6 +145,7 @@ services:
     volumes:
       - ./data/prometheus:/prometheus
       - ./observability/prometheus.config.yaml:/etc/prometheus/prometheus.yml
+      - ./observability/rules:/etc/prometheus/rules:ro
     networks:
       - bitmagnet
 
