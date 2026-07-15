@@ -41,6 +41,24 @@ python3 bench/graphql-rss/run.py \
   --output bench/graphql-rss/evidence/graphql-rss-gate.jsonl
 ```
 
+The default image builder is BuildKit. On a Kata workspace whose Docker data
+is backed by virtiofs, use the explicit legacy backend with the VFS storage
+driver when BuildKit cannot checksum a cross-stage copy:
+
+```sh
+python3 bench/graphql-rss/run.py \
+  --profile gate \
+  --repeat 3 \
+  --docker-builder legacy \
+  --output bench/graphql-rss/evidence/graphql-rss-gate.jsonl
+```
+
+This invokes the same `docker build` commands and exact Dockerfiles with
+`DOCKER_BUILDKIT=0`. The selected backend and environment value are recorded in
+the session evidence; image IDs and layers remain mandatory. Docker documents
+the legacy backend as deprecated, so this is an isolated compatibility path,
+not the default: https://docs.docker.com/reference/cli/docker/image/build/
+
 The default acceptance ceiling is 6 GiB peak inside the 8 GiB GraphQL cgroup,
 leaving 25% headroom. This is a harness guard, not production admission or an
 approval to deploy. The gate profile accepts a stricter ceiling but rejects a
@@ -111,6 +129,7 @@ The JSONL contains:
 - commit, branch, dirty status, tracked-diff and full workspace hashes;
 - Dockerfile, Cargo lock/toolchain, migration-set, schema, runner, and helper
   hashes;
+- the explicit Docker builder backend and `DOCKER_BUILDKIT` value;
 - GraphQL/helper/PostgreSQL image IDs, repo digests, platforms, and layers;
 - every byte/count/timeout/concurrency configuration value and repeat number;
 - seed blob raw/decoded-owned/composer-retained/GraphQL-derived/compressed sizes,

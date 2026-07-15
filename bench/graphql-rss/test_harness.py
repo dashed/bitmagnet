@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 
@@ -243,6 +244,41 @@ class HarnessTests(unittest.TestCase):
         check = runner.provenance_stability(expected, current, "test")
         self.assertFalse(check["ok"])
         self.assertEqual(check["changed_keys"], ["workspace_sha256"])
+
+    def test_docker_builder_backend_is_explicit_and_overrides_ambient_env(self):
+        parser = runner.argument_parser()
+        buildkit_args = parser.parse_args([])
+        self.assertEqual(buildkit_args.docker_builder, "buildkit")
+        with mock.patch.dict(runner.os.environ, {"DOCKER_BUILDKIT": "0"}):
+            buildkit = runner.DockerHarness(
+                buildkit_args, "session", HERE, "amd64"
+            )
+        self.assertEqual(buildkit.build_environment["DOCKER_BUILDKIT"], "1")
+
+        legacy_args = parser.parse_args(["--docker-builder", "legacy"])
+        runner.validate_arguments(legacy_args)
+        legacy = runner.DockerHarness(legacy_args, "session", HERE, "amd64")
+        self.assertEqual(legacy.build_environment["DOCKER_BUILDKIT"], "0")
+
+    def test_selected_builder_environment_is_used_for_both_source_builds(self):
+        args = runner.argument_parser().parse_args(["--docker-builder", "legacy"])
+        harness = runner.DockerHarness(args, "session", HERE, "amd64")
+        calls = []
+
+        def record(*parts, **kwargs):
+            calls.append((parts, kwargs))
+            return runner.subprocess.CompletedProcess(parts, 0, b"", b"")
+
+        harness.docker = record
+        harness.build_images()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(parts[0] == "build" for parts, _ in calls))
+        self.assertTrue(
+            all(
+                kwargs["environment"]["DOCKER_BUILDKIT"] == "0"
+                for _, kwargs in calls
+            )
+        )
 
     def test_gate_profile_rejects_admission_downgrades(self):
         parser = runner.argument_parser()

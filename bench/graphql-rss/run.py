@@ -67,6 +67,7 @@ def run_command(
     command: list[str],
     *,
     cwd: Path = REPO_ROOT,
+    environment: dict[str, str] | None = None,
     input_bytes: bytes | None = None,
     timeout: float | None = None,
     check: bool = True,
@@ -74,6 +75,7 @@ def run_command(
     result = subprocess.run(
         command,
         cwd=cwd,
+        env=environment,
         input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -499,13 +501,21 @@ class DockerHarness:
         self.graphql_image_id: str | None = None
         self.helper_image_id: str | None = None
         self.postgres_image_id: str | None = None
+        self.build_environment = os.environ.copy()
+        self.build_environment["DOCKER_BUILDKIT"] = (
+            "0" if args.docker_builder == "legacy" else "1"
+        )
 
     def docker(self, *parts: str, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return run_command([self.runtime, *parts], **kwargs)
 
     def build_images(self) -> None:
         if self.args.graphql_image is None:
-            print("building exact Dockerfile.graphql image", file=sys.stderr, flush=True)
+            print(
+                f"building exact Dockerfile.graphql image ({self.args.docker_builder})",
+                file=sys.stderr,
+                flush=True,
+            )
             self.docker(
                 "build",
                 "--file",
@@ -513,6 +523,7 @@ class DockerHarness:
                 "--tag",
                 self.graphql_image,
                 "bitmagnet-rs",
+                environment=self.build_environment,
                 timeout=self.args.build_timeout,
             )
         if self.args.helper_image is None:
@@ -524,6 +535,7 @@ class DockerHarness:
                 "--tag",
                 self.helper_image,
                 ".",
+                environment=self.build_environment,
                 timeout=self.args.build_timeout,
             )
 
@@ -1111,6 +1123,12 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--helper-image")
     parser.add_argument("--postgres-image", default=DEFAULT_POSTGRES_IMAGE)
     parser.add_argument("--build-timeout", type=float, default=3600)
+    parser.add_argument(
+        "--docker-builder",
+        choices=("buildkit", "legacy"),
+        default="buildkit",
+        help="Docker image builder backend; selected explicitly and recorded in evidence",
+    )
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     return parser
@@ -1154,6 +1172,8 @@ def main() -> int:
             "recorded_at": utc_now(),
             "status": "unsupported",
             "runtime": args.runtime,
+            "docker_builder": args.docker_builder,
+            "docker_buildkit": "0" if args.docker_builder == "legacy" else "1",
             "error": f"{type(error).__name__}: {error}",
         }
         if args.preflight_only:
@@ -1183,6 +1203,8 @@ def main() -> int:
                             "MemTotal",
                         )
                     },
+                    "docker_builder": args.docker_builder,
+                    "docker_buildkit": "0" if args.docker_builder == "legacy" else "1",
                     "provenance": provenance,
                 },
                 indent=2,
@@ -1239,6 +1261,12 @@ def main() -> int:
                         "NCPU",
                         "MemTotal",
                     )
+                },
+                "docker_builder": {
+                    "backend": args.docker_builder,
+                    "DOCKER_BUILDKIT": (
+                        "0" if args.docker_builder == "legacy" else "1"
+                    ),
                 },
                 "repository": provenance,
             }
