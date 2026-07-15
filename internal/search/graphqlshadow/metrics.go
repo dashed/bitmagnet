@@ -45,7 +45,7 @@ func NewMetrics() *Metrics {
 	countDeltaBuckets := []float64{-1000, -100, -50, -20, -10, -5, -1, 0, 1, 5, 10, 20, 50, 100, 1000}
 	latencyBuckets := prometheus.ExponentialBuckets(latencyStartSecond, 2, 14)
 
-	return &Metrics{
+	m := &Metrics{
 		comparisonsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "comparisons_total",
 			Help: "Total number of GraphQL shadow comparisons performed (eligible query operations only).",
@@ -130,6 +130,23 @@ func NewMetrics() *Metrics {
 			Buckets: prometheus.ExponentialBuckets(0.125, 2, 9),
 		}),
 	}
+
+	// CounterVec and HistogramVec children do not exist until their first label
+	// value is requested. If the process is scraped only after that first event,
+	// Prometheus has no zero baseline and increase() omits the event. Pre-create
+	// every finite label set used by the Phase-2 ranking and exact-count gates so
+	// a pod's first success OR failure is always visible to fail-closed PromQL.
+	for _, k := range []string{"20", "50"} {
+		m.jaccard.WithLabelValues(k)
+	}
+	for _, matched := range []string{"true", "false"} {
+		m.top1Match.WithLabelValues(matched)
+		for _, estimate := range []string{"true", "false"} {
+			m.totalCountMatch.WithLabelValues(matched, estimate)
+		}
+	}
+
+	return m
 }
 
 // observe records a single completed comparison across all collectors. nil-safe.

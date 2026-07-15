@@ -99,8 +99,24 @@ func TestMetricsExcludeUndefinedEmptyTop1(t *testing.T) {
 
 	m.observe(CompareGraphQL(empty, empty, time.Millisecond, time.Millisecond))
 
-	if got := testutil.CollectAndCount(m.jaccard); got != 0 {
-		t.Errorf("jaccard series count after empty/empty = %d, want 0", got)
+	// The finite ranking label sets exist at zero from process start so
+	// Prometheus increase() can count the first event. Empty/empty must not add a
+	// ranking observation to those pre-created children.
+	if got := testutil.CollectAndCount(m.jaccard); got != 2 {
+		t.Errorf("jaccard series count after empty/empty = %d, want 2 pre-initialized series", got)
+	}
+	for _, k := range []string{"20", "50"} {
+		metric := &dto.Metric{}
+		writer, ok := m.jaccard.WithLabelValues(k).(prometheus.Metric)
+		if !ok {
+			t.Fatalf("jaccard{%s} does not implement prometheus.Metric", k)
+		}
+		if err := writer.Write(metric); err != nil {
+			t.Fatalf("write jaccard{%s}: %v", k, err)
+		}
+		if got := metric.GetHistogram().GetSampleCount(); got != 0 {
+			t.Errorf("jaccard{%s} sample count after empty/empty = %d, want 0", k, got)
+		}
 	}
 
 	rboMetric := &dto.Metric{}
@@ -112,8 +128,13 @@ func TestMetricsExcludeUndefinedEmptyTop1(t *testing.T) {
 		t.Errorf("rbo sample count after empty/empty = %d, want 0", got)
 	}
 
-	if got := testutil.CollectAndCount(m.top1Match); got != 0 {
-		t.Fatalf("top1_match series count after empty/empty = %d, want 0", got)
+	if got := testutil.CollectAndCount(m.top1Match); got != 2 {
+		t.Fatalf("top1_match series count after empty/empty = %d, want 2 pre-initialized series", got)
+	}
+	for _, matched := range []string{"true", "false"} {
+		if got := testutil.ToFloat64(m.top1Match.WithLabelValues(matched)); got != 0 {
+			t.Errorf("top1_match{matched=%s} after empty/empty = %v, want 0", matched, got)
+		}
 	}
 
 	refOnly := GraphQLResult{IDs: []string{"a"}, TotalCount: 1}
@@ -134,6 +155,33 @@ func TestMetricsExcludeUndefinedEmptyTop1(t *testing.T) {
 
 	if got := testutil.ToFloat64(m.top1Match.WithLabelValues("false")); got != 1 {
 		t.Errorf("top1_match{matched=false} after one-sided empty = %v, want 1", got)
+	}
+}
+
+func TestMetricsInitializeGateLabelSetsAtZero(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+
+	if got := testutil.CollectAndCount(m.jaccard); got != 2 {
+		t.Fatalf("jaccard initialized series = %d, want 2", got)
+	}
+	if got := testutil.CollectAndCount(m.top1Match); got != 2 {
+		t.Fatalf("top1 initialized series = %d, want 2", got)
+	}
+	if got := testutil.CollectAndCount(m.totalCountMatch); got != 4 {
+		t.Fatalf("total_count_match initialized series = %d, want 4", got)
+	}
+
+	for _, matched := range []string{"true", "false"} {
+		if got := testutil.ToFloat64(m.top1Match.WithLabelValues(matched)); got != 0 {
+			t.Errorf("top1_match{matched=%s} = %v, want 0", matched, got)
+		}
+		for _, estimate := range []string{"true", "false"} {
+			if got := testutil.ToFloat64(m.totalCountMatch.WithLabelValues(matched, estimate)); got != 0 {
+				t.Errorf("total_count_match{matched=%s,estimate=%s} = %v, want 0", matched, estimate, got)
+			}
+		}
 	}
 }
 
