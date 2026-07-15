@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | source/harness `3f555ef5`; accepted evidence `2b8d2912` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and the exact-image four-client GraphQL/sqlx RSS gate all pass | decide G3 point-read scope; real image pin; separately authorized dark deployment/soak; deploy-branch merge |
+| Integration | source/harness `3f555ef5`; accepted evidence `2b8d2912`; ledger `7e5e1360` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and the exact-image four-client GraphQL/sqlx RSS gate all pass; the accepted artifact is immutably pinned and the internal-only dark Service is healthy | keep G3 point reads outside shadow eligibility until implemented/scoped; separately authorize low-rate shadow and >=7-day soak; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + strict gate `90fc6845` | Go-embedded hook executes Go once and now admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings fail closed | low-rate dark soak after deployment admission; optional redirect/content-type hardening |
+| P | `7c5c7eea` + strict gate `90fc6845` | Go-embedded hook executes Go once and now admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings fail closed; internal Rust Service is live but the L3 shadow env is absent | separately authorize low-rate shadow and obtain a valid >=7-day gate; optional redirect/content-type hardening |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; Coder lane `222a811`; RSS evidence `2b8d2912` | fail-closed dark role/image import/CNP/ServiceMonitor, default-off shadow plumbing, all three byte-budget envs, and guarded Coder/Maple gate paths are committed; P2-5 RSS admission is accepted, but nothing is deployed | real image pin, then separately authorized dark deployment/soak; shadow and cutover remain off |
+| I | role `6f3ee63`; RSS evidence `2b8d2912`; homelab pin `4dc037f` | exact accepted artifact promoted without rebuilding; immutable pin and internal-only Deployment/ClusterIP/EndpointSlice/CNPs/ServiceMonitor are live and healthy; generic enablement remains fail-closed and the live L3 workload has no Rust GraphQL shadow env | separately authorize low-rate shadow and >=7-day soak; routing/cutover and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -141,7 +141,9 @@ below every agreement threshold, so it remains dormant regardless of the formal
 - Homelab `f97c1c0` passed the GraphQL playbook and parent image-import syntax
   checks, production-profile targeted ansible-lint, rendered-YAML parsing,
   targeted yamllint, 29/29 Rust-to-Deployment `SEARCH_*` set parity, and
-  `git diff --check`. It was committed and pushed but **not deployed**.
+  `git diff --check`. It was committed and pushed but **not deployed at that
+  checkpoint**; the 2026-07-15 internal dark closeout below supersedes that
+  historical state.
 - Intentional compatibility debt: Rust rejects unsafe cross-budget override
   orderings that Go accepts and caps dynamically; production values satisfy the
   stricter ordering and rejection tests pin it. The L2 tonic client does not
@@ -157,8 +159,10 @@ below every agreement threshold, so it remains dormant regardless of the formal
 - The selected envelope is 64 MiB per compressed/decompressed blob, 128 MiB
   decoded allocation per chunk, and 64 MiB retained owned strings per request,
   with four concurrent refines. Homelab `6f3ee63` wires and validates those exact
-  values. Deployment enablement remains false; the accepted evidence permits only
-  the separate fail-closed RSS-admission boolean to advance.
+  values. Generic inventory auto-enablement remains false; the accepted evidence
+  permitted only the separate fail-closed RSS-admission boolean to advance at
+  this checkpoint. A later confirmed dedicated deployment supplied an explicit
+  override and revalidated the immutable image pin.
 - Release Linux x86_64 component evidence in `d173f2e6` covers chunk pressure,
   retained pressure, the accepted 650-byte-path positive control, mixed lengths,
   and adversarial 1024-byte paths. The accepted control retained 88,561 files at
@@ -217,9 +221,42 @@ below every agreement threshold, so it remains dormant regardless of the formal
     `1c4a3ab627ea4c76e35a5783486d8ff2430deeb5b85d230d39dbca9e01243a7b`
   - `graphql-rss-gate-maple-20260715-3f555ef5.inventory.json` —
     `5052c3bd8cddb335f52dfcad97c95fe65764122e0cf2d507b9e788856c336a83`
-  This accepts only the P2-5 RSS gate. Image build/import and pinning, dark
-  deployment, GraphQL shadow sampling, any cutover, and C5 remain independently
-  gated.
+  This evidence accepts only the P2-5 RSS gate. Promotion and the internal dark
+  deployment were authorized separately and completed later; GraphQL shadow
+  sampling, any cutover, and C5 remain independently gated.
+
+### Internal-only dark deployment closeout (2026-07-15)
+
+- Homelab `d5540b2` added the guarded exact-artifact promotion path, `7309f33`
+  hardened its cleanup proof, and `4dc037f` pinned the result. The accepted Maple
+  image was promoted byte-for-byte without rebuilding after proving accepted ref
+  `3f555ef5`, reconciled ref `7e5e1360`, and their shared `bitmagnet-rs` tree
+  `f9d6a83773397e241237c71482188aafe0cf1038`.
+- The intended live tag is
+  `ghcr.io/dashed/bitmagnet-graphql:graphql-rss-gated-20260715-7e5e1360` at
+  immutable OCI index
+  `sha256:a503f1cf4c111f7b41aa012c92322fe2ac38eb8b0e71f7f17d59ac1a8a740b54`.
+  HEL1 retains the exact tar with SHA-256
+  `f2a12e005108b4b5703af91256077880b8c19a7117081316d41ae1d0b0852179`.
+- The separately confirmed deploy created only the internal dark
+  `bitmagnet-graphql` Deployment and ClusterIP Service plus its EndpointSlice,
+  four Cilium policies, and ServiceMonitor. The pod is Ready 1/1 with zero
+  restarts; `/livez`, `/status`, goose 25, internal dependency health, logs, and
+  Prometheus `up == 1` pass.
+- There is no IngressRoute, certificate, DNS record, external IP, Tantivy egress,
+  GraphQL shadow traffic, routing change, or cutover. Existing ingress still
+  targets Go `bitmagnet-l3:3333`, and the live L3 Deployment has no Rust GraphQL
+  shadow environment. Generic homelab inventory runs remain fail-closed with
+  GraphQL enablement false; only the confirmed dedicated playbook supplies the
+  deployment override and revalidates the pin.
+- G3 Queue/Torrent point-read fields remain explicit `unserved(...)` errors and
+  were excluded from this infrastructure-only health soak because no user or
+  shadow query reaches Rust. They must be implemented or excluded by an explicit
+  eligibility contract before shadow traffic can select them.
+- The guarded RSS Coder workspace remains Pending under cross-namespace
+  anti-affinity. Active Coder identities, container IDs, and restart counts were
+  unchanged across promotion and deployment; no active workspace was
+  interrupted.
 
 ---
 
@@ -336,13 +373,14 @@ extends existing math.
 Owns (homelab repo): new `ansible/roles/bitmagnet-graphql/**`, a `graphql` image
 kind in `playbooks/bitmagnet_image_import.yml` + Makefile, the dark Kubernetes
 Service, Go→Rust egress, and sampling/client configuration. Mirrors Phase-1 Lane I
-(the `bitmagnet-torznab` role pattern). **NO deploys, NO route flip, NO cutover** —
-cutover is USER-GATED and outside this ledger.
+(the `bitmagnet-torznab` role pattern). **Internal dark deployment is live; NO
+shadow, route flip, or cutover** — those remain USER-GATED and outside this
+ledger.
 
 | # | Task | Status |
 |---|------|--------|
-| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, and resource limits so dark comparisons cannot starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | 🟡 homelab `6f3ee63`; role/env validation passes and P2-5 RSS admission is accepted at `2b8d2912`; enablement remains false and the real image build/import/pin remains separately gated |
-| I2 | **Dark Service + embedded-shadow plumbing.** Stand up the internal-only dark GraphQL Service, allow Go→Rust egress, and provide default-off endpoint/sample-rate/timeout/concurrency settings with a single-revert kill switch. Do not add a Traefik mirror. The Go runtime hook must already enforce the operation gate before this can be enabled. A future serve-cutover route remains separate and user-gated. | 🟡 internal-only Service/CNP and six default-off Go shadow envs committed through homelab `6f3ee63`; not deployed or enabled |
+| I1 | **Role per the sidecar pattern.** `bitmagnet-graphql` role following Phase-0/1 conventions: tag-only image pin, `IfNotPresent`, Cilium CNP default-deny + Prometheus allow + PG allow + L3/Tantivy sidecar allow, ServiceMonitor, `BITMAGNET_METRICS_ADDR`, the `goose_db_version` boot-assert env, and resource limits so dark comparisons cannot starve the live path (06 R5). Registry-less image pipeline gains the `graphql` image kind (excluded from `IMAGE=all` until the Dockerfile lands, per Phase-1 I2). | ✅ homelab `d5540b2`/`7309f33`/`4dc037f`; exact artifact immutably pinned, dedicated deployment live and Ready, ClusterIP/EndpointSlice/ServiceMonitor/four CNPs healthy, Prometheus `up == 1`; generic inventory enablement remains false |
+| I2 | **Dark Service + embedded-shadow plumbing.** Stand up the internal-only dark GraphQL Service, allow Go→Rust egress, and provide default-off endpoint/sample-rate/timeout/concurrency settings with a single-revert kill switch. Do not add a Traefik mirror. The Go runtime hook must already enforce the operation gate before this can be enabled. A future serve-cutover route remains separate and user-gated. | ✅ internal Service and default-off plumbing are complete; live L3 has no Rust GraphQL shadow env, sample remains zero, and Tantivy/routing/cutover remain off |
 
 Estimate: **S, ~0.5–1 ew.** Reuses the Phase-1 torznab role wholesale; the new
 pieces are Go→Rust policy and embedded-shadow configuration.
@@ -462,8 +500,10 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   peak was 755,322,880 bytes in the fixed 8 GiB cgroup, with zero swap/OOM events,
   complete barriers/provenance/cleanup, healthy host headroom, and unchanged Hermes.
   The earlier Coder `/dev/shm` failure remains a pre-workload capacity incident,
-  not contradictory workload evidence. Acceptance does not authorize an image
-  build/import or pin, dark deployment, GraphQL shadow sampling, cutover, or C5.
+  not contradictory workload evidence. Acceptance alone did not authorize an
+  image promotion/pin or dark deployment; those two gates were crossed later
+  under separate authorization. GraphQL shadow sampling, cutover, and C5 remain
+  unauthorized.
 - **P2-6 — shadow adds one sampled Rust/PG read (06 R5).** The selected Go-embedded
   hook reuses the already-computed primary Go result and adds only the sampled Rust
   execution; it must never re-issue the Go request. Control the remaining load with
