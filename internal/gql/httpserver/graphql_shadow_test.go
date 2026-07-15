@@ -207,7 +207,6 @@ func TestGraphQLShadowActualTransportMixedSearchMakesZeroRustCalls(t *testing.T)
 	t.Parallel()
 
 	for _, sibling := range []string{"queue { jobs }", "torrent { files }"} {
-		sibling := sibling
 		t.Run(sibling, func(t *testing.T) {
 			t.Parallel()
 
@@ -224,6 +223,7 @@ func TestGraphQLShadowActualTransportMixedSearchMakesZeroRustCalls(t *testing.T)
 			if response.Code != http.StatusOK {
 				t.Fatalf("unexpected GraphQL status: %d body=%s", response.Code, response.Body.String())
 			}
+
 			requireNoDarkCall(t, dark)
 		})
 	}

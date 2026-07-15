@@ -92,6 +92,7 @@ func IsComparableSearchOperation(
 		if field.Name == "__typename" {
 			continue
 		}
+
 		if field.Name != "torrentContent" || field.Alias != field.Name {
 			return false
 		}
@@ -100,9 +101,11 @@ func IsComparableSearchOperation(
 			if child.Name == "__typename" {
 				continue
 			}
+
 			if child.Name != "search" || child.Alias != child.Name {
 				return false
 			}
+
 			if !searchSelectionComparable(doc, child, variables) {
 				return false
 			}

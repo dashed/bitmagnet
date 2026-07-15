@@ -73,7 +73,11 @@ func TestShadowCapturedUnsafeOperationsMakeZeroRustCalls(t *testing.T) {
 		{Query: `{ version }`},
 		{Query: `{ torrentContent { search { totalCount } } }`},
 		{Query: comparableSearchWithQueue, OperationName: "Search", Variables: json.RawMessage(`{"limit":20}`)},
-		{Query: comparableSearchWithTorrentFiles, OperationName: "Search", Variables: json.RawMessage(`{"limit":20}`)},
+		{
+			Query:         comparableSearchWithTorrentFiles,
+			OperationName: "Search",
+			Variables:     json.RawMessage(`{"limit":20}`),
+		},
 	}
 
 	for _, req := range tests {
