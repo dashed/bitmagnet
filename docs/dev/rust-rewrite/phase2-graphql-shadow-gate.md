@@ -74,6 +74,24 @@ Every raw gate input is scoped to the production Go L3 scrape labels
 different Service label. The promtool fixture includes a deliberately divergent
 canary series and proves it cannot change the production recording rules.
 
+### Sample-zero admission profile
+
+Homelab commit `65d8d7b` provides a separate
+`bitmagnet-graphql-shadow-canary` profile for validating the deployment path
+before sampling begins. It is serve-only (`worker run --keys=http_server`), has
+no Ingress, is excluded from production recording rules by its distinct Service
+identity, and hard-bounds both the configured and admitted shadow sample rate to
+zero. The profile also fails closed unless its tag-only main image exists on the
+selected node with the expected containerd digest, `linux/amd64` platform, and
+pinned label; the dark GraphQL EndpointSlice must have a ready TCP 3337 address
+before any canary object is applied.
+
+The profile and reciprocal Cilium manifests are offline-rendered through
+Ansible and kubeconform. Importing the image, creating the SELECT-only canary
+database role, and deploying the sample-zero profile are still separate
+`CONFIRM=1` production mutations. Raising the admitted sample ceiling above zero
+is a later gate and must not be folded into initial deployment.
+
 **Estimate totals are excluded** from the count-match KPI (the `estimate="false"`
 selector): a budgeted-estimate total legitimately differs between engines, so only
 exact totals are held to the 0.95 bar. The `estimate="true"` rows are still
