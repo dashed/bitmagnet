@@ -334,4 +334,19 @@ func TestProductionReactSearchOperationIsComparable(t *testing.T) {
 	) {
 		t.Fatal("production React search with totalCount=false must remain ineligible")
 	}
+
+	exactControl := map[string]any{
+		"aggregationBudget": 0,
+		"hasNextPage":       false,
+		"infoHashes":        []any{},
+		"limit":             0,
+		"totalCount":        true,
+	}
+	if !IsComparableSearchOperation(
+		string(query),
+		"TorrentContentSearch",
+		exactControl,
+	) {
+		t.Fatal("bounded exact-count control must remain shadow-comparable")
+	}
 }
