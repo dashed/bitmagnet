@@ -937,6 +937,7 @@ dependencies = [
  "bitmagnet-fts",
  "bitmagnet-model",
  "chrono",
+ "futures",
  "serde",
  "serde_json",
  "sqlx",

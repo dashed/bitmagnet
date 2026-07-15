@@ -15,9 +15,15 @@ use crate::query::{
 };
 use crate::{ContentType, FileType};
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use sqlx::{PgPool, Row};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+
+// Production currently gives the GraphQL process an eight-connection pool.
+// Reserve headroom for the concurrent membership/count branches and for other
+// requests instead of reproducing Go's unbounded goroutine fan-out.
+const FACET_DB_CONCURRENCY: usize = 4;
 
 pub(crate) const BASE_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
 const BUDGETED_COUNT_SQL: &str = "SELECT count, budget_exceeded FROM budgeted_count($1, $2)";
@@ -176,56 +182,86 @@ pub async fn fetch_aggregations(
     let ctx = CriteriaCtx::new(config, now);
     let mut aggregations = Aggregations::new();
 
+    // Keep group assembly deterministic and bound pending work as well as
+    // active SQL: one facet owns at most FACET_DB_CONCURRENCY bucket futures.
     for facet in options.facets.iter().filter(|facet| facet.aggregate) {
-        let values = facet_values(pool, facet.facet).await?;
-        let logic = effective_logic(facet);
-        let current_facet = (logic == FacetLogic::Or).then(|| facet.facet.key());
-        let mut items = BTreeMap::new();
-
-        for (value, label) in values {
-            let Some(value_criterion) = facet_value_criterion(facet.facet, &value)? else {
-                continue;
-            };
-            let extra = match logic {
-                FacetLogic::And => Criteria::And(vec![value_criterion]),
-                FacetLogic::Or => Criteria::Or(vec![value_criterion]),
-            };
-            let mut state = BuildState::default();
-            let inner_sql = build_base_query(
-                options,
-                &ctx,
-                current_facet,
-                Some(&extra),
-                false,
-                &mut state,
-            )?;
-            let inner_sql = inline_binds(&inner_sql, state.binds());
-            let (count, budget_exceeded) =
-                budgeted_count(pool, &inner_sql, options.aggregation_budget).await?;
-
-            if count > 0 || budget_exceeded || facet.filter.contains(&value) {
-                items.insert(
-                    value,
-                    AggregationItem {
-                        label,
-                        count,
-                        is_estimate: budget_exceeded,
-                    },
-                );
-            }
-        }
-
-        aggregations.insert(
-            facet.facet.key().to_owned(),
-            AggregationGroup {
-                label: facet_label(facet.facet).to_owned(),
-                logic,
-                items,
-            },
-        );
+        let (key, group) = fetch_facet_group(pool, options, &ctx, facet).await?;
+        aggregations.insert(key, group);
     }
 
     Ok(aggregations)
+}
+
+async fn fetch_facet_group(
+    pool: &PgPool,
+    options: &SearchOptions,
+    ctx: &CriteriaCtx<'_>,
+    facet: &FacetRequest,
+) -> Result<(String, AggregationGroup)> {
+    let values = facet_values(pool, facet.facet).await?;
+    let logic = effective_logic(facet);
+    let current_facet = (logic == FacetLogic::Or).then(|| facet.facet.key());
+    let entries = stream::iter(values.into_iter().map(|(value, label)| {
+        fetch_facet_item(
+            pool,
+            options,
+            ctx,
+            facet,
+            logic,
+            current_facet,
+            value,
+            label,
+        )
+    }))
+    .buffer_unordered(FACET_DB_CONCURRENCY)
+    .try_collect::<Vec<_>>()
+    .await?;
+    let items = entries.into_iter().flatten().collect();
+
+    Ok((
+        facet.facet.key().to_owned(),
+        AggregationGroup {
+            label: facet_label(facet.facet).to_owned(),
+            logic,
+            items,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_facet_item(
+    pool: &PgPool,
+    options: &SearchOptions,
+    ctx: &CriteriaCtx<'_>,
+    facet: &FacetRequest,
+    logic: FacetLogic,
+    current_facet: Option<&str>,
+    value: String,
+    label: String,
+) -> Result<Option<(String, AggregationItem)>> {
+    let Some(value_criterion) = facet_value_criterion(facet.facet, &value)? else {
+        return Ok(None);
+    };
+    let extra = match logic {
+        FacetLogic::And => Criteria::And(vec![value_criterion]),
+        FacetLogic::Or => Criteria::Or(vec![value_criterion]),
+    };
+    let mut state = BuildState::default();
+    let inner_sql = build_base_query(options, ctx, current_facet, Some(&extra), false, &mut state)?;
+    let inner_sql = inline_binds(&inner_sql, state.binds());
+    let (count, budget_exceeded) =
+        budgeted_count(pool, &inner_sql, options.aggregation_budget).await?;
+
+    Ok(
+        (count > 0 || budget_exceeded || facet.filter.contains(&value)).then_some((
+            value,
+            AggregationItem {
+                label,
+                count,
+                is_estimate: budget_exceeded,
+            },
+        )),
+    )
 }
 
 impl AggregationGroup {

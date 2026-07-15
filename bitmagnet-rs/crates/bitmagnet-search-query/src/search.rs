@@ -47,13 +47,32 @@ pub async fn search(
     let now = Utc::now();
     let membership = build_search_query_at(options, config, now)?;
 
-    // Go skips doItems for an explicit zero limit unless it needs the one-row
-    // next-page probe. Count and aggregation queries still run independently.
-    let mut items = if options.limit == Some(0) && !options.has_next_page {
-        Vec::new()
-    } else {
-        membership.fetch_with(pool, hydrate).await?
+    // Go runs items, total count, and aggregations concurrently. Keep that
+    // execution shape here: each branch owns an independent pooled connection,
+    // while facet database fan-out has its own lower request-local cap.
+    let items = async {
+        // Go skips doItems for an explicit zero limit unless it needs the
+        // one-row next-page probe. Count and aggregation queries still run.
+        if options.limit == Some(0) && !options.has_next_page {
+            Ok(Vec::new())
+        } else {
+            membership.fetch_with(pool, hydrate).await
+        }
     };
+
+    let total_count = async {
+        if options.total_count {
+            fetch_total_count(pool, options, config, now).await
+        } else {
+            Ok((0, false))
+        }
+    };
+
+    let (mut items, (total_count, total_count_is_estimate), aggregations) = futures::try_join!(
+        items,
+        total_count,
+        fetch_aggregations(pool, options, config, now),
+    )?;
 
     let has_next_page = options.limit.is_some_and(|limit| {
         options.has_next_page && items.len() > usize::try_from(limit).unwrap_or(usize::MAX)
@@ -63,13 +82,6 @@ pub async fn search(
         // already exceeded it on this platform.
         items.truncate(options.limit.unwrap_or_default() as usize);
     }
-
-    let (total_count, total_count_is_estimate) = if options.total_count {
-        fetch_total_count(pool, options, config, now).await?
-    } else {
-        (0, false)
-    };
-    let aggregations = fetch_aggregations(pool, options, config, now).await?;
 
     Ok(SearchResult {
         total_count,

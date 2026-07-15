@@ -745,13 +745,17 @@ impl Composer {
             return Aggregations::new();
         }
         let ids: Vec<InfoHash> = refined.iter().map(|item| item.info_hash).collect();
-        let request = request.for_candidates(
+        let mut request = request.for_candidates(
             &ids,
             HydrateOptions {
                 files_data: false,
                 max_files_data_bytes: None,
             },
         );
+        // This call consumes only aggregations. An explicit zero limit makes
+        // Lane S skip membership and scalar/content hydration while retaining
+        // every facet query, matching Go's aggregation-only refine path.
+        request.options.limit = Some(0);
         match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => result.aggregations,
             Ok(Err(error)) => {
@@ -1635,6 +1639,7 @@ mod tests {
         );
         assert!(!calls[1].hydrate.files_data);
         assert!(calls[1].options.facets[0].aggregate);
+        assert_eq!(calls[1].options.limit, Some(0));
         assert_eq!(candidate_ids(&calls[1].options.filter), vec![id(3), id(2)]);
     }
 

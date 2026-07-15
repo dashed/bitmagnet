@@ -9,6 +9,7 @@ bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-fts = { path = "../bitmagnet-fts" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
