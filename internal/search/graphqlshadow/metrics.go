@@ -78,12 +78,12 @@ func NewMetrics() *Metrics {
 		}),
 		jaccard: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "jaccard",
-			Help:    "Jaccard set similarity between the Go reference and Rust top-K result InferIDs.",
+			Help:    "Jaccard set similarity between the Go reference and Rust top-K result InferIDs when at least one engine returned an item.",
 			Buckets: similarityBuckets,
 		}, []string{"k"}),
 		rbo: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "rbo",
-			Help:    "Rank-Biased Overlap (p=0.9) between the Go reference and Rust ranked results.",
+			Help:    "Rank-Biased Overlap (p=0.9) between the Go reference and Rust ranked results when at least one engine returned an item.",
 			Buckets: similarityBuckets,
 		}),
 		top1Match: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -139,13 +139,13 @@ func (m *Metrics) observe(c GraphQLComparison) {
 	}
 
 	m.comparisonsTotal.Inc()
-	m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
-	m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
-	m.rbo.Observe(c.RBO)
 
-	// Empty/empty has no rank-0 result, so it is not Top-1 evidence. One-sided
-	// emptiness remains a comparable mismatch and enters the denominator.
-	if c.PGCount > 0 || c.TantivyCount > 0 {
+	// Empty/empty has no ranked result, so its vacuous similarities are not KPI
+	// evidence. One-sided emptiness remains an observed mismatch.
+	if c.RankingObserved() {
+		m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
+		m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
+		m.rbo.Observe(c.RBO)
 		m.top1Match.WithLabelValues(boolLabel(c.Top1Match)).Inc()
 	}
 

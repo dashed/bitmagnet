@@ -29,13 +29,16 @@ const (
 // the PostgreSQL ("pg") and Tantivy engines.
 type Comparison struct {
 	// JaccardAt20 is the Jaccard set similarity over the top-20 IDs of each list.
+	// It is structural only when RankingObserved returns false and must not enter
+	// a ranking KPI denominator in that case.
 	JaccardAt20 float64
 	// JaccardAt50 is the Jaccard set similarity over the top-50 IDs of each list.
 	JaccardAt50 float64
-	// RBO is the extrapolated Rank-Biased Overlap of the two ranked lists.
+	// RBO is the extrapolated Rank-Biased Overlap of the two ranked lists. It is
+	// structural only when RankingObserved returns false.
 	RBO float64
 	// Top1Match reports whether both lists are non-empty and share the same
-	// rank-0 (top) result.
+	// rank-0 (top) result. It is meaningful only when RankingObserved is true.
 	Top1Match bool
 	// PGCount is the number of IDs returned by the PostgreSQL engine.
 	PGCount int
@@ -47,12 +50,21 @@ type Comparison struct {
 	TantivyLatency time.Duration
 }
 
+// RankingObserved reports whether at least one engine returned a ranked item.
+// When both lists are empty there is no ranking evidence: the comparator's
+// vacuous Jaccard/RBO values remain useful structurally but must not enter
+// similarity KPI denominators. One-sided emptiness is observed ranking evidence
+// and remains a mismatch.
+func (c Comparison) RankingObserved() bool {
+	return c.PGCount > 0 || c.TantivyCount > 0
+}
+
 // IsDiscrepancy reports whether the two engines disagreed in a way worth
 // surfacing: a comparable top result differs, the top-20 sets are not
 // identical, or the engines returned a different number of results. Two empty
 // result sets have no top result to compare and are not a discrepancy.
 func (c Comparison) IsDiscrepancy() bool {
-	top1Differs := (c.PGCount > 0 || c.TantivyCount > 0) && !c.Top1Match
+	top1Differs := c.RankingObserved() && !c.Top1Match
 
 	return top1Differs || c.JaccardAt20 < 1.0 || c.PGCount != c.TantivyCount
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -49,6 +50,30 @@ func TestMetricsObserve(t *testing.T) {
 	assert.InDelta(t, 1.0, testutil.ToFloat64(m.top1Match.WithLabelValues("false")), epsilon)
 	// The jaccard HistogramVec should have one series per label value ("20","50").
 	assert.Equal(t, 2, testutil.CollectAndCount(m.jaccard))
+}
+
+func TestMetricsExcludeUnobservedRanking(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	m.Observe(Compare(nil, nil, time.Millisecond, time.Millisecond))
+
+	assert.InDelta(t, 1.0, testutil.ToFloat64(m.comparisonsTotal), epsilon)
+	assert.Zero(t, testutil.CollectAndCount(m.jaccard))
+	assert.Zero(t, testutil.CollectAndCount(m.top1Match))
+
+	rboMetric := &dto.Metric{}
+	require.NoError(t, m.rbo.Write(rboMetric))
+	assert.Zero(t, rboMetric.GetHistogram().GetSampleCount())
+
+	m.Observe(Compare([]string{"a"}, nil, time.Millisecond, time.Millisecond))
+
+	assert.Equal(t, 2, testutil.CollectAndCount(m.jaccard))
+	assert.InDelta(t, 1.0, testutil.ToFloat64(m.top1Match.WithLabelValues("false")), epsilon)
+
+	rboMetric.Reset()
+	require.NoError(t, m.rbo.Write(rboMetric))
+	assert.Equal(t, uint64(1), rboMetric.GetHistogram().GetSampleCount())
 }
 
 func TestMetricsIncDropped(t *testing.T) {

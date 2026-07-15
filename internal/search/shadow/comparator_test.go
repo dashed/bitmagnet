@@ -86,6 +86,7 @@ func TestCompareEmptyBoth(t *testing.T) {
 	assert.InDelta(t, 1.0, c.JaccardAt50, epsilon)
 	assert.InDelta(t, 1.0, c.RBO, epsilon)
 	assert.False(t, c.Top1Match) // no top result exists
+	assert.False(t, c.RankingObserved())
 	assert.Equal(t, 0, c.PGCount)
 	assert.Equal(t, 0, c.TantivyCount)
 	assert.False(t, c.IsDiscrepancy())
@@ -100,6 +101,7 @@ func TestCompareOneEmpty(t *testing.T) {
 	assert.InDelta(t, 0.0, c.JaccardAt20, epsilon)
 	assert.InDelta(t, 0.0, c.RBO, epsilon)
 	assert.False(t, c.Top1Match)
+	assert.True(t, c.RankingObserved())
 	assert.Equal(t, 2, c.PGCount)
 	assert.Equal(t, 0, c.TantivyCount)
 }

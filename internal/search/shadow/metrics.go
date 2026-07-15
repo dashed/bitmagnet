@@ -36,14 +36,14 @@ func NewMetrics() *Metrics {
 			Namespace: namespace,
 			Subsystem: subsystemShadow,
 			Name:      "jaccard",
-			Help:      "Jaccard set similarity between PostgreSQL and Tantivy top-K result IDs.",
+			Help:      "Jaccard set similarity between PostgreSQL and Tantivy top-K result IDs when at least one engine returned an item.",
 			Buckets:   prometheus.LinearBuckets(0, 0.1, 11),
 		}, []string{"k"}),
 		rbo: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystemShadow,
 			Name:      "rbo",
-			Help:      "Rank-Biased Overlap (p=0.9) between PostgreSQL and Tantivy ranked results.",
+			Help:      "Rank-Biased Overlap (p=0.9) between PostgreSQL and Tantivy ranked results when at least one engine returned an item.",
 			Buckets:   prometheus.LinearBuckets(0, 0.1, 11),
 		}),
 		latencyRatio: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -57,7 +57,7 @@ func NewMetrics() *Metrics {
 			Namespace: namespace,
 			Subsystem: subsystemShadow,
 			Name:      "top1_match_total",
-			Help:      "Count of comparisons broken down by whether the top (rank-0) result matched.",
+			Help:      "Comparisons with at least one returned item, broken down by whether the top (rank-0) result matched.",
 		}, []string{"matched"}),
 		resultCountDelta: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace,
@@ -95,16 +95,19 @@ func (m *Metrics) Observe(c Comparison) {
 	}
 
 	m.comparisonsTotal.Inc()
-	m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
-	m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
-	m.rbo.Observe(c.RBO)
+
+	if c.RankingObserved() {
+		m.jaccard.WithLabelValues("20").Observe(c.JaccardAt20)
+		m.jaccard.WithLabelValues("50").Observe(c.JaccardAt50)
+		m.rbo.Observe(c.RBO)
+		m.top1Match.WithLabelValues(boolLabel(c.Top1Match)).Inc()
+	}
 
 	// The latency ratio is only meaningful with a positive PG baseline.
 	if c.PGLatency > 0 {
 		m.latencyRatio.Observe(c.TantivyLatency.Seconds() / c.PGLatency.Seconds())
 	}
 
-	m.top1Match.WithLabelValues(boolLabel(c.Top1Match)).Inc()
 	m.resultCountDelta.Observe(float64(c.PGCount - c.TantivyCount))
 }
 

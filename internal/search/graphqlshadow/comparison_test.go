@@ -202,20 +202,32 @@ func TestCompareGraphQLOneSidedEmptyFacetIsObservedMismatch(t *testing.T) {
 	}
 }
 
-func TestCompareGraphQLEstimateFlag(t *testing.T) {
+func TestCompareGraphQLEstimateFlagFromEitherSide(t *testing.T) {
 	t.Parallel()
 
-	rust := GraphQLResult{IDs: []string{"a"}, TotalCount: 500, TotalCountIsEstimate: true}
-	ref := GraphQLResult{IDs: []string{"a"}, TotalCount: 512, TotalCountIsEstimate: true}
+	for _, tc := range []struct {
+		name         string
+		rustEstimate bool
+		refEstimate  bool
+	}{
+		{name: "rust only", rustEstimate: true},
+		{name: "reference only", refEstimate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	c := CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond)
+			rust := GraphQLResult{IDs: []string{"a"}, TotalCount: 500, TotalCountIsEstimate: tc.rustEstimate}
+			ref := GraphQLResult{IDs: []string{"a"}, TotalCount: 512, TotalCountIsEstimate: tc.refEstimate}
+			c := CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond)
 
-	if !c.TotalCountIsEstimate {
-		t.Error("TotalCountIsEstimate should be true when either side is an estimate")
-	}
+			if !c.TotalCountIsEstimate {
+				t.Error("TotalCountIsEstimate should be true when either side is an estimate")
+			}
 
-	if c.TotalCountMatch {
-		t.Error("estimated totals 500 vs 512 should not be an exact match")
+			if c.TotalCountMatch {
+				t.Error("estimated totals 500 vs 512 should not be an exact match")
+			}
+		})
 	}
 }
 

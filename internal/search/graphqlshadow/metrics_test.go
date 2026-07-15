@@ -6,6 +6,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestMetricsRegisterAndGather(t *testing.T) {
@@ -98,12 +99,38 @@ func TestMetricsExcludeUndefinedEmptyTop1(t *testing.T) {
 
 	m.observe(CompareGraphQL(empty, empty, time.Millisecond, time.Millisecond))
 
+	if got := testutil.CollectAndCount(m.jaccard); got != 0 {
+		t.Errorf("jaccard series count after empty/empty = %d, want 0", got)
+	}
+
+	rboMetric := &dto.Metric{}
+	if err := m.rbo.Write(rboMetric); err != nil {
+		t.Fatalf("write rbo metric: %v", err)
+	}
+
+	if got := rboMetric.GetHistogram().GetSampleCount(); got != 0 {
+		t.Errorf("rbo sample count after empty/empty = %d, want 0", got)
+	}
+
 	if got := testutil.CollectAndCount(m.top1Match); got != 0 {
 		t.Fatalf("top1_match series count after empty/empty = %d, want 0", got)
 	}
 
 	refOnly := GraphQLResult{IDs: []string{"a"}, TotalCount: 1}
 	m.observe(CompareGraphQL(empty, refOnly, time.Millisecond, time.Millisecond))
+
+	if got := testutil.CollectAndCount(m.jaccard); got != 2 {
+		t.Errorf("jaccard series count after one-sided empty = %d, want 2", got)
+	}
+
+	rboMetric.Reset()
+	if err := m.rbo.Write(rboMetric); err != nil {
+		t.Fatalf("write rbo metric: %v", err)
+	}
+
+	if got := rboMetric.GetHistogram().GetSampleCount(); got != 1 {
+		t.Errorf("rbo sample count after one-sided empty = %d, want 1", got)
+	}
 
 	if got := testutil.ToFloat64(m.top1Match.WithLabelValues("false")); got != 1 {
 		t.Errorf("top1_match{matched=false} after one-sided empty = %v, want 1", got)
