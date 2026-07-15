@@ -321,12 +321,17 @@ func torrentContentQueryOptions(
 	input TorrentContentSearchQueryInput,
 	fullOrderBy maps.InsertMap[search.TorrentContentOrderBy, search.OrderDirection],
 ) pathsearch.QueryOptions {
-	var facet q.Option
+	var (
+		facet       q.Option
+		refineFacet q.Option
+	)
 
 	var facetFilters []q.Option
 
 	if input.Facets != nil {
-		facet = torrentContentFacetsOption(*input.Facets)
+		facets := torrentContentFacets(*input.Facets)
+		facet = q.WithFacet(facets...)
+		refineFacet = q.WithFacet(filterOnlyFacets(facets)...)
 		facetFilters = torrentContentFacetFilterOptions(*input.Facets)
 	}
 
@@ -356,11 +361,19 @@ func torrentContentQueryOptions(
 
 	combined = append(combined, order)
 
-	// Refine: hydrators + order, NO facets / agg budget (per-chunk decode only).
+	// Refine: hydrators + order + every facet predicate, but NO facet
+	// aggregation / agg budget (per-chunk decode only). Facet filter predicates
+	// live on the facet objects themselves, so dropping the facets here would
+	// silently widen routed results (for example contentType=tv_show would also
+	// return movie/null rows). filterOnlyFacets preserves filter+logic while
+	// forcing IsAggregated=false.
 	refine := []q.Option{
 		search.TorrentContentCoreJoins(),
 		search.HydrateTorrentContentContent(),
 		search.HydrateTorrentContentTorrent(),
+	}
+	if refineFacet != nil {
+		refine = append(refine, refineFacet)
 	}
 	if infoHashFilter != nil {
 		refine = append(refine, infoHashFilter)
@@ -549,7 +562,7 @@ func find2PopularitySortDefault(
 	return rewritten
 }
 
-func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {
+func torrentContentFacets(input gen.TorrentContentFacetsInput) []q.Facet {
 	var qFacets []q.Facet
 	if contentType, ok := input.ContentType.ValueOK(); ok {
 		qFacets = append(qFacets, torrentContentTypeFacet(*contentType))
@@ -587,7 +600,30 @@ func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {
 		qFacets = append(qFacets, videoSourceFacet(*videoSource))
 	}
 
-	return q.WithFacet(qFacets...)
+	return qFacets
+}
+
+func torrentContentFacetsOption(input gen.TorrentContentFacetsInput) q.Option {
+	return q.WithFacet(torrentContentFacets(input)...)
+}
+
+// filterOnlyFacet delegates the full facet contract but suppresses aggregation.
+// Facet-selected values and logic remain active in the query builder, so the
+// L3 candidate refine keeps the exact same structured membership predicate as
+// the normal PostgreSQL path without recalculating facets once per chunk.
+type filterOnlyFacet struct {
+	q.Facet
+}
+
+func (filterOnlyFacet) IsAggregated() bool { return false }
+
+func filterOnlyFacets(facets []q.Facet) []q.Facet {
+	filtered := make([]q.Facet, len(facets))
+	for i, facet := range facets {
+		filtered[i] = filterOnlyFacet{Facet: facet}
+	}
+
+	return filtered
 }
 
 func transformTorrentContentSearchResult(

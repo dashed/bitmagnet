@@ -5,9 +5,9 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 )
 
-// ResolvedOptions is the resolved pagination / order / flags state of an Option
-// set, exposed so callers and tests can assert how a query would paginate and
-// order WITHOUT executing any SQL.
+// ResolvedOptions is the resolved pagination / order / facet / flags state of
+// an Option set, exposed so callers and tests can assert how a query would be
+// shaped WITHOUT executing any SQL.
 //
 // The option layer was otherwise un-introspectable: the only consumer is the
 // search execution path, whose fakes in unit tests ignore the options entirely.
@@ -27,6 +27,10 @@ type ResolvedOptions struct {
 	TotalCount bool
 	// HasTSQuery reports whether a free-text tsquery was applied.
 	HasTSQuery bool
+	// Facets is the resolved facet configuration. It exposes filters, logic, and
+	// aggregation state so routed-query tests can prove that removing per-chunk
+	// aggregation did not also remove a user's facet predicates.
+	Facets []FacetConfig
 }
 
 // ResolveOptions applies opts to a fresh builder bound to daoQuery and returns the
@@ -53,11 +57,17 @@ func ResolveOptions(daoQuery *dao.Query, opts ...Option) (ResolvedOptions, error
 		return ResolvedOptions{}, nil
 	}
 
+	facets := make([]FacetConfig, len(ob.facets))
+	for i, facet := range ob.facets {
+		facets[i] = facet
+	}
+
 	return ResolvedOptions{
 		Limit:      ob.limit,
 		Offset:     ob.offset,
 		OrderBy:    ob.orderBy,
 		TotalCount: ob.totalCount,
 		HasTSQuery: ob.tsquery != "",
+		Facets:     facets,
 	}, nil
 }

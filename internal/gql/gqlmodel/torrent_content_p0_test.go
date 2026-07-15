@@ -76,6 +76,235 @@ func TestTorrentContentBaseOptions_NoPageLimit(t *testing.T) {
 	}
 }
 
+// A facet's selected values are both an aggregation request and a membership
+// predicate. The L3 refine must retain the predicate while suppressing the
+// per-chunk aggregation; otherwise a contentType=tv_show request admits
+// movie/null candidates and corrupts the served page before the one refined-set
+// aggregation pass runs.
+func TestTorrentContentQueryOptions_RefinePreservesFacetFiltersWithoutAggregation(t *testing.T) {
+	daoQuery := newMockDaoQuery(t)
+	aggregate := true
+	tvShow := model.ContentTypeTvShow
+	input := TorrentContentSearchQueryInput{
+		Facets: &gen.TorrentContentFacetsInput{
+			ContentType: graphql.OmittableOf(&gen.ContentTypeFacetInput{
+				Aggregate: graphql.OmittableOf(&aggregate),
+				Filter:    graphql.OmittableOf([]*model.ContentType{&tvShow}),
+			}),
+		},
+	}
+	opts := torrentContentQueryOptions(
+		input,
+		maps.NewInsertMap[search.TorrentContentOrderBy, search.OrderDirection](),
+	)
+
+	for name, wantAggregated := range map[string]bool{
+		"combined": true,
+		"refine":   false,
+		"agg":      true,
+	} {
+		var optionSet []q.Option
+		switch name {
+		case "combined":
+			optionSet = opts.Combined
+		case "refine":
+			optionSet = opts.Refine
+		case "agg":
+			optionSet = opts.Agg
+		}
+
+		resolved, err := q.ResolveOptions(daoQuery, optionSet...)
+		if err != nil {
+			t.Fatalf("ResolveOptions(%s): %v", name, err)
+		}
+		if len(resolved.Facets) != 1 {
+			t.Fatalf("%s facets = %d, want 1 content-type predicate", name, len(resolved.Facets))
+		}
+
+		facet := resolved.Facets[0]
+		if got := facet.IsAggregated(); got != wantAggregated {
+			t.Errorf("%s content-type aggregate = %v, want %v", name, got, wantAggregated)
+		}
+		if !facet.Filter().HasKey(string(model.ContentTypeTvShow)) {
+			t.Errorf("%s content-type facet lost tv_show filter: %#v", name, facet.Filter())
+		}
+		if facet.Logic() != model.FacetLogicOr {
+			t.Errorf("%s content-type logic = %q, want OR", name, facet.Logic())
+		}
+	}
+}
+
+type facetAwareSearch struct {
+	daoQuery    *dao.Query
+	rows        []search.TorrentContentResultItem
+	refineCalls int
+	aggCalls    int
+}
+
+func (f *facetAwareSearch) TorrentContent(
+	_ context.Context,
+	options ...q.Option,
+) (search.TorrentContentResult, error) {
+	resolved, err := q.ResolveOptions(f.daoQuery, options...)
+	if err != nil {
+		return search.TorrentContentResult{}, err
+	}
+
+	var contentTypeFilter q.FacetFilter
+	aggregated := false
+	for _, facet := range resolved.Facets {
+		if facet.Key() == search.TorrentContentTypeFacetKey {
+			contentTypeFilter = facet.Filter()
+		}
+		aggregated = aggregated || facet.IsAggregated()
+	}
+
+	if aggregated {
+		f.aggCalls++
+
+		return search.TorrentContentResult{Aggregations: q.Aggregations{
+			search.TorrentContentTypeFacetKey: {
+				Items: q.AggregationItems{
+					string(model.ContentTypeTvShow): {
+						Label: string(model.ContentTypeTvShow),
+						Count: 2,
+					},
+				},
+			},
+		}}, nil
+	}
+
+	f.refineCalls++
+	items := make([]search.TorrentContentResultItem, 0, len(f.rows))
+	for _, item := range f.rows {
+		key := "null"
+		if item.ContentType.Valid {
+			key = item.ContentType.ContentType.String()
+		}
+		if len(contentTypeFilter) == 0 || contentTypeFilter.HasKey(key) {
+			items = append(items, item)
+		}
+	}
+
+	return search.TorrentContentResult{Items: items}, nil
+}
+
+func (*facetAwareSearch) FileCounts(
+	_ context.Context,
+	ids []protocol.ID,
+) (map[protocol.ID]int, error) {
+	counts := make(map[protocol.ID]int, len(ids))
+	for _, id := range ids {
+		counts[id] = 1
+	}
+
+	return counts, nil
+}
+
+func facetRouteItem(id protocol.ID, contentType *model.ContentType) search.TorrentContentResultItem {
+	item := search.TorrentContentResultItem{TorrentContent: model.TorrentContent{
+		InfoHash: id,
+		Torrent: model.Torrent{
+			InfoHash:    id,
+			FilesStatus: model.FilesStatusMulti,
+			Files: []model.TorrentFile{{
+				Path: "Breaking Bad S01.mkv",
+			}},
+		},
+	}}
+	if contentType != nil {
+		item.ContentType = model.NewNullContentType(*contentType)
+	}
+
+	return item
+}
+
+// End-to-end routed regression for the live idx11 failure: an out-of-filter
+// movie and null candidate appear ahead of valid TV rows in L3 order. Refine
+// must remove them, retain the order of the surviving TV rows, and run exactly
+// one aggregation over the refined set. cached=true and FIND-2 are enabled to
+// match production and prove they do not alter the served Lane-C order.
+func TestSearch_PathsearchFacetFilterPreservesSurvivorOrder(t *testing.T) {
+	previousFlags := search.FeatureFlagsValue()
+	search.SetFeatureFlags(search.FeatureFlags{PopularitySortDefault: true})
+	t.Cleanup(func() { search.SetFeatureFlags(previousFlags) })
+
+	ids := make([]protocol.ID, 4)
+	for i := range ids {
+		ids[i][0] = byte(i + 1)
+	}
+
+	movie := model.ContentTypeMovie
+	tvShow := model.ContentTypeTvShow
+	pg := &facetAwareSearch{
+		daoQuery: newMockDaoQuery(t),
+		// Deliberately reverse PG-natural order; the composer must restore L3
+		// order after the facet predicate removes ids 1 and 3.
+		rows: []search.TorrentContentResultItem{
+			facetRouteItem(ids[3], &tvShow),
+			facetRouteItem(ids[2], nil),
+			facetRouteItem(ids[1], &tvShow),
+			facetRouteItem(ids[0], &movie),
+		},
+	}
+	l3 := &recordingL3{resp: &pb.PathCandidatesResponse{
+		Candidates: []*pb.PathCandidate{
+			{InfoHash: ids[0].Bytes()},
+			{InfoHash: ids[1].Bytes()},
+			{InfoHash: ids[2].Bytes()},
+			{InfoHash: ids[3].Bytes()},
+		},
+		CandidateTotal: 4,
+	}}
+	composer := pathsearch.NewComposer(l3, pg, pathsearch.ComposerConfig{
+		TypeaheadEnabled: true,
+		MinQueryLength:   3,
+		OversampleFactor: 1,
+		MaxCandidates:    100,
+	}, nil)
+
+	descending := true
+	aggregate := true
+	input := queryInput("breaking bad s01", gen.TorrentContentOrderByInput{
+		Field:      gen.TorrentContentOrderByFieldRelevance,
+		Descending: graphql.OmittableOf(&descending),
+	})
+	input.Cached = model.NewNullBool(true)
+	input.Facets = &gen.TorrentContentFacetsInput{
+		ContentType: graphql.OmittableOf(&gen.ContentTypeFacetInput{
+			Aggregate: graphql.OmittableOf(&aggregate),
+			Filter:    graphql.OmittableOf([]*model.ContentType{&tvShow}),
+		}),
+	}
+
+	result, err := (TorrentContentQuery{
+		TorrentContentSearch: pg,
+		Pathsearch:           composer,
+	}).Search(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if len(result.Items) != 2 {
+		t.Fatalf("filtered routed items = %d, want 2 tv_show rows", len(result.Items))
+	}
+	for i, want := range []protocol.ID{ids[1], ids[3]} {
+		if got := result.Items[i].InfoHash; got != want {
+			t.Errorf("filtered routed item %d = %s, want L3 survivor %s", i, got, want)
+		}
+		if got := result.Items[i].ContentType; !got.Valid || got.ContentType != model.ContentTypeTvShow {
+			t.Errorf("filtered routed item %d content type = %+v, want tv_show", i, got)
+		}
+	}
+	if pg.refineCalls != 1 || pg.aggCalls != 1 {
+		t.Errorf("PG calls refine=%d agg=%d, want one filtered refine + one refined-set aggregation",
+			pg.refineCalls, pg.aggCalls)
+	}
+	if got := result.Aggregations.ContentType; len(got) != 1 || got[0].Count != 2 {
+		t.Errorf("refined content-type aggregation = %+v, want one tv_show bucket count=2", got)
+	}
+}
+
 // P0-1 (contrast): the PostgreSQL path keeps DefaultOption's Limit(10) when the
 // caller omits a limit — confirming the cap the L3 path must shed is real and that
 // ResolveOptions observes it (i.e. the assertion above is not vacuous).
