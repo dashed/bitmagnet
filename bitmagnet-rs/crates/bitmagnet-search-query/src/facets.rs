@@ -201,7 +201,7 @@ async fn fetch_facet_group(
     let values = facet_values(pool, facet.facet).await?;
     let logic = effective_logic(facet);
     let current_facet = (logic == FacetLogic::Or).then(|| facet.facet.key());
-    let entries = stream::iter(values.into_iter().map(|(value, label)| {
+    let entries = try_collect_facet_items(values.into_iter().map(|(value, label)| {
         fetch_facet_item(
             pool,
             options,
@@ -213,8 +213,6 @@ async fn fetch_facet_group(
             label,
         )
     }))
-    .buffer_unordered(FACET_DB_CONCURRENCY)
-    .try_collect::<Vec<_>>()
     .await?;
     let items = entries.into_iter().flatten().collect();
 
@@ -226,6 +224,17 @@ async fn fetch_facet_group(
             items,
         },
     ))
+}
+
+async fn try_collect_facet_items<I, Fut, T>(futures: I) -> Result<Vec<T>>
+where
+    I: IntoIterator<Item = Fut>,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    stream::iter(futures)
+        .buffer_unordered(FACET_DB_CONCURRENCY)
+        .try_collect()
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -920,6 +929,11 @@ fn numeric_run_cmp(left: &str, right: &str) -> Ordering {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        Arc,
+    };
+    use tokio::sync::Semaphore;
 
     fn request(facet: TorrentContentFacet, values: &[&str]) -> FacetRequest {
         FacetRequest {
@@ -932,6 +946,52 @@ mod tests {
 
     fn fixed_now() -> DateTime<Utc> {
         "2026-07-12T12:00:00Z".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn facet_item_fanout_is_concurrent_and_bounded() {
+        const EXPECTED_CONCURRENCY: usize = 4;
+        const WORK_ITEMS: usize = EXPECTED_CONCURRENCY + 3;
+
+        assert_eq!(FACET_DB_CONCURRENCY, EXPECTED_CONCURRENCY);
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let work = (0..WORK_ITEMS)
+            .map(|index| {
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                async move {
+                    let current = active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                    peak.fetch_max(current, AtomicOrdering::SeqCst);
+                    started.fetch_add(1, AtomicOrdering::SeqCst);
+
+                    let permit = release.acquire().await.expect("release semaphore is open");
+                    permit.forget();
+                    active.fetch_sub(1, AtomicOrdering::SeqCst);
+                    Ok(index)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut collection = Box::pin(try_collect_facet_items(work));
+        assert!(futures::poll!(&mut collection).is_pending());
+
+        assert_eq!(active.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
+        assert_eq!(peak.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
+        assert_eq!(started.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
+
+        release.add_permits(WORK_ITEMS);
+        let mut completed = collection.await.unwrap();
+        completed.sort_unstable();
+
+        assert_eq!(completed, (0..WORK_ITEMS).collect::<Vec<_>>());
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(peak.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
     }
 
     #[test]
