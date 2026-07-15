@@ -78,6 +78,8 @@ func TestHookUnsafeOperationsMakeZeroRustCalls(t *testing.T) {
 		{query: `query Q { version } mutation M { torrent { reprocess(infoHashes: []) } }`},
 		{query: `query Q { version } mutation M { torrent { reprocess(infoHashes: []) } }`, name: "M"},
 		{query: `{ version }`},
+		{query: comparableSearchWithQueue, name: "Search"},
+		{query: comparableSearchWithTorrentFiles, name: "Search"},
 	}
 
 	for _, test := range tests {

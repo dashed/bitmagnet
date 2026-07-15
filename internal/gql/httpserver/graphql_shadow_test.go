@@ -104,7 +104,15 @@ func testExecutableSchema() graphql.ExecutableSchema {
         aggregations: Aggregations!
       }
       type TorrentContentQuery { search(input: SearchInput!): SearchResult! }
-      type Query { torrentContent: TorrentContentQuery!, version: String!, resolverError: String }
+      type QueueQuery { jobs: [ID!]! }
+      type TorrentQuery { files: [ID!]! }
+      type Query {
+        torrentContent: TorrentContentQuery!
+        queue: QueueQuery!
+        torrent: TorrentQuery!
+        version: String!
+        resolverError: String
+      }
       type Mutation { mutate: Boolean! }
     `})
 
@@ -193,6 +201,32 @@ func TestGraphQLShadowActualTransportComparableSearch(t *testing.T) {
 	}
 
 	requireDarkCall(t, dark)
+}
+
+func TestGraphQLShadowActualTransportMixedSearchMakesZeroRustCalls(t *testing.T) {
+	t.Parallel()
+
+	for _, sibling := range []string{"queue { jobs }", "torrent { files }"} {
+		sibling := sibling
+		t.Run(sibling, func(t *testing.T) {
+			t.Parallel()
+
+			dark := successfulDarkGraphQL(t)
+			handler, _ := testGraphQLHandler(t, dark, time.Second)
+			query := strings.Replace(transportSearchQuery, "\n}", "\n  "+sibling+"\n}", 1)
+			body := mustJSON(t, map[string]any{
+				"query":         query,
+				"operationName": "Search",
+				"variables":     map[string]any{"count": true},
+			})
+
+			response := postGraphQL(t, handler, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf("unexpected GraphQL status: %d body=%s", response.Code, response.Body.String())
+			}
+			requireNoDarkCall(t, dark)
+		})
+	}
 }
 
 func TestGraphQLShadowActualTransportNamedMultiOperation(t *testing.T) {
