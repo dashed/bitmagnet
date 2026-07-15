@@ -1896,8 +1896,9 @@ mod tests {
         let mut cfg = config();
         cfg.max_refine_decompressed_bytes = 128;
         cfg.refine_decoded_byte_budget = 1_024;
-        let composer = Composer::new(candidates, Arc::clone(&pg), cfg, None)
-            .with_metrics(Arc::clone(&metrics));
+        let backend: Arc<dyn PgSearchBackend> = pg.clone();
+        let composer =
+            Composer::new(candidates, backend, cfg, None).with_metrics(Arc::clone(&metrics));
 
         let (result, served) = search(&composer, 10, 0).await;
 
