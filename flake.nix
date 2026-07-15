@@ -24,6 +24,7 @@
             jekyll
             nodejs_22
             nodePackages.prettier
+            prometheus
             protobuf
             protoc-gen-go
             protoc-gen-go-grpc

@@ -16,50 +16,50 @@ tests:
   - interval: 1m
     input_series:
       # 10 comparisons/min, all with a matching top result.
-      - series: 'bitmagnet_graphql_shadow_comparisons_total'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_sampled_total'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_admitted_total'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="false"}'
-        values: '0+0x120'
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false"}'
+        values: "0+0x120"
       # Jaccard@20 mean 0.95 (sum grows 9.5/min against count 10/min).
-      - series: 'bitmagnet_graphql_shadow_jaccard_sum{k="20"}'
-        values: '0+9.5x120'
-      - series: 'bitmagnet_graphql_shadow_jaccard_count{k="20"}'
-        values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_jaccard_sum{namespace="bitmagnet",service="bitmagnet-l3",k="20"}'
+        values: "0+9.5x120"
+      - series: 'bitmagnet_graphql_shadow_jaccard_count{namespace="bitmagnet",service="bitmagnet-l3",k="20"}'
+        values: "0+10x120"
       # RBO mean 0.95.
-      - series: 'bitmagnet_graphql_shadow_rbo_sum'
-        values: '0+9.5x120'
-      - series: 'bitmagnet_graphql_shadow_rbo_count'
-        values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_rbo_sum{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+9.5x120"
+      - series: 'bitmagnet_graphql_shadow_rbo_count{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
       # Exact totals all match; estimate totals mismatch but are excluded.
-      - series: 'bitmagnet_graphql_shadow_total_count_match_total{matched="true",estimate="false"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_total_count_match_total{matched="false",estimate="false"}'
-        values: '0+0x120'
-      - series: 'bitmagnet_graphql_shadow_total_count_match_total{matched="false",estimate="true"}'
-        values: '0+5x120'
-      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{matched="true"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{matched="false"}'
-        values: '0+0x120'
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="false"}'
+        values: "0+0x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="true"}'
+        values: "0+5x120"
+      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false"}'
+        values: "0+0x120"
       # Rust latency all in <=0.008s; reference in (0.008, 0.064]s → rust p99 <= ref p99.
-      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{le="0.008"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{le="0.064"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{le="+Inf"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{le="0.008"}'
-        values: '0+0x120'
-      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{le="0.064"}'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{le="+Inf"}'
-        values: '0+10x120'
+      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.008"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.064"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="+Inf"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.008"}'
+        values: "0+0x120"
+      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.064"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="+Inf"}'
+        values: "0+10x120"
     promql_expr_test:
       - expr: graphql_shadow:gate_pass
         eval_time: 90m
@@ -97,36 +97,36 @@ tests:
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'bitmagnet_graphql_shadow_comparisons_total'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_sampled_total'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_admitted_total'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
-        values: '0+5x180'
-      - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="false"}'
-        values: '0+5x180'
-      - series: 'bitmagnet_graphql_shadow_jaccard_sum{k="20"}'
-        values: '0+9.5x180'
-      - series: 'bitmagnet_graphql_shadow_jaccard_count{k="20"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_rbo_sum'
-        values: '0+9.5x180'
-      - series: 'bitmagnet_graphql_shadow_rbo_count'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_total_count_match_total{matched="true",estimate="false"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{matched="true"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{le="0.008"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{le="+Inf"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{le="0.008"}'
-        values: '0+10x180'
-      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{le="+Inf"}'
-        values: '0+10x180'
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+5x180"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false"}'
+        values: "0+5x180"
+      - series: 'bitmagnet_graphql_shadow_jaccard_sum{namespace="bitmagnet",service="bitmagnet-l3",k="20"}'
+        values: "0+9.5x180"
+      - series: 'bitmagnet_graphql_shadow_jaccard_count{namespace="bitmagnet",service="bitmagnet-l3",k="20"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_rbo_sum{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+9.5x180"
+      - series: 'bitmagnet_graphql_shadow_rbo_count{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_all_facets_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.008"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="+Inf"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="0.008"}'
+        values: "0+10x180"
+      - series: 'bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3",le="+Inf"}'
+        values: "0+10x180"
     promql_expr_test:
       - expr: graphql_shadow:gate_pass
         eval_time: 120m
@@ -166,14 +166,14 @@ tests:
   - interval: 1m
     input_series:
       # ~5 comparisons over the whole window → increase1h well under 20.
-      - series: 'bitmagnet_graphql_shadow_comparisons_total'
-        values: '0+0.08x90'
-      - series: 'bitmagnet_graphql_shadow_sampled_total'
-        values: '0+0.08x90'
-      - series: 'bitmagnet_graphql_shadow_admitted_total'
-        values: '0+0.08x90'
-      - series: 'bitmagnet_graphql_shadow_top1_match_total{matched="true"}'
-        values: '0+0x90'
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+0.08x90"
+      - series: 'bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+0.08x90"
+      - series: 'bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+0.08x90"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+0x90"
     promql_expr_test:
       - expr: graphql_shadow:volume:pass
         eval_time: 80m
@@ -196,10 +196,10 @@ tests:
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'bitmagnet_graphql_shadow_admitted_total'
-        values: '0+10x120'
-      - series: 'bitmagnet_graphql_shadow_comparisons_total'
-        values: '0+9x120'
+      - series: 'bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+9x120"
     promql_expr_test:
       - expr: graphql_shadow:rust_success:ratio
         eval_time: 90m
@@ -229,10 +229,10 @@ tests:
   # ---------------------------------------------------------------------------
   - interval: 1m
     input_series:
-      - series: 'bitmagnet_graphql_shadow_sampled_total'
-        values: '0+10x90'
-      - series: 'bitmagnet_graphql_shadow_reference_error_total'
-        values: '0+1x90'
+      - series: 'bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x90"
+      - series: 'bitmagnet_graphql_shadow_reference_error_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+1x90"
     alert_rule_test:
       - eval_time: 60m
         alertname: GraphQLShadowReferenceErrors
@@ -244,3 +244,24 @@ tests:
               summary: GraphQL shadow captured-Go-response error rate above 5%
               description: >
                 Over 5% of eligible shadow queries fail projection of the already-computed Go response. The comparison sample is degraded; investigate the query/projection contract before trusting the soak verdict.
+
+  # ---------------------------------------------------------------------------
+  # CANARY ISOLATION: a badly divergent canary has a distinct Service label and
+  # cannot contaminate the production L3 recording rules.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x90"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false"}'
+        values: "0+0x90"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-graphql-shadow-canary",matched="true"}'
+        values: "0+0x90"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-graphql-shadow-canary",matched="false"}'
+        values: "0+100x90"
+    promql_expr_test:
+      - expr: graphql_shadow:top1_match:ratio
+        eval_time: 80m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:top1_match:ratio"}'
+            value: 1

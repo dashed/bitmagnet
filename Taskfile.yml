@@ -97,6 +97,7 @@ tasks:
     cmds:
       - task test-go
       - task test-webui
+      - task test-prometheus-rules
 
   test-go:
     cmds:
@@ -108,6 +109,11 @@ tasks:
       - npm test
     env:
       CHROME_BIN: chromium
+
+  test-prometheus-rules:
+    cmds:
+      - promtool check rules observability/rules/graphql-shadow-gate.rules.yml
+      - promtool test rules observability/rules/graphql-shadow-gate.test.yml
 
   migrate:
     cmds:

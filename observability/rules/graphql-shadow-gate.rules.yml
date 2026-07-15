@@ -24,18 +24,22 @@
 # estimate totals: total_count matches are split by the `estimate` label. When a
 # search's total is a budgeted estimate the two engines legitimately differ, so
 # the count-match KPI is computed over estimate="false" (exact) rows only.
+#
+# Workload scope: every raw input is pinned to the production Go L3 scrape
+# labels observed in k3s. Synthetic canaries use a distinct Service and cannot
+# contaminate the promotion verdict, even if they are accidentally scraped.
 groups:
   - name: graphql_shadow_gate_kpis
     interval: 1m
     rules:
       - record: graphql_shadow:comparisons:increase1h
-        expr: sum(increase(bitmagnet_graphql_shadow_comparisons_total[1h]))
+        expr: sum(increase(bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
 
       - record: graphql_shadow:sampled:increase1h
-        expr: sum(increase(bitmagnet_graphql_shadow_sampled_total[1h]))
+        expr: sum(increase(bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
 
       - record: graphql_shadow:admitted:increase1h
-        expr: sum(increase(bitmagnet_graphql_shadow_admitted_total[1h]))
+        expr: sum(increase(bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
 
       - record: graphql_shadow:rust_success:ratio
         expr: |
@@ -45,39 +49,39 @@ groups:
 
       - record: graphql_shadow:top1_match:ratio
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_top1_match_total{matched="true"}[1h]))
+          sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}[1h]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_top1_match_total[1h])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h])), 1)
 
       - record: graphql_shadow:jaccard20:mean
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_jaccard_sum{k="20"}[1h]))
+          sum(increase(bitmagnet_graphql_shadow_jaccard_sum{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_jaccard_count{k="20"}[1h])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_jaccard_count{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h])), 1)
 
       - record: graphql_shadow:rbo:mean
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_rbo_sum[1h]))
+          sum(increase(bitmagnet_graphql_shadow_rbo_sum{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_rbo_count[1h])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_rbo_count{namespace="bitmagnet",service="bitmagnet-l3"}[1h])), 1)
 
       - record: graphql_shadow:total_count_match:ratio
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_total_count_match_total{matched="true",estimate="false"}[1h]))
+          sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}[1h]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_total_count_match_total{estimate="false"}[1h])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",estimate="false"}[1h])), 1)
 
       - record: graphql_shadow:all_facets_match:ratio
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_all_facets_match_total{matched="true"}[1h]))
+          sum(increase(bitmagnet_graphql_shadow_all_facets_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}[1h]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_all_facets_match_total[1h])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_all_facets_match_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h])), 1)
 
       - record: graphql_shadow:rust_latency:p99
-        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_rust_latency_seconds_bucket[1h])) by (le))
+        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_rust_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) by (le))
 
       - record: graphql_shadow:reference_latency:p99
-        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_reference_latency_seconds_bucket[1h])) by (le))
+        expr: histogram_quantile(0.99, sum(rate(bitmagnet_graphql_shadow_reference_latency_seconds_bucket{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) by (le))
 
       # Per-KPI pass indicators (1/0). `>= bool` yields 1/0; `or vector(0)` makes
       # a missing input read as fail so the composite is never a silent gap.
@@ -210,9 +214,9 @@ groups:
 
       - alert: GraphQLShadowReferenceErrors
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_reference_error_total[15m]))
+          sum(increase(bitmagnet_graphql_shadow_reference_error_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m]))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_sampled_total[15m])), 1)
+          clamp_min(sum(increase(bitmagnet_graphql_shadow_sampled_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m])), 1)
           > 0.05
         for: 30m
         labels:
@@ -235,7 +239,7 @@ groups:
   - name: graphql_shadow_composer_bounds
     rules:
       - alert: BitmagnetComposerRefineAggErrors
-        expr: sum(rate(bitmagnet_search_pathsearch_refine_agg_error_total[15m])) > 0
+        expr: sum(rate(bitmagnet_search_pathsearch_refine_agg_error_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m])) > 0
         for: 15m
         labels:
           severity: warning
@@ -246,9 +250,9 @@ groups:
 
       - alert: BitmagnetComposerCapSpike
         expr: |
-          sum(rate(bitmagnet_search_pathsearch_refine_retained_capped_total[15m]))
-          + sum(rate(bitmagnet_search_pathsearch_refine_deadline_capped_total[15m]))
-          + sum(rate(bitmagnet_search_pathsearch_refine_declined_oversized_total[15m]))
+          sum(rate(bitmagnet_search_pathsearch_refine_retained_capped_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m]))
+          + sum(rate(bitmagnet_search_pathsearch_refine_deadline_capped_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m]))
+          + sum(rate(bitmagnet_search_pathsearch_refine_declined_oversized_total{namespace="bitmagnet",service="bitmagnet-l3"}[15m]))
           > 0.1
         for: 30m
         labels:
