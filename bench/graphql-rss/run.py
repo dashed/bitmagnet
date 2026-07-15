@@ -20,6 +20,8 @@ from typing import Any, Iterable
 
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+DEFAULT_GATE_PEAK_BYTES = 6 * GIB
+DEFAULT_POSTGRES_IMAGE = "postgres:17.5-bookworm"
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 
@@ -87,6 +89,33 @@ def run_command(
             f"stdout tail:\n{stdout}\nstderr tail:\n{stderr}"
         )
     return result
+
+
+def command_error_tail(result: subprocess.CompletedProcess[bytes]) -> str:
+    output = result.stdout + result.stderr
+    return output.decode(errors="replace").strip()[-2000:]
+
+
+def docker_object_missing(
+    result: subprocess.CompletedProcess[bytes], *, kind: str, name: str
+) -> bool:
+    if result.returncode == 0:
+        return False
+    error = command_error_tail(result).lower()
+    expected = {
+        "container": (
+            f"no such container: {name}".lower(),
+            f"no such object: {name}".lower(),
+        ),
+        "network": (
+            f"network {name} not found".lower(),
+            f"no such network: {name}".lower(),
+            f"no such object: {name}".lower(),
+        ),
+    }
+    if kind not in expected:
+        raise ValueError(f"unsupported Docker object kind: {kind}")
+    return any(marker in error for marker in expected[kind])
 
 
 def git_text(*args: str) -> str:
@@ -701,7 +730,11 @@ class DockerHarness:
             "inspect", "--format", "{{json .State}}", name, check=False
         )
         if result.returncode != 0:
-            return {"Missing": True}
+            if docker_object_missing(result, kind="container", name=name):
+                return {"Missing": True}
+            raise HarnessError(
+                f"could not verify container {name} state: {command_error_tail(result)}"
+            )
         return json.loads(result.stdout)
 
     def wait_url(self, url: str, contains: str | None = None) -> None:
@@ -1036,13 +1069,19 @@ exit "$app_status"
         if self.network_created:
             try:
                 self.docker("network", "rm", self.network, check=False)
-                present = self.docker(
+                inspected = self.docker(
                     "network", "inspect", self.network, check=False
-                ).returncode == 0
-                if present:
+                )
+                if inspected.returncode == 0:
                     errors.append(f"network still exists: {self.network}")
-                else:
+                elif docker_object_missing(
+                    inspected, kind="network", name=self.network
+                ):
                     self.network_created = False
+                else:
+                    errors.append(
+                        f"network absence unknown: {command_error_tail(inspected)}"
+                    )
             except Exception as error:
                 errors.append(
                     f"network cleanup {self.network}: {type(error).__name__}: {error}"
@@ -1067,22 +1106,45 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=sorted(PROFILE_LIMITS), default="gate")
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--max-peak-bytes", type=int, default=6 * GIB)
+    parser.add_argument("--max-peak-bytes", type=int, default=DEFAULT_GATE_PEAK_BYTES)
     parser.add_argument("--graphql-image")
     parser.add_argument("--helper-image")
-    parser.add_argument("--postgres-image", default="postgres:17.5-bookworm")
+    parser.add_argument("--postgres-image", default=DEFAULT_POSTGRES_IMAGE)
     parser.add_argument("--build-timeout", type=float, default=3600)
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
     return parser
 
 
-def main() -> int:
-    args = argument_parser().parse_args()
+def validate_arguments(args: argparse.Namespace) -> None:
     if args.repeat < 1:
         raise HarnessError("--repeat must be at least 1")
     if not 0 < args.max_peak_bytes < 8 * GIB:
         raise HarnessError("--max-peak-bytes must be greater than zero and below 8 GiB")
+    if args.profile != "gate":
+        return
+
+    failures = []
+    if args.repeat < 3:
+        failures.append("--repeat must be at least 3")
+    if args.max_peak_bytes > DEFAULT_GATE_PEAK_BYTES:
+        failures.append("--max-peak-bytes cannot exceed the selected 6 GiB ceiling")
+    if args.graphql_image is not None or args.helper_image is not None:
+        failures.append("prebuilt GraphQL/helper images are not source-linked")
+    if args.postgres_image != DEFAULT_POSTGRES_IMAGE:
+        failures.append(f"--postgres-image must remain {DEFAULT_POSTGRES_IMAGE}")
+    if args.keep:
+        failures.append("--keep bypasses verified cleanup")
+    if failures:
+        raise HarnessError(
+            "gate profile rejects admission-downgrading options:\n- "
+            + "\n- ".join(failures)
+        )
+
+
+def main() -> int:
+    args = argument_parser().parse_args()
+    validate_arguments(args)
 
     try:
         info = docker_info(args.runtime, require_amd64=args.profile == "gate")

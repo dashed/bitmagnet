@@ -43,8 +43,8 @@ python3 bench/graphql-rss/run.py \
 
 The default acceptance ceiling is 6 GiB peak inside the 8 GiB GraphQL cgroup,
 leaving 25% headroom. This is a harness guard, not production admission or an
-approval to deploy. Override it only when the reviewer has selected a different
-gate explicitly:
+approval to deploy. The gate profile accepts a stricter ceiling but rejects a
+value above 6 GiB:
 
 ```sh
 python3 bench/graphql-rss/run.py --max-peak-bytes 5905580032
@@ -69,9 +69,12 @@ docker build \
   bitmagnet-rs
 ```
 
-`--graphql-image` and `--helper-image` can reuse prebuilt images. Their immutable
-Docker image IDs and layers are recorded, but a supplied GraphQL image has weaker
-source provenance than the default build.
+For admission-grade `gate` runs, the runner always builds GraphQL and helper
+images from the recorded checkout, requires at least three repeats, pins the
+PostgreSQL image, and verifies cleanup. It rejects `--graphql-image`,
+`--helper-image`, `--keep`, a different PostgreSQL image, or fewer repeats.
+Those overrides remain available to the `smoke` profile for debugging; their
+immutable Docker image IDs and layers are still recorded.
 
 ## Workload and evidence
 
@@ -132,8 +135,8 @@ Every helper, service, and dependency container has a session-scoped name and is
 registered before launch. Containers and the private network are removed and
 their absence verified on success and failure; cleanup failure is terminal
 evidence. Built images and JSONL evidence remain for review. `--keep` preserves
-containers and the network for debugging; remove them manually afterward using
-the prefix printed in Docker names.
+containers and the network only with the `smoke` profile; remove them manually
+afterward using the prefix printed in Docker names. The gate profile rejects it.
 
 - exit `0`: every repetition passed response, barrier, metrics, OOM, and peak
   checks;

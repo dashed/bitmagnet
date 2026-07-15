@@ -244,6 +244,74 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertEqual(check["changed_keys"], ["workspace_sha256"])
 
+    def test_gate_profile_rejects_admission_downgrades(self):
+        parser = runner.argument_parser()
+        runner.validate_arguments(parser.parse_args([]))
+        rejected = (
+            ["--repeat", "1"],
+            ["--max-peak-bytes", str(runner.DEFAULT_GATE_PEAK_BYTES + 1)],
+            ["--graphql-image", "unlinked:latest"],
+            ["--helper-image", "unlinked:latest"],
+            ["--postgres-image", "postgres:latest"],
+            ["--keep"],
+        )
+        for options in rejected:
+            with self.subTest(options=options), self.assertRaises(runner.HarnessError):
+                runner.validate_arguments(parser.parse_args(options))
+
+        smoke = parser.parse_args(
+            [
+                "--profile",
+                "smoke",
+                "--repeat",
+                "1",
+                "--max-peak-bytes",
+                str(7 * runner.GIB),
+                "--graphql-image",
+                "debug-graphql:latest",
+                "--helper-image",
+                "debug-helper:latest",
+                "--postgres-image",
+                "postgres:latest",
+                "--keep",
+            ]
+        )
+        runner.validate_arguments(smoke)
+
+    def test_cleanup_rejects_unknown_docker_absence(self):
+        missing = runner.subprocess.CompletedProcess(
+            ["docker", "inspect"],
+            1,
+            b"",
+            b"Error response from daemon: No such container: fixture\n",
+        )
+        unavailable = runner.subprocess.CompletedProcess(
+            ["docker", "inspect"],
+            125,
+            b"",
+            b"Cannot connect to the Docker daemon\n",
+        )
+        self.assertTrue(
+            runner.docker_object_missing(missing, kind="container", name="fixture")
+        )
+        self.assertFalse(
+            runner.docker_object_missing(
+                unavailable, kind="container", name="fixture"
+            )
+        )
+
+        harness = object.__new__(runner.DockerHarness)
+        harness.args = runner.argparse.Namespace(keep=False)
+        harness.containers = {"fixture"}
+        harness.network_created = True
+        harness.network = "fixture-net"
+        harness.docker = lambda *args, **kwargs: unavailable
+        cleanup = harness.cleanup()
+        self.assertFalse(cleanup["ok"])
+        self.assertEqual(cleanup["remaining_containers"], ["fixture"])
+        self.assertTrue(cleanup["network_remaining"])
+        self.assertEqual(len(cleanup["errors"]), 2)
+
     def test_helper_context_excludes_rust_target(self):
         ignore = (HERE / "Dockerfile.harness.dockerignore").read_text()
         self.assertIn("bitmagnet-rs/*", ignore)
