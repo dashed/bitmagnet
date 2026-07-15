@@ -1169,6 +1169,7 @@ export type TorrentContentSearchQuery = {
       hasNextPage?: boolean | null;
       items: Array<{
         __typename?: "TorrentContent";
+        id: string;
         infoHash: string;
         title: string;
         contentType?: ContentType | null;
@@ -1228,6 +1229,13 @@ export type TorrentContentSearchQuery = {
         genre?: Array<{
           __typename?: "GenreAgg";
           value: string;
+          label: string;
+          count: number;
+          isEstimate: boolean;
+        }> | null;
+        releaseYear?: Array<{
+          __typename?: "ReleaseYearAgg";
+          value?: number | null;
           label: string;
           count: number;
           isEstimate: boolean;
@@ -1610,6 +1618,7 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
       totalCountIsEstimate
       hasNextPage
       items {
+        id
         infoHash
         title
         contentType
@@ -1660,6 +1669,12 @@ export const TorrentContentSearchDocument = new TypedDocumentString(`
           isEstimate
         }
         genre {
+          value
+          label
+          count
+          isEstimate
+        }
+        releaseYear {
           value
           label
           count

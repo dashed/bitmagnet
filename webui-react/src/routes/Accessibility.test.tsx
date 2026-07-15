@@ -193,6 +193,7 @@ const searchResponse = {
           dhtFirstSeenAt: "2026-07-09T10:00:00Z",
           dhtLastSeenAt: "2026-07-10T10:00:00Z",
           dhtSeenCount: 8,
+          id: `${INFO_HASH}:movie:?:?`,
           infoHash: INFO_HASH,
           leechers: 3,
           publishedAt: "2026-07-08T10:00:00Z",
