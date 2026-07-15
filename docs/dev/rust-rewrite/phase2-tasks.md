@@ -107,11 +107,11 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | source/harness `3f555ef5`; accepted evidence `2b8d2912`; ledger `7e5e1360` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and the exact-image four-client GraphQL/sqlx RSS gate all pass; the accepted artifact is immutably pinned and the internal-only dark Service is healthy | keep G3 point reads outside shadow eligibility until implemented/scoped; separately authorize low-rate shadow and >=7-day soak; deploy-branch merge |
+| Integration | latency candidate `edb112be`; historical accepted evidence `2b8d2912`; deployed ledger `7e5e1360` | S/C/G/P merged; the old accepted artifact remains immutably pinned and the internal-only dark Service is healthy. The bounded aggregation-concurrency candidate is source-gated but has not passed a fresh exact-image RSS gate, promotion, deploy, or production latency proof | fresh Maple four-artifact gate -> exact promotion/pins -> dark deploy -> reset/pilot/new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910` | Go-embedded hook executes Go once and now admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings fail closed; redirects and invalid response media types fail closed; internal Rust Service is live but the L3 shadow env is absent | separately authorize low-rate shadow and obtain a valid >=7-day gate |
+| P | `7c5c7eea` + hardening through `41c63910` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness, but the live p99 gate failed and the evidence driver is suspended | admit/deploy the source-gated latency candidate, then reset and prove a fresh full green hour before any >=7-day clock |
 | G0/P1 | `244f66cd` | complete; reference only | none |
 | I | role `6f3ee63`; RSS evidence `2b8d2912`; homelab pin `4dc037f` | exact accepted artifact promoted without rebuilding; immutable pin and internal-only Deployment/ClusterIP/EndpointSlice/CNPs/ServiceMonitor are live and healthy; generic enablement remains fail-closed and the live L3 workload has no Rust GraphQL shadow env | separately authorize low-rate shadow and >=7-day soak; routing/cutover and C5 remain off |
 
@@ -257,6 +257,45 @@ below every agreement threshold, so it remains dormant regardless of the formal
   anti-affinity. Active Coder identities, container IDs, and restart counts were
   unchanged across promotion and deployment; no active workspace was
   interrupted.
+
+### Post-closeout aggregation-latency candidate (2026-07-15)
+
+- The repaired Go L3 candidate completed a fresh 11-batch/44-row production
+  rotation with perfect ranked, exact-count, facet, and error results. The first
+  green-hour attempt nevertheless failed closed when stored sample
+  `2026-07-15T19:50:29.972Z` moved Rust/reference p99 to approximately
+  `0.488448s/0.39424s` as one old slow Go observation aged out of the rolling
+  hour. The traffic controller immediately suspended the evidence driver. Go
+  remains authoritative and public routing did not change.
+- Source diagnosis found three avoidable Rust PostgreSQL costs: items, total
+  count, and aggregations were top-level serial work; facet bucket counts were
+  serial; and the refined aggregation pass hydrated items that the composer
+  discarded. `ee6773ea` runs the independent top-level branches with
+  `try_join!`, keeps facet groups deterministic and sequential while bounding
+  bucket-query fanout to four, and makes the composer aggregation request
+  explicitly itemless with `limit=0`. Against the production pool of eight,
+  the resulting approximate per-request peak is six active queries, leaving two
+  connections of headroom.
+- `edb112be` adds a deterministic, timing-free regression proving exactly four
+  facet futures overlap, no fifth starts early, all seven complete, and peak
+  concurrency remains four. Its full tree is
+  `7800cf2c551e63eb6294ddeb52065da1d91859f4`; the `bitmagnet-rs` subtree is
+  `8fe7347e47bd250e47d5725bc99cac5752ebb544`.
+- Exact clean-source verification on Rust 1.97 passed formatting; workspace,
+  all-target, all-feature Clippy with warnings denied; all workspace
+  all-feature tests and doctests; and cache-bypassed `go test -count=1 ./...`.
+  A disposable PostgreSQL 16 run regenerated the real Go 17-case corpus and ran
+  the ignored Rust differential driver with zero diffs. The fixture remained
+  byte-identical at SHA-256
+  `52e74d3fc01314172267f77c66601db726066a27aa77c9fff192e2a0bc405513`.
+  The Coder test cgroup recorded no OOM or OOM-kill events, and no protected
+  workspace was restarted or stopped by this work.
+- Homelab `e3c5f06` pins both trusted RSS entry points to the full source commit.
+  This is source evidence only. The old `7e5e1360` image remains deployed; the
+  replacement still requires a fresh trusted Maple smoke/gate/headroom/inventory
+  set, evidence commit, immutable promotion-pin refresh, byte-for-byte promotion,
+  dark deploy attestation, counter reset, supervised pilot, and a wholly new
+  production green-hour cohort before the seven-day clock can start.
 
 ---
 
@@ -508,7 +547,13 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   hook reuses the already-computed primary Go result and adds only the sampled Rust
   execution; it must never re-issue the Go request. Control the remaining load with
   a low sample rate, non-blocking semaphore admission, a hard timeout, off-peak
-  soak, resource limits, and `NodeDiskIOSaturation`/live-p99 abort signals.
+  soak, resource limits, and `NodeDiskIOSaturation`/live-p99 abort signals. The
+  2026-07-15 production rotation proved those abort signals are load-bearing: all
+  correctness rows passed, but rolling Rust p99 exceeded Go after an old reference
+  outlier aged out, so the controller suspended traffic. `edb112be` is the
+  bounded-query source candidate for that defect; production p99 remains unproven
+  until the exact candidate image is admitted, promoted, dark-deployed, and passes
+  a fresh cohort rather than reusing the failed T0.
 
 ---
 
