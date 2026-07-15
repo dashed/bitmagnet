@@ -42,9 +42,13 @@ type GraphQLResult struct {
 	// threshold (count-match ≥ 0.95) rather than requiring equality.
 	TotalCountIsEstimate bool
 	// Facets maps each facet key to its value→count map. A key absent from the map
-	// (the query did not request that facet) is treated as an empty facet on that
-	// side; a facet requested on one side but not the other is a mismatch.
+	// is not assumed to be an observed empty facet; ObservedFacets carries that
+	// distinction explicitly.
 	Facets map[string]FacetCounts
+	// ObservedFacets contains exactly the aggregation keys present with a non-null
+	// list in the response. An observed empty list is valid evidence; an absent or
+	// null field is not.
+	ObservedFacets map[string]bool
 }
 
 // GraphQLComparison holds the similarity + diff metrics for a single shadowed
@@ -74,9 +78,19 @@ type GraphQLComparison struct {
 	// FacetMatch maps each of the 9 facet keys to whether that facet's full
 	// value→count map is identical on both sides.
 	FacetMatch map[string]bool
+	// FacetObserved marks facets present on either side. A one-sided presence is
+	// observed evidence and must enter the denominator as a mismatch; only absence
+	// on both sides is unobserved.
+	FacetObserved map[string]bool
+	// FacetsObserved is the number of facets observed on at least one side.
+	FacetsObserved int
 	// FacetsMatched is the number of the 9 facets that matched exactly.
 	FacetsMatched int
-	// AllFacetsMatch is true iff every one of the 9 facets matched exactly.
+	// AllFacetsObserved is true iff all 9 facets were observed on at least one
+	// side. A facet missing on one side is still observed, but cannot match.
+	AllFacetsObserved bool
+	// AllFacetsMatch is meaningful only when AllFacetsObserved is true and reports
+	// that every observed facet matched exactly.
 	AllFacetsMatch bool
 }
 
@@ -85,7 +99,7 @@ type GraphQLComparison struct {
 // count), OR the total count, OR any facet count differs. It generalises
 // shadow.Comparison.IsDiscrepancy to the full GraphQL response.
 func (c GraphQLComparison) IsDiscrepancy() bool {
-	return c.Comparison.IsDiscrepancy() || !c.TotalCountMatch || !c.AllFacetsMatch
+	return c.Comparison.IsDiscrepancy() || !c.TotalCountMatch || c.FacetsMatched < c.FacetsObserved
 }
 
 // CompareGraphQL computes the full GraphQL shadow comparison between the Rust
@@ -103,12 +117,20 @@ func CompareGraphQL(rust, ref GraphQLResult, rustLatency, refLatency time.Durati
 		TotalCountIsEstimate: ref.TotalCountIsEstimate || rust.TotalCountIsEstimate,
 		FacetDeltas:          map[string]map[string]int{},
 		FacetMatch:           make(map[string]bool, len(FacetKeys)),
+		FacetObserved:        make(map[string]bool, len(FacetKeys)),
 	}
 
 	for _, key := range FacetKeys {
+		if !ref.ObservedFacets[key] && !rust.ObservedFacets[key] {
+			continue
+		}
+
+		c.FacetObserved[key] = true
+		c.FacetsObserved++
+
 		deltas := diffFacet(ref.Facets[key], rust.Facets[key])
 
-		matched := len(deltas) == 0
+		matched := ref.ObservedFacets[key] && rust.ObservedFacets[key] && len(deltas) == 0
 		c.FacetMatch[key] = matched
 
 		if matched {
@@ -118,7 +140,8 @@ func CompareGraphQL(rust, ref GraphQLResult, rustLatency, refLatency time.Durati
 		}
 	}
 
-	c.AllFacetsMatch = c.FacetsMatched == len(FacetKeys)
+	c.AllFacetsObserved = c.FacetsObserved == len(FacetKeys)
+	c.AllFacetsMatch = c.AllFacetsObserved && c.FacetsMatched == len(FacetKeys)
 
 	return c
 }

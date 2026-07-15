@@ -6,6 +6,8 @@ import (
 )
 
 func TestExtractSearchResultInferID(t *testing.T) {
+	t.Parallel()
+
 	// InferID recipe: hex:contentType:contentSource:contentId, with "?" for an
 	// absent type, and source+id bound together ("?" for both when source absent).
 	search := `{
@@ -44,9 +46,26 @@ func TestExtractSearchResultInferID(t *testing.T) {
 	}
 }
 
+func TestExtractSearchResultUsesCanonicalID(t *testing.T) {
+	t.Parallel()
+
+	search := `{"totalCount":1,"totalCountIsEstimate":false,"items":[{"id":"canonical:infer:id"}],"aggregations":{}}`
+
+	got, err := ExtractSearchResult(json.RawMessage(search))
+	if err != nil {
+		t.Fatalf("ExtractSearchResult error: %v", err)
+	}
+
+	if len(got.IDs) != 1 || got.IDs[0] != "canonical:infer:id" {
+		t.Errorf("IDs = %v, want canonical id", got.IDs)
+	}
+}
+
 func TestExtractSearchResultSourcePresentIDNull(t *testing.T) {
+	t.Parallel()
+
 	// Source present, id null: id becomes "" (source is the binding field).
-	search := `{"totalCount":1,"items":[
+	search := `{"totalCount":1,"totalCountIsEstimate":false,"items":[
       {"infoHash":"aa","contentType":"movie","contentSource":"imdb","contentId":null}
     ],"aggregations":{}}`
 
@@ -61,8 +80,11 @@ func TestExtractSearchResultSourcePresentIDNull(t *testing.T) {
 }
 
 func TestExtractSearchResultFacets(t *testing.T) {
+	t.Parallel()
+
 	search := `{
       "totalCount": 10,
+	  "totalCountIsEstimate": false,
       "items": [{"infoHash":"aa","contentType":"movie","contentSource":null,"contentId":null}],
       "aggregations": {
         "contentType": [
@@ -98,8 +120,11 @@ func TestExtractSearchResultFacets(t *testing.T) {
 }
 
 func TestSearchResultFromDataEnvelope(t *testing.T) {
+	t.Parallel()
+
 	body := `{"data":{"torrentContent":{"search":{
       "totalCount": 1,
+	  "totalCountIsEstimate": false,
       "items": [{"infoHash":"aa","contentType":"movie","contentSource":"imdb","contentId":"tt1"}],
       "aggregations": {"contentType":[{"value":"movie","label":"Movie","count":1,"isEstimate":false}]}
     }}}}`
@@ -118,19 +143,94 @@ func TestSearchResultFromDataEnvelope(t *testing.T) {
 	}
 }
 
+func TestSearchResultFromAlreadyComputedResponseData(t *testing.T) {
+	t.Parallel()
+
+	data := `{"torrentContent":{"search":{
+      "totalCount":1,
+	  "totalCountIsEstimate":false,
+      "items":[{"infoHash":"aa","contentType":"movie","contentSource":"imdb","contentId":"tt1"}],
+      "aggregations":{}
+    }}}`
+
+	got, err := SearchResultFromResponseData(json.RawMessage(data))
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	if len(got.IDs) != 1 || got.IDs[0] != testInferID {
+		t.Errorf("IDs = %v", got.IDs)
+	}
+}
+
 func TestExtractSearchResultMissingInfoHashErrors(t *testing.T) {
-	search := `{"totalCount":1,"items":[{"contentType":"movie"}],"aggregations":{}}`
+	t.Parallel()
+
+	search := `{"totalCount":1,"totalCountIsEstimate":false,"items":[{"contentType":"movie"}],"aggregations":{}}`
 
 	if _, err := ExtractSearchResult(json.RawMessage(search)); err == nil {
 		t.Fatal("expected an error for an item missing infoHash")
 	}
 }
 
+func TestExtractSearchResultRequiresTopLevelPresence(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		`{"totalCountIsEstimate":false,"items":[],"aggregations":{}}`,
+		`{"totalCount":0,"items":[],"aggregations":{}}`,
+		`{"totalCount":0,"totalCountIsEstimate":false,"aggregations":{}}`,
+		`{"totalCount":0,"totalCountIsEstimate":false,"items":[]}`,
+		`{"totalCount":0,"totalCountIsEstimate":false,"items":null,"aggregations":{}}`,
+		`{"totalCount":0,"totalCountIsEstimate":false,"items":[],"aggregations":null}`,
+	}
+
+	for _, body := range tests {
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := ExtractSearchResult(json.RawMessage(body)); err == nil {
+				t.Fatal("ExtractSearchResult returned nil error")
+			}
+		})
+	}
+}
+
+func TestExtractSearchResultTracksObservedFacets(t *testing.T) {
+	t.Parallel()
+
+	search := `{
+	  "totalCount":0,
+	  "totalCountIsEstimate":false,
+	  "items":[],
+	  "aggregations":{
+	    "contentType":[],
+	    "releaseYear":null
+	  }
+	}`
+
+	result, err := ExtractSearchResult(json.RawMessage(search))
+	if err != nil {
+		t.Fatalf("ExtractSearchResult error: %v", err)
+	}
+
+	if !result.ObservedFacets["content_type"] {
+		t.Error("observed empty contentType facet was not tracked")
+	}
+
+	if result.ObservedFacets["release_year"] {
+		t.Error("null releaseYear facet must remain unobserved")
+	}
+}
+
 // TestExtractRoundTripsThroughComparison feeds two extracted responses into the
 // comparator to confirm the full extract→compare path holds together.
 func TestExtractRoundTripsThroughComparison(t *testing.T) {
+	t.Parallel()
+
 	body := `{"data":{"torrentContent":{"search":{
       "totalCount": 2,
+	  "totalCountIsEstimate": false,
       "items": [
         {"infoHash":"aa","contentType":"movie","contentSource":"imdb","contentId":"tt1"},
         {"infoHash":"bb","contentType":"movie","contentSource":"imdb","contentId":"tt2"}
@@ -144,7 +244,7 @@ func TestExtractRoundTripsThroughComparison(t *testing.T) {
 	}
 
 	c := CompareGraphQL(r, r, 0, 0)
-	if !c.AllFacetsMatch || !c.TotalCountMatch || !c.Top1Match {
+	if c.FacetsMatched != c.FacetsObserved || !c.TotalCountMatch || !c.Top1Match {
 		t.Errorf("self-comparison should be a clean match: %+v", c)
 	}
 }

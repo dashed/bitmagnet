@@ -10,7 +10,10 @@ import (
 // is null (the null bucket). It is applied identically to both sides, so the
 // exact sentinel does not affect the diff — it only needs to be stable and
 // distinct from any real value string.
-const nullValueKey = "<null>"
+const (
+	jsonNull     = "null"
+	nullValueKey = "<null>"
+)
 
 // aggFieldToFacetKey maps each GraphQL TorrentContentAggregations field name (as
 // it appears in the JSON response) to the canonical facet key the comparator
@@ -32,13 +35,14 @@ var aggFieldToFacetKey = map[string]string{
 // output). A shadow query MUST select the item identity fields (infoHash,
 // contentType, contentSource, contentId) and any facets it wants compared.
 type searchResponse struct {
-	TotalCount           int             `json:"totalCount"`
-	TotalCountIsEstimate bool            `json:"totalCountIsEstimate"`
-	Items                []searchItem    `json:"items"`
+	TotalCount           *int            `json:"totalCount"`
+	TotalCountIsEstimate *bool           `json:"totalCountIsEstimate"`
+	Items                json.RawMessage `json:"items"`
 	Aggregations         json.RawMessage `json:"aggregations"`
 }
 
 type searchItem struct {
+	ID            string  `json:"id"`
 	InfoHash      string  `json:"infoHash"`
 	ContentType   *string `json:"contentType"`
 	ContentSource *string `json:"contentSource"`
@@ -50,44 +54,89 @@ type aggItem struct {
 	// releaseYear emits a number, and the null bucket emits null. aggValueKey
 	// normalises each to a stable string key.
 	Value      json.RawMessage `json:"value"`
-	Count      int             `json:"count"`
-	IsEstimate bool            `json:"isEstimate"`
+	Label      *string         `json:"label"`
+	Count      *int            `json:"count"`
+	IsEstimate *bool           `json:"isEstimate"`
+}
+
+type responseEnvelope struct {
+	Data json.RawMessage `json:"data"`
+}
+
+type responseData struct {
+	TorrentContent torrentContentResponseData `json:"torrentContent"`
+}
+
+type torrentContentResponseData struct {
+	Search json.RawMessage `json:"search"`
 }
 
 // ExtractSearchResult builds the engine-agnostic GraphQLResult from the JSON of
 // a single torrentContent.search result object (the value at
 // data.torrentContent.search — navigate to it first with SearchResultFromData,
-// or pass a directly-obtained result). It reconstructs each item's InferID with
-// the exact recipe model.TorrentContent.InferID uses
-// (hex(info_hash):content_type:content_source:content_id, with "?" fillers for
-// an absent content type / source / id, and content source + id bound together).
+// or pass a directly-obtained result). It prefers the public id field, which is
+// already model.TorrentContent.InferID. For callers that select the four raw
+// identity fields instead, it reconstructs the same stable key with the exact
+// model recipe.
 func ExtractSearchResult(searchObj json.RawMessage) (GraphQLResult, error) {
 	var resp searchResponse
 	if err := json.Unmarshal(searchObj, &resp); err != nil {
 		return GraphQLResult{}, fmt.Errorf("graphqlshadow: decode search result: %w", err)
 	}
 
-	ids := make([]string, 0, len(resp.Items))
+	if resp.TotalCount == nil {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: search result missing totalCount")
+	}
 
-	for i, item := range resp.Items {
+	if resp.TotalCountIsEstimate == nil {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: search result missing totalCountIsEstimate")
+	}
+
+	if len(resp.Items) == 0 || string(resp.Items) == jsonNull {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: search result missing items")
+	}
+
+	if len(resp.Aggregations) == 0 || string(resp.Aggregations) == jsonNull {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: search result missing aggregations")
+	}
+
+	var items []searchItem
+	if err := json.Unmarshal(resp.Items, &items); err != nil {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: decode search items: %w", err)
+	}
+
+	ids := make([]string, 0, len(items))
+
+	for i, item := range items {
+		// The public GraphQL id is already TorrentContent.InferID and is selected by
+		// the real webui fragment. Prefer it so the embedded hook can compare the
+		// original request without injecting hidden identity fields.
+		if item.ID != "" {
+			ids = append(ids, item.ID)
+
+			continue
+		}
+
 		if item.InfoHash == "" {
 			return GraphQLResult{}, fmt.Errorf(
-				"graphqlshadow: item %d missing infoHash (shadow query must select the identity fields)", i)
+				"graphqlshadow: item %d missing id and infoHash "+
+					"(query must select id or the identity fields)", i)
 		}
 
 		ids = append(ids, inferID(item))
 	}
 
-	facets, err := extractFacets(resp.Aggregations)
+	facets, observedFacets, err := extractFacets(resp.Aggregations)
 	if err != nil {
 		return GraphQLResult{}, err
 	}
 
 	return GraphQLResult{
 		IDs:                  ids,
-		TotalCount:           resp.TotalCount,
-		TotalCountIsEstimate: resp.TotalCountIsEstimate,
+		TotalCount:           *resp.TotalCount,
+		TotalCountIsEstimate: *resp.TotalCountIsEstimate,
 		Facets:               facets,
+		ObservedFacets:       observedFacets,
 	}, nil
 }
 
@@ -96,26 +145,36 @@ func ExtractSearchResult(searchObj json.RawMessage) (GraphQLResult, error) {
 // convenience for the common webui/Hermes query shape; queries that alias the
 // path must extract the search object themselves and call ExtractSearchResult.
 func SearchResultFromData(responseBody json.RawMessage) (GraphQLResult, error) {
-	var envelope struct {
-		Data struct {
-			TorrentContent struct {
-				Search json.RawMessage `json:"search"`
-			} `json:"torrentContent"`
-		} `json:"data"`
-	}
+	var envelope responseEnvelope
 
 	if err := json.Unmarshal(responseBody, &envelope); err != nil {
 		return GraphQLResult{}, fmt.Errorf("graphqlshadow: decode response envelope: %w", err)
 	}
 
-	if len(envelope.Data.TorrentContent.Search) == 0 {
+	return SearchResultFromResponseData(envelope.Data)
+}
+
+// SearchResultFromResponseData navigates gqlgen's already-computed Response.Data
+// object ({"torrentContent": {"search": ...}}) to the search result. Unlike
+// SearchResultFromData it does not expect the outer {"data": ...} HTTP envelope;
+// this is the projection used by the embedded response hook, so the live Go
+// operation is never re-issued just to obtain a reference value.
+func SearchResultFromResponseData(data json.RawMessage) (GraphQLResult, error) {
+	var responseData responseData
+
+	if err := json.Unmarshal(data, &responseData); err != nil {
+		return GraphQLResult{}, fmt.Errorf("graphqlshadow: decode response data: %w", err)
+	}
+
+	if len(responseData.TorrentContent.Search) == 0 {
 		return GraphQLResult{}, fmt.Errorf("graphqlshadow: response has no data.torrentContent.search object")
 	}
 
-	return ExtractSearchResult(envelope.Data.TorrentContent.Search)
+	return ExtractSearchResult(responseData.TorrentContent.Search)
 }
 
-// inferID reconstructs the torrentContent stable key. It mirrors
+// inferID reconstructs the torrentContent stable key when the response did not
+// select the canonical id field. It mirrors
 // model.TorrentContent.InferID exactly: content source and id are bound
 // together, so an absent source yields "?" for BOTH source and id.
 func inferID(item searchItem) string {
@@ -139,44 +198,55 @@ func inferID(item searchItem) string {
 
 // extractFacets decodes the aggregations object into per-facet value→count maps
 // keyed by the canonical facet key. An absent aggregation field means the query
-// did not request that facet; it is simply omitted (an empty facet on this side).
-func extractFacets(aggregations json.RawMessage) (map[string]FacetCounts, error) {
+// did not request that facet and is unobserved. A present empty list is observed
+// evidence and remains distinct from an absent or null field.
+func extractFacets(
+	aggregations json.RawMessage,
+) (map[string]FacetCounts, map[string]bool, error) {
 	if len(aggregations) == 0 {
-		return nil, nil
+		return nil, nil, fmt.Errorf("graphqlshadow: aggregations are missing")
 	}
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(aggregations, &raw); err != nil {
-		return nil, fmt.Errorf("graphqlshadow: decode aggregations: %w", err)
+		return nil, nil, fmt.Errorf("graphqlshadow: decode aggregations: %w", err)
 	}
 
 	facets := map[string]FacetCounts{}
+	observed := map[string]bool{}
 
 	for field, facetKey := range aggFieldToFacetKey {
 		rawItems, ok := raw[field]
-		if !ok || len(rawItems) == 0 || string(rawItems) == "null" {
+		if !ok || len(rawItems) == 0 || string(rawItems) == jsonNull {
 			continue
 		}
 
+		observed[facetKey] = true
+
 		var items []aggItem
 		if err := json.Unmarshal(rawItems, &items); err != nil {
-			return nil, fmt.Errorf("graphqlshadow: decode %s aggregation: %w", field, err)
+			return nil, nil, fmt.Errorf("graphqlshadow: decode %s aggregation: %w", field, err)
 		}
 
 		counts := make(FacetCounts, len(items))
 
-		for _, it := range items {
-			counts[aggValueKey(it.Value)] = it.Count
+		for i, it := range items {
+			if len(it.Value) == 0 || it.Label == nil || it.Count == nil || it.IsEstimate == nil {
+				return nil, nil, fmt.Errorf(
+					"graphqlshadow: %s aggregation item %d is incomplete", field, i)
+			}
+
+			counts[aggValueKey(it.Value)] = *it.Count
 		}
 
 		facets[facetKey] = counts
 	}
 
-	return facets, nil
+	return facets, observed, nil
 }
 
 func aggValueKey(v json.RawMessage) string {
-	if len(v) == 0 || string(v) == "null" {
+	if len(v) == 0 || string(v) == jsonNull {
 		return nullValueKey
 	}
 

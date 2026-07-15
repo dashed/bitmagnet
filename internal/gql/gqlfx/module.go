@@ -3,6 +3,7 @@ package gqlfx
 import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
+	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/gql"
@@ -16,6 +17,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/manager"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"go.uber.org/fx"
@@ -24,9 +26,16 @@ import (
 func New() fx.Option {
 	return fx.Module(
 		"graphql",
+		configfx.NewConfigModule[graphqlshadow.Config](
+			"graphql_shadow",
+			graphqlshadow.NewDefaultConfig(),
+		),
 		fx.Provide(
 			config.New,
 			httpserver.New,
+			graphqlshadow.New,
+			graphqlshadow.NewHTTPExecutor,
+			graphqlshadow.NewHook,
 			func(
 				lcfg lazy.Lazy[gql.Config],
 			) lazy.Lazy[graphql.ExecutableSchema] {

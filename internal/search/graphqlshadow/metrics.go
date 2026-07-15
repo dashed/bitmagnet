@@ -20,7 +20,10 @@ const (
 // tolerate a nil receiver so the driver can run without metrics in tests.
 type Metrics struct {
 	comparisonsTotal prometheus.Counter
+	sampledTotal     prometheus.Counter
+	admittedTotal    prometheus.Counter
 	droppedTotal     prometheus.Counter
+	saturatedTotal   prometheus.Counter
 	rustErrorTotal   prometheus.Counter
 	refErrorTotal    prometheus.Counter
 	jaccard          *prometheus.HistogramVec
@@ -47,18 +50,31 @@ func NewMetrics() *Metrics {
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "comparisons_total",
 			Help: "Total number of GraphQL shadow comparisons performed (eligible query operations only).",
 		}),
+		sampledTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "sampled_total",
+			Help: "Comparable GraphQL searches selected by the sampling draw.",
+		}),
+		admittedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "admitted_total",
+			Help: "Sampled GraphQL shadow attempts admitted to the bounded Rust runner.",
+		}),
 		droppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "dropped_total",
-			Help: "Mirrored requests hard-dropped by the safety gate (non-query operations or unclassifiable documents). " +
-				"These make ZERO Go reference calls — the mutation-double-execute guard.",
+			Help: "Mirrored requests hard-dropped by the safety gate " +
+				"(non-query operations or unclassifiable documents). " +
+				"These make ZERO dark Rust calls.",
+		}),
+		saturatedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "saturated_total",
+			Help: "Sampled GraphQL shadow comparisons dropped because the non-blocking concurrency limit was full.",
 		}),
 		rustErrorTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "rust_error_total",
-			Help: "Eligible shadow requests where the Rust executor errored (no reference call made).",
+			Help: "Eligible shadow requests where the dark Rust endpoint failed.",
 		}),
 		refErrorTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "reference_error_total",
-			Help: "Eligible shadow requests where the Go reference errored after a successful Rust execution.",
+			Help: "Eligible shadow requests whose already-computed Go response could not be projected for comparison.",
 		}),
 		jaccard: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "jaccard",
@@ -86,11 +102,13 @@ func NewMetrics() *Metrics {
 		}),
 		totalCountMatch: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "total_count_match_total",
-			Help: "Comparisons broken down by whether totalCount matched exactly, and whether the total was an estimate.",
+			Help: "Comparisons broken down by whether totalCount matched exactly, " +
+				"and whether the total was an estimate.",
 		}, []string{"matched", "estimate"}),
 		facetMatch: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "facet_match_total",
-			Help: "Per-facet comparisons broken down by facet key and whether that facet's value→count map matched exactly.",
+			Help: "Per-facet comparisons broken down by facet key and whether that " +
+				"facet's value→count map matched exactly.",
 		}, []string{"facet", "matched"}),
 		allFacetsMatch: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "all_facets_match_total",
@@ -98,12 +116,12 @@ func NewMetrics() *Metrics {
 		}, []string{"matched"}),
 		rustLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "rust_latency_seconds",
-			Help:    "Rust resolver latency for shadowed queries (the served-path p99 the gate bounds).",
+			Help:    "Dark Rust GraphQL request-entry to pre-write response-generation duration.",
 			Buckets: latencyBuckets,
 		}),
 		refLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace, Subsystem: subsystemGraphQL, Name: "reference_latency_seconds",
-			Help:    "Go reference /graphql latency for shadowed queries (the gate's p99 baseline).",
+			Help:    "Primary Go request-entry to pre-write GraphQL response-generation duration.",
 			Buckets: latencyBuckets,
 		}),
 		latencyRatio: prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -130,13 +148,20 @@ func (m *Metrics) observe(c GraphQLComparison) {
 	m.totalCountMatch.WithLabelValues(boolLabel(c.TotalCountMatch), boolLabel(c.TotalCountIsEstimate)).Inc()
 
 	for _, key := range FacetKeys {
+		if !c.FacetObserved[key] {
+			continue
+		}
+
 		m.facetMatch.WithLabelValues(key, boolLabel(c.FacetMatch[key])).Inc()
 	}
 
-	m.allFacetsMatch.WithLabelValues(boolLabel(c.AllFacetsMatch)).Inc()
+	if c.AllFacetsObserved {
+		m.allFacetsMatch.WithLabelValues(boolLabel(c.AllFacetsMatch)).Inc()
+	}
 
 	rustSeconds := c.TantivyLatency.Seconds()
 	refSeconds := c.PGLatency.Seconds()
+
 	m.rustLatency.Observe(rustSeconds)
 	m.refLatency.Observe(refSeconds)
 
@@ -147,7 +172,7 @@ func (m *Metrics) observe(c GraphQLComparison) {
 
 // incDropped records one mirrored request hard-dropped by the safety gate. This
 // counter's whole purpose is to make the guard observable: every increment is a
-// request that reached the dark service but made ZERO Go reference calls. nil-safe.
+// request that made ZERO dark Rust calls. nil-safe.
 func (m *Metrics) incDropped() {
 	if m == nil {
 		return
@@ -156,12 +181,36 @@ func (m *Metrics) incDropped() {
 	m.droppedTotal.Inc()
 }
 
+func (m *Metrics) incSampled() {
+	if m == nil {
+		return
+	}
+
+	m.sampledTotal.Inc()
+}
+
+func (m *Metrics) incAdmitted() {
+	if m == nil {
+		return
+	}
+
+	m.admittedTotal.Inc()
+}
+
 func (m *Metrics) incRustError() {
 	if m == nil {
 		return
 	}
 
 	m.rustErrorTotal.Inc()
+}
+
+func (m *Metrics) incSaturated() {
+	if m == nil {
+		return
+	}
+
+	m.saturatedTotal.Inc()
 }
 
 func (m *Metrics) incReferenceError() {
@@ -179,7 +228,8 @@ func (m *Metrics) Collectors() []prometheus.Collector {
 	}
 
 	return []prometheus.Collector{
-		m.comparisonsTotal, m.droppedTotal, m.rustErrorTotal, m.refErrorTotal,
+		m.comparisonsTotal, m.sampledTotal, m.admittedTotal, m.droppedTotal,
+		m.saturatedTotal, m.rustErrorTotal, m.refErrorTotal,
 		m.jaccard, m.rbo, m.top1Match, m.resultCountDelta, m.totalCountDelta,
 		m.totalCountMatch, m.facetMatch, m.allFacetsMatch,
 		m.rustLatency, m.refLatency, m.latencyRatio,
@@ -204,7 +254,10 @@ type Result struct {
 	Metrics *Metrics
 
 	ComparisonsTotalCollector prometheus.Collector `group:"prometheus_collectors"`
+	SampledTotalCollector     prometheus.Collector `group:"prometheus_collectors"`
+	AdmittedTotalCollector    prometheus.Collector `group:"prometheus_collectors"`
 	DroppedTotalCollector     prometheus.Collector `group:"prometheus_collectors"`
+	SaturatedTotalCollector   prometheus.Collector `group:"prometheus_collectors"`
 	RustErrorTotalCollector   prometheus.Collector `group:"prometheus_collectors"`
 	RefErrorTotalCollector    prometheus.Collector `group:"prometheus_collectors"`
 	JaccardCollector          prometheus.Collector `group:"prometheus_collectors"`
@@ -227,7 +280,10 @@ func New() Result {
 	return Result{
 		Metrics:                   m,
 		ComparisonsTotalCollector: m.comparisonsTotal,
+		SampledTotalCollector:     m.sampledTotal,
+		AdmittedTotalCollector:    m.admittedTotal,
 		DroppedTotalCollector:     m.droppedTotal,
+		SaturatedTotalCollector:   m.saturatedTotal,
 		RustErrorTotalCollector:   m.rustErrorTotal,
 		RefErrorTotalCollector:    m.refErrorTotal,
 		JaccardCollector:          m.jaccard,

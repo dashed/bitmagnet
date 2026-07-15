@@ -154,7 +154,7 @@
     {
       "type": "stat",
       "id": 3,
-      "title": "Comparisons / dropped (1h)",
+      "title": "Sampled / admitted / compared / drops (1h)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -187,6 +187,39 @@
           "legendFormat": "dropped (mutations etc.)",
           "range": true,
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(bitmagnet_graphql_shadow_saturated_total[1h]))",
+          "legendFormat": "saturated",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:sampled:increase1h",
+          "legendFormat": "sampled",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:admitted:increase1h",
+          "legendFormat": "admitted",
+          "range": true,
+          "refId": "E"
         }
       ],
       "options": {
@@ -602,6 +635,17 @@
           "legendFormat": "volume",
           "range": true,
           "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:rust_success:pass",
+          "legendFormat": "rust success",
+          "range": true,
+          "refId": "G"
         }
       ],
       "options": {
