@@ -61,14 +61,22 @@ pub(super) async fn search(
     input: TorrentContentSearchQueryInput,
 ) -> Result<TorrentContentSearchResult> {
     let runtime = runtime(ctx)?;
-    search_with_runtime(runtime.as_ref(), input).await
+    let include_files = ctx
+        .look_ahead()
+        .field("items")
+        .field("torrent")
+        .field("files")
+        .exists();
+    search_with_runtime(runtime.as_ref(), input, include_files).await
 }
 
 async fn search_with_runtime(
     runtime: &dyn SearchRuntime,
     input: TorrentContentSearchQueryInput,
+    include_files: bool,
 ) -> Result<TorrentContentSearchResult> {
-    let plan = build_search_plan(&input, runtime.search_build_config())?;
+    let mut plan = build_search_plan(&input, runtime.search_build_config())?;
+    plan.composer.retain_refine_files = include_files;
 
     if runtime.typeahead_enabled()
         && plan.has_query_string
@@ -87,7 +95,7 @@ async fn search_with_runtime(
             .await
             .map_err(backend_error)?;
         if served {
-            return map_search_result(result);
+            return map_search_result(result, include_files);
         }
     }
 
@@ -95,7 +103,7 @@ async fn search_with_runtime(
         .pg_torrent_content(plan.pg)
         .await
         .map_err(backend_error)?;
-    map_search_result(result)
+    map_search_result(result, include_files)
 }
 
 pub(super) async fn collapse_paths(
@@ -447,6 +455,7 @@ fn composer_query_options(
         combined,
         refine: Some(refine),
         agg,
+        retain_refine_files: false,
     }
 }
 
@@ -474,6 +483,7 @@ fn refine_only_query_options(build: SearchBuildConfig) -> QueryOptions {
             build,
             hydrate: HydrateOptions::default(),
         },
+        retain_refine_files: false,
     }
 }
 
@@ -905,7 +915,7 @@ fn map_file_rows_result(result: FileRowsResult) -> Result<FileSearchResult> {
                     path: row.path,
                     extension: row.extension,
                     size: bounded_i64(row.size),
-                    torrent_content: map_search_item(row.torrent_content)?,
+                    torrent_content: map_search_item(row.torrent_content, false)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
@@ -915,7 +925,10 @@ fn map_file_rows_result(result: FileRowsResult) -> Result<FileSearchResult> {
     })
 }
 
-fn map_search_result(result: SearchResult) -> Result<TorrentContentSearchResult> {
+fn map_search_result(
+    result: SearchResult,
+    include_files: bool,
+) -> Result<TorrentContentSearchResult> {
     Ok(TorrentContentSearchResult {
         total_count: bounded_i64(result.total_count),
         total_count_is_estimate: result.total_count_is_estimate,
@@ -923,13 +936,13 @@ fn map_search_result(result: SearchResult) -> Result<TorrentContentSearchResult>
         items: result
             .items
             .into_iter()
-            .map(map_search_item)
+            .map(|item| map_search_item(item, include_files))
             .collect::<Result<Vec<_>>>()?,
         aggregations: map_aggregations(&result.aggregations)?,
     })
 }
 
-fn map_search_item(item: SearchResultItem) -> Result<TorrentContent> {
+fn map_search_item(mut item: SearchResultItem, include_files: bool) -> Result<TorrentContent> {
     let info_hash = Hash20(item.info_hash.to_string());
     let languages = (!item.torrent_content.languages.is_empty()).then(|| {
         item.torrent_content
@@ -957,7 +970,7 @@ fn map_search_item(item: SearchResultItem) -> Result<TorrentContent> {
         .as_ref()
         .map(|content| map_content(content, &item))
         .transpose()?;
-    let torrent = map_torrent(&item)?;
+    let torrent = map_torrent(&mut item, include_files)?;
 
     Ok(TorrentContent {
         id: ID(item.torrent_content.id.clone()),
@@ -1004,7 +1017,10 @@ fn map_search_item(item: SearchResultItem) -> Result<TorrentContent> {
     })
 }
 
-fn map_torrent(item: &SearchResultItem) -> Result<Torrent> {
+fn map_torrent(item: &mut SearchResultItem, include_files: bool) -> Result<Torrent> {
+    if !include_files {
+        item.refine_files.clear();
+    }
     let sources = item
         .torrent_sources
         .iter()
@@ -1031,9 +1047,10 @@ fn map_torrent(item: &SearchResultItem) -> Result<Torrent> {
         .iter()
         .filter_map(|source| source.leechers)
         .max();
-    let files = (!item.refine_files.is_empty()).then(|| {
-        item.refine_files
-            .iter()
+    let file_info_hash = item.info_hash.to_string();
+    let files = (include_files && !item.refine_files.is_empty()).then(|| {
+        std::mem::take(&mut item.refine_files)
+            .into_iter()
             .map(|file| {
                 let extension = if file.extension.is_empty() {
                     file_extension_from_path(&file.path)
@@ -1041,9 +1058,9 @@ fn map_torrent(item: &SearchResultItem) -> Result<Torrent> {
                     Some(file.extension.to_lowercase())
                 };
                 TorrentFile {
-                    info_hash: Hash20(item.info_hash.to_string()),
+                    info_hash: Hash20(file_info_hash.clone()),
                     index: i64::from(file.index),
-                    path: file.path.clone(),
+                    path: file.path,
                     file_type: extension
                         .as_deref()
                         .and_then(parse_file_type_from_extension),
@@ -2166,7 +2183,7 @@ mod tests {
     #[tokio::test]
     async fn composer_served_false_falls_back_but_errors_do_not() {
         let runtime = routed_runtime(false);
-        search_with_runtime(&runtime, routed_search_input())
+        search_with_runtime(&runtime, routed_search_input(), false)
             .await
             .unwrap();
         assert_eq!(runtime.composer_calls.load(AtomicOrdering::Relaxed), 1);
@@ -2176,12 +2193,35 @@ mod tests {
             composer_error: true,
             ..routed_runtime(false)
         };
-        let error = search_with_runtime(&runtime, routed_search_input())
+        let error = search_with_runtime(&runtime, routed_search_input(), false)
             .await
             .err()
             .expect("composer error should propagate");
         assert!(error.message.contains("composer failed"));
         assert_eq!(runtime.pg_calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn search_projection_controls_composer_file_retention() {
+        let runtime = routed_runtime(true);
+        search_with_runtime(&runtime, routed_search_input(), false)
+            .await
+            .unwrap();
+        assert!(
+            !runtime.captured_composer.lock().unwrap()[0]
+                .1
+                .retain_refine_files
+        );
+
+        let runtime = routed_runtime(true);
+        search_with_runtime(&runtime, routed_search_input(), true)
+            .await
+            .unwrap();
+        assert!(
+            runtime.captured_composer.lock().unwrap()[0]
+                .1
+                .retain_refine_files
+        );
     }
 
     #[tokio::test]
@@ -2192,14 +2232,14 @@ mod tests {
             descending: MaybeUndefined::Value(true),
             field: TorrentContentOrderByField::Seeders,
         }]);
-        search_with_runtime(&runtime, input).await.unwrap();
+        search_with_runtime(&runtime, input, false).await.unwrap();
         assert_eq!(runtime.composer_calls.load(AtomicOrdering::Relaxed), 0);
         assert_eq!(runtime.pg_calls.load(AtomicOrdering::Relaxed), 1);
     }
 
     #[test]
     fn expanded_item_maps_canonical_id_hybrid_magnet_and_refined_files() {
-        let mapped = map_search_item(sample_item()).unwrap();
+        let mapped = map_search_item(sample_item(), true).unwrap();
         assert_eq!(mapped.id.as_str(), "movie:tmdb:1");
         assert_eq!(mapped.torrent.size, 5_000_000_000);
         assert_eq!(mapped.torrent.info_hash_v2.as_ref().unwrap().0.len(), 64);
@@ -2210,6 +2250,12 @@ mod tests {
         assert_eq!(files[0].extension.as_deref(), Some("mkv"));
         assert_eq!(files[0].size, 5_000_000_000);
         assert_eq!(mapped.languages.unwrap()[0].name, "English");
+    }
+
+    #[test]
+    fn unselected_files_are_dropped_before_graphql_object_mapping() {
+        let mapped = map_search_item(sample_item(), false).unwrap();
+        assert!(mapped.torrent.files.is_none());
     }
 
     #[test]

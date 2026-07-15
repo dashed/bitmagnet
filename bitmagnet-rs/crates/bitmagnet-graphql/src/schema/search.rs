@@ -239,6 +239,8 @@ pub struct QueryOptions {
     pub refine: Option<SearchRequest>,
     /// Decode-free aggregation over the refined set.
     pub agg: SearchRequest,
+    /// Retain decoded file rows only when the GraphQL projection selects them.
+    pub retain_refine_files: bool,
 }
 
 /// Typed exact-refine inputs.

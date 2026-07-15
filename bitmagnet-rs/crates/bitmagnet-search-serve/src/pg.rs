@@ -16,10 +16,19 @@ use sqlx::{PgPool, Row};
 const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count\
 \nFROM torrent_file_summary\
 \nWHERE info_hash = ANY($1::bytea[])";
-const TORRENT_COUNTS_SQL: &str = "SELECT info_hash, files_count::bigint AS file_count\
+const TORRENT_REFINE_METADATA_SQL: &str = "SELECT info_hash, files_count::bigint AS file_count,\
+\n       octet_length(files_data)::bigint AS compressed_bytes\
 \nFROM torrents\
-\nWHERE info_hash = ANY($1::bytea[])\
-\n  AND files_count IS NOT NULL";
+\nWHERE info_hash = ANY($1::bytea[])";
+
+/// Pre-hydration bounds for one exact-refine candidate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefineMetadata {
+    /// Authoritative summary count, falling back to `torrents.files_count`.
+    pub file_count: Option<i64>,
+    /// Compressed PostgreSQL `files_data` bytes, without materialising the blob.
+    pub compressed_bytes: Option<u64>,
+}
 
 /// One executable Lane-S PostgreSQL request.
 ///
@@ -83,6 +92,12 @@ pub struct QueryOptions {
     pub refine: Option<SearchRequest>,
     /// Facet request for decode-free refined-set re-aggregation.
     pub agg: SearchRequest,
+    /// Retain decoded file rows on matching torrent results.
+    ///
+    /// Exact path matching still decodes each candidate when this is false,
+    /// but drops the file vector before retaining the torrent result. GraphQL
+    /// sets this only when the selected projection includes `torrent.files`.
+    pub retain_refine_files: bool,
 }
 
 impl QueryOptions {
@@ -99,11 +114,11 @@ pub trait PgSearchBackend: Send + Sync {
     /// Execute one fully shaped Lane-S PostgreSQL request.
     async fn torrent_content(&self, request: SearchRequest) -> crate::Result<SearchResult>;
 
-    /// Read authoritative counts without selecting or decoding file blobs.
-    async fn file_counts(
+    /// Read authoritative counts and compressed sizes without selecting blobs.
+    async fn refine_metadata(
         &self,
         ids: &[bitmagnet_model::InfoHash],
-    ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, i64>>;
+    ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, RefineMetadata>>;
 }
 
 /// Concrete sqlx implementation of the composer PostgreSQL dependency.
@@ -150,10 +165,10 @@ impl PgSearchBackend for PgSearch {
         self.search(&request.options, request.hydrate).await
     }
 
-    async fn file_counts(
+    async fn refine_metadata(
         &self,
         ids: &[bitmagnet_model::InfoHash],
-    ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, i64>> {
+    ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, RefineMetadata>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -164,7 +179,7 @@ impl PgSearchBackend for PgSearch {
             .fetch_all(&self.pool)
             .await
             .map_err(|error| crate::Error::Pg(error.to_string()))?;
-        let mut counts = HashMap::with_capacity(ids.len());
+        let mut metadata = HashMap::with_capacity(ids.len());
         for row in summary_rows {
             let raw: Vec<u8> = row
                 .try_get("info_hash")
@@ -174,35 +189,48 @@ impl PgSearchBackend for PgSearch {
             let count: i64 = row
                 .try_get("file_count")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            counts.insert(info_hash, count);
+            metadata.insert(
+                info_hash,
+                RefineMetadata {
+                    file_count: Some(count),
+                    compressed_bytes: None,
+                },
+            );
         }
 
-        let missing = ids
-            .iter()
-            .filter(|id| !counts.contains_key(id))
-            .copied()
-            .collect::<Vec<_>>();
-        if missing.is_empty() {
-            return Ok(counts);
-        }
-
-        let fallback_rows = sqlx::query(TORRENT_COUNTS_SQL)
-            .bind(bytea_values(&missing))
+        let torrent_rows = sqlx::query(TORRENT_REFINE_METADATA_SQL)
+            .bind(&requested)
             .fetch_all(&self.pool)
             .await
             .map_err(|error| crate::Error::Pg(error.to_string()))?;
-        for row in fallback_rows {
+        for row in torrent_rows {
             let raw: Vec<u8> = row
                 .try_get("info_hash")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
             let info_hash = bitmagnet_model::InfoHash::from_slice(&raw)
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            let count: i64 = row
+            let count: Option<i64> = row
                 .try_get("file_count")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            counts.insert(info_hash, count);
+            let compressed_bytes: Option<i64> = row
+                .try_get("compressed_bytes")
+                .map_err(|error| crate::Error::Pg(error.to_string()))?;
+            let compressed_bytes = compressed_bytes
+                .map(|bytes| {
+                    u64::try_from(bytes).map_err(|_| {
+                        crate::Error::Pg(format!(
+                            "negative compressed files_data length for {info_hash}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let entry = metadata.entry(info_hash).or_default();
+            if entry.file_count.is_none() {
+                entry.file_count = count;
+            }
+            entry.compressed_bytes = compressed_bytes;
         }
-        Ok(counts)
+        Ok(metadata)
     }
 }
 
@@ -259,11 +287,20 @@ mod tests {
             .with_total_count(true)
             .with_has_next_page(true)
             .with_aggregation_budget(123.5);
-        let original = SearchRequest::new(options, HydrateOptions { files_data: false });
+        let original = SearchRequest::new(
+            options,
+            HydrateOptions {
+                files_data: false,
+                max_files_data_bytes: None,
+            },
+        );
 
         let shaped = original.for_candidates(
             &[info_hash(1), info_hash(2)],
-            HydrateOptions { files_data: true },
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            },
         );
 
         assert_eq!(
@@ -304,13 +341,13 @@ mod tests {
     }
 
     #[test]
-    fn count_sql_is_two_step_index_keyed_and_blob_free() {
+    fn refine_metadata_sql_is_two_step_index_keyed_and_blob_safe() {
         assert!(SUMMARY_COUNTS_SQL.contains("FROM torrent_file_summary"));
         assert!(SUMMARY_COUNTS_SQL.contains("info_hash = ANY($1::bytea[])"));
-        assert!(TORRENT_COUNTS_SQL.contains("FROM torrents"));
-        assert!(TORRENT_COUNTS_SQL.contains("files_count IS NOT NULL"));
-        for sql in [SUMMARY_COUNTS_SQL, TORRENT_COUNTS_SQL] {
-            assert!(!sql.contains("files_data"));
+        assert!(TORRENT_REFINE_METADATA_SQL.contains("FROM torrents"));
+        assert!(TORRENT_REFINE_METADATA_SQL.contains("octet_length(files_data)"));
+        for sql in [SUMMARY_COUNTS_SQL, TORRENT_REFINE_METADATA_SQL] {
+            assert!(!sql.contains("files_data AS"));
             assert!(!sql.contains("torrent_files"));
             assert!(!sql.contains("JOIN"));
         }
@@ -322,7 +359,7 @@ mod tests {
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .expect("lazy test DSN");
         let backend = PgSearch::new(pool, SearchBuildConfig::default());
-        assert_eq!(backend.file_counts(&[]).await.unwrap(), HashMap::new());
+        assert_eq!(backend.refine_metadata(&[]).await.unwrap(), HashMap::new());
     }
 
     #[tokio::test]
@@ -335,8 +372,13 @@ mod tests {
             popularity_sort_default: true,
         };
         let backend = PgSearch::new(pool, build_config);
-        let _shaped = SearchRequest::default()
-            .for_candidates(&[info_hash(9)], HydrateOptions { files_data: true });
+        let _shaped = SearchRequest::default().for_candidates(
+            &[info_hash(9)],
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            },
+        );
 
         assert_eq!(backend.build_config(), build_config);
     }

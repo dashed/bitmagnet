@@ -207,6 +207,7 @@ fn to_lane_c_query_options(options: QueryOptions) -> lane_c::QueryOptions {
         combined: to_lane_c_search_request(options.combined),
         refine: options.refine.map(to_lane_c_search_request),
         agg: to_lane_c_search_request(options.agg),
+        retain_refine_files: options.retain_refine_files,
     }
 }
 
@@ -434,6 +435,7 @@ mod tests {
             combined: request.clone(),
             refine: Some(request.clone()),
             agg: request,
+            retain_refine_files: false,
         }
     }
 
@@ -461,6 +463,7 @@ mod tests {
             combined: search_request.clone(),
             refine: Some(search_request.clone()),
             agg: search_request,
+            retain_refine_files: true,
         });
 
         assert_eq!(converted.combined.options.query.as_deref(), Some("needle"));
@@ -470,6 +473,7 @@ mod tests {
         assert!(converted.combined.hydrate.files_data);
         assert!(converted.refine.expect("refine request").hydrate.files_data);
         assert!(converted.agg.hydrate.files_data);
+        assert!(converted.retain_refine_files);
     }
 
     #[test]

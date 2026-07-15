@@ -35,6 +35,9 @@ pub struct HydrateOptions {
     /// Load `torrents.files_data`. Off by default so the blob never reaches
     /// the ordered membership path or consumers that do not need file refine.
     pub files_data: bool,
+    /// Optional hard ceiling for one compressed blob selected from PostgreSQL.
+    /// Oversized values are projected as NULL so SQLx never materialises them.
+    pub max_files_data_bytes: Option<u64>,
 }
 
 /// Errors from building or running a search query.
@@ -723,9 +726,17 @@ ORDER BY info_hash, name"#;
 
 fn hydration_by_id_sql(options: HydrateOptions) -> String {
     let files_column = if options.files_data {
-        ",\n       torrents.files_data AS torrent_files_data"
+        match options.max_files_data_bytes {
+            Some(limit) => {
+                format!(
+                    ",\n       CASE WHEN octet_length(torrents.files_data) <= {limit} \
+                     THEN torrents.files_data ELSE NULL END AS torrent_files_data"
+                )
+            }
+            None => ",\n       torrents.files_data AS torrent_files_data".to_owned(),
+        }
     } else {
-        ""
+        String::new()
     };
     format!("{HYDRATION_SELECT}{files_column}{HYDRATION_FROM}")
 }
@@ -1850,10 +1861,19 @@ mod tests {
     #[test]
     fn files_data_is_gated_to_id_keyed_hydration() {
         let default_sql = hydration_by_id_sql(HydrateOptions::default());
-        let files_sql = hydration_by_id_sql(HydrateOptions { files_data: true });
+        let files_sql = hydration_by_id_sql(HydrateOptions {
+            files_data: true,
+            max_files_data_bytes: None,
+        });
+        let bounded_files_sql = hydration_by_id_sql(HydrateOptions {
+            files_data: true,
+            max_files_data_bytes: Some(67_108_864),
+        });
 
         assert!(!default_sql.contains("torrents.files_data"));
         assert!(files_sql.contains("torrents.files_data AS torrent_files_data"));
+        assert!(bounded_files_sql.contains("octet_length(torrents.files_data) <= 67108864"));
+        assert!(bounded_files_sql.contains("THEN torrents.files_data ELSE NULL"));
         assert!(!ORDERING_SELECT.contains("files_data"));
         assert!(!TORRENT_SOURCES_BY_INFO_HASH_SQL.contains("files_data"));
         assert!(!TORRENT_TAGS_BY_INFO_HASH_SQL.contains("files_data"));

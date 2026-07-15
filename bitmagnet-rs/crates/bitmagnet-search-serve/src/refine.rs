@@ -7,7 +7,10 @@
 
 use std::collections::HashSet;
 
-use bitmagnet_model::{file_extension_from_path, BlobFile, FilesStatus, Torrent};
+use bitmagnet_model::{
+    deserialize_files_bounded, file_extension_from_path, BlobError, BlobFile, DecodedFiles,
+    FilesStatus, Torrent,
+};
 
 use crate::filters::Filters;
 
@@ -138,7 +141,8 @@ pub fn torrent_matches(files: &[BlobFile], predicate: &RefinePredicate) -> bool 
 /// is deliberately empty so [`file_extension`] derives it from the name via
 /// [`file_extension_from_path`]. This is the Go CAVEAT C soundness invariant:
 /// it matches the PostgreSQL generated column and Tantivy document builder.
-pub fn files_for_refine(torrent: &Torrent) -> Option<Vec<BlobFile>> {
+#[cfg(test)]
+pub(crate) fn files_for_refine(torrent: &Torrent) -> Option<Vec<BlobFile>> {
     if let Ok(files) = torrent.files() {
         if !files.is_empty() {
             return Some(files);
@@ -157,13 +161,87 @@ pub fn files_for_refine(torrent: &Torrent) -> Option<Vec<BlobFile>> {
     None
 }
 
+/// One bounded file-list decode used by the composer.
+pub(crate) struct BoundedRefineFiles {
+    /// Decoded files in blob order.
+    pub files: Vec<BlobFile>,
+    /// MessagePack bytes materialised while decoding the blob.
+    pub decompressed_bytes: usize,
+    /// Path and extension bytes owned by the decoded files.
+    pub owned_string_bytes: usize,
+}
+
+/// Resolves exact-refine files without permitting unbounded decompression.
+///
+/// Multi-file blob errors are returned so the composer can fail loud or serve
+/// an explicitly capped prefix. Single-file torrents retain the Go-compatible
+/// name surrogate even if an irrelevant blob is corrupt or oversized.
+pub(crate) fn files_for_refine_bounded(
+    torrent: &Torrent,
+    max_decompressed_bytes: usize,
+    max_owned_string_bytes: usize,
+    max_files: usize,
+) -> Result<Option<BoundedRefineFiles>, BlobError> {
+    if let Some(blob) = &torrent.files_data {
+        match deserialize_files_bounded(blob, max_decompressed_bytes, max_files) {
+            Ok(DecodedFiles {
+                files,
+                decompressed_bytes,
+                owned_string_bytes,
+            }) if !files.is_empty() => {
+                if owned_string_bytes > max_owned_string_bytes {
+                    return Err(BlobError::OwnedStringLimitExceeded {
+                        bytes: owned_string_bytes,
+                        limit: max_owned_string_bytes,
+                    });
+                }
+                return Ok(Some(BoundedRefineFiles {
+                    files,
+                    decompressed_bytes,
+                    owned_string_bytes,
+                }));
+            }
+            Ok(_) => {}
+            Err(error) if torrent.files_status != FilesStatus::Single => return Err(error),
+            Err(_) => {}
+        }
+    }
+
+    if torrent.files_status == FilesStatus::Single {
+        if max_files == 0 {
+            return Err(BlobError::FileCountLimitExceeded { count: 1, limit: 0 });
+        }
+        if torrent.name.len() > max_owned_string_bytes {
+            return Err(BlobError::OwnedStringLimitExceeded {
+                bytes: torrent.name.len(),
+                limit: max_owned_string_bytes,
+            });
+        }
+        let file = BlobFile {
+            index: 0,
+            path: torrent.name.clone(),
+            extension: String::new(),
+            size: torrent.size,
+        };
+        let owned_string_bytes = file.owned_string_bytes();
+        return Ok(Some(BoundedRefineFiles {
+            files: vec![file],
+            decompressed_bytes: 0,
+            owned_string_bytes,
+        }));
+    }
+
+    Ok(None)
+}
+
 /// Exact-refines one candidate torrent and reports whether refinement was possible.
 ///
 /// This ports Go's `torrentRefine` in
 /// `internal/search/pathsearch/refine.go`. The second tuple element is `false`
 /// when no trustworthy file list is obtainable, propagating the CAVEAT B
 /// fail-loud signal to the future composer.
-pub fn torrent_refine(torrent: &Torrent, predicate: &RefinePredicate) -> (bool, bool) {
+#[cfg(test)]
+pub(crate) fn torrent_refine(torrent: &Torrent, predicate: &RefinePredicate) -> (bool, bool) {
     let Some(files) = files_for_refine(torrent) else {
         return (false, false);
     };
@@ -405,6 +483,30 @@ mod tests {
         let empty_blob = serialize_files(&[]).unwrap();
         let empty_multi = torrent(FilesStatus::Multi, "multi", 42, Some(empty_blob));
         assert_eq!(files_for_refine(&empty_multi), None);
+    }
+
+    #[test]
+    fn bounded_refine_enforces_owned_bytes_for_blob_and_single_surrogate() {
+        let expected = vec![file("Inception.2010.mkv", "mkv", 7)];
+        let owned_bytes = expected[0].owned_string_bytes();
+        let files_data = serialize_files(&expected).unwrap();
+        let multi = torrent(FilesStatus::Multi, "ignored", 99, Some(files_data));
+
+        let decoded = files_for_refine_bounded(&multi, 4_096, owned_bytes, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.files, expected);
+        assert!(matches!(
+            files_for_refine_bounded(&multi, 4_096, owned_bytes - 1, 1),
+            Err(BlobError::OwnedStringLimitExceeded { .. })
+        ));
+
+        let single_name = "single-name-is-bounded.mkv";
+        let single = torrent(FilesStatus::Single, single_name, 42, None);
+        assert!(matches!(
+            files_for_refine_bounded(&single, 0, single_name.len() - 1, 1),
+            Err(BlobError::OwnedStringLimitExceeded { .. })
+        ));
     }
 
     #[test]

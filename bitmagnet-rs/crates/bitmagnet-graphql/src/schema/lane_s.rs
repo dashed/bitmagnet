@@ -100,6 +100,7 @@ pub const fn to_lane_s_build_config(config: local::SearchBuildConfig) -> lane_s:
 pub const fn to_lane_s_hydrate_options(options: local::HydrateOptions) -> lane_s::HydrateOptions {
     lane_s::HydrateOptions {
         files_data: options.files_data,
+        max_files_data_bytes: None,
     }
 }
 
@@ -369,7 +370,10 @@ mod tests {
                 content: true,
                 files_data: true,
             }),
-            lane_s::HydrateOptions { files_data: true }
+            lane_s::HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            }
         );
     }
 

@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bitmagnet_model::{BlobFile, InfoHash};
+use bitmagnet_model::{BlobError, BlobFile, InfoHash, Torrent};
 use bitmagnet_proto::v1::{PathCandidatesRequest, SortBy, SuggestRequest};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::time::{timeout_at, Instant};
@@ -21,11 +21,12 @@ use crate::config::ComposerConfig;
 use crate::filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
 use crate::metrics::{PathsearchMetrics, RouteResult};
 use crate::pg::{
-    empty_result, Aggregations, HydrateOptions, PgSearchBackend, QueryOptions, SearchRequest,
-    SearchResult, SearchResultItem,
+    empty_result, Aggregations, HydrateOptions, PgSearchBackend, QueryOptions, RefineMetadata,
+    SearchRequest, SearchResult, SearchResultItem,
 };
 use crate::refine::{
-    file_extension, files_for_refine, match_file, paginate, torrent_matches, RefinePredicate,
+    file_extension, files_for_refine_bounded, match_file, paginate, torrent_matches,
+    BoundedRefineFiles, RefinePredicate,
 };
 
 /// L3 path candidate composer backed by Lane-S PostgreSQL hydration.
@@ -47,7 +48,10 @@ pub struct Composer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefineCap {
     None,
-    Retained,
+    OversizedCandidate,
+    RetainedFiles,
+    DecodedBytes,
+    RetainedBytes,
     Deadline,
 }
 
@@ -107,6 +111,89 @@ impl Composer {
     fn inc_route(&self, result: RouteResult) {
         if let Some(metrics) = &self.metrics {
             metrics.inc_route(result);
+        }
+    }
+
+    fn record_refine_cap(&self, cap: RefineCap) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        match cap {
+            RefineCap::RetainedFiles | RefineCap::DecodedBytes | RefineCap::RetainedBytes => {
+                metrics.inc_refine_retained_capped();
+            }
+            RefineCap::Deadline => metrics.inc_refine_deadline_capped(),
+            RefineCap::None | RefineCap::OversizedCandidate => {}
+        }
+    }
+
+    fn bounded_files_for_refine(
+        &self,
+        torrent: &Torrent,
+        chunk_decoded_bytes: &mut u64,
+    ) -> Result<Option<BoundedRefineFiles>, RefineCap> {
+        let remaining = self
+            .config
+            .refine_decoded_byte_budget
+            .saturating_sub(*chunk_decoded_bytes);
+        if remaining == 0 {
+            return Err(RefineCap::DecodedBytes);
+        }
+        // MessagePack contains every decoded path/extension byte, so capping
+        // raw output at half of the remaining allocation budget guarantees
+        // raw + owned strings fit before the post-decode accounting check.
+        let max_decompressed_bytes = self.config.max_refine_decompressed_bytes.min(remaining / 2);
+        let max_decompressed_bytes = usize::try_from(max_decompressed_bytes).unwrap_or(usize::MAX);
+        let max_owned_string_bytes = self.config.max_refine_decompressed_bytes.min(remaining);
+        let max_owned_string_bytes = usize::try_from(max_owned_string_bytes).unwrap_or(usize::MAX);
+        let max_files = usize::try_from(self.effective_file_cap()).unwrap_or(usize::MAX);
+
+        match files_for_refine_bounded(
+            torrent,
+            max_decompressed_bytes,
+            max_owned_string_bytes,
+            max_files,
+        ) {
+            Ok(Some(decoded)) => {
+                let decompressed_bytes =
+                    u64::try_from(decoded.decompressed_bytes).unwrap_or(u64::MAX);
+                let owned_string_bytes =
+                    u64::try_from(decoded.owned_string_bytes).unwrap_or(u64::MAX);
+                let decoded_allocation_bytes =
+                    decompressed_bytes.saturating_add(owned_string_bytes);
+                if owned_string_bytes > self.config.max_refine_decompressed_bytes
+                    || chunk_decoded_bytes.saturating_add(decoded_allocation_bytes)
+                        > self.config.refine_decoded_byte_budget
+                {
+                    tracing::warn!(
+                        decompressed_bytes,
+                        owned_string_bytes,
+                        "pathsearch candidate reached the decoded allocation budget"
+                    );
+                    return Err(RefineCap::DecodedBytes);
+                }
+                *chunk_decoded_bytes = chunk_decoded_bytes.saturating_add(decoded_allocation_bytes);
+                Ok(Some(decoded))
+            }
+            Ok(None) => Ok(None),
+            Err(error @ BlobError::FileCountLimitExceeded { .. }) => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_refine_declined_oversized();
+                }
+                tracing::warn!(%error, "pathsearch candidate exceeded the decoded file-count ceiling");
+                Err(RefineCap::OversizedCandidate)
+            }
+            Err(
+                error @ (BlobError::DecompressedLimitExceeded { .. }
+                | BlobError::OwnedStringLimitExceeded { .. }),
+            ) => {
+                tracing::warn!(%error, "pathsearch candidate reached a bounded decode ceiling");
+                Err(RefineCap::DecodedBytes)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "pathsearch candidate blob decode failed");
+                Err(RefineCap::None)
+            }
         }
     }
 
@@ -203,9 +290,15 @@ impl Composer {
         Some((ids, response.candidate_total))
     }
 
-    fn file_count_of(&self, id: &InfoHash, counts: &HashMap<InfoHash, i64>) -> u64 {
+    fn compressed_blob_cap(&self) -> u64 {
+        self.config
+            .max_refine_decompressed_bytes
+            .min(self.config.refine_decoded_byte_budget)
+    }
+
+    fn file_count_of(&self, id: &InfoHash, metadata: &HashMap<InfoHash, RefineMetadata>) -> u64 {
         let cap = self.effective_file_cap();
-        match counts.get(id).copied() {
+        match metadata.get(id).and_then(|value| value.file_count) {
             Some(count) if count <= 0 => 0,
             Some(count) => u64::try_from(count).unwrap_or(u64::MAX).min(u64::from(cap)),
             None => u64::from(cap),
@@ -215,52 +308,85 @@ impl Composer {
     fn decline_oversized(
         &self,
         ids: Vec<InfoHash>,
-        counts: &HashMap<InfoHash, i64>,
-    ) -> Vec<InfoHash> {
-        let cap = self.effective_file_cap();
-        ids.into_iter()
-            .filter(|id| match counts.get(id).copied() {
-                Some(count) if count > i64::from(cap) => {
+        metadata: &HashMap<InfoHash, RefineMetadata>,
+    ) -> (Vec<InfoHash>, bool) {
+        let file_cap = self.effective_file_cap();
+        let compressed_cap = self.compressed_blob_cap();
+        let mut byte_capped = false;
+        let kept = ids
+            .into_iter()
+            .filter(|id| {
+                let candidate = metadata.get(id).copied().unwrap_or_default();
+                if let Some(count) = candidate
+                    .file_count
+                    .filter(|count| *count > i64::from(file_cap))
+                {
                     if let Some(metrics) = &self.metrics {
                         metrics.inc_refine_declined_oversized();
                     }
                     tracing::warn!(
                         info_hash = %id,
                         file_count = count,
-                        cap,
+                        cap = file_cap,
                         "pathsearch declining oversized candidate"
                     );
-                    false
+                    return false;
                 }
-                _ => true,
+
+                if let Some(bytes) = candidate
+                    .compressed_bytes
+                    .filter(|bytes| *bytes > compressed_cap)
+                {
+                    byte_capped = true;
+                    tracing::warn!(
+                        info_hash = %id,
+                        compressed_bytes = bytes,
+                        cap = compressed_cap,
+                        "pathsearch declining candidate above the compressed blob ceiling"
+                    );
+                    return false;
+                }
+
+                true
             })
-            .collect()
+            .collect();
+        (kept, byte_capped)
     }
 
     fn chunk_by_file_budget(
         &self,
         ids: Vec<InfoHash>,
-        counts: &HashMap<InfoHash, i64>,
+        metadata: &HashMap<InfoHash, RefineMetadata>,
     ) -> Vec<Vec<InfoHash>> {
         let mut chunks = Vec::new();
         let mut current = Vec::new();
         let mut current_files = 0_u64;
+        let mut current_compressed_bytes = 0_u64;
         let max_torrents = usize::try_from(self.config.max_chunk_torrents)
             .unwrap_or(usize::MAX)
             .max(1);
         let file_budget = u64::from(self.config.refine_file_budget);
+        let compressed_budget = self.config.refine_decoded_byte_budget;
 
         for id in ids {
-            let files = self.file_count_of(&id, counts);
+            let files = self.file_count_of(&id, metadata);
+            let compressed_bytes = metadata
+                .get(&id)
+                .and_then(|value| value.compressed_bytes)
+                .unwrap_or(0);
             if !current.is_empty()
                 && (current.len() >= max_torrents
-                    || current_files.saturating_add(files) > file_budget)
+                    || current_files.saturating_add(files) > file_budget
+                    || current_compressed_bytes.saturating_add(compressed_bytes)
+                        > compressed_budget)
             {
                 chunks.push(std::mem::take(&mut current));
                 current_files = 0;
+                current_compressed_bytes = 0;
             }
             current.push(id);
             current_files = current_files.saturating_add(files);
+            current_compressed_bytes = current_compressed_bytes.saturating_add(compressed_bytes);
         }
         if !current.is_empty() {
             chunks.push(current);
@@ -300,7 +426,13 @@ impl Composer {
         ids: &[InfoHash],
         deadline: Instant,
     ) -> Result<Vec<SearchResultItem>, RefineCap> {
-        let request = request.for_candidates(ids, HydrateOptions { files_data: true });
+        let request = request.for_candidates(
+            ids,
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: Some(self.compressed_blob_cap()),
+            },
+        );
         match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => Ok(self.ordered_chunk_items(result, ids)),
             Ok(Err(error)) => {
@@ -324,15 +456,16 @@ impl Composer {
         limit: u32,
         offset: u32,
         sorts: Vec<SortBy>,
-    ) -> (Vec<MatchingFile>, u64, bool) {
+        allow_byte_capped_prefix: bool,
+    ) -> (Vec<MatchingFile>, u64, bool, RefineCap) {
         let predicate = filters.predicate();
         if predicate.is_empty_substr() || !self.eligible(&filters.query) {
             self.inc_route(RouteResult::Ineligible);
-            return (Vec::new(), 0, false);
+            return (Vec::new(), 0, false, RefineCap::None);
         }
         if !self.healthy() {
             self.inc_route(RouteResult::Fallback);
-            return (Vec::new(), 0, false);
+            return (Vec::new(), 0, false, RefineCap::None);
         }
 
         let deadline = self.route_deadline(Instant::now());
@@ -340,61 +473,80 @@ impl Composer {
             .candidate_ids(filters, limit, offset, sorts, deadline)
             .await
         else {
-            return (Vec::new(), 0, false);
+            return (Vec::new(), 0, false, RefineCap::None);
         };
         if ids.is_empty() {
             return if self.trust_empty() {
                 self.inc_route(RouteResult::Served);
-                (Vec::new(), candidate_total, true)
+                (Vec::new(), candidate_total, true, RefineCap::None)
             } else {
                 self.inc_route(RouteResult::Fallback);
-                (Vec::new(), 0, false)
+                (Vec::new(), 0, false, RefineCap::None)
             };
         }
 
-        let counts = match timeout_at(deadline, self.pg.file_counts(&ids)).await {
-            Ok(Ok(counts)) => counts,
+        let metadata = match timeout_at(deadline, self.pg.refine_metadata(&ids)).await {
+            Ok(Ok(metadata)) => metadata,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch file-row count probe failed; falling back to PostgreSQL");
                 self.inc_route(RouteResult::Error);
-                return (Vec::new(), 0, false);
+                return (Vec::new(), 0, false, RefineCap::None);
             }
             Err(_) => {
                 self.inc_route(RouteResult::Error);
-                return (Vec::new(), 0, false);
+                return (Vec::new(), 0, false, RefineCap::None);
             }
         };
-        let kept = self.decline_oversized(ids, &counts);
+        let (kept, preflight_byte_capped) = self.decline_oversized(ids, &metadata);
         if kept.is_empty() {
-            self.inc_route(RouteResult::Served);
-            return (Vec::new(), candidate_total, true);
-        }
-        let chunks = self.chunk_by_file_budget(kept, &counts);
-        let _permit = if chunks.len() > 1 {
-            match self.acquire_refine_slot(deadline).await {
-                Some(permit) => Some(permit),
-                None => {
-                    if let Some(metrics) = &self.metrics {
-                        metrics.inc_refine_shed();
-                    }
-                    tracing::warn!(
-                        query = filters.query,
-                        "pathsearch file-row refine slot unavailable; serving shed empty estimate"
-                    );
-                    self.inc_route(RouteResult::Served);
-                    return (Vec::new(), candidate_total, true);
+            if preflight_byte_capped {
+                self.record_refine_cap(RefineCap::DecodedBytes);
+                if !allow_byte_capped_prefix {
+                    self.inc_route(RouteResult::Fallback);
+                    return (Vec::new(), 0, false, RefineCap::DecodedBytes);
                 }
             }
-        } else {
-            None
+            self.inc_route(RouteResult::Served);
+            return (
+                Vec::new(),
+                candidate_total,
+                true,
+                if preflight_byte_capped {
+                    RefineCap::DecodedBytes
+                } else {
+                    RefineCap::None
+                },
+            );
+        }
+        let chunks = self.chunk_by_file_budget(kept, &metadata);
+        let _permit = match self.acquire_refine_slot(deadline).await {
+            Some(permit) => permit,
+            None => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_refine_shed();
+                }
+                tracing::warn!(
+                    query = filters.query,
+                    "pathsearch file-row refine slot unavailable; serving shed empty estimate"
+                );
+                self.inc_route(RouteResult::Served);
+                return (Vec::new(), candidate_total, true, RefineCap::None);
+            }
         };
 
         let retained_budget = u64::from(self.config.retained_file_budget);
+        let retained_byte_budget = self.config.retained_byte_budget;
         let file_cap = u64::from(self.effective_file_cap());
         let mut matching = Vec::new();
-        let mut cap = RefineCap::None;
+        let mut retained_bytes = 0_u64;
+        let mut cap = if preflight_byte_capped {
+            RefineCap::DecodedBytes
+        } else {
+            RefineCap::None
+        };
 
         'refine: for chunk in chunks {
+            let mut chunk_decoded_bytes = 0_u64;
             if Instant::now() >= deadline {
                 cap = RefineCap::Deadline;
                 break;
@@ -410,7 +562,7 @@ impl Composer {
                 }
                 Err(_) => {
                     self.inc_route(RouteResult::Error);
-                    return (Vec::new(), 0, false);
+                    return (Vec::new(), 0, false, RefineCap::None);
                 }
             };
 
@@ -419,14 +571,25 @@ impl Composer {
                     cap = RefineCap::Deadline;
                     break 'refine;
                 }
-                let Some(files) = files_for_refine(&item.torrent) else {
-                    tracing::warn!(
-                        info_hash = %item.info_hash,
-                        "pathsearch file-row candidate files unobtainable; falling back to PostgreSQL"
-                    );
-                    self.inc_route(RouteResult::Fallback);
-                    return (Vec::new(), 0, false);
+                let decoded = match self
+                    .bounded_files_for_refine(&item.torrent, &mut chunk_decoded_bytes)
+                {
+                    Ok(Some(decoded)) => decoded,
+                    Err(RefineCap::OversizedCandidate) => continue,
+                    Ok(None) | Err(RefineCap::None) => {
+                        tracing::warn!(
+                            info_hash = %item.info_hash,
+                            "pathsearch file-row candidate files unobtainable; falling back to PostgreSQL"
+                        );
+                        self.inc_route(RouteResult::Fallback);
+                        return (Vec::new(), 0, false, RefineCap::None);
+                    }
+                    Err(reason) => {
+                        cap = reason;
+                        break 'refine;
+                    }
                 };
+                let files = decoded.files;
                 let file_count = u64::try_from(files.len()).unwrap_or(u64::MAX);
                 if file_count > file_cap {
                     if let Some(metrics) = &self.metrics {
@@ -455,54 +618,77 @@ impl Composer {
                         continue;
                     }
                     let extension = file_extension(&file);
+                    let file_bytes =
+                        u64::try_from(file.owned_string_bytes().saturating_add(extension.len()))
+                            .unwrap_or(u64::MAX);
+                    if retained_bytes.saturating_add(file_bytes) > retained_byte_budget {
+                        cap = RefineCap::RetainedBytes;
+                        break 'refine;
+                    }
                     matching.push(MatchingFile {
                         file,
                         extension,
                         torrent_content: Arc::clone(&item),
                     });
+                    retained_bytes = retained_bytes.saturating_add(file_bytes);
                     if u64::try_from(matching.len()).unwrap_or(u64::MAX) >= retained_budget {
-                        cap = RefineCap::Retained;
+                        cap = RefineCap::RetainedFiles;
                         break 'refine;
                     }
                 }
             }
         }
 
-        if let Some(metrics) = &self.metrics {
-            match cap {
-                RefineCap::Retained => metrics.inc_refine_retained_capped(),
-                RefineCap::Deadline => metrics.inc_refine_deadline_capped(),
-                RefineCap::None => {}
-            }
-        }
+        self.record_refine_cap(cap);
         if cap != RefineCap::None {
             tracing::warn!(
                 ?cap,
                 matches = matching.len(),
+                retained_bytes,
                 "pathsearch serving bounded file-match prefix"
             );
         }
+        if !allow_byte_capped_prefix
+            && matches!(cap, RefineCap::DecodedBytes | RefineCap::RetainedBytes)
+        {
+            tracing::warn!(
+                ?cap,
+                "pathsearch route has no estimate signal for a byte-capped prefix; declining"
+            );
+            self.inc_route(RouteResult::Fallback);
+            return (Vec::new(), 0, false, cap);
+        }
         self.inc_route(RouteResult::Served);
-        (matching, candidate_total, true)
+        (matching, candidate_total, true, cap)
     }
 
     fn refine_chunk(
         &self,
         items: Vec<SearchResultItem>,
         predicate: &RefinePredicate,
+        retain_refine_files: bool,
         deadline: Instant,
         refined: &mut Vec<SearchResultItem>,
         retained_files: &mut u64,
+        retained_bytes: &mut u64,
+        chunk_decoded_bytes: &mut u64,
     ) -> Result<RefineCap, ()> {
         let file_cap = u64::from(self.effective_file_cap());
         for mut item in items {
             if Instant::now() >= deadline {
                 return Ok(RefineCap::Deadline);
             }
-            let Some(files) = files_for_refine(&item.torrent) else {
-                tracing::warn!(info_hash = %item.info_hash, "pathsearch candidate files unobtainable; falling back to PostgreSQL");
-                return Err(());
+            let decoded = match self.bounded_files_for_refine(&item.torrent, chunk_decoded_bytes) {
+                Ok(Some(decoded)) => decoded,
+                Err(RefineCap::OversizedCandidate) => continue,
+                Ok(None) | Err(RefineCap::None) => {
+                    tracing::warn!(info_hash = %item.info_hash, "pathsearch candidate files unobtainable; falling back to PostgreSQL");
+                    return Err(());
+                }
+                Err(reason) => return Ok(reason),
             };
+            let file_owned_bytes = u64::try_from(decoded.owned_string_bytes).unwrap_or(u64::MAX);
+            let files = decoded.files;
             let file_count = u64::try_from(files.len()).unwrap_or(u64::MAX);
             if file_count > file_cap {
                 if let Some(metrics) = &self.metrics {
@@ -519,15 +705,25 @@ impl Composer {
             if !torrent_matches(&files, predicate) {
                 continue;
             }
-            if !refined.is_empty()
-                && retained_files.saturating_add(file_count)
-                    > u64::from(self.config.retained_file_budget)
-            {
-                return Ok(RefineCap::Retained);
+            if retain_refine_files {
+                if !refined.is_empty()
+                    && retained_files.saturating_add(file_count)
+                        > u64::from(self.config.retained_file_budget)
+                {
+                    return Ok(RefineCap::RetainedFiles);
+                }
+                if retained_bytes.saturating_add(file_owned_bytes)
+                    > self.config.retained_byte_budget
+                {
+                    return Ok(RefineCap::RetainedBytes);
+                }
+                *retained_files = retained_files.saturating_add(file_count);
+                *retained_bytes = retained_bytes.saturating_add(file_owned_bytes);
+                item.refine_files = files;
+            } else {
+                item.refine_files.clear();
             }
-            *retained_files = retained_files.saturating_add(file_count);
             item.torrent.files_data = None;
-            item.refine_files = files;
             refined.push(item);
         }
         Ok(RefineCap::None)
@@ -543,7 +739,13 @@ impl Composer {
             return Aggregations::new();
         }
         let ids: Vec<InfoHash> = refined.iter().map(|item| item.info_hash).collect();
-        let request = request.for_candidates(&ids, HydrateOptions { files_data: false });
+        let request = request.for_candidates(
+            &ids,
+            HydrateOptions {
+                files_data: false,
+                max_files_data_bytes: None,
+            },
+        );
         match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => result.aggregations,
             Ok(Err(error)) => {
@@ -590,8 +792,8 @@ impl Composer {
                 (empty_result(), false)
             };
         }
-        let counts = match timeout_at(deadline, self.pg.file_counts(&ids)).await {
-            Ok(Ok(counts)) => counts,
+        let metadata = match timeout_at(deadline, self.pg.refine_metadata(&ids)).await {
+            Ok(Ok(metadata)) => metadata,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch file-count probe failed; falling back to PostgreSQL");
                 self.inc_route(RouteResult::Error);
@@ -602,34 +804,37 @@ impl Composer {
                 return (empty_result(), false);
             }
         };
-        let kept = self.decline_oversized(ids.clone(), &counts);
+        let (kept, preflight_byte_capped) = self.decline_oversized(ids.clone(), &metadata);
         if kept.is_empty() {
+            if preflight_byte_capped {
+                self.record_refine_cap(RefineCap::DecodedBytes);
+            }
             self.inc_route(RouteResult::Served);
             return (Self::empty_estimate(), true);
         }
-        let chunks = self.chunk_by_file_budget(kept, &counts);
-        let _permit = if chunks.len() > 1 {
-            match self.acquire_refine_slot(deadline).await {
-                Some(permit) => Some(permit),
-                None => {
-                    if let Some(metrics) = &self.metrics {
-                        metrics.inc_refine_shed();
-                    }
-                    self.inc_route(RouteResult::Served);
-                    tracing::warn!(
-                        "pathsearch refine slot unavailable; serving shed empty estimate"
-                    );
-                    return (Self::empty_estimate(), true);
+        let chunks = self.chunk_by_file_budget(kept, &metadata);
+        let _permit = match self.acquire_refine_slot(deadline).await {
+            Some(permit) => permit,
+            None => {
+                if let Some(metrics) = &self.metrics {
+                    metrics.inc_refine_shed();
                 }
+                self.inc_route(RouteResult::Served);
+                tracing::warn!("pathsearch refine slot unavailable; serving shed empty estimate");
+                return (Self::empty_estimate(), true);
             }
-        } else {
-            None
         };
 
         let mut refined = Vec::new();
         let mut retained_files = 0_u64;
-        let mut cap = RefineCap::None;
+        let mut retained_bytes = 0_u64;
+        let mut cap = if preflight_byte_capped {
+            RefineCap::DecodedBytes
+        } else {
+            RefineCap::None
+        };
         for chunk in chunks {
+            let mut chunk_decoded_bytes = 0_u64;
             if Instant::now() >= deadline {
                 cap = RefineCap::Deadline;
                 break;
@@ -651,9 +856,12 @@ impl Composer {
             match self.refine_chunk(
                 items,
                 &predicate,
+                options.retain_refine_files,
                 deadline,
                 &mut refined,
                 &mut retained_files,
+                &mut retained_bytes,
+                &mut chunk_decoded_bytes,
             ) {
                 Ok(RefineCap::None) => {}
                 Ok(reason) => {
@@ -667,16 +875,11 @@ impl Composer {
             }
         }
         if cap != RefineCap::None {
-            if let Some(metrics) = &self.metrics {
-                match cap {
-                    RefineCap::Retained => metrics.inc_refine_retained_capped(),
-                    RefineCap::Deadline => metrics.inc_refine_deadline_capped(),
-                    RefineCap::None => {}
-                }
-            }
+            self.record_refine_cap(cap);
             tracing::warn!(
                 ?cap,
                 matches = refined.len(),
+                retained_bytes,
                 "pathsearch serving bounded refined prefix"
             );
         }
@@ -862,8 +1065,8 @@ impl SearchServe for Composer {
         offset: u32,
         sorts: Vec<SortBy>,
     ) -> crate::Result<(Vec<PathGroup>, bool)> {
-        let (matching, _, served) = self
-            .collect_matching_files(&filters, &options, limit, offset, sorts)
+        let (matching, _, served, _) = self
+            .collect_matching_files(&filters, &options, limit, offset, sorts, false)
             .await;
         if !served {
             return Ok((Vec::new(), false));
@@ -903,13 +1106,14 @@ impl SearchServe for Composer {
         offset: u32,
         sort_by: Vec<FileRowSort>,
     ) -> crate::Result<(FileRowsResult, bool)> {
-        let (mut matching, candidate_total, served) = self
+        let (mut matching, candidate_total, served, _) = self
             .collect_matching_files(
                 &filters,
                 &options,
                 limit.saturating_add(1),
                 offset,
                 Vec::new(),
+                true,
             )
             .await;
         if !served {
@@ -951,8 +1155,8 @@ impl SearchServe for Composer {
             query: prefix.clone(),
             ..Filters::default()
         };
-        let (matching, _, served) = self
-            .collect_matching_files(&filters, &options, limit, 0, Vec::new())
+        let (matching, _, served, _) = self
+            .collect_matching_files(&filters, &options, limit, 0, Vec::new(), false)
             .await;
         if !served {
             return Ok((Vec::new(), false));
@@ -1179,6 +1383,17 @@ mod tests {
                 for item in &mut items {
                     item.torrent.files_data = None;
                 }
+            } else if let Some(limit) = request.hydrate.max_files_data_bytes {
+                for item in &mut items {
+                    if item
+                        .torrent
+                        .files_data
+                        .as_ref()
+                        .is_some_and(|blob| u64::try_from(blob.len()).unwrap_or(u64::MAX) > limit)
+                    {
+                        item.torrent.files_data = None;
+                    }
+                }
             }
             let aggregations = if request.options.facets.iter().any(|facet| facet.aggregate) {
                 Aggregations::from([(
@@ -1208,14 +1423,33 @@ mod tests {
             })
         }
 
-        async fn file_counts(&self, ids: &[InfoHash]) -> crate::Result<HashMap<InfoHash, i64>> {
+        async fn refine_metadata(
+            &self,
+            ids: &[InfoHash],
+        ) -> crate::Result<HashMap<InfoHash, RefineMetadata>> {
             if self.fail_counts {
                 return Err(crate::Error::Pg("file-count failure".into()));
             }
-            Ok(ids
-                .iter()
-                .filter_map(|id| self.counts.get(id).copied().map(|count| (*id, count)))
-                .collect())
+            let mut metadata = HashMap::new();
+            for id in ids {
+                let file_count = self.counts.get(id).copied();
+                let compressed_bytes = self
+                    .items
+                    .iter()
+                    .find(|item| item.info_hash == *id)
+                    .and_then(|item| item.torrent.files_data.as_ref())
+                    .map(|blob| u64::try_from(blob.len()).unwrap_or(u64::MAX));
+                if file_count.is_some() || compressed_bytes.is_some() {
+                    metadata.insert(
+                        *id,
+                        RefineMetadata {
+                            file_count,
+                            compressed_bytes,
+                        },
+                    );
+                }
+            }
+            Ok(metadata)
         }
     }
 
@@ -1292,6 +1526,19 @@ mod tests {
         result
     }
 
+    fn decompressed_blob_len(item: &SearchResultItem) -> u64 {
+        u64::try_from(
+            bitmagnet_model::deserialize_files_bounded(
+                item.torrent.files_data.as_deref().unwrap(),
+                usize::MAX,
+                usize::MAX,
+            )
+            .unwrap()
+            .decompressed_bytes,
+        )
+        .unwrap()
+    }
+
     fn query_options() -> QueryOptions {
         let aggregate_facet = FacetRequest {
             facet: TorrentContentFacet::ContentType,
@@ -1302,16 +1549,23 @@ mod tests {
         QueryOptions {
             combined: SearchRequest::new(
                 SearchOptions::default().with_facets([aggregate_facet.clone()]),
-                HydrateOptions { files_data: true },
+                HydrateOptions {
+                    files_data: true,
+                    max_files_data_bytes: None,
+                },
             ),
             refine: Some(SearchRequest::new(
                 SearchOptions::default(),
-                HydrateOptions { files_data: true },
+                HydrateOptions {
+                    files_data: true,
+                    max_files_data_bytes: None,
+                },
             )),
             agg: SearchRequest::new(
                 SearchOptions::default().with_facets([aggregate_facet]),
                 HydrateOptions::default(),
             ),
+            retain_refine_files: true,
         }
     }
 
@@ -1363,6 +1617,10 @@ mod tests {
         let calls = pg.calls();
         assert_eq!(calls.len(), 2);
         assert!(calls[0].hydrate.files_data);
+        assert_eq!(
+            calls[0].hydrate.max_files_data_bytes,
+            Some(composer.config.max_refine_decompressed_bytes)
+        );
         assert!(
             calls[0].options.facets.is_empty(),
             "even a one-chunk route must use refine, not candidate-set combined facets"
@@ -1384,6 +1642,8 @@ mod tests {
         .predicate();
         let mut refined = Vec::new();
         let mut retained_files = 0;
+        let mut retained_bytes = 0;
+        let mut chunk_decoded_bytes = 0;
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(1))
             .expect("small deadline must fit");
@@ -1392,14 +1652,19 @@ mod tests {
             .refine_chunk(
                 vec![item(1, 2, false), item(2, 3, true)],
                 &predicate,
+                true,
                 deadline,
                 &mut refined,
                 &mut retained_files,
+                &mut retained_bytes,
+                &mut chunk_decoded_bytes,
             )
             .unwrap();
 
         assert_eq!(cap, RefineCap::None);
         assert_eq!(retained_files, 3);
+        assert!(retained_bytes > 0);
+        assert!(chunk_decoded_bytes > retained_bytes);
         assert_eq!(refined.len(), 1, "the nonmatch must not be retained");
         assert_eq!(refined[0].info_hash, id(2));
         assert!(refined[0].torrent.files_data.is_none());
@@ -1500,6 +1765,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unselected_files_are_not_retained_or_charged_to_retained_budgets() {
+        let candidate_source = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
+        let pg = Arc::new(FakePg::new(
+            vec![item(1, 1, true), item(2, 1, true)],
+            HashMap::from([(id(1), 1), (id(2), 1)]),
+        ));
+        let mut cfg = config();
+        cfg.retained_file_budget = 1;
+        cfg.retained_byte_budget = 1;
+        let composer = Composer::new(candidate_source, pg, cfg, None);
+        let mut options = query_options();
+        options.retain_refine_files = false;
+
+        let (result, served) = composer
+            .torrent_content(
+                Filters {
+                    query: "inception".to_owned(),
+                    ..Filters::default()
+                },
+                options,
+                10,
+                0,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(served);
+        assert_eq!(result.items.len(), 2);
+        assert!(result.items.iter().all(|item| item.refine_files.is_empty()));
+        assert!(result
+            .items
+            .iter()
+            .all(|item| item.torrent.files_data.is_none()));
+    }
+
+    #[tokio::test]
+    async fn retained_byte_budget_accepts_exact_boundary_and_caps_plus_one() {
+        let files = vec![file(0, "inception/movie.mkv", "mkv", 1)];
+        let retained_bytes = u64::try_from(files[0].owned_string_bytes()).unwrap();
+
+        for (budget, expected_items, expected_caps) in [
+            (retained_bytes, 1, 0),
+            (retained_bytes.saturating_sub(1), 0, 1),
+        ] {
+            let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+            let pg = Arc::new(FakePg::new(
+                vec![item_with_files(1, files.clone())],
+                HashMap::from([(id(1), 1)]),
+            ));
+            let metrics = Arc::new(PathsearchMetrics::new());
+            let mut cfg = config();
+            cfg.retained_byte_budget = budget;
+            let composer =
+                Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
+
+            let (result, served) = search(&composer, 10, 0).await;
+
+            assert!(served);
+            assert_eq!(result.items.len(), expected_items);
+            assert_eq!(metrics.retained_capped_count(), expected_caps);
+        }
+    }
+
+    #[tokio::test]
+    async fn decoded_byte_budget_charges_nonmatches_before_later_candidates() {
+        let first_path = "x".repeat(128);
+        let second_path = format!("inception{}", "y".repeat(119));
+        let first = item_with_files(1, vec![file(0, &first_path, "mkv", 1)]);
+        let second = item_with_files(2, vec![file(0, &second_path, "mkv", 1)]);
+        let raw_len = decompressed_blob_len(&first);
+        assert_eq!(raw_len, decompressed_blob_len(&second));
+
+        for (budget, expected_items, expected_caps) in [(raw_len * 2, 0, 1), (raw_len * 4, 1, 0)] {
+            let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
+            let pg = Arc::new(FakePg::new(
+                vec![first.clone(), second.clone()],
+                HashMap::from([(id(1), 1), (id(2), 1)]),
+            ));
+            let metrics = Arc::new(PathsearchMetrics::new());
+            let mut cfg = config();
+            cfg.max_refine_decompressed_bytes = raw_len;
+            cfg.refine_decoded_byte_budget = budget;
+            let composer =
+                Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
+
+            let (result, served) = search(&composer, 10, 0).await;
+
+            assert!(served);
+            assert_eq!(result.items.len(), expected_items);
+            assert_eq!(metrics.retained_capped_count(), expected_caps);
+        }
+    }
+
+    #[tokio::test]
+    async fn decompression_ceiling_bounds_a_high_expansion_candidate() {
+        let files = vec![file(
+            0,
+            &format!("inception/{}", "x".repeat(8_192)),
+            "mkv",
+            1,
+        )];
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+        let pg = Arc::new(FakePg::new(
+            vec![item_with_files(1, files)],
+            HashMap::from([(id(1), 1)]),
+        ));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.max_refine_decompressed_bytes = 128;
+        cfg.refine_decoded_byte_budget = 1_024;
+        let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert!(result.items.is_empty());
+        assert!(result.total_count_is_estimate);
+        assert_eq!(metrics.retained_capped_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn compressed_blob_ceiling_declines_before_sqlx_hydration() {
+        let mut oversized = item(1, 1, true);
+        oversized.torrent.files_data = Some(vec![0_u8; 129]);
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+        let pg = Arc::new(FakePg::new(vec![oversized], HashMap::from([(id(1), 1)])));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.max_refine_decompressed_bytes = 128;
+        cfg.refine_decoded_byte_budget = 1_024;
+        let composer = Composer::new(candidates, Arc::clone(&pg), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert!(result.items.is_empty());
+        assert!(result.total_count_is_estimate);
+        assert!(
+            pg.calls().is_empty(),
+            "oversized bytea must not be selected"
+        );
+        assert_eq!(metrics.retained_capped_count(), 1);
+    }
+
+    #[tokio::test]
     async fn route_deadline_serves_accumulated_prefix_not_pg_fallback() {
         let candidate_source = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
         let mut fake_pg = FakePg::new(
@@ -1527,7 +1939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saturated_multi_chunk_route_sheds_but_single_chunk_does_not_take_slot() {
+    async fn saturated_refine_slot_sheds_multi_and_single_chunk_routes() {
         let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
         let pg = Arc::new(FakePg::new(
             vec![item(1, 1, true), item(2, 1, true)],
@@ -1559,11 +1971,11 @@ mod tests {
         let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
         let held = composer.refine_slots.acquire().await.unwrap();
 
-        let (fast, served) = search(&composer, 10, 0).await;
+        let (single_chunk_shed, served) = search(&composer, 10, 0).await;
 
         assert!(served);
-        assert_eq!(fast.items.len(), 2);
-        assert_eq!(metrics.shed_count(), 1);
+        assert!(single_chunk_shed.items.is_empty());
+        assert_eq!(metrics.shed_count(), 2);
         assert_eq!(metrics.route_count(RouteResult::Served), 2);
         drop(held);
     }
@@ -2051,6 +2463,52 @@ mod tests {
             .all(|call| candidate_ids(&call.options.filter).len() == 1));
         assert_eq!(metrics.retained_capped_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
+    }
+
+    #[tokio::test]
+    async fn c4_byte_cap_is_estimated_for_file_rows_but_declined_elsewhere() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+        let pg = Arc::new(FakePg::new(
+            vec![item_with_files(
+                1,
+                vec![file(0, "inception/long-path.mkv", "mkv", 1)],
+            )],
+            HashMap::from([(id(1), 1)]),
+        ));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let mut cfg = config();
+        cfg.retained_byte_budget = 1;
+        let composer = Composer::new(candidates, pg, cfg, None).with_metrics(Arc::clone(&metrics));
+        let filters = Filters {
+            query: "inception".to_owned(),
+            ..Filters::default()
+        };
+
+        let (file_rows, served) = composer
+            .search_file_rows(filters.clone(), query_options(), 10, 0, Vec::new())
+            .await
+            .unwrap();
+        assert!(served);
+        assert!(file_rows.rows.is_empty());
+        assert!(file_rows.total_count_is_estimate);
+
+        let (groups, served) = composer
+            .collapse_paths(filters, query_options(), 10, 0, Vec::new())
+            .await
+            .unwrap();
+        assert!(!served);
+        assert!(groups.is_empty());
+
+        let (suggestions, served) = composer
+            .path_typeahead("inception".to_owned(), query_options(), 10)
+            .await
+            .unwrap();
+        assert!(!served);
+        assert!(suggestions.is_empty());
+
+        assert_eq!(metrics.retained_capped_count(), 3);
+        assert_eq!(metrics.route_count(RouteResult::Served), 1);
+        assert_eq!(metrics.route_count(RouteResult::Fallback), 2);
     }
 
     #[tokio::test]

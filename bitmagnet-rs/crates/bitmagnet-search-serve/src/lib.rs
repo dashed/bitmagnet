@@ -25,9 +25,10 @@ pub use client::{Client, ClientConfig};
 pub use composer::Composer;
 pub use config::{
     ComposerConfig, DisabledServeRouter, ServeConfig, ServeMode, DEFAULT_MAX_CANDIDATES,
-    DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES, DEFAULT_MAX_REFINE_FILES,
-    DEFAULT_MIN_QUERY_LENGTH, DEFAULT_OVERSAMPLE_FACTOR, DEFAULT_REFINE_FILE_BUDGET,
-    DEFAULT_RETAINED_FILE_BUDGET, DEFAULT_ROUTE_TIMEOUT,
+    DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES,
+    DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES, DEFAULT_MAX_REFINE_FILES, DEFAULT_MIN_QUERY_LENGTH,
+    DEFAULT_OVERSAMPLE_FACTOR, DEFAULT_REFINE_DECODED_BYTE_BUDGET, DEFAULT_REFINE_FILE_BUDGET,
+    DEFAULT_RETAINED_BYTE_BUDGET, DEFAULT_RETAINED_FILE_BUDGET, DEFAULT_ROUTE_TIMEOUT,
 };
 pub use filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
 pub use health::{
@@ -37,13 +38,10 @@ pub use health::{
 pub use metrics::{PathsearchMetrics, RouteResult, ServeMetrics, ServeOutcome};
 pub use pg::{
     AggregationGroup, AggregationItem, Aggregations, Criteria, HydrateOptions, PgSearch,
-    PgSearchBackend, QueryOptions, SearchBuildConfig, SearchOptions, SearchRequest, SearchResult,
-    SearchResultItem,
+    PgSearchBackend, QueryOptions, RefineMetadata, SearchBuildConfig, SearchOptions, SearchRequest,
+    SearchResult, SearchResultItem,
 };
-pub use refine::{
-    distinct_matched_paths, files_for_refine, paginate, torrent_matches, torrent_refine,
-    RefinePredicate,
-};
+pub use refine::{distinct_matched_paths, paginate, torrent_matches, RefinePredicate};
 
 /// Errors produced by the search-serving contract and its future implementations.
 #[derive(Debug, thiserror::Error)]

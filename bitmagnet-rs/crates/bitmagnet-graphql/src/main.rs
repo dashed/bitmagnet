@@ -212,6 +212,30 @@ struct SearchArgs {
     )]
     pathsearch_retained_file_budget: u32,
 
+    /// Maximum compressed input and decompressed output bytes for one torrent blob.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_MAX_REFINE_DECOMPRESSED_BYTES",
+        default_value_t = 67_108_864
+    )]
+    pathsearch_max_refine_decompressed_bytes: u64,
+
+    /// Cumulative MessagePack plus owned path/extension bytes per refine chunk.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_REFINE_DECODED_BYTE_BUDGET",
+        default_value_t = 134_217_728
+    )]
+    pathsearch_refine_decoded_byte_budget: u64,
+
+    /// Cumulative retained path/extension bytes per request.
+    #[arg(
+        long,
+        env = "SEARCH_PATHSEARCH_RETAINED_BYTE_BUDGET",
+        default_value_t = 67_108_864
+    )]
+    pathsearch_retained_byte_budget: u64,
+
     /// End-to-end L3 candidate plus exact-refine deadline.
     #[arg(
         long,
@@ -221,7 +245,7 @@ struct SearchArgs {
     )]
     pathsearch_route_timeout: Duration,
 
-    /// Maximum concurrent expensive multi-chunk refines; zero uses CPU count.
+    /// Maximum concurrent blob-decode refines; zero uses CPU count.
     #[arg(
         long,
         env = "SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES",
@@ -229,7 +253,7 @@ struct SearchArgs {
     )]
     pathsearch_max_concurrent_refines: i32,
 
-    /// Time a multi-chunk refine waits for a concurrency slot.
+    /// Time a blob-decode refine waits for a concurrency slot.
     #[arg(
         long,
         env = "SEARCH_PATHSEARCH_SLOT_WAIT",
@@ -383,6 +407,9 @@ fn build_search_runtime(
             refine_file_budget: args.pathsearch_refine_file_budget,
             max_chunk_torrents: args.pathsearch_max_chunk_torrents,
             retained_file_budget: args.pathsearch_retained_file_budget,
+            max_refine_decompressed_bytes: args.pathsearch_max_refine_decompressed_bytes,
+            refine_decoded_byte_budget: args.pathsearch_refine_decoded_byte_budget,
+            retained_byte_budget: args.pathsearch_retained_byte_budget,
             route_timeout: args.pathsearch_route_timeout,
             max_concurrent_refines: usize::try_from(args.pathsearch_max_concurrent_refines)
                 .unwrap_or(0),
@@ -400,6 +427,10 @@ fn build_search_runtime(
         anyhow::ensure!(
             normalized.refine_file_budget <= normalized.retained_file_budget,
             "pathsearch refine_file_budget must not exceed retained_file_budget"
+        );
+        anyhow::ensure!(
+            normalized.max_refine_decompressed_bytes <= normalized.refine_decoded_byte_budget,
+            "pathsearch max_refine_decompressed_bytes must not exceed refine_decoded_byte_budget"
         );
 
         let candidate_client = Arc::new(
@@ -723,7 +754,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 33] = [
+    const ARGS_ENV_KEYS: [&str; 36] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
         "HEALTH_PEER_GRAPHQL_URLS",
@@ -748,6 +779,9 @@ mod tests {
         "SEARCH_PATHSEARCH_REFINE_FILE_BUDGET",
         "SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS",
         "SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET",
+        "SEARCH_PATHSEARCH_MAX_REFINE_DECOMPRESSED_BYTES",
+        "SEARCH_PATHSEARCH_REFINE_DECODED_BYTE_BUDGET",
+        "SEARCH_PATHSEARCH_RETAINED_BYTE_BUDGET",
         "SEARCH_PATHSEARCH_ROUTE_TIMEOUT",
         "SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES",
         "SEARCH_PATHSEARCH_SLOT_WAIT",
@@ -845,6 +879,15 @@ mod tests {
         assert_eq!(defaults.search.pathsearch_refine_file_budget, 300_000);
         assert_eq!(defaults.search.pathsearch_max_chunk_torrents, 1_024);
         assert_eq!(defaults.search.pathsearch_retained_file_budget, 1_000_000);
+        assert_eq!(
+            defaults.search.pathsearch_max_refine_decompressed_bytes,
+            67_108_864
+        );
+        assert_eq!(
+            defaults.search.pathsearch_refine_decoded_byte_budget,
+            134_217_728
+        );
+        assert_eq!(defaults.search.pathsearch_retained_byte_budget, 67_108_864);
         assert_eq!(defaults.search.pathsearch_route_timeout.as_secs(), 8);
         assert_eq!(defaults.search.pathsearch_max_concurrent_refines, 0);
         assert!(defaults.search.pathsearch_slot_wait.is_zero());
@@ -904,6 +947,9 @@ mod tests {
             ("SEARCH_PATHSEARCH_REFINE_FILE_BUDGET", "7002"),
             ("SEARCH_PATHSEARCH_MAX_CHUNK_TORRENTS", "73"),
             ("SEARCH_PATHSEARCH_RETAINED_FILE_BUDGET", "7003"),
+            ("SEARCH_PATHSEARCH_MAX_REFINE_DECOMPRESSED_BYTES", "7004"),
+            ("SEARCH_PATHSEARCH_REFINE_DECODED_BYTE_BUDGET", "7005"),
+            ("SEARCH_PATHSEARCH_RETAINED_BYTE_BUDGET", "7006"),
             ("SEARCH_PATHSEARCH_ROUTE_TIMEOUT", "7s"),
             ("SEARCH_PATHSEARCH_MAX_CONCURRENT_REFINES", "-4"),
             ("SEARCH_PATHSEARCH_SLOT_WAIT", "-2s"),
@@ -940,6 +986,9 @@ mod tests {
         assert_eq!(args.search.pathsearch_refine_file_budget, 7_002);
         assert_eq!(args.search.pathsearch_max_chunk_torrents, 73);
         assert_eq!(args.search.pathsearch_retained_file_budget, 7_003);
+        assert_eq!(args.search.pathsearch_max_refine_decompressed_bytes, 7_004);
+        assert_eq!(args.search.pathsearch_refine_decoded_byte_budget, 7_005);
+        assert_eq!(args.search.pathsearch_retained_byte_budget, 7_006);
         assert_eq!(args.search.pathsearch_route_timeout.as_secs(), 7);
         assert_eq!(args.search.pathsearch_max_concurrent_refines, -4);
         assert!(args.search.pathsearch_slot_wait.is_zero());
@@ -1031,13 +1080,26 @@ mod tests {
         args.search.pathsearch_refine_file_budget = 1_000_001;
         args.search.pathsearch_retained_file_budget = 1_000_000;
         let error = build_search_runtime(
-            pool,
+            pool.clone(),
             &args.search,
             Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
         )
         .err()
         .expect("retained budget ordering must fail closed");
         assert!(error.to_string().contains("refine_file_budget"));
+
+        args.search.pathsearch_refine_file_budget = 300_000;
+        args.search.pathsearch_retained_file_budget = 1_000_000;
+        args.search.pathsearch_max_refine_decompressed_bytes = 129;
+        args.search.pathsearch_refine_decoded_byte_budget = 128;
+        let error = build_search_runtime(
+            pool,
+            &args.search,
+            Arc::new(bitmagnet_search_serve::PathsearchMetrics::new()),
+        )
+        .err()
+        .expect("decompressed-byte ordering must fail closed");
+        assert!(error.to_string().contains("max_refine_decompressed_bytes"));
     }
 
     #[tokio::test]

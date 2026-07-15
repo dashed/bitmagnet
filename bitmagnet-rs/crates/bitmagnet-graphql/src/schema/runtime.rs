@@ -182,7 +182,10 @@ pub async fn hydrate_l2_file_rows(
                 aggregation_budget: 5_000.0,
             },
             to_lane_s_build_config(build_config),
-            lane_s_query::HydrateOptions { files_data: false },
+            lane_s_query::HydrateOptions {
+                files_data: false,
+                max_files_data_bytes: None,
+            },
         )
         .await?;
 
@@ -366,7 +369,10 @@ mod tests {
         );
         assert_eq!(
             call.hydrate,
-            lane_s_query::HydrateOptions { files_data: false }
+            lane_s_query::HydrateOptions {
+                files_data: false,
+                max_files_data_bytes: None,
+            }
         );
         drop(calls);
 

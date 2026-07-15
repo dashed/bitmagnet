@@ -14,9 +14,11 @@ use bitmagnet_proto::v1::{
 };
 use bitmagnet_search_serve::{
     Aggregations, CandidateSource, Composer, ComposerConfig, Criteria, Filters, HydrateOptions,
-    PgSearchBackend, QueryOptions, SearchOptions, SearchRequest, SearchResult, SearchResultItem,
-    SearchServe, DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_CHUNK_TORRENTS, DEFAULT_MAX_DECODE_CANDIDATES,
-    DEFAULT_MAX_REFINE_FILES, DEFAULT_REFINE_FILE_BUDGET, DEFAULT_RETAINED_FILE_BUDGET,
+    PgSearchBackend, QueryOptions, RefineMetadata, SearchOptions, SearchRequest, SearchResult,
+    SearchResultItem, SearchServe, DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_CHUNK_TORRENTS,
+    DEFAULT_MAX_DECODE_CANDIDATES, DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES, DEFAULT_MAX_REFINE_FILES,
+    DEFAULT_REFINE_DECODED_BYTE_BUDGET, DEFAULT_REFINE_FILE_BUDGET, DEFAULT_RETAINED_BYTE_BUDGET,
+    DEFAULT_RETAINED_FILE_BUDGET,
 };
 
 const LIVE_MAX_FILES_PER_TORRENT: usize = 88_561;
@@ -24,12 +26,14 @@ const CHUNK_TORRENTS: usize = 3;
 const RETAINED_TORRENTS: usize = 12;
 const HARNESS_ROUTE_TIMEOUT: Duration = Duration::from_secs(300);
 const VARIABLE_PATH_BYTES: [usize; 4] = [39, 128, 512, 1_024];
+const ACCEPTED_BOUNDARY_PATH_BYTES: usize = 650;
 const LONG_PATH_BYTES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Chunk,
     Retained,
+    AcceptedByteBoundary,
     VariablePathRetained,
     LongPathRetained,
 }
@@ -39,11 +43,12 @@ impl Scenario {
         match value {
             "chunk" => Ok(Self::Chunk),
             "retained" => Ok(Self::Retained),
+            "accepted-byte-boundary" => Ok(Self::AcceptedByteBoundary),
             "variable-path-retained" => Ok(Self::VariablePathRetained),
             "long-path-retained" => Ok(Self::LongPathRetained),
             _ => Err(format!(
                 "invalid scenario {value:?}; expected chunk, retained, \
-                 variable-path-retained, or long-path-retained"
+                 accepted-byte-boundary, variable-path-retained, or long-path-retained"
             )),
         }
     }
@@ -52,6 +57,7 @@ impl Scenario {
         match self {
             Self::Chunk => "chunk",
             Self::Retained => "retained",
+            Self::AcceptedByteBoundary => "accepted-byte-boundary",
             Self::VariablePathRetained => "variable-path-retained",
             Self::LongPathRetained => "long-path-retained",
         }
@@ -60,6 +66,7 @@ impl Scenario {
     fn torrent_count(self) -> usize {
         match self {
             Self::Chunk => CHUNK_TORRENTS,
+            Self::AcceptedByteBoundary => 1,
             Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
                 RETAINED_TORRENTS
             }
@@ -69,6 +76,7 @@ impl Scenario {
     fn decoded_file_upper_bound(self) -> usize {
         match self {
             Self::Chunk => CHUNK_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
+            Self::AcceptedByteBoundary => LIVE_MAX_FILES_PER_TORRENT,
             // Eleven torrents fit below the retained cap. The twelfth is
             // decoded as one bounded lookahead before the composer stops.
             Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
@@ -80,6 +88,7 @@ impl Scenario {
     fn path_bytes(self, file_index: usize) -> usize {
         match self {
             Self::Chunk | Self::Retained => 39,
+            Self::AcceptedByteBoundary => ACCEPTED_BOUNDARY_PATH_BYTES,
             Self::VariablePathRetained => {
                 VARIABLE_PATH_BYTES[file_index % VARIABLE_PATH_BYTES.len()]
             }
@@ -90,6 +99,7 @@ impl Scenario {
     fn path_shape(self) -> &'static str {
         match self {
             Self::Chunk | Self::Retained => "fixed-39",
+            Self::AcceptedByteBoundary => "fixed-650-accepted-boundary",
             Self::VariablePathRetained => "cycle-39-128-512-1024",
             Self::LongPathRetained => "fixed-1024",
         }
@@ -117,10 +127,14 @@ impl Scenario {
     fn expected_retained_files(self) -> usize {
         match self {
             Self::Chunk => CHUNK_TORRENTS * LIVE_MAX_FILES_PER_TORRENT,
-            Self::Retained | Self::VariablePathRetained | Self::LongPathRetained => {
-                11 * LIVE_MAX_FILES_PER_TORRENT
-            }
+            Self::Retained => 11 * LIVE_MAX_FILES_PER_TORRENT,
+            Self::AcceptedByteBoundary | Self::VariablePathRetained => LIVE_MAX_FILES_PER_TORRENT,
+            Self::LongPathRetained => 0,
         }
+    }
+
+    fn expected_capped(self) -> bool {
+        !matches!(self, Self::Chunk | Self::AcceptedByteBoundary)
     }
 }
 
@@ -197,6 +211,14 @@ impl PgSearchBackend for DiskPg {
                     fixture.blob_path.display()
                 ))
             })?;
+            let files_data =
+                if request.hydrate.max_files_data_bytes.is_some_and(|limit| {
+                    u64::try_from(files_data.len()).unwrap_or(u64::MAX) > limit
+                }) {
+                    None
+                } else {
+                    Some(files_data)
+                };
             let name = format!("production-shaped-{info_hash}");
             let size = u64::try_from(fixture.file_count).unwrap_or(u64::MAX) * 1_048_576;
             let mut item = SearchResultItem::for_test(info_hash, &name, size);
@@ -208,7 +230,7 @@ impl PgSearchBackend for DiskPg {
                 files_status: FilesStatus::Multi,
                 extension: None,
                 files_count: u32::try_from(fixture.file_count).ok(),
-                files_data: Some(files_data),
+                files_data,
                 file_extensions: vec!["mkv".to_owned()],
             };
             items.push(item);
@@ -220,17 +242,22 @@ impl PgSearchBackend for DiskPg {
         })
     }
 
-    async fn file_counts(
+    async fn refine_metadata(
         &self,
         ids: &[InfoHash],
-    ) -> bitmagnet_search_serve::Result<HashMap<InfoHash, i64>> {
+    ) -> bitmagnet_search_serve::Result<HashMap<InfoHash, RefineMetadata>> {
         Ok(ids
             .iter()
             .filter_map(|info_hash| {
                 self.fixtures.get(info_hash).map(|fixture| {
                     (
                         *info_hash,
-                        i64::try_from(fixture.file_count).unwrap_or(i64::MAX),
+                        RefineMetadata {
+                            file_count: Some(i64::try_from(fixture.file_count).unwrap_or(i64::MAX)),
+                            compressed_bytes: std::fs::metadata(&fixture.blob_path)
+                                .ok()
+                                .map(|metadata| metadata.len()),
+                        },
                     )
                 })
             })
@@ -284,6 +311,7 @@ fn parent_main(args: &[String]) -> Result<(), Box<dyn Error>> {
         "all" => vec![
             Scenario::Chunk,
             Scenario::Retained,
+            Scenario::AcceptedByteBoundary,
             Scenario::VariablePathRetained,
             Scenario::LongPathRetained,
         ],
@@ -360,13 +388,20 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
     let options = QueryOptions {
         combined: SearchRequest::new(
             SearchOptions::default(),
-            HydrateOptions { files_data: true },
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            },
         ),
         refine: Some(SearchRequest::new(
             SearchOptions::default(),
-            HydrateOptions { files_data: true },
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            },
         )),
         agg: SearchRequest::default(),
+        retain_refine_files: true,
     };
 
     let baseline_rss_kib = proc_status_kib("VmRSS")?;
@@ -425,7 +460,9 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
             "\"path_bytes_mean\":{:.3},",
             "\"torrents\":{},\"files_per_torrent\":{},\"raw_blob_bytes\":{},",
             "\"max_refine_files\":{},\"chunk_file_budget\":{},",
-            "\"retained_file_budget\":{},\"route_timeout_seconds\":{},",
+            "\"retained_file_budget\":{},\"max_refine_decompressed_bytes\":{},",
+            "\"refine_decoded_byte_budget\":{},\"retained_byte_budget\":{},",
+            "\"expected_capped\":{},\"route_timeout_seconds\":{},",
             "\"decoded_file_upper_bound\":{},\"retained_files\":{},",
             "\"baseline_rss_kib\":{},\"final_rss_kib\":{},\"peak_rss_kib\":{},",
             "\"peak_delta_kib\":{},\"rss_delta_bytes_per_peak_file\":{:.3},",
@@ -449,6 +486,10 @@ async fn child_main(args: &[String]) -> Result<(), Box<dyn Error>> {
         DEFAULT_MAX_REFINE_FILES,
         DEFAULT_REFINE_FILE_BUDGET,
         DEFAULT_RETAINED_FILE_BUDGET,
+        DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES,
+        DEFAULT_REFINE_DECODED_BYTE_BUDGET,
+        DEFAULT_RETAINED_BYTE_BUDGET,
+        scenario.expected_capped(),
         HARNESS_ROUTE_TIMEOUT.as_secs(),
         scenario.decoded_file_upper_bound(),
         retained_files,
@@ -549,6 +590,7 @@ mod tests {
         for scenario in [
             Scenario::Chunk,
             Scenario::Retained,
+            Scenario::AcceptedByteBoundary,
             Scenario::VariablePathRetained,
             Scenario::LongPathRetained,
         ] {
@@ -563,20 +605,21 @@ mod tests {
     }
 
     #[test]
-    fn retained_scenarios_preserve_one_bounded_lookahead_contract() {
-        for scenario in [
-            Scenario::Retained,
-            Scenario::VariablePathRetained,
-            Scenario::LongPathRetained,
-        ] {
-            assert_eq!(
-                scenario.decoded_file_upper_bound(),
-                12 * LIVE_MAX_FILES_PER_TORRENT
-            );
-            assert_eq!(
-                scenario.expected_retained_files(),
-                11 * LIVE_MAX_FILES_PER_TORRENT
-            );
-        }
+    fn byte_budgets_change_the_long_path_retention_contract() {
+        assert_eq!(
+            Scenario::Retained.expected_retained_files(),
+            11 * LIVE_MAX_FILES_PER_TORRENT
+        );
+        assert_eq!(
+            Scenario::AcceptedByteBoundary.expected_retained_files(),
+            LIVE_MAX_FILES_PER_TORRENT
+        );
+        assert_eq!(
+            Scenario::VariablePathRetained.expected_retained_files(),
+            LIVE_MAX_FILES_PER_TORRENT
+        );
+        assert_eq!(Scenario::LongPathRetained.expected_retained_files(), 0);
+        assert!(!Scenario::AcceptedByteBoundary.expected_capped());
+        assert!(Scenario::LongPathRetained.expected_capped());
     }
 }

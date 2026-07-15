@@ -13,6 +13,13 @@ pub const DEFAULT_REFINE_FILE_BUDGET: u32 = 300_000;
 pub const DEFAULT_MAX_CHUNK_TORRENTS: u32 = 1024;
 /// Default cumulative retained decoded-file budget for one request.
 pub const DEFAULT_RETAINED_FILE_BUDGET: u32 = 1_000_000;
+/// Default compressed-input and decompressed-output ceiling per blob (64 MiB).
+pub const DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+/// Default cumulative decode-allocation budget for one refine chunk (128 MiB).
+/// Charges decompressed MessagePack plus owned path/extension string bytes.
+pub const DEFAULT_REFINE_DECODED_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
+/// Default cumulative retained path/extension byte budget per request (64 MiB).
+pub const DEFAULT_RETAINED_BYTE_BUDGET: u64 = 64 * 1024 * 1024;
 /// Default hard memory cap on candidate torrents fetched and decoded.
 pub const DEFAULT_MAX_CANDIDATES: u32 = 2000;
 /// Default per-request latency cap on candidate torrents decoded.
@@ -54,11 +61,17 @@ pub struct ComposerConfig {
     pub max_chunk_torrents: u32,
     /// Cumulative retained decoded-file budget; zero uses the default.
     pub retained_file_budget: u32,
+    /// Per-torrent compressed input and decompressed MessagePack ceiling; zero uses the default.
+    pub max_refine_decompressed_bytes: u64,
+    /// Cumulative raw MessagePack plus owned string bytes per chunk; zero uses the default.
+    pub refine_decoded_byte_budget: u64,
+    /// Cumulative retained path/extension bytes per request; zero uses the default.
+    pub retained_byte_budget: u64,
     /// Timeout for the whole candidate and refine route; zero uses the default.
     pub route_timeout: Duration,
-    /// Maximum concurrent expensive multi-chunk refines; zero means one per CPU.
+    /// Maximum concurrent blob-decode refines; zero means one per CPU.
     pub max_concurrent_refines: usize,
-    /// Time a multi-chunk refine waits for a slot; zero queues to the route deadline.
+    /// Time a blob-decode refine waits for a slot; zero queues to the route deadline.
     pub slot_wait: Duration,
 }
 
@@ -76,6 +89,9 @@ impl Default for ComposerConfig {
             refine_file_budget: DEFAULT_REFINE_FILE_BUDGET,
             max_chunk_torrents: DEFAULT_MAX_CHUNK_TORRENTS,
             retained_file_budget: DEFAULT_RETAINED_FILE_BUDGET,
+            max_refine_decompressed_bytes: DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES,
+            refine_decoded_byte_budget: DEFAULT_REFINE_DECODED_BYTE_BUDGET,
+            retained_byte_budget: DEFAULT_RETAINED_BYTE_BUDGET,
             route_timeout: DEFAULT_ROUTE_TIMEOUT,
             max_concurrent_refines: 0,
             slot_wait: Duration::ZERO,
@@ -84,7 +100,7 @@ impl Default for ComposerConfig {
 }
 
 impl ComposerConfig {
-    /// Resolves the multi-chunk refine limit, using available CPU parallelism for zero.
+    /// Resolves the blob-decode refine limit, using available CPU parallelism for zero.
     #[must_use]
     pub fn resolved_max_concurrent_refines(&self) -> usize {
         if self.max_concurrent_refines == 0 {
@@ -122,6 +138,15 @@ impl ComposerConfig {
         }
         if config.retained_file_budget == 0 {
             config.retained_file_budget = DEFAULT_RETAINED_FILE_BUDGET;
+        }
+        if config.max_refine_decompressed_bytes == 0 {
+            config.max_refine_decompressed_bytes = DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES;
+        }
+        if config.refine_decoded_byte_budget == 0 {
+            config.refine_decoded_byte_budget = DEFAULT_REFINE_DECODED_BYTE_BUDGET;
+        }
+        if config.retained_byte_budget == 0 {
+            config.retained_byte_budget = DEFAULT_RETAINED_BYTE_BUDGET;
         }
         if config.route_timeout.is_zero() {
             config.route_timeout = DEFAULT_ROUTE_TIMEOUT;
@@ -235,6 +260,15 @@ mod tests {
         assert_eq!(config.refine_file_budget, DEFAULT_REFINE_FILE_BUDGET);
         assert_eq!(config.max_chunk_torrents, DEFAULT_MAX_CHUNK_TORRENTS);
         assert_eq!(config.retained_file_budget, DEFAULT_RETAINED_FILE_BUDGET);
+        assert_eq!(
+            config.max_refine_decompressed_bytes,
+            DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES
+        );
+        assert_eq!(
+            config.refine_decoded_byte_budget,
+            DEFAULT_REFINE_DECODED_BYTE_BUDGET
+        );
+        assert_eq!(config.retained_byte_budget, DEFAULT_RETAINED_BYTE_BUDGET);
         assert_eq!(config.route_timeout, DEFAULT_ROUTE_TIMEOUT);
         assert_eq!(config.max_concurrent_refines, 0);
         assert_eq!(config.slot_wait, Duration::ZERO);
@@ -251,6 +285,9 @@ mod tests {
             refine_file_budget: 0,
             max_chunk_torrents: 0,
             retained_file_budget: 0,
+            max_refine_decompressed_bytes: 0,
+            refine_decoded_byte_budget: 0,
+            retained_byte_budget: 0,
             route_timeout: Duration::ZERO,
             max_concurrent_refines: 7,
             ..ComposerConfig::default()
@@ -273,6 +310,18 @@ mod tests {
         assert_eq!(
             normalized.retained_file_budget,
             DEFAULT_RETAINED_FILE_BUDGET
+        );
+        assert_eq!(
+            normalized.max_refine_decompressed_bytes,
+            DEFAULT_MAX_REFINE_DECOMPRESSED_BYTES
+        );
+        assert_eq!(
+            normalized.refine_decoded_byte_budget,
+            DEFAULT_REFINE_DECODED_BYTE_BUDGET
+        );
+        assert_eq!(
+            normalized.retained_byte_budget,
+            DEFAULT_RETAINED_BYTE_BUDGET
         );
         assert_eq!(normalized.route_timeout, DEFAULT_ROUTE_TIMEOUT);
         assert_eq!(normalized.max_concurrent_refines, 7);

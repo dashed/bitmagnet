@@ -113,7 +113,7 @@ impl PathsearchMetrics {
             ),
             retained_capped: int_counter(
                 &format!("{PATH_PREFIX}_refine_retained_capped_total"),
-                "Requests served as an estimate after reaching the retained-file budget.",
+                "Requests served as an estimate after reaching a retained-file or byte budget.",
             ),
             deadline_capped: int_counter(
                 &format!("{PATH_PREFIX}_refine_deadline_capped_total"),
@@ -195,7 +195,7 @@ impl PathsearchMetrics {
         self.refine_declined.inc();
     }
 
-    /// Records one request stopped by the cumulative retained-file cap.
+    /// Records one request stopped by a cumulative retained-file or byte cap.
     pub fn inc_refine_retained_capped(&self) {
         self.retained_capped.inc();
     }
