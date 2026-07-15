@@ -185,6 +185,40 @@ func TestMetricsInitializeGateLabelSetsAtZero(t *testing.T) {
 	}
 }
 
+func TestMetricsCountFirstRankingAndExactFailures(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	rust := GraphQLResult{IDs: []string{"rust"}, TotalCount: 2}
+	ref := GraphQLResult{IDs: []string{"go"}, TotalCount: 1}
+	m.observe(CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond))
+
+	if got := testutil.ToFloat64(m.top1Match.WithLabelValues("false")); got != 1 {
+		t.Errorf("first top1 failure = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.top1Match.WithLabelValues("true")); got != 0 {
+		t.Errorf("top1 success after first failure = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(m.totalCountMatch.WithLabelValues("false", "false")); got != 1 {
+		t.Errorf("first exact-count failure = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.totalCountMatch.WithLabelValues("true", "false")); got != 0 {
+		t.Errorf("exact-count success after first failure = %v, want 0", got)
+	}
+
+	metric := &dto.Metric{}
+	writer, ok := m.jaccard.WithLabelValues("20").(prometheus.Metric)
+	if !ok {
+		t.Fatal("jaccard{20} does not implement prometheus.Metric")
+	}
+	if err := writer.Write(metric); err != nil {
+		t.Fatalf("write jaccard{20}: %v", err)
+	}
+	if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+		t.Errorf("first jaccard observation count = %d, want 1", got)
+	}
+}
+
 // TestMetricsNilSafe confirms every driver-invoked method tolerates a nil
 // receiver (the driver may run without metrics).
 func TestMetricsNilSafe(t *testing.T) {
