@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,7 +29,11 @@ type HTTPExecutor struct {
 func NewHTTPExecutor(cfg Config) *HTTPExecutor {
 	return &HTTPExecutor{
 		endpoint: cfg.Endpoint,
-		client:   http.DefaultClient,
+		client: &http.Client{
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -72,6 +77,18 @@ func (e *HTTPExecutor) Execute(ctx context.Context, req Request) (ExecutionResul
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return ExecutionResult{}, fmt.Errorf("dark GraphQL endpoint returned HTTP %d", resp.StatusCode)
+	}
+
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("parse dark GraphQL response Content-Type: %w", err)
+	}
+
+	if mediaType != "application/json" && mediaType != "application/graphql-response+json" {
+		return ExecutionResult{}, fmt.Errorf(
+			"dark GraphQL endpoint returned unsupported Content-Type %q",
+			mediaType,
+		)
 	}
 
 	handlerDuration, err := parseHandlerDuration(resp.Header.Get(handlerDurationHeader))
