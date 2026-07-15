@@ -39,7 +39,11 @@ issues a second Go request.
 The dark response must carry
 `X-Bitmagnet-Graphql-Handler-Duration-Us: <positive integer>`. A missing,
 malformed, zero, or negative duration makes that admitted attempt a Rust error;
-client round-trip time is deliberately not used. Both histograms represent the
+client round-trip time is deliberately not used. The dark client does not follow
+redirects and accepts only `application/json` or
+`application/graphql-response+json` responses (media-type parameters are
+allowed); any redirect or other/malformed/missing media type is a Rust error.
+Both histograms represent the
 closest shared server-side boundary: HTTP request entry through pre-write
 GraphQL response generation. On Go, the clock is sealed immediately after the
 gqlgen response handler returns, before `ServeHTTP` writes the response. This
@@ -64,6 +68,11 @@ in mind when investigating near-equal latency results.
 Each KPI has a 1/0 `graphql_shadow:<kpi>:pass` companion; their product is
 `graphql_shadow:gate_pass`. All KPIs are computed over a **1h rolling window**;
 the gate requires `gate_pass` to hold **continuously** for the whole soak.
+
+Every raw gate input is scoped to the production Go L3 scrape labels
+`namespace="bitmagnet",service="bitmagnet-l3"`. An isolated canary must use a
+different Service label. The promtool fixture includes a deliberately divergent
+canary series and proves it cannot change the production recording rules.
 
 **Estimate totals are excluded** from the count-match KPI (the `estimate="false"`
 selector): a budgeted-estimate total legitimately differs between engines, so only
@@ -150,10 +159,11 @@ numeric gate alone would miss; C7's bound tests are the offline backstop).
 ## Running the checks offline
 
 ```bash
-promtool check rules observability/rules/graphql-shadow-gate.rules.yml
-promtool test rules  observability/rules/graphql-shadow-gate.test.yml
+task test-prometheus-rules
 ```
 
 Both are wired into CI-equivalent local verification; the unit test drives
 synthetic pass / fail / low-volume scenarios and asserts `gate_pass` and the
-alerts behave as specified.
+alerts behave as specified. The Task invokes both `promtool check rules` and
+`promtool test rules`; the Nix development shell provides `promtool` through the
+Prometheus package.
