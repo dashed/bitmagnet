@@ -519,8 +519,14 @@ class DockerHarness:
                 file=sys.stderr,
                 flush=True,
             )
+            legacy_cleanup = (
+                ["--force-rm"]
+                if self.args.graphql_docker_builder == "legacy"
+                else []
+            )
             self.docker(
                 "build",
+                *legacy_cleanup,
                 "--file",
                 "bitmagnet-rs/docker/Dockerfile.graphql",
                 "--tag",

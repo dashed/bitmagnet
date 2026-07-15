@@ -290,6 +290,8 @@ class HarnessTests(unittest.TestCase):
         harness.build_images()
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(parts[0] == "build" for parts, _ in calls))
+        self.assertIn("--force-rm", calls[0][0])
+        self.assertNotIn("--force-rm", calls[1][0])
         self.assertEqual(
             [kwargs["environment"]["DOCKER_BUILDKIT"] for _, kwargs in calls],
             ["0", "1"],
