@@ -29,12 +29,18 @@ PROFILE_LIMITS = {
         "decoded_byte_budget": 128 * MIB,
         "retained_byte_budget": 64 * MIB,
         "accepted_files_per_blob": 14_000,
+        "accepted_path_payload_bytes": 1_000,
+        "adversarial_extra_bytes": 8 * 1024,
+        "min_retained_fill_percent": 80,
     },
     "smoke": {
         "max_decompressed_bytes": 2 * MIB,
         "decoded_byte_budget": 4 * MIB,
         "retained_byte_budget": 2 * MIB,
         "accepted_files_per_blob": 450,
+        "accepted_path_payload_bytes": 1_000,
+        "adversarial_extra_bytes": 8 * 1024,
+        "min_retained_fill_percent": 80,
     },
 }
 
@@ -139,7 +145,48 @@ def repository_provenance() -> dict[str, Any]:
     }
 
 
-def docker_info(runtime: str) -> dict[str, Any]:
+PROVENANCE_STABILITY_KEYS = (
+    "commit",
+    "branch",
+    "describe",
+    "status_porcelain",
+    "tracked_diff_sha256",
+    "workspace_sha256",
+    "workspace_file_count",
+    "graphql_dockerfile_sha256",
+    "rust_cargo_lock_sha256",
+    "rust_toolchain_sha256",
+    "migrations_sha256",
+    "harness_schema_sha256",
+    "harness_runner_sha256",
+    "harness_helper_sha256",
+)
+
+
+def provenance_stability(
+    expected: dict[str, Any], current: dict[str, Any], stage: str
+) -> dict[str, Any]:
+    changed = [
+        key for key in PROVENANCE_STABILITY_KEYS if expected.get(key) != current.get(key)
+    ]
+    return {
+        "stage": stage,
+        "ok": not changed,
+        "changed_keys": changed,
+        "current": current,
+    }
+
+
+def normalize_architecture(value: Any) -> str:
+    architecture = str(value or "").lower()
+    if architecture in {"amd64", "x86_64"}:
+        return "amd64"
+    if architecture in {"arm64", "aarch64"}:
+        return "arm64"
+    return architecture
+
+
+def docker_info(runtime: str, *, require_amd64: bool) -> dict[str, Any]:
     if shutil.which(runtime) is None:
         raise HarnessError(f"container runtime {runtime!r} is not on PATH")
     result = run_command(
@@ -161,6 +208,11 @@ def docker_info(runtime: str) -> dict[str, Any]:
         )
     if int(info.get("NCPU") or 0) < 4:
         failures.append(f"server exposes {info.get('NCPU')!r} CPUs; at least 4 required")
+    architecture = normalize_architecture(info.get("Architecture"))
+    if require_amd64 and architecture != "amd64":
+        failures.append(
+            f"server architecture is {info.get('Architecture')!r}, not production amd64"
+        )
     # The measured service gets 8 GiB. PostgreSQL, the mock, and the response
     # driver must not force host-level pressure into that cgroup measurement.
     if int(info.get("MemTotal") or 0) < 12 * GIB:
@@ -258,7 +310,9 @@ def evaluate_run(
     *,
     driver: dict[str, Any],
     barrier: dict[str, Any],
+    refine_barrier: dict[str, Any],
     cgroup: dict[str, Any],
+    live_state: dict[str, Any],
     state: dict[str, Any],
     scenario: str,
     projection: str,
@@ -266,6 +320,7 @@ def evaluate_run(
     max_peak_bytes: int,
 ) -> dict[str, Any]:
     expected_items = 4 if scenario == "accepted" else 0
+    expected_total = expected_items
     expected_files = (
         4 * accepted_files_per_blob
         if scenario == "accepted" and projection == "files"
@@ -284,10 +339,21 @@ def evaluate_run(
             and not response.get("graphql_errors")
             and response.get("item_count") == expected_items
             and response.get("file_count") == expected_files
+            and response.get("total_count") == expected_total
+            and response.get("total_count_is_estimate") is True
+            and response.get("has_next_page") is False
             and handler_duration_valid
         )
 
-    local_events = cgroup.get("memory_events_local") or cgroup.get("memory_events") or {}
+    local_events = cgroup.get("memory_events_local")
+    if not isinstance(local_events, dict):
+        local_events = cgroup.get("memory_events")
+    required_event_keys = {"oom", "oom_kill", "oom_group_kill"}
+    events_complete = isinstance(local_events, dict) and required_event_keys.issubset(
+        local_events
+    )
+    if not isinstance(local_events, dict):
+        local_events = {}
     peak = cgroup.get("memory_peak")
     samples = driver.get("metrics_samples", [])
     route_served = prometheus_sample(
@@ -299,6 +365,7 @@ def evaluate_run(
     checks = {
         "four_responses_valid": len(response_checks) == 4 and all(response_checks),
         "four_client_mock_barrier": bool(barrier.get("ok")),
+        "four_request_refine_barrier": bool(refine_barrier.get("ok")),
         "metrics_scrape_valid": driver.get("metrics_error") is None,
         "pathsearch_healthy": any(
             line == "bitmagnet_search_pathsearch_healthy 1"
@@ -307,10 +374,20 @@ def evaluate_run(
         "four_routes_served": route_served == 4.0,
         "byte_cap_metric_matches_scenario": retained_capped
         == (4.0 if scenario == "adversarial" else 0.0),
-        "no_cgroup_oom": int(local_events.get("oom", 0)) == 0
-        and int(local_events.get("oom_kill", 0)) == 0
-        and int(local_events.get("oom_group_kill", 0)) == 0,
-        "docker_not_oom_killed": not bool(state.get("OOMKilled")),
+        "cgroup_oom_evidence_complete": events_complete,
+        "no_cgroup_oom": events_complete
+        and int(local_events["oom"]) == 0
+        and int(local_events["oom_kill"]) == 0
+        and int(local_events["oom_group_kill"]) == 0,
+        "docker_state_complete": state.get("OOMKilled") is False
+        and state.get("Dead") is False
+        and state.get("Status") == "exited"
+        and state.get("ExitCode") == 0
+        and state.get("Error") in {"", None},
+        "container_running_before_stop": live_state.get("Running") is True
+        and live_state.get("OOMKilled") is False
+        and live_state.get("Dead") is False,
+        "docker_not_oom_killed": state.get("OOMKilled") is False,
         "memory_peak_captured": isinstance(peak, int) and peak > 0,
         "memory_peak_within_8gib": isinstance(peak, int) and peak < 8 * GIB,
         "memory_peak_within_gate": isinstance(peak, int) and peak <= max_peak_bytes,
@@ -320,6 +397,9 @@ def evaluate_run(
         "checks": checks,
         "expected_item_count_per_response": expected_items,
         "expected_file_count_per_response": expected_files,
+        "expected_total_count_per_response": expected_total,
+        "expected_total_count_is_estimate": True,
+        "expected_has_next_page": False,
     }
 
 
@@ -354,20 +434,29 @@ class JsonlWriter:
 
 
 class DockerHarness:
-    def __init__(self, args: argparse.Namespace, session_id: str, evidence_dir: Path):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        session_id: str,
+        evidence_dir: Path,
+        runtime_architecture: str,
+    ):
         self.args = args
         self.runtime = args.runtime
         self.session_id = session_id
         self.prefix = f"bm-rss-{session_id[:10]}"
         self.network = f"{self.prefix}-net"
         self.pg = f"{self.prefix}-pg"
-        self.mock = f"{self.prefix}-mock"
         self.evidence_dir = evidence_dir
         self.containers: set[str] = set()
         self.network_created = False
         self.graphql_image = args.graphql_image or f"{self.prefix}-graphql:local"
         self.helper_image = args.helper_image or f"{self.prefix}-helper:local"
         self.pg_password = uuid.uuid4().hex
+        self.runtime_architecture = runtime_architecture
+        self.graphql_image_id: str | None = None
+        self.helper_image_id: str | None = None
+        self.postgres_image_id: str | None = None
 
     def docker(self, *parts: str, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return run_command([self.runtime, *parts], **kwargs)
@@ -412,10 +501,73 @@ class DockerHarness:
             "rootfs_layers": (row.get("RootFS") or {}).get("Layers") or [],
         }
 
+    def resolve_images(self) -> dict[str, dict[str, Any]]:
+        postgres = self.docker("image", "inspect", self.args.postgres_image, check=False)
+        if postgres.returncode != 0:
+            self.docker("pull", self.args.postgres_image, timeout=600)
+        images = {
+            "graphql": self.image_info(self.graphql_image),
+            "helper": self.image_info(self.helper_image),
+            "postgres": self.image_info(self.args.postgres_image),
+        }
+        self.graphql_image_id = images["graphql"]["id"]
+        self.helper_image_id = images["helper"]["id"]
+        self.postgres_image_id = images["postgres"]["id"]
+        if not all(
+            isinstance(image_id, str) and image_id.startswith("sha256:")
+            for image_id in (
+                self.graphql_image_id,
+                self.helper_image_id,
+                self.postgres_image_id,
+            )
+        ):
+            raise HarnessError(f"images did not resolve to immutable IDs: {images}")
+        return images
+
+    def remove_container(self, name: str, *, strict: bool = True) -> bool:
+        self.docker("rm", "--force", name, check=False)
+        removed = bool(self.container_state(name).get("Missing"))
+        if removed:
+            self.containers.discard(name)
+            return True
+        if strict:
+            raise HarnessError(f"container {name} still exists after forced removal")
+        return False
+
+    def run_helper(
+        self,
+        suffix: str,
+        command: list[str],
+        *,
+        cpus: str | None = None,
+        memory: str | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if self.helper_image_id is None:
+            raise HarnessError("helper image was not resolved")
+        name = f"{self.prefix}-{suffix}-{uuid.uuid4().hex[:6]}"
+        parts = ["run", "--name", name, "--network", self.network]
+        if cpus is not None:
+            parts.extend(["--cpus", cpus])
+        if memory is not None:
+            parts.extend(["--memory", memory])
+        parts.extend([self.helper_image_id, *command])
+        self.containers.add(name)
+        try:
+            result = self.docker(*parts, timeout=timeout)
+        except BaseException:
+            self.remove_container(name, strict=False)
+            raise
+        self.remove_container(name)
+        return result
+
     def start_dependencies(self) -> dict[str, Any]:
+        if self.postgres_image_id is None:
+            raise HarnessError("PostgreSQL image was not resolved")
         self.docker("network", "create", self.network)
         self.network_created = True
 
+        self.containers.add(self.pg)
         self.docker(
             "run",
             "--detach",
@@ -439,9 +591,8 @@ class DockerHarness:
             "POSTGRES_USER=bitmagnet",
             "--env",
             f"POSTGRES_PASSWORD={self.pg_password}",
-            self.args.postgres_image,
+            self.postgres_image_id,
         )
-        self.containers.add(self.pg)
         for _ in range(120):
             ready = self.docker(
                 "exec",
@@ -474,30 +625,36 @@ class DockerHarness:
             timeout=120,
         )
         dsn = f"postgresql://bitmagnet:{self.pg_password}@postgres:5432/bitmagnet"
-        seeded = self.docker(
-            "run",
-            "--rm",
-            "--network",
-            self.network,
-            "--memory",
-            "2g",
-            self.helper_image,
+        seeded = self.run_helper(
             "seed",
-            "--dsn",
-            dsn,
-            "--profile",
-            self.args.profile,
+            [
+                "seed",
+                "--dsn",
+                dsn,
+                "--profile",
+                self.args.profile,
+            ],
+            memory="2g",
             timeout=300,
         )
         seed_lines = [line for line in seeded.stdout.decode().splitlines() if line.strip()]
         seed_summary = json.loads(seed_lines[-1])
 
-        events = self.evidence_dir / f"{self.prefix}-mock-events.jsonl"
+        return {"seed": seed_summary}
+
+    def start_mock(self, case_id: str) -> tuple[str, Path]:
+        if self.helper_image_id is None:
+            raise HarnessError("helper image was not resolved")
+        name = f"{self.prefix}-mock-{case_id}"
+        events = self.evidence_dir / f"{name}-events.jsonl"
+        if events.exists():
+            raise HarnessError(f"mock evidence path already exists: {events}")
+        self.containers.add(name)
         self.docker(
             "run",
             "--detach",
             "--name",
-            self.mock,
+            name,
             "--network",
             self.network,
             "--network-alias",
@@ -508,7 +665,7 @@ class DockerHarness:
             "256m",
             "--mount",
             f"type=bind,src={self.evidence_dir},dst=/evidence",
-            self.helper_image,
+            self.helper_image_id,
             "mock",
             "--events",
             f"/evidence/{events.name}",
@@ -517,15 +674,14 @@ class DockerHarness:
             "--barrier-timeout",
             "60",
         )
-        self.containers.add(self.mock)
         for _ in range(120):
-            state = self.container_state(self.mock)
+            state = self.container_state(name)
             if state.get("Running") and events.exists():
                 break
             time.sleep(0.25)
         else:
             raise HarnessError("gRPC barrier mock did not become ready")
-        return {"seed": seed_summary, "mock_events_path": str(events)}
+        return name, events
 
     def container_state(self, name: str) -> dict[str, Any]:
         result = self.docker(
@@ -537,11 +693,6 @@ class DockerHarness:
 
     def wait_url(self, url: str, contains: str | None = None) -> None:
         command = [
-            "run",
-            "--rm",
-            "--network",
-            self.network,
-            self.helper_image,
             "wait",
             "--url",
             url,
@@ -550,7 +701,7 @@ class DockerHarness:
         ]
         if contains is not None:
             command.extend(["--contains", contains])
-        self.docker(*command, timeout=75)
+        self.run_helper("wait", command, memory="256m", timeout=75)
 
     def graphql_config(self) -> dict[str, str]:
         limits = PROFILE_LIMITS[self.args.profile]
@@ -593,7 +744,7 @@ class DockerHarness:
     def graphql_environment(self) -> list[str]:
         values = {
             "BITMAGNET_POSTGRES_DSN": (
-                f"postgresql://bitmagnet:{self.pg_password}@postgres:5432/bitmagnet"
+                "postgresql://bitmagnet_rss_app:rss-gate-only@postgres:5432/bitmagnet"
             ),
             **self.graphql_config(),
         }
@@ -602,20 +753,69 @@ class DockerHarness:
             environment.extend(["--env", f"{key}={value}"])
         return environment
 
+    def reset_refine_barrier(self) -> int:
+        result = self.docker(
+            "exec",
+            self.pg,
+            "psql",
+            "-qAtX",
+            "-U",
+            "bitmagnet",
+            "-d",
+            "bitmagnet",
+            "-c",
+            "SELECT nextval('rss_refine_barrier_generation'); "
+            "SELECT setval('rss_refine_barrier_arrivals', 1, false);",
+        )
+        values = [line.strip() for line in result.stdout.decode().splitlines() if line.strip()]
+        if len(values) != 2:
+            raise HarnessError(f"unexpected refine-barrier reset output: {values!r}")
+        return int(values[0])
+
+    def refine_barrier_evidence(self, expected_generation: int) -> dict[str, Any]:
+        result = self.docker(
+            "exec",
+            self.pg,
+            "psql",
+            "-qAtX",
+            "--field-separator=,",
+            "-U",
+            "bitmagnet",
+            "-d",
+            "bitmagnet",
+            "-c",
+            "SELECT generation.last_value, arrivals.last_value, arrivals.is_called "
+            "FROM rss_refine_barrier_generation AS generation "
+            "CROSS JOIN rss_refine_barrier_arrivals AS arrivals;",
+        )
+        fields = result.stdout.decode().strip().split(",")
+        if len(fields) != 3:
+            return {"ok": False, "parse_error": fields}
+        generation, arrivals, is_called = int(fields[0]), int(fields[1]), fields[2] == "t"
+        return {
+            "ok": generation == expected_generation and is_called and arrivals == 4,
+            "expected_generation": expected_generation,
+            "generation": generation,
+            "arrivals": arrivals if is_called else 0,
+            "is_called": is_called,
+        }
+
     def run_case(
         self,
         *,
         scenario: str,
         projection: str,
         repeat: int,
-        events_path: Path,
     ) -> dict[str, Any]:
+        if self.graphql_image_id is None:
+            raise HarnessError("GraphQL image was not resolved")
         case_id = f"{scenario}-{projection}-r{repeat}"
         name = f"{self.prefix}-{case_id}"
         run_dir = self.evidence_dir / f"{self.prefix}-{case_id}-cgroup"
         run_dir.mkdir(parents=True, exist_ok=False)
         run_dir.chmod(0o777)
-        offset = events_path.stat().st_size if events_path.exists() else 0
+        mock_name, events_path = self.start_mock(case_id)
+        refine_generation = self.reset_refine_barrier()
 
         watcher = r"""
 snapshot() {
@@ -646,6 +846,7 @@ snapshot
 exit "$app_status"
 """.strip()
 
+        self.containers.add(name)
         self.docker(
             "run",
             "--detach",
@@ -666,15 +867,17 @@ exit "$app_status"
             *self.graphql_environment(),
             "--entrypoint",
             "/bin/sh",
-            self.graphql_image,
+            self.graphql_image_id,
             "-c",
             watcher,
         )
-        self.containers.add(name)
         inspected = json.loads(self.docker("inspect", name).stdout)[0]
         host_config = inspected.get("HostConfig") or {}
         actual_contract = {
             "image_id": inspected.get("Image"),
+            "image_architecture": normalize_architecture(
+                self.image_info(self.graphql_image_id)["architecture"]
+            ),
             "nano_cpus": host_config.get("NanoCpus"),
             "memory_bytes": host_config.get("Memory"),
             "memory_swap_bytes": host_config.get("MemorySwap"),
@@ -689,29 +892,25 @@ exit "$app_status"
                 f"http://{name}:9090/metrics",
                 "bitmagnet_search_pathsearch_healthy 1",
             )
-            driven = self.docker(
-                "run",
-                "--rm",
-                "--network",
-                self.network,
-                "--cpus",
-                "2",
-                "--memory",
-                "2g",
-                self.helper_image,
+            driven = self.run_helper(
                 "drive",
-                "--url",
-                f"http://{name}:3337/graphql",
-                "--metrics-url",
-                f"http://{name}:9090/metrics",
-                "--query",
-                scenario,
-                "--projection",
-                projection,
-                "--clients",
-                "4",
-                "--timeout",
-                "180",
+                [
+                    "drive",
+                    "--url",
+                    f"http://{name}:3337/graphql",
+                    "--metrics-url",
+                    f"http://{name}:9090/metrics",
+                    "--query",
+                    scenario,
+                    "--projection",
+                    projection,
+                    "--clients",
+                    "4",
+                    "--timeout",
+                    "180",
+                ],
+                cpus="2",
+                memory="2g",
                 timeout=210,
             )
             lines = [line for line in driven.stdout.decode().splitlines() if line.strip()]
@@ -730,15 +929,18 @@ exit "$app_status"
         cgroup = read_cgroup_snapshot(run_dir) or cgroup
         logged = self.docker("logs", name, check=False)
         logs = logged.stdout + logged.stderr
-        self.docker("rm", "--force", name, check=False)
-        self.containers.discard(name)
+        self.remove_container(name)
 
-        events = new_mock_events(events_path, offset)
+        events = new_mock_events(events_path, 0)
         barrier = barrier_evidence(events, scenario)
+        refine_barrier = self.refine_barrier_evidence(refine_generation)
+        self.remove_container(mock_name)
         evaluation = evaluate_run(
             driver=driver,
             barrier=barrier,
+            refine_barrier=refine_barrier,
             cgroup=cgroup,
+            live_state=live_state,
             state=state,
             scenario=scenario,
             projection=projection,
@@ -748,7 +950,8 @@ exit "$app_status"
             max_peak_bytes=self.args.max_peak_bytes,
         )
         evaluation["checks"]["actual_resource_contract"] = actual_contract == {
-            "image_id": self.image_info(self.graphql_image)["id"],
+            "image_id": self.graphql_image_id,
+            "image_architecture": self.runtime_architecture,
             "nano_cpus": 4_000_000_000,
             "memory_bytes": 8 * GIB,
             "memory_swap_bytes": 8 * GIB,
@@ -773,6 +976,7 @@ exit "$app_status"
             "driver": driver,
             "driver_error": drive_error,
             "mock_barrier": barrier,
+            "refine_barrier": refine_barrier,
             "cgroup_v2": cgroup,
             "container_state_before_stop": live_state,
             "container_state_after_stop": state,
@@ -781,19 +985,47 @@ exit "$app_status"
             "evaluation": evaluation,
         }
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> dict[str, Any]:
         if self.args.keep:
             print(
                 f"--keep selected; preserving containers/network with prefix {self.prefix}",
                 file=sys.stderr,
             )
-            return
-        for name in sorted(self.containers, reverse=True):
-            self.docker("rm", "--force", name, check=False)
-        self.containers.clear()
+            return {
+                "ok": True,
+                "preserved": True,
+                "remaining_containers": sorted(self.containers),
+                "network_remaining": self.network_created,
+                "errors": [],
+            }
+        errors = []
+        for name in sorted(tuple(self.containers), reverse=True):
+            try:
+                if not self.remove_container(name, strict=False):
+                    errors.append(f"container still exists: {name}")
+            except Exception as error:
+                errors.append(f"container cleanup {name}: {type(error).__name__}: {error}")
         if self.network_created:
-            self.docker("network", "rm", self.network, check=False)
-            self.network_created = False
+            try:
+                self.docker("network", "rm", self.network, check=False)
+                present = self.docker(
+                    "network", "inspect", self.network, check=False
+                ).returncode == 0
+                if present:
+                    errors.append(f"network still exists: {self.network}")
+                else:
+                    self.network_created = False
+            except Exception as error:
+                errors.append(
+                    f"network cleanup {self.network}: {type(error).__name__}: {error}"
+                )
+        return {
+            "ok": not errors,
+            "preserved": False,
+            "remaining_containers": sorted(self.containers),
+            "network_remaining": self.network_created,
+            "errors": errors,
+        }
 
 
 def default_output() -> Path:
@@ -825,7 +1057,7 @@ def main() -> int:
         raise HarnessError("--max-peak-bytes must be greater than zero and below 8 GiB")
 
     try:
-        info = docker_info(args.runtime)
+        info = docker_info(args.runtime, require_amd64=args.profile == "gate")
     except Exception as error:
         failure = {
             "kind": "unsupported_runtime",
@@ -873,7 +1105,12 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     session_id = uuid.uuid4().hex
     writer = JsonlWriter(output)
-    harness = DockerHarness(args, session_id, output.parent)
+    harness = DockerHarness(
+        args,
+        session_id,
+        output.parent,
+        normalize_architecture(info.get("Architecture")),
+    )
     started = time.monotonic()
     run_records: list[dict[str, Any]] = []
     exit_code = 2
@@ -918,12 +1155,24 @@ def main() -> int:
         )
 
         harness.build_images()
+        images = harness.resolve_images()
+        post_build_provenance = provenance_stability(
+            provenance, repository_provenance(), "post_build"
+        )
+        writer.write(
+            {
+                "kind": "provenance_check",
+                "recorded_at": utc_now(),
+                "session_id": session_id,
+                **post_build_provenance,
+            }
+        )
+        if not post_build_provenance["ok"]:
+            raise HarnessError(
+                "workspace changed during image build: "
+                f"{post_build_provenance['changed_keys']}"
+            )
         setup = harness.start_dependencies()
-        images = {
-            "graphql": harness.image_info(harness.graphql_image),
-            "helper": harness.image_info(harness.helper_image),
-            "postgres": harness.image_info(args.postgres_image),
-        }
         writer.write(
             {
                 "kind": "setup",
@@ -935,7 +1184,6 @@ def main() -> int:
             }
         )
 
-        events_path = Path(setup["mock_events_path"])
         total = args.repeat * 4
         current = 0
         for repeat in range(1, args.repeat + 1):
@@ -951,11 +1199,26 @@ def main() -> int:
                         scenario=scenario,
                         projection=projection,
                         repeat=repeat,
-                        events_path=events_path,
                     )
                     run_records.append(record)
                     writer.write(record)
 
+        final_provenance = provenance_stability(
+            provenance, repository_provenance(), "pre_summary"
+        )
+        writer.write(
+            {
+                "kind": "provenance_check",
+                "recorded_at": utc_now(),
+                "session_id": session_id,
+                **final_provenance,
+            }
+        )
+        if not final_provenance["ok"]:
+            raise HarnessError(
+                "workspace changed during RSS run: "
+                f"{final_provenance['changed_keys']}"
+            )
         passed = all(row["evaluation"]["passed"] for row in run_records)
         peaks = [
             row["cgroup_v2"].get("memory_peak")
@@ -992,7 +1255,26 @@ def main() -> int:
         print(f"fatal: {error}", file=sys.stderr)
         exit_code = 2
     finally:
-        harness.cleanup()
+        try:
+            cleanup = harness.cleanup()
+        except Exception as error:
+            cleanup = {
+                "ok": False,
+                "preserved": False,
+                "remaining_containers": sorted(harness.containers),
+                "network_remaining": harness.network_created,
+                "errors": [f"{type(error).__name__}: {error}"],
+            }
+        writer.write(
+            {
+                "kind": "cleanup",
+                "recorded_at": utc_now(),
+                "session_id": session_id,
+                **cleanup,
+            }
+        )
+        if not cleanup["ok"]:
+            exit_code = 2
         writer.close()
 
     print(f"evidence: {output}", file=sys.stderr)

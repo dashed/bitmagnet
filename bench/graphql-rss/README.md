@@ -11,8 +11,10 @@ does not read a kubeconfig, contact k3s, or mutate production.
 
 ## Prerequisites (fail closed)
 
-- A Linux Docker server using cgroup v2. Docker Desktop is supported when its
-  Linux VM reports cgroup v2.
+- A Linux Docker server using cgroup v2. The `gate` profile requires amd64 to
+  match production. Docker Desktop is supported when its Linux VM reports
+  cgroup v2 and the remaining prerequisites; an arm64 `smoke` run is structural
+  evidence only and cannot satisfy the admission gate.
 - At least 4 Docker CPUs and 12 GiB assigned to Docker. The GraphQL container
   gets exactly 4 CPUs and 8 GiB; the extra capacity isolates PostgreSQL, the
   mock, and response clients from the measured cgroup.
@@ -76,9 +78,11 @@ source provenance than the default build.
 The disposable database contains two classes of production-format
 `zstd(msgpack[{i,p,e,s}])` blobs:
 
-- `accepted`: four candidate torrents whose combined MessagePack plus owned
-  strings remain below the decoded budget and whose retained strings remain
-  below the retained budget.
+- `accepted`: four candidate torrents whose combined MessagePack plus decoded
+  owned strings remain below the decoded budget. Composer-retained owned strings
+  remain below the retained budget while filling at least 80% of it. Evidence
+  reports GraphQL's later path-derived extension bytes separately because they
+  are not charged to the composer-retained budget.
 - `adversarial`: a highly compressible blob whose decompressed MessagePack is
   strictly larger than the one-blob decompression ceiling.
 
@@ -91,10 +95,13 @@ Each repeat starts a new GraphQL cgroup for every combination below:
 | adversarial | minimal | bounded rejection, empty estimated result |
 | adversarial | `torrent.files` | bounded rejection, empty estimated result |
 
-Both the HTTP driver and the gRPC test double have four-party barriers. A run is
-invalid unless the mock records exactly four arrivals, releases, and responses
-in one generation. The driver retains only response summaries and hashes in the
-JSONL; it does not write multi-megabyte response bodies to disk.
+The HTTP driver and each case's fresh gRPC test double have four-party barriers.
+A harness-only forced-RLS policy adds a second barrier on the first
+`torrent_contents` read after each request acquires a composer refine permit. A
+run is invalid unless the mock records exactly four arrivals, releases, and
+responses in one generation and four distinct sqlx backends reach the refine
+barrier. The driver retains only response summaries and hashes in the JSONL; it
+does not write multi-megabyte response bodies to disk.
 
 The JSONL contains:
 
@@ -103,7 +110,8 @@ The JSONL contains:
   hashes;
 - GraphQL/helper/PostgreSQL image IDs, repo digests, platforms, and layers;
 - every byte/count/timeout/concurrency configuration value and repeat number;
-- seed blob raw/owned/retained/compressed sizes and SHA-256 hashes;
+- seed blob raw/decoded-owned/composer-retained/GraphQL-derived/compressed sizes,
+  retained-budget fill ratio, and SHA-256 hashes;
 - four response status/size/hash/latency/error summaries and handler duration;
 - selected Prometheus process/pathsearch samples plus scrape hashes;
 - `memory.current`, `memory.peak`, `memory.events(.local)`, `memory.stat`, swap
@@ -119,10 +127,12 @@ kernel-maintained and exact.
 
 ## Cleanup and exit status
 
-Containers and the private network are removed on success and failure. Built
-images and JSONL evidence remain for review. `--keep` preserves containers and
-the network for debugging; remove them manually afterward using the prefix
-printed in Docker names.
+Every helper, service, and dependency container has a session-scoped name and is
+registered before launch. Containers and the private network are removed and
+their absence verified on success and failure; cleanup failure is terminal
+evidence. Built images and JSONL evidence remain for review. `--keep` preserves
+containers and the network for debugging; remove them manually afterward using
+the prefix printed in Docker names.
 
 - exit `0`: every repetition passed response, barrier, metrics, OOM, and peak
   checks;

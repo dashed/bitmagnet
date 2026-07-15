@@ -41,6 +41,7 @@ class Profile:
     accepted_files_per_blob: int
     accepted_path_payload_bytes: int
     adversarial_extra_bytes: int
+    min_retained_fill_percent: int
 
 
 PROFILES = {
@@ -53,6 +54,7 @@ PROFILES = {
         accepted_files_per_blob=14_000,
         accepted_path_payload_bytes=1_000,
         adversarial_extra_bytes=8 * 1024,
+        min_retained_fill_percent=80,
     ),
     # Fast structural check using the same ratios and all the same code paths.
     "smoke": Profile(
@@ -62,6 +64,7 @@ PROFILES = {
         accepted_files_per_blob=450,
         accepted_path_payload_bytes=1_000,
         adversarial_extra_bytes=8 * 1024,
+        min_retained_fill_percent=80,
     ),
 }
 
@@ -77,10 +80,10 @@ def encode_files(files: list[dict[str, Any]]) -> tuple[bytes, int, int, int]:
     raw = msgpack.packb(files, use_bin_type=True)
     blob = zstandard.ZstdCompressor(level=3).compress(raw)
     owned = sum(len(row["p"].encode()) + len(row["e"].encode()) for row in files)
-    # MatchingFile retains the path and a path-derived extension in addition to
-    # the decoded BlobFile's extension while the candidate is retained.
-    retained = owned + sum(len(row["e"].encode()) for row in files)
-    return blob, len(raw), owned, retained
+    # The composer's retained-byte budget charges decoded owned strings. The
+    # GraphQL mapper derives another extension later, outside that budget.
+    graphql_derived = sum(len(row["e"].encode()) for row in files)
+    return blob, len(raw), owned, graphql_derived
 
 
 def accepted_files(profile: Profile, ordinal: int) -> list[dict[str, Any]]:
@@ -110,7 +113,8 @@ def seed(args: argparse.Namespace) -> int:
     created = datetime(2026, 7, 14, tzinfo=timezone.utc)
     summaries: list[dict[str, Any]] = []
     accepted_decoded = 0
-    accepted_retained = 0
+    accepted_composer_retained = 0
+    accepted_graphql_derived = 0
 
     with psycopg.connect(args.dsn) as connection:
         with connection.cursor() as cursor:
@@ -129,10 +133,13 @@ def seed(args: argparse.Namespace) -> int:
             datasets.append(("adversarial", ADVERSARIAL_HASHES[0], adversarial_files(profile)))
 
             for dataset, info_hash, files in datasets:
-                blob, raw_bytes, owned_bytes, retained_bytes = encode_files(files)
+                blob, raw_bytes, owned_bytes, graphql_derived_bytes = encode_files(
+                    files
+                )
                 if dataset == "accepted":
                     accepted_decoded += raw_bytes + owned_bytes
-                    accepted_retained += retained_bytes
+                    accepted_composer_retained += owned_bytes
+                    accepted_graphql_derived += graphql_derived_bytes
 
                 hex_hash = info_hash.hex()
                 name = f"graphql-rss-{dataset}-{hex_hash[:4]}"
@@ -209,7 +216,11 @@ def seed(args: argparse.Namespace) -> int:
                         "files": len(files),
                         "raw_bytes": raw_bytes,
                         "owned_string_bytes": owned_bytes,
-                        "retained_string_bytes": retained_bytes,
+                        "composer_retained_string_bytes": owned_bytes,
+                        "graphql_derived_extension_bytes": graphql_derived_bytes,
+                        "graphql_string_bytes_after_mapping": (
+                            owned_bytes + graphql_derived_bytes
+                        ),
                         "compressed_bytes": len(blob),
                         "blob_sha256": hashlib.sha256(blob).hexdigest(),
                     }
@@ -222,8 +233,12 @@ def seed(args: argparse.Namespace) -> int:
     invariants = {
         "accepted_decoded_within_budget": accepted_decoded
         <= profile.decoded_byte_budget,
-        "accepted_retained_within_budget": accepted_retained
+        "accepted_composer_retained_within_budget": accepted_composer_retained
         <= profile.retained_byte_budget,
+        "accepted_composer_retained_fills_budget": (
+            accepted_composer_retained * 100
+            >= profile.retained_byte_budget * profile.min_retained_fill_percent
+        ),
         "adversarial_exceeds_decompressed_limit": adversarial["raw_bytes"]
         > profile.max_decompressed_bytes,
     }
@@ -235,7 +250,14 @@ def seed(args: argparse.Namespace) -> int:
             "profile": args.profile,
             "limits": profile.__dict__,
             "accepted_decoded_bytes": accepted_decoded,
-            "accepted_retained_bytes": accepted_retained,
+            "accepted_composer_retained_bytes": accepted_composer_retained,
+            "accepted_graphql_derived_extension_bytes": accepted_graphql_derived,
+            "accepted_graphql_string_bytes_after_mapping": (
+                accepted_composer_retained + accepted_graphql_derived
+            ),
+            "accepted_composer_retained_fill_ratio": (
+                accepted_composer_retained / profile.retained_byte_budget
+            ),
             "invariants": invariants,
             "blobs": summaries,
         }
@@ -474,6 +496,7 @@ def request_once(
                 ),
                 "total_count": (search or {}).get("totalCount"),
                 "total_count_is_estimate": (search or {}).get("totalCountIsEstimate"),
+                "has_next_page": (search or {}).get("hasNextPage"),
             }
         )
     except Exception as error:

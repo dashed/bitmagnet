@@ -131,3 +131,80 @@ CREATE TABLE torrent_file_summary (
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL
 );
+
+-- The GraphQL process uses this non-owner role so forced RLS can place a
+-- harness-only barrier on the first torrent_contents read after the composer's
+-- refine semaphore is acquired. Four separate PostgreSQL backends must arrive
+-- before any of them can hydrate/decode, proving the measured requests reached
+-- the expensive phase concurrently rather than merely overlapping at L3.
+CREATE ROLE bitmagnet_rss_app LOGIN PASSWORD 'rss-gate-only';
+GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_rss_app;
+GRANT USAGE ON SCHEMA public TO bitmagnet_rss_app;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO bitmagnet_rss_app;
+
+CREATE SEQUENCE rss_refine_barrier_generation;
+CREATE SEQUENCE rss_refine_barrier_arrivals;
+SELECT setval('rss_refine_barrier_generation', 1, true);
+SELECT setval('rss_refine_barrier_arrivals', 1, false);
+
+CREATE FUNCTION rss_refine_barrier_wait()
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  barrier_generation bigint;
+  recorded_generation text;
+  arrivals bigint;
+  arrivals_called boolean;
+  deadline timestamptz;
+BEGIN
+  SELECT last_value
+    INTO barrier_generation
+    FROM rss_refine_barrier_generation;
+  recorded_generation := current_setting('bitmagnet_rss.generation', true);
+  IF recorded_generation = barrier_generation::text THEN
+    RETURN true;
+  END IF;
+
+  SELECT last_value, is_called
+    INTO arrivals, arrivals_called
+    FROM rss_refine_barrier_arrivals;
+  IF arrivals_called AND arrivals >= 4 THEN
+    PERFORM set_config(
+      'bitmagnet_rss.generation', barrier_generation::text, false
+    );
+    RETURN true;
+  END IF;
+
+  arrivals := nextval('rss_refine_barrier_arrivals');
+  PERFORM set_config(
+    'bitmagnet_rss.generation', barrier_generation::text, false
+  );
+  deadline := clock_timestamp() + interval '60 seconds';
+  WHILE arrivals < 4 LOOP
+    IF clock_timestamp() >= deadline THEN
+      RAISE EXCEPTION
+        'refine barrier generation % reached only %/4 arrivals',
+        barrier_generation,
+        arrivals;
+    END IF;
+    PERFORM pg_sleep(0.01);
+    SELECT last_value INTO arrivals FROM rss_refine_barrier_arrivals;
+  END LOOP;
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION rss_refine_barrier_wait() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION rss_refine_barrier_wait() TO bitmagnet_rss_app;
+
+ALTER TABLE torrent_contents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE torrent_contents FORCE ROW LEVEL SECURITY;
+CREATE POLICY rss_refine_barrier_select
+  ON torrent_contents
+  FOR SELECT
+  TO bitmagnet_rss_app
+  USING (rss_refine_barrier_wait());
