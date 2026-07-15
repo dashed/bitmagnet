@@ -248,20 +248,37 @@ class HarnessTests(unittest.TestCase):
     def test_docker_builder_backend_is_explicit_and_overrides_ambient_env(self):
         parser = runner.argument_parser()
         buildkit_args = parser.parse_args([])
-        self.assertEqual(buildkit_args.docker_builder, "buildkit")
+        self.assertEqual(buildkit_args.graphql_docker_builder, "buildkit")
         with mock.patch.dict(runner.os.environ, {"DOCKER_BUILDKIT": "0"}):
             buildkit = runner.DockerHarness(
                 buildkit_args, "session", HERE, "amd64"
             )
-        self.assertEqual(buildkit.build_environment["DOCKER_BUILDKIT"], "1")
+        self.assertEqual(
+            buildkit.graphql_build_environment["DOCKER_BUILDKIT"], "1"
+        )
+        self.assertEqual(
+            buildkit.helper_build_environment["DOCKER_BUILDKIT"], "1"
+        )
 
-        legacy_args = parser.parse_args(["--docker-builder", "legacy"])
+        legacy_args = parser.parse_args(["--graphql-docker-builder", "legacy"])
         runner.validate_arguments(legacy_args)
         legacy = runner.DockerHarness(legacy_args, "session", HERE, "amd64")
-        self.assertEqual(legacy.build_environment["DOCKER_BUILDKIT"], "0")
+        self.assertEqual(
+            legacy.graphql_build_environment["DOCKER_BUILDKIT"], "0"
+        )
+        self.assertEqual(legacy.helper_build_environment["DOCKER_BUILDKIT"], "1")
+        self.assertEqual(
+            runner.docker_builders(legacy_args),
+            {
+                "graphql": {"backend": "legacy", "DOCKER_BUILDKIT": "0"},
+                "helper": {"backend": "buildkit", "DOCKER_BUILDKIT": "1"},
+            },
+        )
 
-    def test_selected_builder_environment_is_used_for_both_source_builds(self):
-        args = runner.argument_parser().parse_args(["--docker-builder", "legacy"])
+    def test_each_source_build_uses_its_explicit_builder_environment(self):
+        args = runner.argument_parser().parse_args(
+            ["--graphql-docker-builder", "legacy"]
+        )
         harness = runner.DockerHarness(args, "session", HERE, "amd64")
         calls = []
 
@@ -273,11 +290,9 @@ class HarnessTests(unittest.TestCase):
         harness.build_images()
         self.assertEqual(len(calls), 2)
         self.assertTrue(all(parts[0] == "build" for parts, _ in calls))
-        self.assertTrue(
-            all(
-                kwargs["environment"]["DOCKER_BUILDKIT"] == "0"
-                for _, kwargs in calls
-            )
+        self.assertEqual(
+            [kwargs["environment"]["DOCKER_BUILDKIT"] for _, kwargs in calls],
+            ["0", "1"],
         )
 
     def test_gate_profile_rejects_admission_downgrades(self):

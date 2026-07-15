@@ -49,15 +49,17 @@ driver when BuildKit cannot checksum a cross-stage copy:
 python3 bench/graphql-rss/run.py \
   --profile gate \
   --repeat 3 \
-  --docker-builder legacy \
+  --graphql-docker-builder legacy \
   --output bench/graphql-rss/evidence/graphql-rss-gate.jsonl
 ```
 
-This invokes the same `docker build` commands and exact Dockerfiles with
-`DOCKER_BUILDKIT=0`. The selected backend and environment value are recorded in
-the session evidence; image IDs and layers remain mandatory. Docker documents
-the legacy backend as deprecated, so this is an isolated compatibility path,
-not the default: https://docs.docker.com/reference/cli/docker/image/build/
+This invokes the GraphQL `docker build` command and exact Dockerfile with
+`DOCKER_BUILDKIT=0`. The helper remains on BuildKit so Docker honors its
+Dockerfile-scoped ignore file instead of sending the full repository context.
+Both selected backends and environment values are recorded in the session
+evidence; image IDs and layers remain mandatory. Docker documents the legacy
+backend as deprecated, so this is an isolated compatibility path, not the
+default: https://docs.docker.com/reference/cli/docker/image/build/
 
 The default acceptance ceiling is 6 GiB peak inside the 8 GiB GraphQL cgroup,
 leaving 25% headroom. This is a harness guard, not production admission or an
@@ -129,7 +131,8 @@ The JSONL contains:
 - commit, branch, dirty status, tracked-diff and full workspace hashes;
 - Dockerfile, Cargo lock/toolchain, migration-set, schema, runner, and helper
   hashes;
-- the explicit Docker builder backend and `DOCKER_BUILDKIT` value;
+- the explicit GraphQL and helper Docker builder backends and
+  `DOCKER_BUILDKIT` values;
 - GraphQL/helper/PostgreSQL image IDs, repo digests, platforms, and layers;
 - every byte/count/timeout/concurrency configuration value and repeat number;
 - seed blob raw/decoded-owned/composer-retained/GraphQL-derived/compressed sizes,

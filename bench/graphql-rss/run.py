@@ -501,10 +501,12 @@ class DockerHarness:
         self.graphql_image_id: str | None = None
         self.helper_image_id: str | None = None
         self.postgres_image_id: str | None = None
-        self.build_environment = os.environ.copy()
-        self.build_environment["DOCKER_BUILDKIT"] = (
-            "0" if args.docker_builder == "legacy" else "1"
+        self.graphql_build_environment = os.environ.copy()
+        self.graphql_build_environment["DOCKER_BUILDKIT"] = (
+            "0" if args.graphql_docker_builder == "legacy" else "1"
         )
+        self.helper_build_environment = os.environ.copy()
+        self.helper_build_environment["DOCKER_BUILDKIT"] = "1"
 
     def docker(self, *parts: str, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return run_command([self.runtime, *parts], **kwargs)
@@ -512,7 +514,8 @@ class DockerHarness:
     def build_images(self) -> None:
         if self.args.graphql_image is None:
             print(
-                f"building exact Dockerfile.graphql image ({self.args.docker_builder})",
+                "building exact Dockerfile.graphql image "
+                f"({self.args.graphql_docker_builder})",
                 file=sys.stderr,
                 flush=True,
             )
@@ -523,11 +526,15 @@ class DockerHarness:
                 "--tag",
                 self.graphql_image,
                 "bitmagnet-rs",
-                environment=self.build_environment,
+                environment=self.graphql_build_environment,
                 timeout=self.args.build_timeout,
             )
         if self.args.helper_image is None:
-            print("building pinned harness helper image", file=sys.stderr, flush=True)
+            print(
+                "building pinned harness helper image (buildkit)",
+                file=sys.stderr,
+                flush=True,
+            )
             self.docker(
                 "build",
                 "--file",
@@ -535,7 +542,7 @@ class DockerHarness:
                 "--tag",
                 self.helper_image,
                 ".",
-                environment=self.build_environment,
+                environment=self.helper_build_environment,
                 timeout=self.args.build_timeout,
             )
 
@@ -1124,10 +1131,13 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--postgres-image", default=DEFAULT_POSTGRES_IMAGE)
     parser.add_argument("--build-timeout", type=float, default=3600)
     parser.add_argument(
-        "--docker-builder",
+        "--graphql-docker-builder",
         choices=("buildkit", "legacy"),
         default="buildkit",
-        help="Docker image builder backend; selected explicitly and recorded in evidence",
+        help=(
+            "GraphQL image builder backend; the helper always uses BuildKit and both "
+            "choices are recorded in evidence"
+        ),
     )
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--preflight-only", action="store_true")
@@ -1160,6 +1170,18 @@ def validate_arguments(args: argparse.Namespace) -> None:
         )
 
 
+def docker_builders(args: argparse.Namespace) -> dict[str, dict[str, str]]:
+    return {
+        "graphql": {
+            "backend": args.graphql_docker_builder,
+            "DOCKER_BUILDKIT": (
+                "0" if args.graphql_docker_builder == "legacy" else "1"
+            ),
+        },
+        "helper": {"backend": "buildkit", "DOCKER_BUILDKIT": "1"},
+    }
+
+
 def main() -> int:
     args = argument_parser().parse_args()
     validate_arguments(args)
@@ -1172,8 +1194,7 @@ def main() -> int:
             "recorded_at": utc_now(),
             "status": "unsupported",
             "runtime": args.runtime,
-            "docker_builder": args.docker_builder,
-            "docker_buildkit": "0" if args.docker_builder == "legacy" else "1",
+            "docker_builders": docker_builders(args),
             "error": f"{type(error).__name__}: {error}",
         }
         if args.preflight_only:
@@ -1203,8 +1224,7 @@ def main() -> int:
                             "MemTotal",
                         )
                     },
-                    "docker_builder": args.docker_builder,
-                    "docker_buildkit": "0" if args.docker_builder == "legacy" else "1",
+                    "docker_builders": docker_builders(args),
                     "provenance": provenance,
                 },
                 indent=2,
@@ -1262,12 +1282,7 @@ def main() -> int:
                         "MemTotal",
                     )
                 },
-                "docker_builder": {
-                    "backend": args.docker_builder,
-                    "DOCKER_BUILDKIT": (
-                        "0" if args.docker_builder == "legacy" else "1"
-                    ),
-                },
+                "docker_builders": docker_builders(args),
                 "repository": provenance,
             }
         )
