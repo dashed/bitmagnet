@@ -40,6 +40,24 @@ const comparableQuery = `query Search($limit: Int) {
   }
 }`
 
+const comparableSearchWithQueue = `query Search($limit: Int) {
+  torrentContent {
+    search(input: {limit: $limit, totalCount: true}) {
+      totalCount totalCountIsEstimate items { id } aggregations { __typename }
+    }
+  }
+  queue { jobs }
+}`
+
+const comparableSearchWithTorrentFiles = `query Search($limit: Int) {
+  torrentContent {
+    search(input: {limit: $limit, totalCount: true}) {
+      totalCount totalCountIsEstimate items { id } aggregations { __typename }
+    }
+  }
+  torrent { files }
+}`
+
 // TestShadowCapturedUnsafeOperationsMakeZeroRustCalls is the load-bearing
 // defense-in-depth test: no non-query or unclassifiable operation can reach the
 // dark service even if a caller bypasses Hook and invokes Driver directly.
@@ -54,6 +72,8 @@ func TestShadowCapturedUnsafeOperationsMakeZeroRustCalls(t *testing.T) {
 		{Query: `query Q { version } mutation M { torrent { reprocess(infoHashes: []) } }`, OperationName: "M"},
 		{Query: `{ version }`},
 		{Query: `{ torrentContent { search { totalCount } } }`},
+		{Query: comparableSearchWithQueue, OperationName: "Search", Variables: json.RawMessage(`{"limit":20}`)},
+		{Query: comparableSearchWithTorrentFiles, OperationName: "Search", Variables: json.RawMessage(`{"limit":20}`)},
 	}
 
 	for _, req := range tests {

@@ -209,6 +209,25 @@ func TestIsComparableSearchOperation(t *testing.T) {
 			variables:     map[string]any{"count": false},
 		},
 		{
+			name: "search with typename-only siblings",
+			query: `{ __typename torrentContent { __typename search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } }`,
+			want: true,
+		},
+		{
+			name: "search plus out-of-scope queue sibling",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } queue { jobs } }`,
+		},
+		{
+			name: "search plus out-of-scope torrent files sibling",
+			query: `{ torrentContent { search(input: {totalCount: true}) {
+			  totalCount totalCountIsEstimate items { id } aggregations { __typename }
+			} } torrent { files } }`,
+		},
+		{
 			name:  "unrelated query",
 			query: `{ version }`,
 		},

@@ -66,11 +66,12 @@ func ClassifyOperation(query, operationName string) (OperationType, error) {
 }
 
 // IsComparableSearchOperation reports whether the selected operation is a
-// read-only query containing an unaliased torrentContent.search selection with
-// either the canonical id or all four fields needed to reconstruct each item's
-// stable InferID. The comparator intentionally ignores other GraphQL queries:
-// they have no search result projection to compare, and calling Rust for them
-// would add load without producing useful parity evidence.
+// read-only query containing only an unaliased torrentContent.search selection
+// (plus optional __typename fields), with either the canonical id or all four
+// fields needed to reconstruct each item's stable InferID. Any out-of-scope
+// sibling makes the whole operation ineligible: Rust's first dark-soak contract
+// is search-only, so sending a mixed operation would contaminate its evidence
+// with errors from intentionally unserved fields.
 //
 // The unaliased requirement matches SearchResultFromResponseData's fixed
 // response path. It is conservative by design: aliases and incomplete item
@@ -85,23 +86,32 @@ func IsComparableSearchOperation(
 		return false
 	}
 
+	foundComparableSearch := false
+
 	for _, field := range selectionFields(doc, selected.SelectionSet, nil) {
-		if field.Name != "torrentContent" || field.Alias != field.Name {
+		if field.Name == "__typename" {
 			continue
+		}
+		if field.Name != "torrentContent" || field.Alias != field.Name {
+			return false
 		}
 
 		for _, child := range selectionFields(doc, field.SelectionSet, nil) {
-			if child.Name != "search" || child.Alias != child.Name {
+			if child.Name == "__typename" {
 				continue
 			}
-
-			if searchSelectionComparable(doc, child, variables) {
-				return true
+			if child.Name != "search" || child.Alias != child.Name {
+				return false
 			}
+			if !searchSelectionComparable(doc, child, variables) {
+				return false
+			}
+
+			foundComparableSearch = true
 		}
 	}
 
-	return false
+	return foundComparableSearch
 }
 
 func selectOperation(query, operationName string) (*ast.QueryDocument, *ast.OperationDefinition, error) {
