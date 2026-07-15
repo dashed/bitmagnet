@@ -23,18 +23,20 @@ their byte shape explicit:
 |---|---:|---|
 | `chunk` | fixed 39 | original production-tail chunk observation |
 | `retained` | fixed 39 | original retained cap + lookahead observation |
+| `accepted-byte-boundary` | fixed 650 | high-fanout case accepted just below the byte envelope |
 | `variable-path-retained` | cycles 39, 128, 512, 1,024 | sensitivity to a mixed long-path tail |
 | `long-path-retained` | fixed 1,024 | adversarial all-long-path upper observation |
 
 The latter two do not claim that 1,024 bytes is a schema maximum: PostgreSQL
-`text`, MessagePack, and the decoder currently impose no path-byte limit. They
-measure how strongly the count caps depend on owned string bytes and keep that
-residual visible rather than treating a single 39-byte fixture as a hard bound.
+`text` and MessagePack impose no per-path byte limit. They measure how the
+aggregate decompressed, decoded-allocation, and retained-byte budgets stop a
+hostile path distribution rather than treating a single 39-byte fixture as a
+hard bound.
 
 Run on Linux in release mode:
 
 ```text
-CARGO_BUILD_JOBS=4 cargo run --release -p bitmagnet-search-serve \
+CARGO_BUILD_JOBS=4 cargo run --locked --release -p bitmagnet-search-serve \
   --bin search-serve-rss -- --scenario all
 ```
 
@@ -47,7 +49,8 @@ This probe is necessary but not sufficient to accept or raise production caps.
 Its evidence must be interpreted with the final GraphQL binary's allocator,
 container limit, concurrent request count, PostgreSQL driver buffers, and other
 resident services. C7 unit tests independently prove that every request stops at
-the configured per-torrent, chunk, retained, deadline, and concurrency bounds.
+the configured compressed/decompressed, transient decoded, retained-byte,
+file-count, deadline, and concurrency bounds.
 
 ## 2026-07-13 Coder result
 
@@ -82,6 +85,10 @@ decompressed, and retained decoded-byte bounds. Until then the evidence blocks
 raising caps or claiming whole-pod headroom, not merging the bounded route.
 
 ## 2026-07-13 path-shape follow-up
+
+This section records the historical count-only result that motivated the P2-5
+byte envelope. Its deployment conclusion is superseded by the 2026-07-14
+follow-up below, while the raw observation remains valid.
 
 Raw evidence is committed separately in
 `evidence/rss-coder-x86_64-20260713-path-shapes.jsonl`, preserving the original
@@ -124,3 +131,39 @@ byte envelope. This blocks deployment acceptance and cap increases, but not
 merging the already bounded route and its observability library. Runtime metric
 acceptance separately still requires the final composition root to register one
 shared `PathsearchMetrics` and pass it to both the composer and health poller.
+
+## 2026-07-14 P2-5 byte-envelope follow-up
+
+Raw evidence is committed in
+`evidence/rss-coder-x86_64-20260714-p2-5-byte-bounds.jsonl`. The Linux x86_64
+release binary used Rust 1.97.0, the standard system allocator, and the staged
+production envelope:
+
+- 64 MiB maximum compressed input and decompressed MessagePack output per blob;
+- 128 MiB transient decoded allocation per chunk, charged as raw MessagePack
+  plus owned path/extension strings; and
+- 64 MiB retained owned-string bytes per request.
+
+| Scenario | Retained files | Cap expected | Peak RSS delta |
+|---|---:|---:|---:|
+| chunk, fixed 39 | 265,683 | no | 48,620 KiB |
+| retained, fixed 39 | 974,171 | yes | 160,944 KiB |
+| accepted boundary, fixed 650 | 88,561 | no | 128,076 KiB |
+| mixed 39/128/512/1,024 | 88,561 | yes | 89,508 KiB |
+| fixed 1,024 | 0 | yes | 69,656 KiB |
+
+Every route completed and matched its expected bounded-prefix contract. The
+new fixed-650 high-fanout case is the important positive control: all 88,561
+files were retained without tripping a cap, at about 125.1 MiB peak RSS delta.
+The hostile fixed-1,024 case that previously retained 974,171 files and peaked
+about 1.24 GiB now retains none and peaks about 68.0 MiB while proving the
+decompression boundary rejects the highly compressible input.
+
+This closes the count-only byte-envelope defect and supports retaining the
+existing count defaults. It does not close deployment admission. The final gate
+is the integrated `bench/graphql-rss` run using the exact GraphQL image, real
+sqlx/PostgreSQL hydration, four overlapping requests, both GraphQL projections,
+and an 8 GiB cgroup with the agreed 6 GiB peak ceiling. Keep the homelab RSS gate
+false until that JSONL passes on a host with at least 12 GiB available to Docker;
+the disposable Coder Docker runtime used for this component run correctly fails
+that preflight and is not valid integrated evidence.
