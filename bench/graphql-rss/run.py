@@ -258,6 +258,17 @@ def read_cgroup_snapshot(directory: Path) -> dict[str, Any]:
             result["sample_time_unix_ns"] = int(sampled_at.read_text().strip())
         except ValueError:
             result["sample_time_unix_ns"] = None
+    app_exit_status = directory / "app_exit_status"
+    if app_exit_status.exists():
+        try:
+            result["app_exit_status"] = int(app_exit_status.read_text().strip())
+        except ValueError:
+            result["app_exit_status"] = None
+    intentional_stop = directory / "intentional_stop_requested"
+    if intentional_stop.exists():
+        result["intentional_stop_requested"] = (
+            intentional_stop.read_text().strip() == "1"
+        )
     return result
 
 
@@ -387,6 +398,8 @@ def evaluate_run(
         "container_running_before_stop": live_state.get("Running") is True
         and live_state.get("OOMKilled") is False
         and live_state.get("Dead") is False,
+        "intentional_stop_recorded": cgroup.get("intentional_stop_requested") is True,
+        "intentional_child_exit_expected": cgroup.get("app_exit_status") in {0, 143},
         "docker_not_oom_killed": state.get("OOMKilled") is False,
         "memory_peak_captured": isinstance(peak, int) and peak > 0,
         "memory_peak_within_8gib": isinstance(peak, int) and peak < 8 * GIB,
@@ -827,7 +840,11 @@ snapshot() {
   date +%s%N > /evidence/sample_time_unix_ns.tmp && mv /evidence/sample_time_unix_ns.tmp /evidence/sample_time_unix_ns
 }
 app_pid=0
+stop_requested=0
 terminate() {
+  stop_requested=1
+  printf '1\n' > /evidence/intentional_stop_requested.tmp
+  mv /evidence/intentional_stop_requested.tmp /evidence/intentional_stop_requested
   if [ "$app_pid" -gt 0 ]; then kill -TERM "$app_pid" 2>/dev/null || true; fi
 }
 trap terminate TERM INT
@@ -841,8 +858,19 @@ watcher_pid=$!
 set +e
 wait "$app_pid"
 app_status=$?
+if [ "$stop_requested" -eq 1 ]; then
+  # POSIX wait is interrupted when PID 1 receives TERM. Reap the application a
+  # second time to preserve its actual clean-or-SIGTERM status.
+  wait "$app_pid" 2>/dev/null
+  app_status=$?
+fi
 wait "$watcher_pid" 2>/dev/null || true
 snapshot
+printf '%s\n' "$app_status" > /evidence/app_exit_status.tmp
+mv /evidence/app_exit_status.tmp /evidence/app_exit_status
+if [ "$stop_requested" -eq 1 ] && { [ "$app_status" -eq 0 ] || [ "$app_status" -eq 143 ]; }; then
+  exit 0
+fi
 exit "$app_status"
 """.strip()
 

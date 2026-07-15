@@ -132,6 +132,8 @@ class HarnessTests(unittest.TestCase):
         refine_barrier = {"ok": True, "arrivals": 4}
         cgroup = {
             "memory_peak": 5 * runner.GIB,
+            "intentional_stop_requested": True,
+            "app_exit_status": 143,
             "memory_events_local": {
                 "oom": 0,
                 "oom_kill": 0,
@@ -175,6 +177,23 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertFalse(failed["passed"])
         self.assertFalse(failed["checks"]["no_cgroup_oom"])
+
+        cgroup["memory_events_local"]["oom_kill"] = 0
+        cgroup["app_exit_status"] = 137
+        failed = runner.evaluate_run(
+            driver=driver,
+            barrier=barrier,
+            refine_barrier=refine_barrier,
+            cgroup=cgroup,
+            live_state=live_state,
+            state=state,
+            scenario="accepted",
+            projection="files",
+            accepted_files_per_blob=14_000,
+            max_peak_bytes=6 * runner.GIB,
+        )
+        self.assertFalse(failed["passed"])
+        self.assertFalse(failed["checks"]["intentional_child_exit_expected"])
 
     def test_evaluation_fails_closed_on_missing_kernel_or_docker_state(self):
         driver = {

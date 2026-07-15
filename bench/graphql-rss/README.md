@@ -115,7 +115,8 @@ The JSONL contains:
 - four response status/size/hash/latency/error summaries and handler duration;
 - selected Prometheus process/pathsearch samples plus scrape hashes;
 - `memory.current`, `memory.peak`, `memory.events(.local)`, `memory.stat`, swap
-  peak, Docker OOM state, and service-log hash/tail;
+  peak, the recorded intentional-stop and raw child exit status, Docker OOM
+  state, and service-log hash/tail;
 - per-check evaluation and a terminal pass/fail summary.
 
 A small PID-1 wrapper and cgroup watcher run inside the GraphQL container. The
