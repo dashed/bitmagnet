@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -297,6 +298,150 @@ class HarnessTests(unittest.TestCase):
             ["0", "1"],
         )
 
+    def test_evidence_commands_use_docker_volume_not_host_bind(self):
+        args = runner.argument_parser().parse_args(
+            ["--profile", "smoke", "--repeat", "1"]
+        )
+        harness = runner.DockerHarness(args, "session", HERE, "amd64")
+        harness.helper_image_id = "sha256:helper"
+        harness.graphql_image_id = "sha256:graphql"
+        volume = "fixture-evidence"
+        mount = f"type=volume,src={volume},dst=/evidence"
+        commands = (
+            harness.mock_run_command("mock", "events.jsonl", volume),
+            harness.graphql_run_command("graphql", volume, "watcher"),
+        )
+        for command in commands:
+            self.assertIn(mount, command)
+            self.assertFalse(any(part.startswith("type=bind") for part in command))
+        self.assertNotIn("type=bind", (HERE / "run.py").read_text())
+
+    def test_evidence_volume_is_initialized_and_copied(self):
+        args = runner.argument_parser().parse_args(
+            ["--profile", "smoke", "--repeat", "1"]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "case"
+            destination.mkdir()
+            harness = runner.DockerHarness(args, "session", HERE, "amd64")
+            harness.helper_image_id = "sha256:helper"
+            calls = []
+
+            def record(*parts, **kwargs):
+                calls.append((parts, kwargs))
+                return runner.subprocess.CompletedProcess(parts, 0, b"", b"")
+
+            harness.docker = record
+            harness.volume_state = lambda name: {"Missing": True}
+            harness.container_state = lambda name: {"Running": True}
+            store = harness.create_evidence_store("accepted-minimal-r1", destination)
+            harness.collect_evidence(store)
+
+        operations = [parts[:2] for parts, _ in calls]
+        self.assertEqual(operations[0], ("volume", "create"))
+        self.assertEqual(operations[1][0], "run")
+        self.assertEqual(operations[2][0], "exec")
+        self.assertEqual(operations[3][0], "cp")
+        carrier_command = calls[1][0]
+        self.assertIn(harness.evidence_mount(store.volume), carrier_command)
+        self.assertIn("os.chmod('/evidence', 0o777)", carrier_command[-1])
+        self.assertEqual(
+            calls[3][0],
+            ("cp", f"{store.carrier}:/evidence/.", str(store.destination)),
+        )
+        self.assertTrue(store.collected)
+
+    def test_evidence_volume_rejects_preexisting_name(self):
+        args = runner.argument_parser().parse_args(
+            ["--profile", "smoke", "--repeat", "1"]
+        )
+        harness = runner.DockerHarness(args, "session", HERE, "amd64")
+        harness.helper_image_id = "sha256:helper"
+        harness.volume_state = lambda name: {"Name": name}
+        with self.assertRaisesRegex(
+            runner.HarnessError, "Docker evidence volume already exists"
+        ):
+            harness.create_evidence_store("accepted-minimal-r1", HERE)
+        self.assertEqual(harness.volumes, set())
+        self.assertEqual(harness.evidence_stores, {})
+
+    def test_cleanup_copies_before_removing_case_resources(self):
+        harness = object.__new__(runner.DockerHarness)
+        harness.args = runner.argparse.Namespace(keep=False)
+        harness.containers = {"fixture-carrier", "fixture-graphql"}
+        harness.volumes = {"fixture-volume"}
+        harness.network_created = False
+        store = runner.EvidenceStore(
+            "fixture-volume", "fixture-carrier", HERE / "evidence" / "fixture"
+        )
+        harness.evidence_stores = {store.volume: store}
+        actions = []
+
+        def collect(value):
+            actions.append(f"copy:{value.volume}")
+            value.collected = True
+
+        def remove_container(name, strict=True):
+            actions.append(f"container:{name}")
+            harness.containers.discard(name)
+            return True
+
+        def remove_volume(name, strict=True):
+            actions.append(f"volume:{name}")
+            harness.volumes.discard(name)
+            harness.evidence_stores.pop(name, None)
+            return True
+
+        harness.collect_evidence = collect
+        harness.remove_container = remove_container
+        harness.remove_volume = remove_volume
+        cleanup = harness.cleanup()
+        self.assertTrue(cleanup["ok"])
+        self.assertEqual(actions[0], "copy:fixture-volume")
+        self.assertLess(
+            actions.index("copy:fixture-volume"), actions.index("volume:fixture-volume")
+        )
+        self.assertTrue(
+            all(
+                actions.index("copy:fixture-volume") < actions.index(action)
+                for action in actions
+                if action.startswith("container:")
+            )
+        )
+
+    def test_cleanup_copy_failure_is_terminal_but_resources_are_removed(self):
+        harness = object.__new__(runner.DockerHarness)
+        harness.args = runner.argparse.Namespace(keep=False)
+        harness.containers = {"fixture-carrier"}
+        harness.volumes = {"fixture-volume"}
+        harness.network_created = False
+        store = runner.EvidenceStore(
+            "fixture-volume", "fixture-carrier", HERE / "evidence" / "fixture"
+        )
+        harness.evidence_stores = {store.volume: store}
+
+        def fail_copy(value):
+            raise runner.HarnessError(f"copy failed for {value.volume}")
+
+        def remove_container(name, strict=True):
+            harness.containers.discard(name)
+            return True
+
+        def remove_volume(name, strict=True):
+            harness.volumes.discard(name)
+            harness.evidence_stores.pop(name, None)
+            return True
+
+        harness.collect_evidence = fail_copy
+        harness.remove_container = remove_container
+        harness.remove_volume = remove_volume
+        cleanup = harness.cleanup()
+        self.assertFalse(cleanup["ok"])
+        self.assertEqual(cleanup["evidence_copy_failures"], ["fixture-volume"])
+        self.assertEqual(cleanup["remaining_containers"], [])
+        self.assertEqual(cleanup["remaining_volumes"], [])
+        self.assertIn("copy failed", cleanup["errors"][0])
+
     def test_gate_profile_rejects_admission_downgrades(self):
         parser = runner.argument_parser()
         runner.validate_arguments(parser.parse_args([]))
@@ -356,14 +501,58 @@ class HarnessTests(unittest.TestCase):
         harness = object.__new__(runner.DockerHarness)
         harness.args = runner.argparse.Namespace(keep=False)
         harness.containers = {"fixture"}
+        harness.volumes = {"fixture-volume"}
+        harness.evidence_stores = {}
         harness.network_created = True
         harness.network = "fixture-net"
         harness.docker = lambda *args, **kwargs: unavailable
         cleanup = harness.cleanup()
         self.assertFalse(cleanup["ok"])
         self.assertEqual(cleanup["remaining_containers"], ["fixture"])
+        self.assertEqual(cleanup["remaining_volumes"], ["fixture-volume"])
         self.assertTrue(cleanup["network_remaining"])
-        self.assertEqual(len(cleanup["errors"]), 2)
+        self.assertEqual(len(cleanup["errors"]), 3)
+
+        missing_volume = runner.subprocess.CompletedProcess(
+            ["docker", "volume", "inspect"],
+            1,
+            b"",
+            b"Error response from daemon: get fixture-volume: no such volume\n",
+        )
+        self.assertTrue(
+            runner.docker_object_missing(
+                missing_volume, kind="volume", name="fixture-volume"
+            )
+        )
+
+    def test_jsonl_writer_rejects_existing_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "evidence.jsonl"
+            output.write_text("sentinel\n")
+            with self.assertRaisesRegex(
+                runner.HarnessError, "evidence output already exists"
+            ):
+                runner.JsonlWriter(output)
+            self.assertEqual(output.read_text(), "sentinel\n")
+
+            fresh = Path(temporary) / "fresh.jsonl"
+            writer = runner.JsonlWriter(fresh)
+            writer.close()
+            self.assertTrue(fresh.exists())
+
+    def test_ignored_evidence_does_not_change_workspace_digest(self):
+        evidence_dir = HERE / "evidence"
+        directory_existed = evidence_dir.exists()
+        evidence_dir.mkdir(exist_ok=True)
+        ignored = evidence_dir / f"digest-test-{runner.uuid.uuid4().hex}.jsonl"
+        before = runner.workspace_digest()
+        try:
+            ignored.write_text('{"kind":"test"}\n')
+            self.assertEqual(runner.workspace_digest(), before)
+        finally:
+            ignored.unlink(missing_ok=True)
+            if not directory_existed:
+                evidence_dir.rmdir()
 
     def test_helper_context_excludes_rust_target(self):
         ignore = (HERE / "Dockerfile.harness.dockerignore").read_text()

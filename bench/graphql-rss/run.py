@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -112,6 +113,11 @@ def docker_object_missing(
         "network": (
             f"network {name} not found".lower(),
             f"no such network: {name}".lower(),
+            f"no such object: {name}".lower(),
+        ),
+        "volume": (
+            f"no such volume: {name}".lower(),
+            f"get {name}: no such volume".lower(),
             f"no such object: {name}".lower(),
         ),
     }
@@ -466,7 +472,10 @@ class JsonlWriter:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.stream = path.open("a", encoding="utf-8")
+        try:
+            self.stream = path.open("x", encoding="utf-8")
+        except FileExistsError as error:
+            raise HarnessError(f"evidence output already exists: {path}") from error
 
     def write(self, value: dict[str, Any]) -> None:
         self.stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
@@ -475,6 +484,14 @@ class JsonlWriter:
 
     def close(self) -> None:
         self.stream.close()
+
+
+@dataclass
+class EvidenceStore:
+    volume: str
+    carrier: str
+    destination: Path
+    collected: bool = False
 
 
 class DockerHarness:
@@ -493,6 +510,8 @@ class DockerHarness:
         self.pg = f"{self.prefix}-pg"
         self.evidence_dir = evidence_dir
         self.containers: set[str] = set()
+        self.volumes: set[str] = set()
+        self.evidence_stores: dict[str, EvidenceStore] = {}
         self.network_created = False
         self.graphql_image = args.graphql_image or f"{self.prefix}-graphql:local"
         self.helper_image = args.helper_image or f"{self.prefix}-helper:local"
@@ -600,6 +619,172 @@ class DockerHarness:
         if strict:
             raise HarnessError(f"container {name} still exists after forced removal")
         return False
+
+    def volume_state(self, name: str) -> dict[str, Any]:
+        result = self.docker("volume", "inspect", name, check=False)
+        if result.returncode != 0:
+            if docker_object_missing(result, kind="volume", name=name):
+                return {"Missing": True}
+            raise HarnessError(
+                f"could not verify volume {name} state: {command_error_tail(result)}"
+            )
+        rows = json.loads(result.stdout)
+        if len(rows) != 1:
+            raise HarnessError(f"expected one volume inspection row for {name}")
+        return rows[0]
+
+    def remove_volume(self, name: str, *, strict: bool = True) -> bool:
+        self.docker("volume", "rm", "--force", name, check=False)
+        removed = bool(self.volume_state(name).get("Missing"))
+        if removed:
+            self.volumes.discard(name)
+            self.evidence_stores.pop(name, None)
+            return True
+        if strict:
+            raise HarnessError(f"volume {name} still exists after forced removal")
+        return False
+
+    @staticmethod
+    def evidence_mount(volume: str) -> str:
+        return f"type=volume,src={volume},dst=/evidence"
+
+    def create_evidence_store(
+        self, case_id: str, destination: Path
+    ) -> EvidenceStore:
+        if self.helper_image_id is None:
+            raise HarnessError("helper image was not resolved")
+        volume = f"{self.prefix}-{case_id}-evidence"
+        carrier = f"{self.prefix}-{case_id}-evidence-carrier"
+        store = EvidenceStore(
+            volume=volume,
+            carrier=carrier,
+            destination=destination,
+        )
+        if not self.volume_state(volume).get("Missing"):
+            raise HarnessError(f"Docker evidence volume already exists: {volume}")
+        self.volumes.add(volume)
+        self.evidence_stores[volume] = store
+        self.docker(
+            "volume",
+            "create",
+            "--label",
+            f"bitmagnet.graphql-rss.session={self.session_id}",
+            "--label",
+            f"bitmagnet.graphql-rss.case={case_id}",
+            volume,
+        )
+
+        self.containers.add(carrier)
+        self.docker(
+            "run",
+            "--detach",
+            "--name",
+            carrier,
+            "--cpus",
+            "0.1",
+            "--memory",
+            "64m",
+            "--pids-limit",
+            "16",
+            "--mount",
+            self.evidence_mount(volume),
+            "--entrypoint",
+            "python",
+            self.helper_image_id,
+            "-c",
+            (
+                "import os,time; os.chmod('/evidence', 0o777); "
+                "time.sleep(2147483647)"
+            ),
+        )
+        permission_check = (
+            "import os; raise SystemExit(0 if "
+            "(os.stat('/evidence').st_mode & 0o777) == 0o777 else 1)"
+        )
+        for _ in range(120):
+            state = self.container_state(carrier)
+            if state.get("Running"):
+                ready = self.docker(
+                    "exec", carrier, "python", "-c", permission_check, check=False
+                )
+                if ready.returncode == 0:
+                    break
+            time.sleep(0.25)
+        else:
+            raise HarnessError("Docker evidence carrier did not become writable")
+        return store
+
+    def collect_evidence(self, store: EvidenceStore) -> None:
+        if store.collected:
+            return
+        store.destination.mkdir(parents=True, exist_ok=True)
+        self.docker(
+            "cp",
+            f"{store.carrier}:/evidence/.",
+            str(store.destination),
+            timeout=120,
+        )
+        store.collected = True
+
+    def mock_run_command(
+        self, name: str, events_name: str, evidence_volume: str
+    ) -> list[str]:
+        if self.helper_image_id is None:
+            raise HarnessError("helper image was not resolved")
+        return [
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--network",
+            self.network,
+            "--network-alias",
+            "pathsearch-mock",
+            "--cpus",
+            "1",
+            "--memory",
+            "256m",
+            "--mount",
+            self.evidence_mount(evidence_volume),
+            self.helper_image_id,
+            "mock",
+            "--events",
+            f"/evidence/{events_name}",
+            "--barrier",
+            "4",
+            "--barrier-timeout",
+            "60",
+        ]
+
+    def graphql_run_command(
+        self, name: str, evidence_volume: str, watcher: str
+    ) -> list[str]:
+        if self.graphql_image_id is None:
+            raise HarnessError("GraphQL image was not resolved")
+        return [
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--network",
+            self.network,
+            "--cpus",
+            "4",
+            "--memory",
+            "8g",
+            "--memory-swap",
+            "8g",
+            "--pids-limit",
+            "512",
+            "--mount",
+            self.evidence_mount(evidence_volume),
+            *self.graphql_environment(),
+            "--entrypoint",
+            "/bin/sh",
+            self.graphql_image_id,
+            "-c",
+            watcher,
+        ]
 
     def run_helper(
         self,
@@ -709,46 +894,30 @@ class DockerHarness:
 
         return {"seed": seed_summary}
 
-    def start_mock(self, case_id: str) -> tuple[str, Path]:
+    def start_mock(self, case_id: str, evidence_volume: str) -> tuple[str, str]:
         if self.helper_image_id is None:
             raise HarnessError("helper image was not resolved")
         name = f"{self.prefix}-mock-{case_id}"
-        events = self.evidence_dir / f"{name}-events.jsonl"
-        if events.exists():
-            raise HarnessError(f"mock evidence path already exists: {events}")
+        events_name = f"{name}-events.jsonl"
         self.containers.add(name)
-        self.docker(
-            "run",
-            "--detach",
-            "--name",
-            name,
-            "--network",
-            self.network,
-            "--network-alias",
-            "pathsearch-mock",
-            "--cpus",
-            "1",
-            "--memory",
-            "256m",
-            "--mount",
-            f"type=bind,src={self.evidence_dir},dst=/evidence",
-            self.helper_image_id,
-            "mock",
-            "--events",
-            f"/evidence/{events.name}",
-            "--barrier",
-            "4",
-            "--barrier-timeout",
-            "60",
+        self.docker(*self.mock_run_command(name, events_name, evidence_volume))
+        events_container_path = f"/evidence/{events_name}"
+        ready_command = (
+            "from pathlib import Path; "
+            f"raise SystemExit(0 if Path({events_container_path!r}).is_file() else 1)"
         )
         for _ in range(120):
             state = self.container_state(name)
-            if state.get("Running") and events.exists():
-                break
+            if state.get("Running"):
+                ready = self.docker(
+                    "exec", name, "python", "-c", ready_command, check=False
+                )
+                if ready.returncode == 0:
+                    break
             time.sleep(0.25)
         else:
             raise HarnessError("gRPC barrier mock did not become ready")
-        return name, events
+        return name, events_name
 
     def container_state(self, name: str) -> dict[str, Any]:
         result = self.docker(
@@ -884,8 +1053,8 @@ class DockerHarness:
         name = f"{self.prefix}-{case_id}"
         run_dir = self.evidence_dir / f"{self.prefix}-{case_id}-cgroup"
         run_dir.mkdir(parents=True, exist_ok=False)
-        run_dir.chmod(0o777)
-        mock_name, events_path = self.start_mock(case_id)
+        evidence_store = self.create_evidence_store(case_id, run_dir)
+        mock_name, events_name = self.start_mock(case_id, evidence_store.volume)
         refine_generation = self.reset_refine_barrier()
 
         watcher = r"""
@@ -933,30 +1102,7 @@ exit "$app_status"
 """.strip()
 
         self.containers.add(name)
-        self.docker(
-            "run",
-            "--detach",
-            "--name",
-            name,
-            "--network",
-            self.network,
-            "--cpus",
-            "4",
-            "--memory",
-            "8g",
-            "--memory-swap",
-            "8g",
-            "--pids-limit",
-            "512",
-            "--mount",
-            f"type=bind,src={run_dir},dst=/evidence",
-            *self.graphql_environment(),
-            "--entrypoint",
-            "/bin/sh",
-            self.graphql_image_id,
-            "-c",
-            watcher,
-        )
+        self.docker(*self.graphql_run_command(name, evidence_store.volume, watcher))
         inspected = json.loads(self.docker("inspect", name).stdout)[0]
         host_config = inspected.get("HostConfig") or {}
         actual_contract = {
@@ -1007,20 +1153,23 @@ exit "$app_status"
 
         time.sleep(0.5)
         live_state = self.container_state(name)
-        cgroup = read_cgroup_snapshot(run_dir)
         if live_state.get("Running"):
             self.docker("stop", "--time", "15", name, check=False, timeout=30)
         state = self.container_state(name)
-        # The watcher can capture a last sample after our first read.
-        cgroup = read_cgroup_snapshot(run_dir) or cgroup
         logged = self.docker("logs", name, check=False)
         logs = logged.stdout + logged.stderr
-        self.remove_container(name)
+        self.collect_evidence(evidence_store)
 
+        cgroup = read_cgroup_snapshot(run_dir)
+        events_path = run_dir / events_name
         events = new_mock_events(events_path, 0)
         barrier = barrier_evidence(events, scenario)
         refine_barrier = self.refine_barrier_evidence(refine_generation)
+
+        self.remove_container(name)
         self.remove_container(mock_name)
+        self.remove_container(evidence_store.carrier)
+        self.remove_volume(evidence_store.volume)
         evaluation = evaluate_run(
             driver=driver,
             barrier=barrier,
@@ -1066,31 +1215,58 @@ exit "$app_status"
             "cgroup_v2": cgroup,
             "container_state_before_stop": live_state,
             "container_state_after_stop": state,
+            "evidence_transport": {
+                "kind": "docker_volume_cp",
+                "volume": evidence_store.volume,
+                "path": str(run_dir.relative_to(self.evidence_dir)),
+            },
             "container_log_sha256": sha256_bytes(logs),
             "container_log_tail": logs.decode(errors="replace").splitlines()[-200:],
             "evaluation": evaluation,
         }
 
     def cleanup(self) -> dict[str, Any]:
+        errors = []
+        evidence_copy_failures = []
+        for store in sorted(
+            self.evidence_stores.values(), key=lambda item: item.volume
+        ):
+            if store.collected:
+                continue
+            try:
+                self.collect_evidence(store)
+            except Exception as error:
+                evidence_copy_failures.append(store.volume)
+                errors.append(
+                    f"evidence copy {store.volume}: {type(error).__name__}: {error}"
+                )
         if self.args.keep:
             print(
-                f"--keep selected; preserving containers/network with prefix {self.prefix}",
+                "--keep selected; preserving containers/volumes/network with prefix "
+                f"{self.prefix}",
                 file=sys.stderr,
             )
             return {
-                "ok": True,
+                "ok": not errors,
                 "preserved": True,
                 "remaining_containers": sorted(self.containers),
+                "remaining_volumes": sorted(self.volumes),
                 "network_remaining": self.network_created,
-                "errors": [],
+                "evidence_copy_failures": evidence_copy_failures,
+                "errors": errors,
             }
-        errors = []
         for name in sorted(tuple(self.containers), reverse=True):
             try:
                 if not self.remove_container(name, strict=False):
                     errors.append(f"container still exists: {name}")
             except Exception as error:
                 errors.append(f"container cleanup {name}: {type(error).__name__}: {error}")
+        for name in sorted(tuple(self.volumes), reverse=True):
+            try:
+                if not self.remove_volume(name, strict=False):
+                    errors.append(f"volume still exists: {name}")
+            except Exception as error:
+                errors.append(f"volume cleanup {name}: {type(error).__name__}: {error}")
         if self.network_created:
             try:
                 self.docker("network", "rm", self.network, check=False)
@@ -1115,13 +1291,15 @@ exit "$app_status"
             "ok": not errors,
             "preserved": False,
             "remaining_containers": sorted(self.containers),
+            "remaining_volumes": sorted(self.volumes),
             "network_remaining": self.network_created,
+            "evidence_copy_failures": evidence_copy_failures,
             "errors": errors,
         }
 
 
 def default_output() -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return SCRIPT_DIR / "evidence" / f"graphql-rss-{stamp}.jsonl"
 
 
@@ -1289,6 +1467,11 @@ def main() -> int:
                     )
                 },
                 "docker_builders": docker_builders(args),
+                "evidence_transport": {
+                    "kind": "docker_volume_cp",
+                    "client_daemon_shared_filesystem_required": False,
+                    "exclusive_output": True,
+                },
                 "repository": provenance,
             }
         )
@@ -1401,7 +1584,13 @@ def main() -> int:
                 "ok": False,
                 "preserved": False,
                 "remaining_containers": sorted(harness.containers),
+                "remaining_volumes": sorted(harness.volumes),
                 "network_remaining": harness.network_created,
+                "evidence_copy_failures": sorted(
+                    store.volume
+                    for store in harness.evidence_stores.values()
+                    if not store.collected
+                ),
                 "errors": [f"{type(error).__name__}: {error}"],
             }
         writer.write(

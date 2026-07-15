@@ -7,7 +7,9 @@ clients, and the service container's cgroup-v2 memory accounting.
 
 It is local-only. It creates a private container network, a tmpfs PostgreSQL,
 an L3 test double, and fresh GraphQL containers. It publishes no host ports and
-does not read a kubeconfig, contact k3s, or mutate production.
+does not read a kubeconfig, contact k3s, or mutate production. Per-case kernel
+and mock evidence uses a Docker-managed named volume and `docker cp`, so the
+Docker client and daemon do not need a shared host filesystem.
 
 ## Prerequisites (fail closed)
 
@@ -144,6 +146,9 @@ The JSONL contains:
   state, and service-log hash/tail;
 - per-check evaluation and a terminal pass/fail summary.
 
+The output is created exclusively and an existing path is rejected rather than
+appended to. Use a fresh filename for every smoke or gate attempt.
+
 A small PID-1 wrapper and cgroup watcher run inside the GraphQL container. The
 wrapper forwards termination to the exact GraphQL binary; the watcher atomically
 mirrors the kernel files every 100 ms and takes a final sample after the binary
@@ -153,12 +158,14 @@ kernel-maintained and exact.
 
 ## Cleanup and exit status
 
-Every helper, service, and dependency container has a session-scoped name and is
-registered before launch. Containers and the private network are removed and
-their absence verified on success and failure; cleanup failure is terminal
-evidence. Built images and JSONL evidence remain for review. `--keep` preserves
-containers and the network only with the `smoke` profile; remove them manually
-afterward using the prefix printed in Docker names. The gate profile rejects it.
+Every helper, service, dependency container, and evidence volume has a
+session-scoped name and is registered before launch. Uncollected volume evidence
+is copied before cleanup; containers, volumes, and the private network are then
+removed and their absence verified on success and failure. Copy or cleanup
+failure is terminal evidence. Built images, copied per-case files, and JSONL
+evidence remain for review. `--keep` preserves containers, volumes, and the
+network only with the `smoke` profile; remove them manually afterward using the
+prefix printed in Docker names. The gate profile rejects it.
 
 - exit `0`: every repetition passed response, barrier, metrics, OOM, and peak
   checks;
