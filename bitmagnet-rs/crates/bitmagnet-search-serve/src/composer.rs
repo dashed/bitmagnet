@@ -55,6 +55,13 @@ enum RefineCap {
     Deadline,
 }
 
+struct RefineAccum<'a> {
+    refined: &'a mut Vec<SearchResultItem>,
+    retained_files: &'a mut u64,
+    retained_bytes: &'a mut u64,
+    chunk_decoded_bytes: &'a mut u64,
+}
+
 /// One exact-matching file retained by the shared C4 visitor.
 ///
 /// The hydrated item is shared across all of its matching files while the
@@ -668,17 +675,16 @@ impl Composer {
         predicate: &RefinePredicate,
         retain_refine_files: bool,
         deadline: Instant,
-        refined: &mut Vec<SearchResultItem>,
-        retained_files: &mut u64,
-        retained_bytes: &mut u64,
-        chunk_decoded_bytes: &mut u64,
+        accum: RefineAccum<'_>,
     ) -> Result<RefineCap, ()> {
         let file_cap = u64::from(self.effective_file_cap());
         for mut item in items {
             if Instant::now() >= deadline {
                 return Ok(RefineCap::Deadline);
             }
-            let decoded = match self.bounded_files_for_refine(&item.torrent, chunk_decoded_bytes) {
+            let decoded = match self
+                .bounded_files_for_refine(&item.torrent, accum.chunk_decoded_bytes)
+            {
                 Ok(Some(decoded)) => decoded,
                 Err(RefineCap::OversizedCandidate) => continue,
                 Ok(None) | Err(RefineCap::None) => {
@@ -706,25 +712,25 @@ impl Composer {
                 continue;
             }
             if retain_refine_files {
-                if !refined.is_empty()
-                    && retained_files.saturating_add(file_count)
+                if !accum.refined.is_empty()
+                    && accum.retained_files.saturating_add(file_count)
                         > u64::from(self.config.retained_file_budget)
                 {
                     return Ok(RefineCap::RetainedFiles);
                 }
-                if retained_bytes.saturating_add(file_owned_bytes)
+                if accum.retained_bytes.saturating_add(file_owned_bytes)
                     > self.config.retained_byte_budget
                 {
                     return Ok(RefineCap::RetainedBytes);
                 }
-                *retained_files = retained_files.saturating_add(file_count);
-                *retained_bytes = retained_bytes.saturating_add(file_owned_bytes);
+                *accum.retained_files = accum.retained_files.saturating_add(file_count);
+                *accum.retained_bytes = accum.retained_bytes.saturating_add(file_owned_bytes);
                 item.refine_files = files;
             } else {
                 item.refine_files.clear();
             }
             item.torrent.files_data = None;
-            refined.push(item);
+            accum.refined.push(item);
         }
         Ok(RefineCap::None)
     }
@@ -858,10 +864,12 @@ impl Composer {
                 &predicate,
                 options.retain_refine_files,
                 deadline,
-                &mut refined,
-                &mut retained_files,
-                &mut retained_bytes,
-                &mut chunk_decoded_bytes,
+                RefineAccum {
+                    refined: &mut refined,
+                    retained_files: &mut retained_files,
+                    retained_bytes: &mut retained_bytes,
+                    chunk_decoded_bytes: &mut chunk_decoded_bytes,
+                },
             ) {
                 Ok(RefineCap::None) => {}
                 Ok(reason) => {
@@ -1654,10 +1662,12 @@ mod tests {
                 &predicate,
                 true,
                 deadline,
-                &mut refined,
-                &mut retained_files,
-                &mut retained_bytes,
-                &mut chunk_decoded_bytes,
+                RefineAccum {
+                    refined: &mut refined,
+                    retained_files: &mut retained_files,
+                    retained_bytes: &mut retained_bytes,
+                    chunk_decoded_bytes: &mut chunk_decoded_bytes,
+                },
             )
             .unwrap();
 
