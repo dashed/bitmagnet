@@ -1148,11 +1148,9 @@ export type QueuePurgeJobsMutation = {
 };
 
 export type TorrentContentSearchQueryVariables = Exact<{
-  aggregationBudget?: InputMaybe<Scalars["Float"]["input"]>;
   cached?: InputMaybe<Scalars["Boolean"]["input"]>;
   facets?: InputMaybe<TorrentContentFacetsInput>;
   hasNextPage?: InputMaybe<Scalars["Boolean"]["input"]>;
-  infoHashes?: InputMaybe<Array<Scalars["Hash20"]["input"]> | Scalars["Hash20"]["input"]>;
   limit?: InputMaybe<Scalars["Int"]["input"]>;
   orderBy?: InputMaybe<Array<TorrentContentOrderByInput> | TorrentContentOrderByInput>;
   page?: InputMaybe<Scalars["Int"]["input"]>;
@@ -1611,10 +1609,10 @@ export const QueuePurgeJobsDocument = new TypedDocumentString(`
 }
     `) as unknown as TypedDocumentString<QueuePurgeJobsMutation, QueuePurgeJobsMutationVariables>;
 export const TorrentContentSearchDocument = new TypedDocumentString(`
-    query TorrentContentSearch($aggregationBudget: Float, $cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $infoHashes: [Hash20!], $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
+    query TorrentContentSearch($cached: Boolean, $facets: TorrentContentFacetsInput, $hasNextPage: Boolean, $limit: Int, $orderBy: [TorrentContentOrderByInput!], $page: Int, $queryString: String, $totalCount: Boolean) {
   torrentContent {
     search(
-      input: {aggregationBudget: $aggregationBudget, cached: $cached, facets: $facets, hasNextPage: $hasNextPage, infoHashes: $infoHashes, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}
+      input: {cached: $cached, facets: $facets, hasNextPage: $hasNextPage, limit: $limit, orderBy: $orderBy, page: $page, queryString: $queryString, totalCount: $totalCount}
     ) {
       totalCount
       totalCountIsEstimate

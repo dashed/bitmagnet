@@ -334,19 +334,39 @@ func TestProductionReactSearchOperationIsComparable(t *testing.T) {
 	) {
 		t.Fatal("production React search with totalCount=false must remain ineligible")
 	}
+}
 
-	exactControl := map[string]any{
+func TestExactCountControlOperationIsComparable(t *testing.T) {
+	t.Parallel()
+
+	query := `query GraphQLShadowExactControl(
+	  $aggregationBudget: Float!
+	  $infoHashes: [Hash20!]!
+	  $limit: Int!
+	  $totalCount: Boolean!
+	) {
+	  torrentContent {
+	    search(input: {
+	      aggregationBudget: $aggregationBudget
+	      infoHashes: $infoHashes
+	      limit: $limit
+	      totalCount: $totalCount
+	    }) {
+	      totalCount
+	      totalCountIsEstimate
+	      items { id }
+	      aggregations { __typename }
+	    }
+	  }
+	}`
+	variables := map[string]any{
 		"aggregationBudget": 0,
-		"hasNextPage":       false,
 		"infoHashes":        []any{},
 		"limit":             0,
 		"totalCount":        true,
 	}
-	if !IsComparableSearchOperation(
-		string(query),
-		"TorrentContentSearch",
-		exactControl,
-	) {
+
+	if !IsComparableSearchOperation(query, "GraphQLShadowExactControl", variables) {
 		t.Fatal("bounded exact-count control must remain shadow-comparable")
 	}
 }

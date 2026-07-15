@@ -1,9 +1,7 @@
 query TorrentContentSearch(
-  $aggregationBudget: Float
   $cached: Boolean
   $facets: TorrentContentFacetsInput
   $hasNextPage: Boolean
-  $infoHashes: [Hash20!]
   $limit: Int
   $orderBy: [TorrentContentOrderByInput!]
   $page: Int
@@ -13,11 +11,9 @@ query TorrentContentSearch(
   torrentContent {
     search(
       input: {
-        aggregationBudget: $aggregationBudget
         cached: $cached
         facets: $facets
         hasNextPage: $hasNextPage
-        infoHashes: $infoHashes
         limit: $limit
         orderBy: $orderBy
         page: $page
