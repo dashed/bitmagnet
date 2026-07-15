@@ -76,21 +76,27 @@ canary series and proves it cannot change the production recording rules.
 
 ### Sample-zero admission profile
 
-Homelab commit `65d8d7b` provides a separate
+Homelab commit `65d8d7b`, hardened through `694bc07`, provides a separate
 `bitmagnet-graphql-shadow-canary` profile for validating the deployment path
 before sampling begins. It is serve-only (`worker run --keys=http_server`), has
 no Ingress, is excluded from production recording rules by its distinct Service
 identity, and hard-bounds both the configured and admitted shadow sample rate to
 zero. The profile also fails closed unless its tag-only main image exists on the
-selected node with the expected containerd digest, `linux/amd64` platform, and
-pinned label; the dark GraphQL EndpointSlice must have a ready TCP 3337 address
-before any canary object is applied.
+selected node with the importer-recorded containerd digest and Docker config ID,
+`linux/amd64` platform, and pinned label. The exact tag is inspected through CRI
+before apply; the dark GraphQL EndpointSlice must have a ready TCP 3337 address
+before any canary object is applied. After rollout, the role rechecks the
+containerd tag and attests the single Ready Pod and exact running CRI container
+against the same tag, config ID, node, namespace, Pod name, and Pod UID.
 
 The profile and reciprocal Cilium manifests are offline-rendered through
-Ansible and kubeconform. Importing the image, creating the SELECT-only canary
-database role, and deploying the sample-zero profile are still separate
-`CONFIRM=1` production mutations. Raising the admitted sample ceiling above zero
-is a later gate and must not be folded into initial deployment.
+Ansible and kubeconform. Its placement, resources, serve-only worker set,
+SELECT-only database identity, sample-zero ceiling, and namespace-qualified
+PostgreSQL/GraphQL Cilium destinations are pinned against extra-variable
+overrides. Importing the image, creating the SELECT-only canary database role,
+and deploying the sample-zero profile are still separate `CONFIRM=1` production
+mutations. Raising the admitted sample ceiling above zero is a later gate and
+must not be folded into initial deployment.
 
 **Estimate totals are excluded** from the count-match KPI (the `estimate="false"`
 selector): a budgeted-estimate total legitimately differs between engines, so only
