@@ -29,7 +29,12 @@ WORKDIR /build
 # Copy the complete Rust workspace; .dockerignore excludes target/VCS noise.
 COPY . .
 
-RUN cargo build --locked --release -p bitmagnet-graphql
+# Preserve only the runtime artifact in the committed builder layer. This keeps
+# classic/VFS builders from snapshotting Cargo's multi-gigabyte target tree and
+# gives the cross-stage copy a small, stable source outside Cargo's build tree.
+RUN cargo build --locked --release -p bitmagnet-graphql \
+    && install -D -m 0755 target/release/bitmagnet-graphql /out/bitmagnet-graphql \
+    && rm -rf target
 
 # ---- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -42,7 +47,7 @@ RUN apt-get update \
     && groupadd --system --gid 65532 bitmagnet \
     && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
 
-COPY --from=builder /build/target/release/bitmagnet-graphql /usr/local/bin/bitmagnet-graphql
+COPY --from=builder /out/bitmagnet-graphql /usr/local/bin/bitmagnet-graphql
 
 # Prometheus remains disabled unless BITMAGNET_METRICS_ADDR is set.
 ENV LISTEN_ADDR=0.0.0.0:3337
