@@ -98,7 +98,7 @@ mirror or mirrored-body buffer to configure.
 
 ---
 
-## Reconciled execution status (2026-07-14)
+## Reconciled execution status (2026-07-15)
 
 This table supersedes the original status cells in the detailed task-definition
 tables below. Those rows remain the scope contract, but were not kept current while
@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | runtime/gate `4eec31de` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and a fail-closed integrated RSS harness are pushed | run the integrated four-client GraphQL/sqlx gate on a suitable amd64 Docker host; G3 point reads; dark deployment/soak; deploy-branch merge |
+| Integration | runtime/gate `fb413c97` | S/C/G/P merged; bounded path decode/retention, projection-aware file retention, strict root-only shadow admission, component RSS evidence, and a fail-closed integrated RSS harness are pushed | wait for exclusive Kata-node capacity, then run the integrated four-client GraphQL/sqlx gate; G3 point reads; dark deployment/soak; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
-| C | byte envelope `deb351d7`; evidence `d173f2e6` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits now close the owned-path defect; release Linux component RSS scenarios pass | integrated GraphQL/sqlx RSS acceptance still blocks deployment; C5 remains quality-gated |
+| C | byte envelope `deb351d7`; evidence `d173f2e6`; gate `fb413c97` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits now close the owned-path defect; release Linux component RSS scenarios pass | integrated GraphQL/sqlx RSS acceptance still blocks deployment; its dedicated workspace is provisioned but capacity-guarded; C5 remains quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
 | P | `7c5c7eea` + strict gate `90fc6845` | Go-embedded hook executes Go once and now admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings fail closed | low-rate dark soak after deployment admission; optional redirect/content-type hardening |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | homelab `6f3ee63` | fail-closed dark role/image import/CNP/ServiceMonitor, default-off shadow plumbing, and all three byte-budget envs are committed and pushed; not deployed | integrated RSS acceptance + real image pin, then separately authorized dark deployment/soak |
+| I | role `6f3ee63`; Coder gate lane `222a811` | fail-closed dark role/image import/CNP/ServiceMonitor, default-off shadow plumbing, all three byte-budget envs, and an exclusive dedicated Coder RSS profile are committed and pushed; not deployed | integrated RSS acceptance + real image pin, then separately authorized dark deployment/soak |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -147,7 +147,7 @@ below every agreement threshold, so it remains dormant regardless of the formal
   stricter ordering and rejection tests pin it. The L2 tonic client does not
   support Go's Unix-socket target syntax; production uses a ClusterIP endpoint.
 
-### P2-5 byte-envelope closeout and remaining admission gate (2026-07-14)
+### P2-5 byte-envelope closeout and remaining admission gate (2026-07-15)
 
 - `deb351d7` bounds compressed SQL input and streaming zstd/MessagePack output,
   fallible decode growth, decoded MessagePack plus owned path/extension bytes per
@@ -168,7 +168,7 @@ below every agreement threshold, so it remains dormant regardless of the formal
   model 26 plus fixtures; search-query 52; search-serve 63 plus both RSS binaries
   and the live-adapter target. Focused all-target clippy denies warnings, Cargo
   formatting is clean, and the focused Go shadow/HTTP tests pass.
-- `bench/graphql-rss` at `4eec31de` builds the exact GraphQL image and exercises
+- `bench/graphql-rss` through `fb413c97` builds the exact GraphQL image and exercises
   real PostgreSQL/sqlx hydration, a fresh L3 mock per case, four simultaneous
   clients, minimal versus `torrent.files` projections, and kernel cgroup-v2 RSS/
   OOM evidence. It requires amd64, three repeats, a fixed 8 GiB cgroup and 6 GiB
@@ -177,13 +177,28 @@ below every agreement threshold, so it remains dormant regardless of the formal
   A forced-RLS hook was dynamically proven with four distinct PostgreSQL
   backends after the composer semaphore; the helper Docker context is 39.46 kB.
   An independent exact-commit re-review found no remaining code blockers after
-  all nine original findings closed; 12/12 harness unit tests, Python compile,
-  shell syntax, dynamic TERM normalization, and fail-closed cleanup probes pass.
-- The full integrated gate has **not** run. The disposable Coder Docker server
-  reports 12,749,656,064 bytes, below the unchanged 12 GiB prerequisite, and its
-  nested-overlay builder is unsuitable. Preflight exits 2 before creating gate
-  containers. No production node was used as a benchmark host. Therefore
-  `bitmagnet_graphql_rss_gate_accepted=false` remains the correct admission state.
+  all nine original findings closed. The runner now records separate GraphQL and
+  helper builder backends: the Kata/VFS compatibility path uses classic Docker
+  only for GraphQL while the helper remains on BuildKit so its Dockerfile-scoped
+  ignore is honored. The classic path force-removes failed intermediates, and
+  `Dockerfile.graphql` copies out only the release binary before deleting Cargo's
+  target tree. All 14 harness unit tests, Python compile, shell syntax, dynamic
+  TERM normalization, and fail-closed cleanup probes pass.
+- Homelab `222a811` provisions `ansible-bot/bm-p2-rss` with a 4-CPU/16-GiB DinD
+  request, 8-CPU/16-GiB limit, VFS, 100-GiB ephemeral Docker store, 4-GiB dev
+  container, 20-GiB home PVC, amd64, cgroup v2, and `kata-qemu`. Runtime preflight
+  passes with Docker 29.6.1, 11 visible CPUs, and 23,487,074,304 bytes.
+- The full integrated gate has **not** run. A smoke image build at `687bb0fc`
+  reached no workload case: at 2026-07-15 03:43:28Z the Kata agent timed out and
+  QEMU was killed while HEL1's 63-GiB `/dev/shm` backing store was 95% full from
+  concurrent workspaces. Host OOM counters remained zero. A minimal probe also
+  proves BuildKit cross-stage COPY is unsupported on this VFS path, so the retry
+  must use the explicit classic GraphQL builder at current tip `fb413c97`.
+  Homelab now anti-affinity-serializes the RSS profile across both Coder workspace
+  namespaces; `bm-p2-rss` is intentionally Pending until the other workspaces
+  stop and backing capacity is safe. No production node was benchmarked, no
+  admission JSONL exists, and `bitmagnet_graphql_rss_gate_accepted=false` remains
+  the correct state.
 
 ---
 
@@ -419,10 +434,11 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   accepted near-budget positive control remains functional.
 
   The remaining risk is deployment admission, not an unbounded known code path.
-  `4eec31de` provides the exact-image, real-sqlx, four-client cgroup-v2 harness and
+  `fb413c97` provides the exact-image, real-sqlx, four-client cgroup-v2 harness and
   fails closed on provenance, concurrency, response semantics, OOM/state evidence,
-  cleanup, architecture, repeats, and threshold downgrades. No suitable non-prod
-  amd64 Docker host with the required 12 GiB has run it yet. Keep
+  cleanup, architecture, repeats, and threshold downgrades. Its dedicated non-prod
+  Coder host profile now passes runtime preflight, but the first smoke exposed
+  shared Kata `/dev/shm` exhaustion before any workload case. Keep
   `bitmagnet_graphql_rss_gate_accepted=false` until the repeated 8 GiB-cgroup run
   passes its 6 GiB peak ceiling and its JSONL receives review.
 - **P2-6 — shadow adds one sampled Rust/PG read (06 R5).** The selected Go-embedded
