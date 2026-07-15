@@ -59,16 +59,28 @@ in mind when investigating near-equal latency results.
 | Exact total-count match | `graphql_shadow:total_count_match:ratio` | ≥ 0.95 |
 | Served-path latency | `graphql_shadow:rust_latency:p99` vs `:reference_latency:p99` | Rust p99 ≤ Go p99 |
 | Rust execution validity | `graphql_shadow:rust_success:ratio` | ≥ 0.99 |
-| Soak-validity floor | `graphql_shadow:comparisons:increase1h` | ≥ 20 samples / 1h window |
+| Comparison-volume floor | `graphql_shadow:comparisons:increase1h` | ≥ 20 samples / 1h window |
+| Ranking-evidence floor | `graphql_shadow:ranking_observations:increase1h` | ≥ 20 result-bearing samples / 1h window |
+| Exact-count-evidence floor | `graphql_shadow:exact_count_observations:increase1h` | ≥ 20 `estimate=false` samples / 1h window |
 
 Each KPI has a 1/0 `graphql_shadow:<kpi>:pass` companion; their product is
 `graphql_shadow:gate_pass`. All KPIs are computed over a **1h rolling window**;
-the gate requires `gate_pass` to hold **continuously** for the whole soak.
+the gate requires `gate_pass` to hold **continuously** for the whole soak. All
+three volume bits (`volume`, `ranking_volume`, and `exact_count_volume`) are
+mandatory; a high comparison count cannot mask missing ranking or exact-count
+evidence.
+
+**Ranking observations require at least one returned item.** When both engines
+return an empty result set there is no rank-0 item or ranked list to evaluate,
+so that comparison does not enter the Top-1, Jaccard, or RBO denominators and is
+not logged as a ranking discrepancy. If exactly one engine is empty, ranking is
+observed and the request remains a real Top-1/Jaccard/RBO mismatch.
 
 **Estimate totals are excluded** from the count-match KPI (the `estimate="false"`
 selector): a budgeted-estimate total legitimately differs between engines, so only
 exact totals are held to the 0.95 bar. The `estimate="true"` rows are still
-recorded and visible on the dashboard.
+recorded and visible on the dashboard, but never enter the exact numerator,
+denominator, or observation floor.
 
 **Facets** (`graphql_shadow:all_facets_match:ratio`) are reported and alerted on
 (`GraphQLShadowFacetMismatch`, info) but are **not** part of `gate_pass` — the
@@ -93,6 +105,11 @@ min_over_time(graphql_shadow:gate_pass[7d]) == 1
 `1` → PASS (safe to proceed to a user-gated cutover decision). `0` or empty →
 FAIL / insufficient data — do **not** cut over. Widen `[7d]` to the actual soak
 length if it ran longer.
+
+Any comparator or metric-boundary semantic change invalidates the accumulated
+soak. Stop the evidence driver, deploy the repaired source and rules, let the old
+one-hour samples drain, then run a new pilot. The seven-day clock starts only
+after all three volume bits and every numeric pass bit are continuously 1.
 
 To see *which* KPI failed and when, plot each `graphql_shadow:<kpi>:pass` over the
 window; the metric that dropped to 0 points at the defect (phase6 §5: "the failing
@@ -155,5 +172,5 @@ promtool test rules  observability/rules/graphql-shadow-gate.test.yml
 ```
 
 Both are wired into CI-equivalent local verification; the unit test drives
-synthetic pass / fail / low-volume scenarios and asserts `gate_pass` and the
-alerts behave as specified.
+synthetic pass / fail / low-volume, all-estimate, empty-ranking, and exact-count
+threshold scenarios and asserts `gate_pass` and the alerts behave as specified.

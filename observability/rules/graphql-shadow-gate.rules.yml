@@ -14,8 +14,9 @@
 #   exact total-count match    >= 0.95   (estimate totals excluded — see below)
 #   Rust p99 latency           <= Go reference p99 latency
 #   Rust success ratio         >= 0.99   (comparisons / admitted attempts)
-# plus a soak-validity floor: >= MIN_SAMPLES comparisons in the window, so a
-# low-traffic window reads as "not yet passing" rather than a spurious pass.
+# plus three soak-validity floors: >= MIN_SAMPLES total comparisons, ranking
+# observations, and exact-count observations in the window. Low or inapplicable
+# traffic therefore reads as "not yet passing" rather than a spurious pass.
 #
 # WINDOW: all KPIs use a 1h rolling window (single source of truth below). The
 # gate then requires gate_pass to hold continuously across the whole soak, which
@@ -41,6 +42,15 @@ groups:
       - record: graphql_shadow:admitted:increase1h
         expr: sum(increase(bitmagnet_graphql_shadow_admitted_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
 
+      # Both-empty comparisons have no ranking evidence and are omitted from
+      # Top1/Jaccard/RBO at the source. One-sided emptiness remains a mismatch.
+      - record: graphql_shadow:ranking_observations:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) or vector(0)
+
+      # Estimate-labelled observations never enter the exact-count gate.
+      - record: graphql_shadow:exact_count_observations:increase1h
+        expr: sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",estimate="false"}[1h])) or vector(0)
+
       - record: graphql_shadow:rust_success:ratio
         expr: |
           graphql_shadow:comparisons:increase1h
@@ -49,27 +59,27 @@ groups:
 
       - record: graphql_shadow:top1_match:ratio
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}[1h]))
+          (sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}[1h])) or vector(0))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h])), 1)
+          clamp_min((sum(increase(bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) or vector(0)), 1)
 
       - record: graphql_shadow:jaccard20:mean
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_jaccard_sum{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h]))
+          (sum(increase(bitmagnet_graphql_shadow_jaccard_sum{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h])) or vector(0))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_jaccard_count{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h])), 1)
+          clamp_min((sum(increase(bitmagnet_graphql_shadow_jaccard_count{namespace="bitmagnet",service="bitmagnet-l3",k="20"}[1h])) or vector(0)), 1)
 
       - record: graphql_shadow:rbo:mean
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_rbo_sum{namespace="bitmagnet",service="bitmagnet-l3"}[1h]))
+          (sum(increase(bitmagnet_graphql_shadow_rbo_sum{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) or vector(0))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_rbo_count{namespace="bitmagnet",service="bitmagnet-l3"}[1h])), 1)
+          clamp_min((sum(increase(bitmagnet_graphql_shadow_rbo_count{namespace="bitmagnet",service="bitmagnet-l3"}[1h])) or vector(0)), 1)
 
       - record: graphql_shadow:total_count_match:ratio
         expr: |
-          sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}[1h]))
+          (sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}[1h])) or vector(0))
           /
-          clamp_min(sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",estimate="false"}[1h])), 1)
+          clamp_min((sum(increase(bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",estimate="false"}[1h])) or vector(0)), 1)
 
       - record: graphql_shadow:all_facets_match:ratio
         expr: |
@@ -106,6 +116,12 @@ groups:
       - record: graphql_shadow:volume:pass
         expr: (graphql_shadow:comparisons:increase1h >= bool 20) or vector(0)
 
+      - record: graphql_shadow:ranking_volume:pass
+        expr: (graphql_shadow:ranking_observations:increase1h >= bool 20) or vector(0)
+
+      - record: graphql_shadow:exact_count_volume:pass
+        expr: (graphql_shadow:exact_count_observations:increase1h >= bool 20) or vector(0)
+
       # Composite gate: 1 iff every threshold holds AND the window had enough
       # samples. Product of the empty-labelled pass indicators → a single 1/0
       # series. The soak verdict is min_over_time(graphql_shadow:gate_pass[7d]).
@@ -118,11 +134,17 @@ groups:
           * graphql_shadow:latency:pass
           * graphql_shadow:rust_success:pass
           * graphql_shadow:volume:pass
+          * graphql_shadow:ranking_volume:pass
+          * graphql_shadow:exact_count_volume:pass
 
   - name: graphql_shadow_gate_alerts
     rules:
       - alert: GraphQLShadowGateFailing
-        expr: graphql_shadow:gate_pass == 0 and graphql_shadow:comparisons:increase1h >= 20
+        expr: |
+          graphql_shadow:gate_pass == 0
+          and graphql_shadow:volume:pass == 1
+          and graphql_shadow:ranking_volume:pass == 1
+          and graphql_shadow:exact_count_volume:pass == 1
         for: 30m
         labels:
           severity: warning
@@ -136,7 +158,7 @@ groups:
             the failing metric points at the defect. Do NOT cut over.
 
       - alert: GraphQLShadowTop1Low
-        expr: graphql_shadow:top1_match:ratio < 0.98 and graphql_shadow:comparisons:increase1h >= 20
+        expr: graphql_shadow:top1_match:ratio < 0.98 and graphql_shadow:ranking_volume:pass == 1
         for: 30m
         labels:
           severity: warning
@@ -146,7 +168,7 @@ groups:
           description: "Top1 match ratio {{ $value }} < 0.98 — the Rust and Go top result disagree too often."
 
       - alert: GraphQLShadowJaccardLow
-        expr: graphql_shadow:jaccard20:mean < 0.90 and graphql_shadow:comparisons:increase1h >= 20
+        expr: graphql_shadow:jaccard20:mean < 0.90 and graphql_shadow:ranking_volume:pass == 1
         for: 30m
         labels:
           severity: warning
@@ -156,7 +178,7 @@ groups:
           description: "Jaccard@20 mean {{ $value }} < 0.90 — the top-20 result sets diverge."
 
       - alert: GraphQLShadowRBOLow
-        expr: graphql_shadow:rbo:mean < 0.92 and graphql_shadow:comparisons:increase1h >= 20
+        expr: graphql_shadow:rbo:mean < 0.92 and graphql_shadow:ranking_volume:pass == 1
         for: 30m
         labels:
           severity: warning
@@ -166,7 +188,7 @@ groups:
           description: "RBO mean {{ $value }} < 0.92 — the ranked results diverge beyond the head."
 
       - alert: GraphQLShadowCountMatchLow
-        expr: graphql_shadow:total_count_match:ratio < 0.95 and graphql_shadow:comparisons:increase1h >= 20
+        expr: graphql_shadow:total_count_match:ratio < 0.95 and graphql_shadow:exact_count_volume:pass == 1
         for: 30m
         labels:
           severity: warning
@@ -174,6 +196,31 @@ groups:
         annotations:
           summary: GraphQL shadow exact total-count match below 0.95
           description: "Exact total-count match {{ $value }} < 0.95 (estimate totals excluded)."
+
+      - alert: GraphQLShadowRankingEvidenceLow
+        expr: graphql_shadow:ranking_volume:pass == 0 and graphql_shadow:volume:pass == 1
+        for: 1h
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow ranking evidence is insufficient
+          description: >
+            Fewer than 20 non-empty ranking observations were recorded during
+            the last hour. Ranking parity and the soak verdict are not valid.
+
+      - alert: GraphQLShadowExactCountEvidenceLow
+        expr: graphql_shadow:exact_count_volume:pass == 0 and graphql_shadow:volume:pass == 1
+        for: 1h
+        labels:
+          severity: warning
+          component: bitmagnet-graphql-shadow
+        annotations:
+          summary: GraphQL shadow exact-count evidence is insufficient
+          description: >
+            Fewer than 20 estimate=false total-count observations were recorded
+            during the last hour. Exact-count parity and the soak verdict are
+            not valid.
 
       - alert: GraphQLShadowRustSlower
         expr: graphql_shadow:rust_latency:p99 > graphql_shadow:reference_latency:p99 and graphql_shadow:comparisons:increase1h >= 20

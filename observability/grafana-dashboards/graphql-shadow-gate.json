@@ -154,7 +154,7 @@
     {
       "type": "stat",
       "id": 3,
-      "title": "Sampled / admitted / compared / drops (1h)",
+      "title": "Attempts & evidence volume (1h)",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -220,6 +220,28 @@
           "legendFormat": "admitted",
           "range": true,
           "refId": "E"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:ranking_observations:increase1h",
+          "legendFormat": "ranking evidence",
+          "range": true,
+          "refId": "F"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:exact_count_observations:increase1h",
+          "legendFormat": "exact-count evidence",
+          "range": true,
+          "refId": "G"
         }
       ],
       "options": {
@@ -315,6 +337,7 @@
       "type": "timeseries",
       "id": 5,
       "title": "Similarity KPIs (thresholds: Top1 .98 / Jaccard .90 / RBO .92)",
+      "description": "Both-empty comparisons have no ranked result and are excluded from all three ratios. At least 20 result-bearing ranking observations per rolling hour are required by the gate; one-sided emptiness remains a mismatch.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -406,6 +429,7 @@
       "type": "timeseries",
       "id": 6,
       "title": "Count-match & facet agreement (threshold .95)",
+      "description": "The gated total-count ratio includes estimate=false observations only and requires at least 20 exact observations per rolling hour. Estimated totals remain visible in raw metrics but never enter the exact gate.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -646,6 +670,28 @@
           "legendFormat": "rust success",
           "range": true,
           "refId": "G"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:ranking_volume:pass",
+          "legendFormat": "ranking volume",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "graphql_shadow:exact_count_volume:pass",
+          "legendFormat": "exact-count volume",
+          "range": true,
+          "refId": "I"
         }
       ],
       "options": {

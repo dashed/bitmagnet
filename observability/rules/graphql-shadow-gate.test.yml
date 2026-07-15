@@ -265,3 +265,180 @@ tests:
         exp_samples:
           - labels: '{__name__="graphql_shadow:top1_match:ratio"}'
             value: 1
+
+  # ---------------------------------------------------------------------------
+  # ALL ESTIMATES: estimate=true observations never satisfy exact-count volume.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="true"}'
+        values: "0+10x120"
+    promql_expr_test:
+      - expr: graphql_shadow:exact_count_observations:increase1h
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:exact_count_observations:increase1h"}'
+            value: 0
+      - expr: graphql_shadow:total_count_match:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:ratio"}'
+            value: 0
+      - expr: graphql_shadow:exact_count_volume:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:exact_count_volume:pass"}'
+            value: 0
+      - expr: graphql_shadow:gate_pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:gate_pass"}'
+            value: 0
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GraphQLShadowExactCountEvidenceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: bitmagnet-graphql-shadow
+            exp_annotations:
+              summary: GraphQL shadow exact-count evidence is insufficient
+              description: >
+                Fewer than 20 estimate=false total-count observations were recorded during the last hour. Exact-count parity and the soak verdict are not valid.
+      - eval_time: 90m
+        alertname: GraphQLShadowCountMatchLow
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # EMPTY-ONLY RANKING: comparisons and exact totals exist, but no ranked item
+  # was observed, so ranking ratios stay explicit-zero and evidence fails.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+10x120"
+    promql_expr_test:
+      - expr: graphql_shadow:ranking_observations:increase1h
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:ranking_observations:increase1h"}'
+            value: 0
+      - expr: graphql_shadow:top1_match:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:top1_match:ratio"}'
+            value: 0
+      - expr: graphql_shadow:ranking_volume:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:ranking_volume:pass"}'
+            value: 0
+      - expr: graphql_shadow:exact_count_volume:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:exact_count_volume:pass"}'
+            value: 1
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GraphQLShadowRankingEvidenceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: bitmagnet-graphql-shadow
+            exp_annotations:
+              summary: GraphQL shadow ranking evidence is insufficient
+              description: >
+                Fewer than 20 non-empty ranking observations were recorded during the last hour. Ranking parity and the soak verdict are not valid.
+      - eval_time: 90m
+        alertname: GraphQLShadowTop1Low
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # THIN EXACT COHORT: a perfect ratio cannot pass without 20 exact samples.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_comparisons_total{namespace="bitmagnet",service="bitmagnet-l3"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_top1_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true"}'
+        values: "0+10x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+0.1x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="true"}'
+        values: "0+10x120"
+    promql_expr_test:
+      - expr: graphql_shadow:total_count_match:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:ratio"}'
+            value: 1
+      - expr: graphql_shadow:exact_count_volume:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:exact_count_volume:pass"}'
+            value: 0
+      - expr: graphql_shadow:gate_pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:gate_pass"}'
+            value: 0
+
+  # ---------------------------------------------------------------------------
+  # EXACT THRESHOLD: 19/20 passes at 0.95; 18/20 fails at 0.90. Estimate rows
+  # do not dilute or improve either exact-only ratio.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+19x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="false"}'
+        values: "0+1x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="true"}'
+        values: "0+100x120"
+    promql_expr_test:
+      - expr: graphql_shadow:total_count_match:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:ratio"}'
+            value: 0.95
+      - expr: graphql_shadow:total_count_match:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:pass"}'
+            value: 1
+
+  - interval: 1m
+    input_series:
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="false"}'
+        values: "0+18x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="false",estimate="false"}'
+        values: "0+2x120"
+      - series: 'bitmagnet_graphql_shadow_total_count_match_total{namespace="bitmagnet",service="bitmagnet-l3",matched="true",estimate="true"}'
+        values: "0+100x120"
+    promql_expr_test:
+      - expr: graphql_shadow:total_count_match:ratio
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:ratio"}'
+            value: 0.9
+      - expr: graphql_shadow:total_count_match:pass
+        eval_time: 90m
+        exp_samples:
+          - labels: '{__name__="graphql_shadow:total_count_match:pass"}'
+            value: 0
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: GraphQLShadowCountMatchLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: bitmagnet-graphql-shadow
+            exp_annotations:
+              summary: GraphQL shadow exact total-count match below 0.95
+              description: "Exact total-count match 0.9 < 0.95 (estimate totals excluded)."
