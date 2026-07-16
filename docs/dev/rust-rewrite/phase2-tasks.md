@@ -107,11 +107,11 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; source-only candidate `7ba5a75c`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` now pass exact-SHA Rust, Go, and disposable-PostgreSQL source gates, but have no RSS admission, image, promotion, or deployment | keep the failed cohort suspended; admit and measure `7ba5a75c` before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; candidate `7ba5a75c`; exact-SHA Coder RSS evidence `8dd0d1f3`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` pass exact-SHA Rust, Go, disposable-PostgreSQL, and 12-case Coder RSS gates. The Coder artifact is pre-admission evidence only: no canonical four-artifact Maple bundle, typed receipt, image promotion, or deployment exists for this candidate | keep the failed cohort suspended; extend the validator for the fixed phase histogram, run and admit the canonical Maple bundle for `7ba5a75c`, then dark-measure before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; source-only retained-tail candidate `7ba5a75c` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate is source-gated only | run exact RSS/artifact admission and dark measurement before any reset/pilot/new cohort; no replacement green hour or soak exists |
+| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; retained-tail candidate `7ba5a75c`; Coder RSS evidence `8dd0d1f3` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate passes source and Coder RSS gates but remains unadmitted | run canonical Maple four-artifact admission and dark measurement before any reset/pilot/new cohort; no replacement green hour or soak exists |
 | G0/P1 | `244f66cd` | complete; reference only | none |
 | I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact artifact remains healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The supervisor detected the latency-only break, exited `20`, suspended the exact CronJob at generation `3`, and cleared recurring Jobs; public routing is unchanged | preserve containment and failed evidence; do not restart this cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
@@ -471,6 +471,41 @@ cohort must pass an uninterrupted full hour before continuing into the separate
 seven-day soak. No result here authorizes Rust responses, public routing, G3
 eligibility expansion, or C5.
 
+### Exact-SHA Coder RSS pre-admission checkpoint (2026-07-16)
+
+- Source evidence commit `8dd0d1f3` preserves the 18-record gate JSONL for exact
+  clean detached commit `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`.
+  Session `1ccb77c5e3ec4d6796ef0b9272f69f1c` ran all four
+  accepted/adversarial x minimal/files cases three times. All 12 runs and every
+  recorded evaluation check passed; neither cgroup nor Docker reported an OOM.
+- Maximum whole-container RSS was `829325312` bytes (790.90625 MiB), below the
+  `6442450944`-byte (6 GiB) admission ceiling. Both provenance checks retained
+  the exact commit and clean tree. The terminal summary passed and cleanup left
+  no containers, volumes, or non-default network. The remote and committed
+  artifact SHA-256 is
+  `6f572cab408329d84885ad5ab05671e03c1f24d89f443d8998d74e67a45ef7a5`.
+- The first attempt failed before any case because the Coder template overrode
+  the official DinD entrypoint and stranded cgroup-v2 memory/IO controllers in
+  a threaded hierarchy. Homelab `aa42cd4` restores the image entrypoint while
+  preserving explicit daemon arguments; template `improvised_fields70`
+  (`85d99343-1c48-4748-a62e-cdcd0daadcf9`) passed nested CPU/memory-limit smoke
+  before the successful retry. Failed evidence remains distinct at SHA-256
+  `996423a3926f44bef67f48d97bfa8f1bb11e7d87bce7d5ec4ace92545e3e90aa`.
+- This is deliberately **not typed admission**. The fail-closed validator
+  requires one committed canonical Maple bundle containing a same-tip smoke,
+  gate, continuous host-headroom stream, and terminal inventory, all bound to
+  the preserved Maple image. It also needs reviewed support for the new fixed
+  `bitmagnet_search_pathsearch_phase_duration_seconds` histogram family before
+  hashes and policy pins can advance. No candidate image was promoted or
+  deployed, and no traffic/reset/cohort action occurred.
+
+Remaining sequence: keep the failed driver suspended and Go authoritative;
+restore the full production readiness guard; update and test the histogram
+validator contract; run the trusted exact-`7ba5a75c` Maple four-artifact gate;
+commit and review that bundle; then issue a typed receipt. Dark deployment and
+phase-attributed measurement remain later, separate steps. No traffic cohort may
+start from the Coder artifact alone.
+
 ---
 
 ## Lane S — full PG search-query builder + FTS crate (branch `p2s-searchquery`)
@@ -734,9 +769,10 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   ranked tail is real and remains unresolved in live evidence. Source-only
   candidate `7ba5a75c` combines request-wide fair facet scheduling, batched
   pathsearch commits, seven fixed phase timings, and fail-closed writer rollback;
-  its exact Rust/Go/PostgreSQL source gates pass. It has no RSS admission, image,
-  promotion, deployment, or runtime latency proof, so it is not yet accepted as
-  the fix. The supervisor retained CronJob UID
+  its exact Rust/Go/PostgreSQL source gates and a 12-case Coder RSS pre-admission
+  gate pass. It has no canonical Maple bundle, typed receipt, promoted image,
+  deployment, or runtime latency proof, so it is not yet accepted as the fix.
+  The supervisor retained CronJob UID
   `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation 3 with `suspend=true`.
   No replacement cohort has started, and no completed green hour or soak exists.
 
