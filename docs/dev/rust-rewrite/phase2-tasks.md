@@ -98,7 +98,7 @@ mirror or mirrored-body buffer to configure.
 
 ---
 
-## Reconciled execution status (2026-07-15)
+## Reconciled execution status (2026-07-16)
 
 This table supersedes the original status cells in the detailed task-definition
 tables below. Those rows remain the scope contract, but were not kept current while
@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, and internal-only dark deployment. The exact running image is healthy but has not yet been production-latency proven | reset/re-arm -> supervised pilot -> wholly new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, internal-only dark deployment, route-preserving reset/re-arm, and a fresh pilot. The driver remains suspended at pilot-only counters | run the reviewed supervisor through a wholly new rotation and green hour; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness but failed live p99; the exact latency-fixed Rust image is now dark-deployed while the evidence driver remains suspended | reset/re-arm and prove a fresh pilot plus full green hour before any >=7-day clock |
+| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact latency-fixed image is dark-deployed; the replacement cohort was reset and its fresh pilot passed `1/1/1` with zero aborts | prove the full fresh rotation and green hour before any >=7-day clock |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; fresh evidence `f584452b`; homelab pin `26ab7c4` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. Public routing is unchanged and generic inventory enablement remains false | supervise the fresh shadow cohort; routing/cutover, Tantivy egress, and C5 remain off |
+| I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. Reset, pilot, and a fail-closed supervisor are ready; public routing is unchanged and generic inventory enablement remains false | start only through the supervisor; routing/cutover, Tantivy egress, and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -346,11 +346,61 @@ below every agreement threshold, so it remains dormant regardless of the formal
 - The Service remains ClusterIP-only with no Ingress, Certificate, external IP,
   or Tantivy egress. Public routing still uses Authentik and `bitmagnet-l3:3333`;
   Go remains authoritative. The bounded Go comparison hook remains enabled, but
-  the controlled evidence CronJob is suspended with no active Jobs. At the
+  the controlled evidence CronJob was suspended with no active Jobs. At that
   deployment checkpoint all Coder workspaces were stopped and both workspace
-  namespaces were empty. The old failed-cohort counters remain `57/57/57` by
-  design. Counter reset/re-arm, a supervised pilot, and a wholly new green-hour
-  cohort are the remaining gates before the seven-day clock can start.
+  namespaces were empty. The then-current failed-cohort counters `57/57/57`
+  were historical pre-reset state; the fresh checkpoint below supersedes the
+  operational boundary without erasing that failed-latency evidence.
+
+### Fresh reset/pilot and supervised green-hour checkpoint (2026-07-16)
+
+- The latency-fixed dark image above was reset and re-armed through the
+  route-preserving production controllers. Go L3 pod UID
+  `47e6ce62-7cc6-4ae6-897a-2e7523602270` and dark GraphQL UID
+  `568f76ee-9807-4e26-a273-febe130ba8a3` are Ready with zero restarts. The
+  public IngressRoute remains exact UID `876edf57-eec2-46d2-94b5-f4306c3446a7`,
+  generation `2`, Authentik plus `bitmagnet-l3:3333`; Go is authoritative.
+- Fresh pilot UID `2d7a62b6-e8b8-4e83-9164-872a3c6d7973` completed at
+  `2026-07-16T03:24:40Z` with exact sampled/admitted/comparison deltas `1/1/1`
+  and every abort counter zero. Evidence ConfigMap UID
+  `26e59987-c98a-422b-bc0f-ea527d76d3cb` binds L3 identity, CronJob UID
+  `d2d8189f-9e7a-4453-ac8e-951730e8190b`, immutable driver ConfigMap
+  `bitmagnet-graphql-shadow-traffic-37741e72f576`, and all four payload hashes.
+  The replacement CronJob remains generation `1`, `suspend=true`; no recurring
+  cohort or replacement T0 has started.
+- The re-arm availability smoke exposed an independent L2 scaling defect. Its
+  broad extension query implicitly requested an exact total at the normal
+  28-segment high-water and exceeded DuckDB's configured 3-GiB engine limit.
+  Node, pod cgroup, PVC, and restart evidence stayed healthy. The scheduled fold
+  reduced manifest segments `28 -> 5`, then the guarded retry passed.
+- Homelab `f76187e` changes only the three L2 availability probes to
+  `totalCount:false` while retaining a concrete `items.path` assertion;
+  `6af84ca` parses and verifies their real YAML/JSON payloads. Exact-count
+  correctness controls remain intact. Extension-only exact counts still need a
+  separate rollup-backed implementation plus a worst-case 38-layer
+  memory/latency regression; extra memory is not the durable fix.
+- Homelab `00e2590` adds the required fail-closed supervisor and read-only
+  watcher. It freezes pilot/CronJob/immutable ConfigMap/pod/container/route
+  identities, protects current and newly active Coder pods without lifecycle
+  mutations, validates all 11 consecutive five-minute Jobs and 44 exact log
+  rows, and proves all 16 pass series independently with one-hour minimum `1`,
+  count `60`, and changes `0`. It also accumulates the exact 36 recording rules,
+  18 GraphQL plus 3 composer alerts, direct counters, pod logs, relevant Warning
+  events, nodes, endpoints, and dependency identities.
+- Containment is two-tier and route-preserving: driver/proof failures stop the
+  recurring traffic; critical shadow/network/Coder failures network-disable the
+  hook; either controller falls back to the other if its first action fails.
+  The supervisor never changes ingress or Coder lifecycle. Twenty-nine focused
+  tests, Ruff, Python/shell syntax, six Ansible syntax checks, Prometheus rule
+  tests, and live read-only simulated-running preflight/runtime audits passed.
+  At that pre-start audit all reviewed alerts were healthy/inactive, no relevant
+  Warning or severe log existed, and both Coder workspace namespaces were empty.
+
+Remaining sequence: commit both ledgers, recheck drift-prone Coder and production
+identities, start only through the supervisor, prove the complete fresh rotation
+and full green hour, then continue the same uninterrupted cohort into the
+seven-day soak. No result here authorizes Rust responses, public routing, G3
+eligibility expansion, or C5.
 
 ---
 
