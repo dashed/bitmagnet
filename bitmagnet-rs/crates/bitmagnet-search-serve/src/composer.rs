@@ -19,7 +19,7 @@ use crate::api::SearchServe;
 use crate::candidates::{CandidateSource, HealthGate};
 use crate::config::ComposerConfig;
 use crate::filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
-use crate::metrics::{PathsearchMetrics, RouteResult};
+use crate::metrics::{PathsearchMetrics, PathsearchPhase, RouteResult};
 use crate::pg::{
     empty_result, Aggregations, HydrateOptions, PgSearchBackend, QueryOptions, RefineMetadata,
     SearchRequest, SearchResult, SearchResultItem,
@@ -119,6 +119,12 @@ impl Composer {
         if let Some(metrics) = &self.metrics {
             metrics.inc_route(result);
         }
+    }
+
+    fn phase_timer(&self, phase: PathsearchPhase) -> Option<prometheus::HistogramTimer> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.start_phase_timer(phase))
     }
 
     fn record_refine_cap(&self, cap: RefineCap) {
@@ -756,6 +762,9 @@ impl Composer {
         // Lane S skip membership and scalar/content hydration while retaining
         // every facet query, matching Go's aggregation-only refine path.
         request.options.limit = Some(0);
+        // No timer is emitted for the empty/deadline no-op above. This phase
+        // measures an aggregation backend attempt, excluding request shaping.
+        let _aggregations = self.phase_timer(PathsearchPhase::Aggregations);
         match timeout_at(deadline, self.pg.torrent_content(request)).await {
             Ok(Ok(result)) => result.aggregations,
             Ok(Err(error)) => {
@@ -777,6 +786,21 @@ impl Composer {
         offset: u32,
         sorts: Vec<SortBy>,
     ) -> (SearchResult, bool) {
+        // The RAII timer deliberately wraps the inner method so every terminal
+        // return, including ineligible, fallback, and error paths, is observed.
+        let _route_total = self.phase_timer(PathsearchPhase::RouteTotal);
+        self.compose_torrent_content_inner(filters, options, limit, offset, sorts)
+            .await
+    }
+
+    async fn compose_torrent_content_inner(
+        &self,
+        filters: Filters,
+        options: QueryOptions,
+        limit: u32,
+        offset: u32,
+        sorts: Vec<SortBy>,
+    ) -> (SearchResult, bool) {
         let predicate = filters.predicate();
         if predicate.is_empty_substr() || !self.eligible(&filters.query) {
             self.inc_route(RouteResult::Ineligible);
@@ -787,10 +811,12 @@ impl Composer {
             return (empty_result(), false);
         }
         let deadline = self.route_deadline(Instant::now());
-        let Some((ids, candidate_total)) = self
-            .candidate_ids(&filters, limit, offset, sorts, deadline)
-            .await
-        else {
+        let candidates = {
+            let _candidate_ids = self.phase_timer(PathsearchPhase::CandidateIds);
+            self.candidate_ids(&filters, limit, offset, sorts, deadline)
+                .await
+        };
+        let Some((ids, candidate_total)) = candidates else {
             return (empty_result(), false);
         };
         if ids.is_empty() {
@@ -802,7 +828,11 @@ impl Composer {
                 (empty_result(), false)
             };
         }
-        let metadata = match timeout_at(deadline, self.pg.refine_metadata(&ids)).await {
+        let metadata_result = {
+            let _refine_metadata = self.phase_timer(PathsearchPhase::RefineMetadata);
+            timeout_at(deadline, self.pg.refine_metadata(&ids)).await
+        };
+        let metadata = match metadata_result {
             Ok(Ok(metadata)) => metadata,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch file-count probe failed; falling back to PostgreSQL");
@@ -823,7 +853,11 @@ impl Composer {
             return (Self::empty_estimate(), true);
         }
         let chunks = self.chunk_by_file_budget(kept, &metadata);
-        let _permit = match self.acquire_refine_slot(deadline).await {
+        let permit = {
+            let _refine_slot_wait = self.phase_timer(PathsearchPhase::RefineSlotWait);
+            self.acquire_refine_slot(deadline).await
+        };
+        let _permit = match permit {
             Some(permit) => permit,
             None => {
                 if let Some(metrics) = &self.metrics {
@@ -849,10 +883,14 @@ impl Composer {
                 cap = RefineCap::Deadline;
                 break;
             }
-            let items = match self
-                .hydrate_chunk(options.refine_request(), &chunk, deadline)
-                .await
-            {
+            // Hydrate records every attempted bounded chunk. Exact refine records
+            // only after that chunk hydrates successfully.
+            let hydrate_result = {
+                let _hydrate_chunk = self.phase_timer(PathsearchPhase::HydrateChunk);
+                self.hydrate_chunk(options.refine_request(), &chunk, deadline)
+                    .await
+            };
+            let items = match hydrate_result {
                 Ok(items) => items,
                 Err(RefineCap::Deadline) => {
                     cap = RefineCap::Deadline;
@@ -863,18 +901,22 @@ impl Composer {
                     return (empty_result(), false);
                 }
             };
-            match self.refine_chunk(
-                items,
-                &predicate,
-                options.retain_refine_files,
-                deadline,
-                RefineAccum {
-                    refined: &mut refined,
-                    retained_files: &mut retained_files,
-                    retained_bytes: &mut retained_bytes,
-                    chunk_decoded_bytes: &mut chunk_decoded_bytes,
-                },
-            ) {
+            let refine_result = {
+                let _refine_chunk = self.phase_timer(PathsearchPhase::RefineChunk);
+                self.refine_chunk(
+                    items,
+                    &predicate,
+                    options.retain_refine_files,
+                    deadline,
+                    RefineAccum {
+                        refined: &mut refined,
+                        retained_files: &mut retained_files,
+                        retained_bytes: &mut retained_bytes,
+                        chunk_decoded_bytes: &mut chunk_decoded_bytes,
+                    },
+                )
+            };
+            match refine_result {
                 Ok(RefineCap::None) => {}
                 Ok(reason) => {
                     cap = reason;
@@ -1748,6 +1790,27 @@ mod tests {
             .all(|call| !candidate_ids(&call.options.filter).contains(&id(1))));
         assert_eq!(metrics.refine_declined_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::CandidateIds), 1);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineMetadata),
+            1
+        );
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineSlotWait),
+            1
+        );
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::HydrateChunk),
+            2,
+            "hydrate timing is one observation per attempted bounded chunk"
+        );
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineChunk),
+            2,
+            "exact-refine timing follows each successfully hydrated bounded chunk"
+        );
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::Aggregations), 1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RouteTotal), 1);
     }
 
     #[tokio::test]
@@ -1952,6 +2015,11 @@ mod tests {
         assert!(result.total_count_is_estimate);
         assert_eq!(metrics.deadline_capped_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::Aggregations),
+            0,
+            "an expired route deadline must not emit an aggregation observation"
+        );
     }
 
     #[tokio::test]
@@ -1974,6 +2042,10 @@ mod tests {
         assert!(shed.items.is_empty());
         assert_eq!(metrics.shed_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineSlotWait),
+            1
+        );
         drop(held);
 
         let candidates = Arc::new(FakeCandidates::returning(&[id(1), id(2)], 2));
@@ -1993,7 +2065,37 @@ mod tests {
         assert!(single_chunk_shed.items.is_empty());
         assert_eq!(metrics.shed_count(), 2);
         assert_eq!(metrics.route_count(RouteResult::Served), 2);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineSlotWait),
+            2
+        );
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn empty_refined_set_skips_aggregation_backend_and_phase_observation() {
+        let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
+        let pg = Arc::new(FakePg::new(
+            vec![item(1, 1, false)],
+            HashMap::from([(id(1), 1)]),
+        ));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidates, pg.clone(), config(), None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert!(result.items.is_empty());
+        assert!(result.aggregations.is_empty());
+        assert_eq!(pg.calls().len(), 1, "only the hydrate backend should run");
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::Aggregations),
+            0,
+            "an empty refined set must not emit an aggregation observation"
+        );
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::HydrateChunk), 1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RefineChunk), 1);
     }
 
     #[tokio::test]
@@ -2180,8 +2282,25 @@ mod tests {
             vec![item(1, 1, true)],
             HashMap::from([(id(1), 1)]),
         ));
-        let composer = Composer::new(Arc::new(failing_l3), pg, config(), None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(Arc::new(failing_l3), pg, config(), None)
+            .with_metrics(Arc::clone(&metrics));
         assert!(!search(&composer, 10, 0).await.1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::CandidateIds), 1);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RouteTotal),
+            1,
+            "RAII route timing must survive an early candidate error return"
+        );
+        for phase in [
+            PathsearchPhase::RefineMetadata,
+            PathsearchPhase::RefineSlotWait,
+            PathsearchPhase::HydrateChunk,
+            PathsearchPhase::RefineChunk,
+            PathsearchPhase::Aggregations,
+        ] {
+            assert_eq!(metrics.phase_sample_count(phase), 0);
+        }
 
         let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
         let mut failing_counts = FakePg::new(vec![item(1, 1, true)], HashMap::new());
@@ -2199,8 +2318,17 @@ mod tests {
         let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
         let mut failing_search = FakePg::new(vec![item(1, 1, true)], HashMap::from([(id(1), 1)]));
         failing_search.fail_search = true;
-        let composer = Composer::new(candidates, Arc::new(failing_search), config(), None);
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidates, Arc::new(failing_search), config(), None)
+            .with_metrics(Arc::clone(&metrics));
         assert!(!search(&composer, 10, 0).await.1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::HydrateChunk), 1);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::RefineChunk),
+            0,
+            "failed hydration must not emit an exact-refine observation"
+        );
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::Aggregations), 0);
     }
 
     #[tokio::test]

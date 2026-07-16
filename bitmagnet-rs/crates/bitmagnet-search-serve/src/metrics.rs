@@ -8,6 +8,49 @@
 
 const PATH_PREFIX: &str = "bitmagnet_search_pathsearch";
 const SERVE_PREFIX: &str = "bitmagnet_search_serve";
+const PHASE_DURATION_BUCKET_START_SECONDS: f64 = 0.001;
+const PHASE_DURATION_BUCKET_FACTOR: f64 = 2.0;
+const PHASE_DURATION_BUCKET_COUNT: usize = 14;
+
+/// Fixed, low-cardinality phase labels for ranked torrent-content composition.
+///
+/// Hydration produces one observation per attempted bounded chunk. Exact refine
+/// produces one observation only after that chunk hydrates successfully. Every
+/// other phase produces at most one observation per composer route attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathsearchPhase {
+    CandidateIds,
+    RefineMetadata,
+    RefineSlotWait,
+    HydrateChunk,
+    RefineChunk,
+    Aggregations,
+    RouteTotal,
+}
+
+impl PathsearchPhase {
+    const ALL: [Self; 7] = [
+        Self::CandidateIds,
+        Self::RefineMetadata,
+        Self::RefineSlotWait,
+        Self::HydrateChunk,
+        Self::RefineChunk,
+        Self::Aggregations,
+        Self::RouteTotal,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CandidateIds => "candidate_ids",
+            Self::RefineMetadata => "refine_metadata",
+            Self::RefineSlotWait => "refine_slot_wait",
+            Self::HydrateChunk => "hydrate_chunk",
+            Self::RefineChunk => "refine_chunk",
+            Self::Aggregations => "aggregations",
+            Self::RouteTotal => "route_total",
+        }
+    }
+}
 
 /// Stable labels for `bitmagnet_search_pathsearch_route_total`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +114,7 @@ pub struct PathsearchMetrics {
     deadline_capped: prometheus::IntCounter,
     refine_shed: prometheus::IntCounter,
     refine_agg_error: prometheus::IntCounter,
+    phase_duration: prometheus::HistogramVec,
 }
 
 impl PathsearchMetrics {
@@ -127,6 +171,17 @@ impl PathsearchMetrics {
                 &format!("{PATH_PREFIX}_refine_agg_error_total"),
                 "Requests served without facets after refined-set aggregation failed.",
             ),
+            phase_duration: histogram_vec(
+                &format!("{PATH_PREFIX}_phase_duration_seconds"),
+                "Duration of ranked torrent-content composition phases. Hydrate is observed per attempted chunk; refine only after successful hydrate.",
+                &["phase"],
+                prometheus::exponential_buckets(
+                    PHASE_DURATION_BUCKET_START_SECONDS,
+                    PHASE_DURATION_BUCKET_FACTOR,
+                    PHASE_DURATION_BUCKET_COUNT,
+                )
+                .expect("pathsearch phase-duration histogram buckets are valid"),
+            ),
         };
 
         // Pre-initialize the finite label vocabulary. Besides exposing useful
@@ -142,6 +197,9 @@ impl PathsearchMetrics {
             RouteResult::Error,
         ] {
             metrics.routes.with_label_values(&[result.label()]);
+        }
+        for phase in PathsearchPhase::ALL {
+            metrics.phase_duration.with_label_values(&[phase.label()]);
         }
 
         metrics
@@ -215,6 +273,17 @@ impl PathsearchMetrics {
         self.refine_agg_error.inc();
     }
 
+    /// Starts an RAII timer for one fixed ranked-search composition phase.
+    ///
+    /// Dropping the returned timer records exactly one observation. The phase
+    /// enum prevents request data or other high-cardinality values from becoming
+    /// Prometheus labels.
+    pub(crate) fn start_phase_timer(&self, phase: PathsearchPhase) -> prometheus::HistogramTimer {
+        self.phase_duration
+            .with_label_values(&[phase.label()])
+            .start_timer()
+    }
+
     fn collectors(&self) -> Vec<Box<dyn prometheus::core::Collector>> {
         vec![
             Box::new(self.doc_count.clone()),
@@ -228,6 +297,7 @@ impl PathsearchMetrics {
             Box::new(self.deadline_capped.clone()),
             Box::new(self.refine_shed.clone()),
             Box::new(self.refine_agg_error.clone()),
+            Box::new(self.phase_duration.clone()),
         ]
     }
 
@@ -276,6 +346,13 @@ impl PathsearchMetrics {
     #[cfg(test)]
     pub(crate) fn agg_error_count(&self) -> u64 {
         self.refine_agg_error.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase_sample_count(&self, phase: PathsearchPhase) -> u64 {
+        self.phase_duration
+            .with_label_values(&[phase.label()])
+            .get_sample_count()
     }
 }
 
@@ -383,6 +460,19 @@ fn int_counter_vec(name: &str, help: &str, labels: &[&str]) -> prometheus::IntCo
         .unwrap_or_else(|error| panic!("invalid Prometheus counter vector {name}: {error}"))
 }
 
+fn histogram_vec(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+    buckets: Vec<f64>,
+) -> prometheus::HistogramVec {
+    prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(name, help).buckets(buckets),
+        labels,
+    )
+    .unwrap_or_else(|error| panic!("invalid Prometheus histogram vector {name}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +481,8 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../../testdata/parity/metric-names.golden"
     ));
+    const RUST_ONLY_PHASE_DURATION_CONTRACT: &str =
+        "bitmagnet_search_pathsearch_phase_duration_seconds{phase}";
 
     fn contract_lines(collectors: Vec<Box<dyn prometheus::core::Collector>>) -> Vec<String> {
         let mut lines = collectors
@@ -412,11 +504,13 @@ mod tests {
         actual.extend(contract_lines(ServeMetrics::new().collectors()));
         actual.sort();
 
-        let expected = PHASE_ZERO_METRIC_GOLDEN
+        let mut expected = PHASE_ZERO_METRIC_GOLDEN
             .lines()
             .filter(|line| line.starts_with(PATH_PREFIX) || line.starts_with(SERVE_PREFIX))
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        expected.push(RUST_ONLY_PHASE_DURATION_CONTRACT.to_owned());
+        expected.sort();
 
         assert!(!expected.is_empty(), "Phase-0 metric golden lost Lane C");
         assert_eq!(actual, expected);
@@ -437,6 +531,9 @@ mod tests {
         metrics.inc_refine_deadline_capped();
         metrics.inc_refine_shed();
         metrics.inc_refine_agg_error();
+        for phase in PathsearchPhase::ALL {
+            drop(metrics.start_phase_timer(phase));
+        }
 
         assert_eq!(metrics.doc_count.get(), 37);
         assert_eq!(metrics.healthy.get(), 1);
@@ -457,6 +554,9 @@ mod tests {
         assert_eq!(metrics.deadline_capped_count(), 1);
         assert_eq!(metrics.shed_count(), 1);
         assert_eq!(metrics.agg_error_count(), 1);
+        for phase in PathsearchPhase::ALL {
+            assert_eq!(metrics.phase_sample_count(phase), 1);
+        }
     }
 
     #[test]
@@ -487,6 +587,7 @@ mod tests {
         let pathsearch = PathsearchMetrics::register();
         let serve = ServeMetrics::register();
         pathsearch.inc_route(RouteResult::Served);
+        drop(pathsearch.start_phase_timer(PathsearchPhase::RouteTotal));
         serve.inc_serve(ServeOutcome::FallbackEmpty);
 
         let text = bitmagnet_common::metrics::gather_text();
@@ -499,5 +600,8 @@ mod tests {
         assert!(text
             .lines()
             .any(|line| line == "bitmagnet_search_pathsearch_healthy 0"));
+        assert!(text.lines().any(|line| {
+            line == "bitmagnet_search_pathsearch_phase_duration_seconds_count{phase=\"route_total\"} 1"
+        }));
     }
 }
