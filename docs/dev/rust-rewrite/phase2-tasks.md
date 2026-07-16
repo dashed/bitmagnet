@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, internal-only dark deployment, route-preserving reset/re-arm, and a fresh pilot. The driver remains suspended at pilot-only counters | run the reviewed supervisor through a wholly new rotation and green hour; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, internal-only dark deployment, route-preserving reset/re-arm, fresh pilot, and the complete replacement 11-job/44-row rotation. All 16 pass series established stored T0 `1784180489.972`; the full green-hour window is in progress | complete the full green-hour proof, then preserve the same uninterrupted cohort for the >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact latency-fixed image is dark-deployed; the replacement cohort was reset and its fresh pilot passed `1/1/1` with zero aborts | prove the full fresh rotation and green hour before any >=7-day clock |
+| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact latency-fixed image is dark-deployed; the replacement cohort passed its fresh pilot, all 11 rotation Jobs/44 rows, and established a fully green T0 with zero abort or mismatch counters | finish the in-progress full green hour, then continue this exact cohort uninterrupted into the >=7-day soak |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. Reset, pilot, and a fail-closed supervisor are ready; public routing is unchanged and generic inventory enablement remains false | start only through the supervisor; routing/cutover, Tantivy egress, and C5 remain off |
+| I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The fail-closed supervisor is live, the full rotation and T0 passed, public routing is unchanged, and generic inventory enablement remains false | keep the supervisor and exact cohort uninterrupted through the green-hour proof and >=7-day soak; routing/cutover, Tantivy egress, and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -366,8 +366,9 @@ below every agreement threshold, so it remains dormant regardless of the formal
   `26e59987-c98a-422b-bc0f-ea527d76d3cb` binds L3 identity, CronJob UID
   `d2d8189f-9e7a-4453-ac8e-951730e8190b`, immutable driver ConfigMap
   `bitmagnet-graphql-shadow-traffic-37741e72f576`, and all four payload hashes.
-  The replacement CronJob remains generation `1`, `suspend=true`; no recurring
-  cohort or replacement T0 has started.
+  At the pilot checkpoint the replacement CronJob was generation `1`,
+  `suspend=true`, with no recurring cohort or replacement T0; the supervised
+  rotation/T0 checkpoint below supersedes that pre-start state.
 - The re-arm availability smoke exposed an independent L2 scaling defect. Its
   broad extension query implicitly requested an exact total at the normal
   28-segment high-water and exceeded DuckDB's configured 3-GiB engine limit.
@@ -395,10 +396,32 @@ below every agreement threshold, so it remains dormant regardless of the formal
   tests, and live read-only simulated-running preflight/runtime audits passed.
   At that pre-start audit all reviewed alerts were healthy/inactive, no relevant
   Warning or severe log existed, and both Coder workspace namespaces were empty.
+- Evidence at `/tmp/bitmagnet-graphql-shadow-green-hour-20260716.jsonl` records
+  that the supervisor began this replacement cohort at `2026-07-16T04:46:39Z` and
+  bound the live generation-`2` CronJob to the successful pilot, immutable
+  driver payload, exact pod/container identities, and unchanged public route.
+  All 11 consecutive five-minute Jobs completed the full start rotation
+  `[1,5,9,13,17,21,25,29,33,37,41]` at `2026-07-16T05:40:37Z`, proving all 44
+  ranked/exact rows without a skipped or repeated slot.
+- Final rotation counters were sampled/admitted/comparisons `45/45/45`, including
+  the pilot, with 22 perfect ranking proofs and 22 exact-count proofs. Jaccard
+  k=20 and k=50 sums/counts, RBO sum/count, and Top-1 matches were all `22/22`;
+  dropped, saturated, Rust error, reference error, ranking/count/facet mismatch,
+  and result/count delta counters were all zero. All 21 reviewed GraphQL/composer
+  alerts were inactive, and the evidence contains no abort-required event.
+- All 16 exact gate series were `1` at stored T0 `1784180489.972`
+  (`2026-07-16T05:41:29.972Z`); the watcher emitted `t0_established` at
+  `2026-07-16T05:42:32Z`. The public IngressRoute remains UID
+  `876edf57-eec2-46d2-94b5-f4306c3446a7`, generation `2`, Authentik plus
+  `bitmagnet-l3:3333`, and no Coder workspace is active or was mutated. The full
+  green-hour continuity window is now in progress; if its independent raw-range
+  proof passes, this same uninterrupted cohort continues into the separate
+  seven-day soak.
 
-Remaining sequence: commit both ledgers, recheck drift-prone Coder and production
-identities, start only through the supervisor, prove the complete fresh rotation
-and full green hour, then continue the same uninterrupted cohort into the
+Remaining sequence: preserve this rotation/T0 checkpoint and its homelab
+companion without disturbing the live supervisor; keep verifying route, pod, alert, log,
+Event, and Coder invariants until the watcher proves the full green hour. On that
+success, leave the driver and exact cohort uninterrupted for the separate
 seven-day soak. No result here authorizes Rust responses, public routing, G3
 eligibility expansion, or C5.
 
@@ -656,9 +679,10 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   2026-07-15 production rotation proved those abort signals are load-bearing: all
   correctness rows passed, but rolling Rust p99 exceeded Go after an old reference
   outlier aged out, so the controller suspended traffic. `edb112be` is the
-  bounded-query source candidate for that defect; production p99 remains unproven
-  until the exact candidate image is admitted, promoted, dark-deployed, and passes
-  a fresh cohort rather than reusing the failed T0.
+  bounded-query source repair for that defect. Its exact image is now admitted,
+  promoted, dark-deployed, and has passed a fresh 11-job rotation with a new fully
+  green T0; production p99 remains under the in-progress full green-hour proof,
+  followed by the same uninterrupted >=7-day cohort rather than the failed T0.
 
 ---
 
