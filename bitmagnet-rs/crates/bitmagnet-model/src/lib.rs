@@ -21,7 +21,10 @@ mod enums;
 mod info_hash;
 mod torrent;
 
-pub use blob::{deserialize_files, serialize_files, BlobError, BlobFile};
+pub use blob::{
+    deserialize_files, deserialize_files_bounded, serialize_files, BlobError, BlobFile,
+    DecodedFiles,
+};
 pub use content::{Content, TorrentContent};
 pub use enums::{file_extension_from_path, ContentType, FileType, FilesStatus, ParseEnumError};
 pub use info_hash::{InfoHash, InfoHashError, INFO_HASH_LEN};

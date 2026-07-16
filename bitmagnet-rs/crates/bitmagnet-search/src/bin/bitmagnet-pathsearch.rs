@@ -15,6 +15,7 @@ use bitmagnet_model::InfoHash;
 use bitmagnet_proto::v1::path_search_service_server::PathSearchServiceServer;
 use bitmagnet_search::pathsearch::document::PathDocument;
 use bitmagnet_search::pathsearch::index::DEFAULT_WRITER_HEAP_BYTES;
+use bitmagnet_search::pathsearch::server::PathSearchMutation;
 use bitmagnet_search::pathsearch::watermark::{current_epoch, read_watermark, write_watermark};
 use bitmagnet_search::pathsearch::{
     PathSearchServer, PrefixIndex, PrefixIndexConfig, PREFIX_INDEX_FILENAME,
@@ -185,7 +186,11 @@ async fn spawn_follow_loop(
             }
             match follow_window(&pool, &server, watermark, until, batch_size, deleted_limit).await {
                 Ok(stats) => {
-                    watermark = until;
+                    // `follow_window` returns only after every changed page and
+                    // the final live-tombstone batch commit and reload. Any
+                    // batch failure takes the error arm and leaves both
+                    // watermarks at the previous successful boundary.
+                    watermark = stats.until;
                     server.set_watermark_epoch(watermark);
                     if let Err(error) = write_watermark(&watermark_file, watermark) {
                         warn!(%error, path = %watermark_file.display(), "failed writing pathsearch watermark");
@@ -222,6 +227,14 @@ struct FollowStats {
     stale_tombstones_skipped: u64,
 }
 
+#[derive(Debug, Default)]
+struct PreparedChangedBatch {
+    upserted_info_hashes: Vec<Vec<u8>>,
+    upserts: u64,
+    skips: u64,
+    blob_errors: u64,
+}
+
 async fn follow_window(
     pool: &PgPool,
     server: &PathSearchServer,
@@ -254,17 +267,12 @@ async fn follow_window(
         if page.is_empty() {
             break;
         }
-        for row in &page {
-            cursor = Some(row.info_hash);
-            match apply_changed_row(server, row).await? {
-                RowOutcome::Upserted => {
-                    stats.upserts += 1;
-                    upserted_in_window.insert(row.info_hash.as_slice().to_vec());
-                }
-                RowOutcome::Tombstoned => stats.skips += 1,
-                RowOutcome::BlobError => stats.blob_errors += 1,
-            }
-        }
+        let applied = apply_changed_batch(server, &page).await?;
+        cursor = page.last().map(|row| row.info_hash);
+        upserted_in_window.extend(applied.upserted_info_hashes);
+        stats.upserts = stats.upserts.saturating_add(applied.upserts);
+        stats.skips = stats.skips.saturating_add(applied.skips);
+        stats.blob_errors = stats.blob_errors.saturating_add(applied.blob_errors);
     }
 
     let deleted = read_deleted_torrents(pool, since, until, deleted_limit)
@@ -279,13 +287,15 @@ async fn follow_window(
     let total_deleted = deleted.len();
     let live = live_tombstones(deleted, &upserted_in_window);
     stats.stale_tombstones_skipped = (total_deleted - live.len()) as u64;
-    for info_hash in live {
-        server
-            .delete_info_hash(info_hash.as_slice())
-            .await
-            .context("deleting path-bag tombstone")?;
-        stats.deletes += 1;
-    }
+    let delete_count = u64::try_from(live.len()).unwrap_or(u64::MAX);
+    server
+        .apply_follow_batch(
+            live.iter()
+                .map(|info_hash| PathSearchMutation::Delete(info_hash.as_slice())),
+        )
+        .await
+        .context("applying live path-bag tombstone batch")?;
+    stats.deletes = delete_count;
 
     Ok(stats)
 }
@@ -305,57 +315,44 @@ fn live_tombstones(deleted: Vec<InfoHash>, upserted: &HashSet<Vec<u8>>) -> Vec<I
         .collect()
 }
 
-/// What a single changed-torrent row did to the index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RowOutcome {
-    /// The torrent has path text; its path-bag doc was replaced
-    /// (`delete_term(info_hash)` + add).
-    Upserted,
-    /// The torrent has no path text; any prior path-bag doc was tombstoned so a
-    /// supersession can never leave a stale candidate behind.
-    Tombstoned,
-    /// The blob failed to decode; the torrent was tombstoned rather than left
-    /// pointing at a corrupt path-bag.
-    BlobError,
-}
-
-/// Apply one changed/backfilled torrent row to the live index using the
-/// server's commit-visible upsert/delete primitives.
+/// Prepare and apply one fetched page as a single commit-visible index batch.
 ///
-/// A torrent with path text is upserted; one without path text — or with an
-/// undecodable blob — is tombstoned. This keeps supersession correct: a torrent
-/// that loses its files in a re-crawl must lose its candidate document too.
+/// All replacements are queued before tombstones, and the server commits and
+/// reloads once for the whole page. A torrent without path text — or with an
+/// undecodable blob — is tombstoned so a re-crawl cannot leave a stale
+/// candidate behind.
 ///
 /// # Errors
-/// Returns Tantivy write/commit/reload failures from the server primitives.
-async fn apply_changed_row(
+/// Returns Tantivy write/commit/reload failures from the server batch primitive.
+async fn apply_changed_batch(
     server: &PathSearchServer,
-    row: &TorrentWithBlob,
-) -> anyhow::Result<RowOutcome> {
-    match PathDocument::from_torrent(row) {
-        Ok(Some(doc)) => {
-            server
-                .upsert_document(&doc)
-                .await
-                .context("upserting changed path-bag")?;
-            Ok(RowOutcome::Upserted)
-        }
-        Ok(None) => {
-            server
-                .delete_info_hash(row.info_hash.as_slice())
-                .await
-                .context("deleting empty changed path-bag")?;
-            Ok(RowOutcome::Tombstoned)
-        }
-        Err(error) => {
-            server
-                .delete_info_hash(row.info_hash.as_slice())
-                .await
-                .context("deleting corrupt changed path-bag")?;
-            warn!(info_hash = %row.info_hash, %error, "changed torrent has undecodable blob");
-            Ok(RowOutcome::BlobError)
-        }
-    }
+    rows: &[TorrentWithBlob],
+) -> anyhow::Result<PreparedChangedBatch> {
+    let mut batch = PreparedChangedBatch::default();
+    let mutations = rows
+        .iter()
+        .map(|row| match PathDocument::from_torrent(row) {
+            Ok(Some(document)) => {
+                batch.upserted_info_hashes.push(document.info_hash.clone());
+                batch.upserts = batch.upserts.saturating_add(1);
+                PathSearchMutation::Replace(document)
+            }
+            Ok(None) => {
+                batch.skips = batch.skips.saturating_add(1);
+                PathSearchMutation::Delete(row.info_hash.as_slice())
+            }
+            Err(error) => {
+                batch.blob_errors = batch.blob_errors.saturating_add(1);
+                warn!(info_hash = %row.info_hash, %error, "changed torrent has undecodable blob");
+                PathSearchMutation::Delete(row.info_hash.as_slice())
+            }
+        });
+
+    server
+        .apply_follow_batch(mutations)
+        .await
+        .context("applying changed path-bag batch")?;
+    Ok(batch)
 }
 
 /// Whether a deleted-torrent read was truncated by its runaway guard.
@@ -372,8 +369,8 @@ fn deleted_read_truncated(found: usize, deleted_limit: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_changed_row, current_epoch, deleted_read_truncated, live_tombstones,
-        maybe_start_metrics, RowOutcome,
+        apply_changed_batch, current_epoch, deleted_read_truncated, live_tombstones,
+        maybe_start_metrics,
     };
     use bitmagnet_db::TorrentWithBlob;
     use bitmagnet_model::{serialize_files, BlobFile, InfoHash};
@@ -463,28 +460,38 @@ mod tests {
     /// changes the fileset supersedes in place (doc_count stays 1; old paths
     /// gone, new present), and a torrent that loses all path text is tombstoned.
     #[tokio::test]
-    async fn apply_changed_row_upserts_supersedes_and_tombstones() {
+    async fn apply_changed_batch_upserts_supersedes_and_tombstones() {
         let server = PathSearchServer::in_ram().unwrap();
 
-        let outcome = apply_changed_row(
+        let batch = apply_changed_batch(
             &server,
-            &changed_row(1, "multi", Some(blob("Season01/Old.Episode.mkv"))),
+            &[changed_row(
+                1,
+                "multi",
+                Some(blob("Season01/Old.Episode.mkv")),
+            )],
         )
         .await
         .unwrap();
-        assert_eq!(outcome, RowOutcome::Upserted);
+        assert_eq!(batch.upserts, 1);
+        assert_eq!(batch.skips, 0);
+        assert_eq!(batch.blob_errors, 0);
         assert_eq!(doc_count(&server).await, 1);
         assert_eq!(candidate_total(&server, "old.episode").await, 1);
 
         // Re-crawl with a new fileset: supersede via delete_term + add. The
         // torrent must not duplicate, and the old path must no longer match.
-        let outcome = apply_changed_row(
+        let batch = apply_changed_batch(
             &server,
-            &changed_row(1, "multi", Some(blob("Season02/New.Feature.mkv"))),
+            &[changed_row(
+                1,
+                "multi",
+                Some(blob("Season02/New.Feature.mkv")),
+            )],
         )
         .await
         .unwrap();
-        assert_eq!(outcome, RowOutcome::Upserted);
+        assert_eq!(batch.upserts, 1);
         assert_eq!(
             doc_count(&server).await,
             1,
@@ -499,35 +506,79 @@ mod tests {
 
         // The torrent loses its files (multi-file, no blob): tombstone it so no
         // stale candidate survives.
-        let outcome = apply_changed_row(&server, &changed_row(1, "multi", None))
+        let batch = apply_changed_batch(&server, &[changed_row(1, "multi", None)])
             .await
             .unwrap();
-        assert_eq!(outcome, RowOutcome::Tombstoned);
+        assert_eq!(batch.upserts, 0);
+        assert_eq!(batch.skips, 1);
+        assert_eq!(batch.blob_errors, 0);
         assert_eq!(doc_count(&server).await, 0);
     }
 
     /// An undecodable blob tombstones the torrent rather than leaving it
     /// pointing at a corrupt path-bag.
     #[tokio::test]
-    async fn apply_changed_row_tombstones_on_corrupt_blob() {
+    async fn apply_changed_batch_tombstones_on_corrupt_blob() {
         let server = PathSearchServer::in_ram().unwrap();
-        apply_changed_row(&server, &changed_row(2, "multi", Some(blob("Keep.mkv"))))
+        apply_changed_batch(&server, &[changed_row(2, "multi", Some(blob("Keep.mkv")))])
             .await
             .unwrap();
         assert_eq!(doc_count(&server).await, 1);
 
-        let outcome = apply_changed_row(
+        let batch = apply_changed_batch(
             &server,
-            &changed_row(2, "multi", Some(b"not a zstd frame".to_vec())),
+            &[changed_row(2, "multi", Some(b"not a zstd frame".to_vec()))],
         )
         .await
         .unwrap();
-        assert_eq!(outcome, RowOutcome::BlobError);
+        assert_eq!(batch.upserts, 0);
+        assert_eq!(batch.skips, 0);
+        assert_eq!(batch.blob_errors, 1);
         assert_eq!(
             doc_count(&server).await,
             0,
             "corrupt blob must tombstone, not keep a stale candidate"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_changed_batch_handles_a_mixed_fetched_page() {
+        let server = PathSearchServer::in_ram().unwrap();
+        apply_changed_batch(
+            &server,
+            &[
+                changed_row(2, "multi", Some(blob("Stale.Two.mkv"))),
+                changed_row(3, "multi", Some(blob("Stale.Three.mkv"))),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let batch = apply_changed_batch(
+            &server,
+            &[
+                changed_row(1, "multi", Some(blob("Fresh.One.mkv"))),
+                changed_row(2, "multi", None),
+                changed_row(3, "multi", Some(b"not a zstd frame".to_vec())),
+                changed_row(4, "multi", Some(blob("Fresh.Four.mkv"))),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(batch.upserts, 2);
+        assert_eq!(batch.skips, 1);
+        assert_eq!(batch.blob_errors, 1);
+        assert_eq!(
+            batch.upserted_info_hashes,
+            vec![vec![1; 20], vec![4; 20]],
+            "the window-level stale-tombstone filter receives only successful upserts"
+        );
+        assert_eq!(doc_count(&server).await, 2);
+        assert_eq!(candidate_total(&server, "fresh.one").await, 1);
+        assert_eq!(candidate_total(&server, "fresh.four").await, 1);
+        assert_eq!(candidate_total(&server, "stale.two").await, 0);
+        assert_eq!(candidate_total(&server, "stale.three").await, 0);
     }
 
     /// The HARD-FAIL guard: a deleted-torrent read that reaches its runaway

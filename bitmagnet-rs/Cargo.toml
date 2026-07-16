@@ -12,6 +12,9 @@ members = [
     "crates/bitmagnet-diff",
     "crates/bitmagnet-search-query",
     "crates/bitmagnet-torznab",
+    "crates/bitmagnet-fts",
+    "crates/bitmagnet-search-serve",
+    "crates/bitmagnet-graphql",
 ]
 
 [workspace.package]

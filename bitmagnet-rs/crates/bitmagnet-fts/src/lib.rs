@@ -1,18 +1,20 @@
-//! Copied verbatim from `bitmagnet-search` (`src/query.rs`
+//! Shared FTS port for the bitmagnet Rust rewrite: the Go
+//! `internal/database/fts` tokenizer (`TokenizeFlat`) plus the
+//! `AppQueryToTsquery` builder, ported verbatim (Go `src/query.rs`
 //! `app_query_to_tsquery` + `src/tokenizer.rs` + `src/tokenizer/tables.rs`,
-//! go-unidecode v0.2.0). This deliberate duplication keeps
-//! `bitmagnet-search-query` Tantivy-free. Planned consolidation into a shared
-//! `bitmagnet-fts` crate is a team-lead-owned task.
+//! go-unidecode v0.2.0). Kept Tantivy-free so every consumer
+//! (`bitmagnet-search-query`'s full builder, a future ingest-side indexer)
+//! shares ONE tokenizer instead of copying it.
 
 mod tokenizer;
 
-use self::tokenizer::tokenize_flat;
+pub use self::tokenizer::tokenize_flat;
 
 /// Port of Go `fts.AppQueryToTsquery`: turn a user-facing app query into the
 /// Postgres `tsquery` string Postgres would match against. Pure and
 /// deterministic, so it is asserted byte-for-byte against the Go test vectors.
 #[must_use]
-pub(crate) fn app_query_to_tsquery(raw: &str) -> String {
+pub fn app_query_to_tsquery(raw: &str) -> String {
     tokens_to_tsquery(&lex_app_query(raw))
 }
 /// Lexed app-query tokens, mirroring Go `queryLexer.readQueryToken`.

@@ -1,8 +1,7 @@
-//! Copied verbatim from `bitmagnet-search` (`src/query.rs`
-//! `app_query_to_tsquery` + `src/tokenizer.rs` + `src/tokenizer/tables.rs`,
-//! go-unidecode v0.2.0). This deliberate duplication keeps
-//! `bitmagnet-search-query` Tantivy-free. Planned consolidation into a shared
-//! `bitmagnet-fts` crate is a team-lead-owned task.
+//! Ported verbatim from the Go `internal/database/fts` tokenizer
+//! (Go `src/query.rs` `app_query_to_tsquery` + `src/tokenizer.rs` +
+//! `src/tokenizer/tables.rs`, go-unidecode v0.2.0). This crate is the single,
+//! Tantivy-free home for the port, shared by every FTS consumer.
 //!
 //! The std-only tokenizer core that replicates bitmagnet's Go
 //! `fts.TokenizeFlat()` byte-for-byte, so this crate tokenizes identically to
@@ -209,7 +208,7 @@ fn tokenize_spans(input: &str) -> Vec<TokenSpan> {
 ///
 /// See the [module documentation](self) for the algorithm and worked examples.
 #[must_use]
-pub(crate) fn tokenize_flat(input: &str) -> Vec<String> {
+pub fn tokenize_flat(input: &str) -> Vec<String> {
     tokenize_spans(input)
         .into_iter()
         .map(|span| span.text)

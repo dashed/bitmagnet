@@ -16,8 +16,12 @@ package gql_test
 // async-graphql `.sdl()` output — parse it with a GraphQL parser and apply the
 // SAME rules):
 //  1. Drop built-in definitions: the five built-in scalars (String/Int/Float/
-//     Boolean/ID), all introspection types (name prefixed "__"), and built-in
-//     directives. Only the app's declared type system remains.
+//     Boolean/ID), all introspection types (name prefixed "__"), the
+//     introspection root fields gqlparser injects onto Query (__schema/__type,
+//     likewise name prefixed "__"), and built-in directives. Only the app's
+//     declared type system remains. A code-first server (async-graphql) never
+//     prints the introspection root fields in its .sdl(), so dropping them —
+//     symmetric with the "__"-type strip — is required for the Rust 0-diff gate.
 //  2. Drop all descriptions/comments.
 //  3. Canonical (order-independent) ordering: type definitions sorted by name;
 //     within each type, fields / input fields / enum values / arguments /
@@ -210,6 +214,15 @@ func writeFields(b *strings.Builder, fields ast.FieldList) {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 
 	for _, f := range sorted {
+		// Drop the introspection root fields gqlparser injects onto Query
+		// (__schema/__type). Names prefixed "__" are reserved by the GraphQL spec
+		// for introspection, so no app field uses them; this mirrors the
+		// "__"-type strip in isBuiltinType. A code-first async-graphql server does
+		// not emit these in .sdl(), so they must not appear in the golden.
+		if strings.HasPrefix(f.Name, "__") {
+			continue
+		}
+
 		fmt.Fprintf(b, "  %s%s: %s\n", f.Name, formatArgs(f.Arguments), f.Type.String())
 	}
 }
@@ -292,6 +305,32 @@ func TestGraphQLSDLKnownGood(t *testing.T) {
 		if strings.Contains(sdl, s+"\n") {
 			t.Errorf("SDL golden leaked built-in %q", s)
 		}
+	}
+}
+
+// TestGraphQLSDLGoldenIdempotent proves the normalizer is a fixed point on its
+// own output: parsing the golden back as an SDL source and re-normalizing it
+// must reproduce the golden byte-for-byte. This is the property the Rust 0-diff
+// gate relies on — both sides canonicalize to the same fixed form — and it
+// guards the "__"-field strip specifically: gqlparser re-injects __schema/__type
+// onto Query when the golden is reloaded, and the normalizer must strip them
+// again to land back on the golden.
+func TestGraphQLSDLGoldenIdempotent(t *testing.T) {
+	path := filepath.Join(repoRootGQL(t), sdlGoldenRel)
+
+	golden, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden %s (run with -update to create): %v", path, err)
+	}
+
+	schema, loadErr := gqlparser.LoadSchema(&ast.Source{Name: sdlGoldenRel, Input: string(golden)})
+	if loadErr != nil {
+		t.Fatalf("reload golden as schema: %v", loadErr)
+	}
+
+	if got := normalizeSchemaSDL(schema); got != string(golden) {
+		t.Errorf("normalizer is not idempotent on the golden: normalize(golden) != golden.\n"+
+			"golden sha256 %s, renormalized sha256 %s", shortSHA(string(golden)), shortSHA(got))
 	}
 }
 

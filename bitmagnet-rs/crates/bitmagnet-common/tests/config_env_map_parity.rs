@@ -16,7 +16,7 @@ fn go_config_env_map_golden_is_preserved() {
     );
 
     let lines = body.split('\n').collect::<Vec<_>>();
-    assert_eq!(lines.len(), 115, "golden key count changed");
+    assert_eq!(lines.len(), 122, "golden key count changed");
     for adjacent in lines.windows(2) {
         assert!(
             adjacent[0] < adjacent[1],

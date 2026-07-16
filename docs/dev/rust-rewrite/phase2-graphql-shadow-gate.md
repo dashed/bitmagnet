@@ -39,7 +39,11 @@ issues a second Go request.
 The dark response must carry
 `X-Bitmagnet-Graphql-Handler-Duration-Us: <positive integer>`. A missing,
 malformed, zero, or negative duration makes that admitted attempt a Rust error;
-client round-trip time is deliberately not used. Both histograms represent the
+client round-trip time is deliberately not used. The dark client does not follow
+redirects and accepts only `application/json` or
+`application/graphql-response+json` responses (media-type parameters are
+allowed); any redirect or other/malformed/missing media type is a Rust error.
+Both histograms represent the
 closest shared server-side boundary: HTTP request entry through pre-write
 GraphQL response generation. On Go, the clock is sealed immediately after the
 gqlgen response handler returns, before `ServeHTTP` writes the response. This
@@ -75,6 +79,35 @@ return an empty result set there is no rank-0 item or ranked list to evaluate,
 so that comparison does not enter the Top-1, Jaccard, or RBO denominators and is
 not logged as a ranking discrepancy. If exactly one engine is empty, ranking is
 observed and the request remains a real Top-1/Jaccard/RBO mismatch.
+
+Every raw gate input is scoped to the production Go L3 scrape labels
+`namespace="bitmagnet",service="bitmagnet-l3"`. An isolated canary must use a
+different Service label. The promtool fixture includes a deliberately divergent
+canary series and proves it cannot change the production recording rules.
+
+### Sample-zero admission profile
+
+Homelab commit `65d8d7b`, hardened through `694bc07`, provides a separate
+`bitmagnet-graphql-shadow-canary` profile for validating the deployment path
+before sampling begins. It is serve-only (`worker run --keys=http_server`), has
+no Ingress, is excluded from production recording rules by its distinct Service
+identity, and hard-bounds both the configured and admitted shadow sample rate to
+zero. The profile also fails closed unless its tag-only main image exists on the
+selected node with the importer-recorded containerd digest and Docker config ID,
+`linux/amd64` platform, and pinned label. The exact tag is inspected through CRI
+before apply; the dark GraphQL EndpointSlice must have a ready TCP 3337 address
+before any canary object is applied. After rollout, the role rechecks the
+containerd tag and attests the single Ready Pod and exact running CRI container
+against the same tag, config ID, node, namespace, Pod name, and Pod UID.
+
+The profile and reciprocal Cilium manifests are offline-rendered through
+Ansible and kubeconform. Its placement, resources, serve-only worker set,
+SELECT-only database identity, sample-zero ceiling, and namespace-qualified
+PostgreSQL/GraphQL Cilium destinations are pinned against extra-variable
+overrides. Importing the image, creating the SELECT-only canary database role,
+and deploying the sample-zero profile are still separate `CONFIRM=1` production
+mutations. Raising the admitted sample ceiling above zero is a later gate and
+must not be folded into initial deployment.
 
 **Estimate totals are excluded** from the count-match KPI (the `estimate="false"`
 selector): a budgeted-estimate total legitimately differs between engines, so only
@@ -167,10 +200,11 @@ numeric gate alone would miss; C7's bound tests are the offline backstop).
 ## Running the checks offline
 
 ```bash
-promtool check rules observability/rules/graphql-shadow-gate.rules.yml
-promtool test rules  observability/rules/graphql-shadow-gate.test.yml
+task test-prometheus-rules
 ```
 
 Both are wired into CI-equivalent local verification; the unit test drives
 synthetic pass / fail / low-volume, all-estimate, empty-ranking, and exact-count
 threshold scenarios and asserts `gate_pass` and the alerts behave as specified.
+The Task invokes both `promtool check rules` and `promtool test rules`; the Nix
+development shell provides `promtool` through the Prometheus package.

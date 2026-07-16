@@ -1,0 +1,37 @@
+[package]
+name = "bitmagnet-graphql"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "bitmagnet-graphql"
+path = "src/main.rs"
+
+[dependencies]
+bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-db = { path = "../bitmagnet-db" }
+bitmagnet-model = { path = "../bitmagnet-model" }
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+bitmagnet-search-query = { path = "../bitmagnet-search-query" }
+bitmagnet-search-serve = { path = "../bitmagnet-search-serve" }
+anyhow = { workspace = true }
+async-trait = "0.1"
+async-graphql = "7"
+async-graphql-axum = "7"
+async-graphql-parser = "7"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { workspace = true, features = ["env"] }
+prometheus.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx.workspace = true
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true, features = ["transport"] }
+tracing.workspace = true
+
+[lints]
+workspace = true
