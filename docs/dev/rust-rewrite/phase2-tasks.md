@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, internal-only dark deployment, route-preserving reset/re-arm, fresh pilot, and the complete replacement 11-job/44-row rotation. All 16 pass series established stored T0 `1784180489.972`; the full green-hour window is in progress | complete the full green-hour proof, then preserve the same uninterrupted cohort for the >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed admission, promotion, dark deployment, reset/re-arm, fresh pilot, and complete replacement rotation. Its provisional post-rotation T0 failed latency continuity at stored sample `1784181329.972`; containment suspended the driver | keep the failed cohort suspended; no latency fix is selected; require a wholly new cohort before any green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact latency-fixed image is dark-deployed; the replacement cohort passed its fresh pilot, all 11 rotation Jobs/44 rows, and established a fully green T0 with zero abort or mismatch counters | finish the in-progress full green hour, then continue this exact cohort uninterrupted into the >=7-day soak |
+| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57` | diagnose the real retained Rust latency tail and select a fix before any reset/pilot/new cohort; no green hour or soak exists |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The fail-closed supervisor is live, the full rotation and T0 passed, public routing is unchanged, and generic inventory enablement remains false | keep the supervisor and exact cohort uninterrupted through the green-hour proof and >=7-day soak; routing/cutover, Tantivy egress, and C5 remain off |
+| I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact artifact remains healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The supervisor detected the latency-only break, exited `20`, suspended the exact CronJob at generation `3`, and cleared recurring Jobs; public routing is unchanged | preserve containment and failed evidence; do not restart this cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -352,7 +352,7 @@ below every agreement threshold, so it remains dormant regardless of the formal
   were historical pre-reset state; the fresh checkpoint below supersedes the
   operational boundary without erasing that failed-latency evidence.
 
-### Fresh reset/pilot and supervised green-hour checkpoint (2026-07-16)
+### Fresh reset/pilot and failed supervised green-hour checkpoint (2026-07-16)
 
 - The latency-fixed dark image above was reset and re-armed through the
   route-preserving production controllers. Go L3 pod UID
@@ -408,22 +408,40 @@ below every agreement threshold, so it remains dormant regardless of the formal
   k=20 and k=50 sums/counts, RBO sum/count, and Top-1 matches were all `22/22`;
   dropped, saturated, Rust error, reference error, ranking/count/facet mismatch,
   and result/count delta counters were all zero. All 21 reviewed GraphQL/composer
-  alerts were inactive, and the evidence contains no abort-required event.
+  alerts were inactive at the rotation checkpoint, before the later latency
+  continuity break.
 - All 16 exact gate series were `1` at stored T0 `1784180489.972`
   (`2026-07-16T05:41:29.972Z`); the watcher emitted `t0_established` at
   `2026-07-16T05:42:32Z`. The public IngressRoute remains UID
   `876edf57-eec2-46d2-94b5-f4306c3446a7`, generation `2`, Authentik plus
-  `bitmagnet-l3:3333`, and no Coder workspace is active or was mutated. The full
-  green-hour continuity window is now in progress; if its independent raw-range
-  proof passes, this same uninterrupted cohort continues into the separate
-  seven-day soak.
+  `bitmagnet-l3:3333`, and no Coder workspace was mutated. This was the first
+  qualifying post-rotation T0, not a completed green hour.
+- Continuity broke at stored sample `1784181329.972`
+  (`2026-07-16T05:55:29.972Z`). Rust p99 moved from `0.90112s` to `0.78848s`,
+  while the Go reference moved from `1.55648s` to `0.488448s` as the old Go
+  high-latency outlier aged out. Only `graphql_shadow:latency:pass` and the
+  composite `graphql_shadow:gate_pass` flipped to `0`; the other 14 exact pass
+  series remained `1`.
+- The old Go outlier aging out was the immediate trigger, but this is not merely
+  stale-reference noise: Rust retained a real ranked tail above `0.512s`. No
+  latency fix or new candidate has been selected.
+- At `05:55:52Z` the watcher emitted `abort_required` exit `20`. Direct totals
+  were `57/57/57`; all 28 ranking and 28 exact-count proofs remained perfect,
+  while every drop, saturation, Rust/reference error, facet/ranking/count
+  mismatch, and result/count delta stayed zero. This T0 is invalid.
+- Fail-closed containment suspended the same CronJob UID
+  `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation `3` and cleared recurring
+  Jobs. Go routing, the dark Rust service, and the comparison hook remain
+  unchanged; Go stays authoritative. No qualifying cohort, green hour, or soak
+  exists.
 
-Remaining sequence: preserve this rotation/T0 checkpoint and its homelab
-companion without disturbing the live supervisor; keep verifying route, pod, alert, log,
-Event, and Coder invariants until the watcher proves the full green hour. On that
-success, leave the driver and exact cohort uninterrupted for the separate
-seven-day soak. No result here authorizes Rust responses, public routing, G3
-eligibility expansion, or C5.
+Remaining sequence: preserve the suspended failed cohort and its homelab
+companion, diagnose the retained Rust latency tail, and select/review a fix
+before any new reset/re-arm. A future attempt must start from a fresh pilot,
+complete rotation, and new post-rotation T0, then pass an uninterrupted full hour
+before that same future cohort can continue into the separate seven-day soak. No
+result here authorizes Rust responses, public routing, G3 eligibility expansion,
+or C5.
 
 ---
 
@@ -679,10 +697,16 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   2026-07-15 production rotation proved those abort signals are load-bearing: all
   correctness rows passed, but rolling Rust p99 exceeded Go after an old reference
   outlier aged out, so the controller suspended traffic. `edb112be` is the
-  bounded-query source repair for that defect. Its exact image is now admitted,
-  promoted, dark-deployed, and has passed a fresh 11-job rotation with a new fully
-  green T0; production p99 remains under the in-progress full green-hour proof,
-  followed by the same uninterrupted >=7-day cohort rather than the failed T0.
+  bounded-query source repair selected for that first latency failure. Its exact
+  image is admitted, promoted, dark-deployed, and passed a fresh 11-job rotation
+  before establishing the first qualifying post-rotation T0. That provisional T0
+  failed: rolling Rust p99 moved from `0.90112` to `0.78848` while Go moved from
+  `1.55648` to `0.488448`, flipping only the latency row and aggregate gate. The
+  aging Go outlier was the immediate trigger, but the retained Rust `>0.512`
+  ranked tail is real and remains unresolved. The supervisor retained CronJob UID
+  `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation 3 with `suspend=true`.
+  No next fix is selected, no replacement cohort has started, and no completed
+  green-hour or soak exists.
 
 ---
 
