@@ -18,11 +18,13 @@ use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use sqlx::{PgPool, Row};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 // Production currently gives the GraphQL process an eight-connection pool.
 // Reserve headroom for the concurrent membership/count branches and for other
-// requests instead of reproducing Go's unbounded goroutine fan-out.
+// requests instead of reproducing Go's unbounded goroutine fan-out. This is
+// one request-wide cap shared by all facet groups.
 const FACET_DB_CONCURRENCY: usize = 4;
 
 pub(crate) const BASE_SELECT: &str = "SELECT torrent_contents.info_hash\nFROM torrent_contents";
@@ -180,58 +182,146 @@ pub async fn fetch_aggregations(
     now: DateTime<Utc>,
 ) -> Result<Aggregations> {
     let ctx = CriteriaCtx::new(config, now);
-    let mut aggregations = Aggregations::new();
+    let facet_preparations = options
+        .facets
+        .iter()
+        .filter(|facet| facet.aggregate)
+        .enumerate()
+        .map(|(order, facet)| [(order, Arc::new(facet.clone()))]);
+    let mut prepared = try_collect_facet_work(facet_preparations, |(order, facet)| {
+        prepare_facet_group(pool, order, facet)
+    })
+    .await?;
+    prepared.sort_by_key(|facet| facet.order);
 
-    // Keep group assembly deterministic and bound pending work as well as
-    // active SQL: one facet owns at most FACET_DB_CONCURRENCY bucket futures.
-    for facet in options.facets.iter().filter(|facet| facet.aggregate) {
-        let (key, group) = fetch_facet_group(pool, options, &ctx, facet).await?;
+    let mut groups = Vec::with_capacity(prepared.len());
+    let item_work = prepared
+        .into_iter()
+        .enumerate()
+        .map(|(group_index, prepared)| {
+            groups.push((
+                prepared.facet.facet.key().to_owned(),
+                AggregationGroup {
+                    label: facet_label(prepared.facet.facet).to_owned(),
+                    logic: prepared.logic,
+                    items: BTreeMap::new(),
+                },
+            ));
+
+            prepared
+                .values
+                .into_iter()
+                .map(move |(value, label)| FacetItemWork {
+                    group_index,
+                    facet: Arc::clone(&prepared.facet),
+                    logic: prepared.logic,
+                    current_facet: prepared.current_facet,
+                    value,
+                    label,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    // Interleave groups before applying one request-wide cap. This lets
+    // independent facet groups overlap without multiplying per-group limits;
+    // buffer_unordered retains at most FACET_DB_CONCURRENCY pending futures.
+    let ctx = &ctx;
+    let entries = try_collect_facet_work(item_work, |work| async move {
+        let item = fetch_facet_item(
+            pool,
+            options,
+            ctx,
+            &work.facet,
+            work.logic,
+            work.current_facet,
+            work.value,
+            work.label,
+        )
+        .await?;
+        Ok((work.group_index, item))
+    })
+    .await?;
+
+    for (group_index, item) in entries {
+        if let Some((value, item)) = item {
+            groups
+                .get_mut(group_index)
+                .expect("prepared facet group must exist")
+                .1
+                .items
+                .insert(value, item);
+        }
+    }
+
+    let mut aggregations = Aggregations::new();
+    for (key, group) in groups {
+        // Match the previous sequential assembly if malformed options contain
+        // the same facet twice: the later complete group replaces the first.
         aggregations.insert(key, group);
     }
 
     Ok(aggregations)
 }
 
-async fn fetch_facet_group(
-    pool: &PgPool,
-    options: &SearchOptions,
-    ctx: &CriteriaCtx<'_>,
-    facet: &FacetRequest,
-) -> Result<(String, AggregationGroup)> {
-    let values = facet_values(pool, facet.facet).await?;
-    let logic = effective_logic(facet);
-    let current_facet = (logic == FacetLogic::Or).then(|| facet.facet.key());
-    let entries = try_collect_facet_items(values.into_iter().map(|(value, label)| {
-        fetch_facet_item(
-            pool,
-            options,
-            ctx,
-            facet,
-            logic,
-            current_facet,
-            value,
-            label,
-        )
-    }))
-    .await?;
-    let items = entries.into_iter().flatten().collect();
-
-    Ok((
-        facet.facet.key().to_owned(),
-        AggregationGroup {
-            label: facet_label(facet.facet).to_owned(),
-            logic,
-            items,
-        },
-    ))
+struct PreparedFacet {
+    order: usize,
+    facet: Arc<FacetRequest>,
+    logic: FacetLogic,
+    current_facet: Option<&'static str>,
+    values: BTreeMap<String, String>,
 }
 
-async fn try_collect_facet_items<I, Fut, T>(futures: I) -> Result<Vec<T>>
+struct FacetItemWork {
+    group_index: usize,
+    facet: Arc<FacetRequest>,
+    logic: FacetLogic,
+    current_facet: Option<&'static str>,
+    value: String,
+    label: String,
+}
+
+async fn prepare_facet_group(
+    pool: &PgPool,
+    order: usize,
+    facet: Arc<FacetRequest>,
+) -> Result<PreparedFacet> {
+    let values = facet_values(pool, facet.facet).await?;
+    let logic = effective_logic(&facet);
+    let current_facet = (logic == FacetLogic::Or).then(|| facet.facet.key());
+
+    Ok(PreparedFacet {
+        order,
+        facet,
+        logic,
+        current_facet,
+        values,
+    })
+}
+
+async fn try_collect_facet_work<Groups, Group, Work, Run, Fut, T>(
+    groups: Groups,
+    run: Run,
+) -> Result<Vec<T>>
 where
-    I: IntoIterator<Item = Fut>,
+    Groups: IntoIterator<Item = Group>,
+    Group: IntoIterator<Item = Work>,
+    Run: FnMut(Work) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    stream::iter(futures)
+    let mut groups = groups
+        .into_iter()
+        .map(IntoIterator::into_iter)
+        .collect::<VecDeque<_>>();
+    let round_robin = std::iter::from_fn(move || loop {
+        let mut group = groups.pop_front()?;
+        if let Some(work) = group.next() {
+            groups.push_back(group);
+            return Some(work);
+        }
+    });
+
+    stream::iter(round_robin)
+        .map(run)
         .buffer_unordered(FACET_DB_CONCURRENCY)
         .try_collect()
         .await
@@ -949,49 +1039,126 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn facet_item_fanout_is_concurrent_and_bounded() {
+    async fn facet_group_fanout_overlaps_with_one_global_cap() {
         const EXPECTED_CONCURRENCY: usize = 4;
-        const WORK_ITEMS: usize = EXPECTED_CONCURRENCY + 3;
+        const GROUPS: usize = 2;
+        const ITEMS_PER_GROUP: usize = EXPECTED_CONCURRENCY;
+        const WORK_ITEMS: usize = GROUPS * ITEMS_PER_GROUP;
 
         assert_eq!(FACET_DB_CONCURRENCY, EXPECTED_CONCURRENCY);
 
         let active = Arc::new(AtomicUsize::new(0));
+        let active_by_group =
+            Arc::new((0..GROUPS).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         let peak = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Semaphore::new(0));
-        let work = (0..WORK_ITEMS)
-            .map(|index| {
-                let active = Arc::clone(&active);
-                let peak = Arc::clone(&peak);
-                let started = Arc::clone(&started);
-                let release = Arc::clone(&release);
-                async move {
-                    let current = active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-                    peak.fetch_max(current, AtomicOrdering::SeqCst);
-                    started.fetch_add(1, AtomicOrdering::SeqCst);
-
-                    let permit = release.acquire().await.expect("release semaphore is open");
-                    permit.forget();
-                    active.fetch_sub(1, AtomicOrdering::SeqCst);
-                    Ok(index)
-                }
-            })
+        let work = (0..GROUPS)
+            .map(|group| (0..ITEMS_PER_GROUP).map(move |index| (group, index)))
             .collect::<Vec<_>>();
+        let run_active = Arc::clone(&active);
+        let run_active_by_group = Arc::clone(&active_by_group);
+        let run_peak = Arc::clone(&peak);
+        let run_started = Arc::clone(&started);
+        let run_release = Arc::clone(&release);
+        let mut collection = Box::pin(try_collect_facet_work(work, move |(group, index)| {
+            let active = Arc::clone(&run_active);
+            let active_by_group = Arc::clone(&run_active_by_group);
+            let peak = Arc::clone(&run_peak);
+            let started = Arc::clone(&run_started);
+            let release = Arc::clone(&run_release);
+            async move {
+                let current = active.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+                active_by_group[group].fetch_add(1, AtomicOrdering::SeqCst);
+                peak.fetch_max(current, AtomicOrdering::SeqCst);
+                started.fetch_add(1, AtomicOrdering::SeqCst);
 
-        let mut collection = Box::pin(try_collect_facet_items(work));
+                let permit = release.acquire().await.expect("release semaphore is open");
+                permit.forget();
+                active_by_group[group].fetch_sub(1, AtomicOrdering::SeqCst);
+                active.fetch_sub(1, AtomicOrdering::SeqCst);
+                Ok((group, index))
+            }
+        }));
         assert!(futures::poll!(&mut collection).is_pending());
 
         assert_eq!(active.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
         assert_eq!(peak.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
         assert_eq!(started.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
+        assert_eq!(active_by_group[0].load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(active_by_group[1].load(AtomicOrdering::SeqCst), 2);
 
         release.add_permits(WORK_ITEMS);
         let mut completed = collection.await.unwrap();
         completed.sort_unstable();
 
-        assert_eq!(completed, (0..WORK_ITEMS).collect::<Vec<_>>());
+        assert_eq!(
+            completed,
+            (0..GROUPS)
+                .flat_map(|group| (0..ITEMS_PER_GROUP).map(move |index| (group, index)))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
         assert_eq!(peak.load(AtomicOrdering::SeqCst), EXPECTED_CONCURRENCY);
+    }
+
+    #[tokio::test]
+    async fn facet_group_fanout_fails_closed_and_drops_pending_tasks() {
+        struct ActiveGuard(Arc<AtomicUsize>);
+
+        impl Drop for ActiveGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, AtomicOrdering::SeqCst);
+            }
+        }
+
+        const WORK_ITEMS: usize = FACET_DB_CONCURRENCY * 3;
+        let active = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+        let never_release = Arc::new(Semaphore::new(0));
+        let work = (0..2)
+            .map(|group| (0..WORK_ITEMS / 2).map(move |index| (group, index)))
+            .collect::<Vec<_>>();
+        let run_active = Arc::clone(&active);
+        let run_started = Arc::clone(&started);
+        let run_never_release = Arc::clone(&never_release);
+
+        let error = try_collect_facet_work(work, move |(group, index)| {
+            let active = Arc::clone(&run_active);
+            let started = Arc::clone(&run_started);
+            let never_release = Arc::clone(&run_never_release);
+            async move {
+                active.fetch_add(1, AtomicOrdering::SeqCst);
+                started.fetch_add(1, AtomicOrdering::SeqCst);
+                let _active = ActiveGuard(active);
+
+                if group == 1 && index == 0 {
+                    return Err(SearchQueryError::InvalidParams(
+                        "synthetic facet failure".to_owned(),
+                    ));
+                }
+
+                let permit = never_release
+                    .acquire()
+                    .await
+                    .expect("test semaphore remains open");
+                permit.forget();
+                Ok((group, index))
+            }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid search params: synthetic facet failure"
+        );
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+        // Dropping the Rust futures prevents new work from starting. SQLx may
+        // still have to drain already-issued PostgreSQL queries before their
+        // pooled connections become reusable.
+        assert!(started.load(AtomicOrdering::SeqCst) <= FACET_DB_CONCURRENCY);
+        assert!(started.load(AtomicOrdering::SeqCst) < WORK_ITEMS);
     }
 
     #[test]
