@@ -107,11 +107,11 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; candidate `7ba5a75c`; Coder RSS evidence `8dd0d1f3`; canonical Maple bundle `5b0178de`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` pass exact-SHA Rust, Go, disposable-PostgreSQL, Coder RSS, and canonical 4/4 smoke plus 12/12 Maple RSS gates. The four Maple artifacts and exact preserved image are reviewed/committed, but no typed receipt, image promotion, or deployment exists for this candidate | keep the failed cohort suspended; pin and issue the typed receipt for the committed bundle, then dark-measure `7ba5a75c` before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; candidate `7ba5a75c`; Coder RSS evidence `8dd0d1f3`; canonical Maple bundle `5b0178de`; source reconciliation `4ea8063a`; typed admission `c6a32b2`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` pass exact-SHA Rust, Go, disposable-PostgreSQL, Coder RSS, canonical 4/4 smoke plus 12/12 Maple RSS gates, and the controller-only v2 typed admission. The candidate image has not been promoted, deployed, or measured in production | keep the failed cohort suspended and require a fresh green/stable production guard; only under separate authorization promote the exact image byte-for-byte, deploy it to the internal dark Service, and perform direct dark phase-attributed measurement before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; retained-tail candidate `7ba5a75c`; Maple evidence `5b0178de` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate passes source and canonical RSS gates but still lacks a typed receipt | issue typed admission and dark-measure before any reset/pilot/new cohort; no replacement green hour or soak exists |
+| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; retained-tail candidate `7ba5a75c`; Maple evidence `5b0178de`; typed admission `c6a32b2` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate passes source, canonical RSS, and typed-admission gates but is not promoted, deployed, or latency-proven | require a fresh green/stable production guard, then separately authorize exact-image promotion, internal dark deployment, and direct phase-attributed measurement before any reset/pilot/new cohort; no replacement green hour or soak exists |
 | G0/P1 | `244f66cd` | complete; reference only | none |
 | I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact artifact remains healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The supervisor detected the latency-only break, exited `20`, suspended the exact CronJob at generation `3`, and cleared recurring Jobs; public routing is unchanged | preserve containment and failed evidence; do not restart this cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
@@ -435,7 +435,7 @@ below every agreement threshold, so it remains dormant regardless of the formal
   unchanged; Go stays authoritative. No qualifying cohort, green hour, or soak
   exists.
 
-### Retained-tail source candidate and heavy-gate checkpoint (2026-07-16)
+### Retained-tail source candidate and heavy-gate checkpoint (historical; superseded below)
 
 - The clean pushed integration source is
   `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`. It is four commits beyond the
@@ -462,16 +462,17 @@ below every agreement threshold, so it remains dormant regardless of the formal
   exists for `7ba5a75c`. The failed cohort remains suspended and Go remains
   authoritative.
 
-Remaining sequence: preserve the suspended failed cohort and its homelab
-companion; run the exclusive exact-SHA RSS gate and artifact admission for
-`7ba5a75c`; then dark-deploy and measure the candidate before deciding whether it
-resolves the retained tail. Only a reviewed, admitted result may start a wholly
-new reset/re-arm, pilot, complete rotation, and post-rotation T0. That future
-cohort must pass an uninterrupted full hour before continuing into the separate
-seven-day soak. No result here authorizes Rust responses, public routing, G3
-eligibility expansion, or C5.
+Historical remaining sequence at that checkpoint (completed through typed
+admission and superseded by the checkpoints below): preserve the suspended failed
+cohort and its homelab companion; run the exclusive exact-SHA RSS gate and
+artifact admission for `7ba5a75c`; then dark-deploy and measure the candidate
+before deciding whether it resolves the retained tail. Only a reviewed, admitted
+result may start a wholly new reset/re-arm, pilot, complete rotation, and
+post-rotation T0. That future cohort must pass an uninterrupted full hour before
+continuing into the separate seven-day soak. No result here authorizes Rust
+responses, public routing, G3 eligibility expansion, or C5.
 
-### Exact-SHA Coder RSS pre-admission checkpoint (2026-07-16)
+### Exact-SHA Coder RSS pre-admission checkpoint (historical; superseded below)
 
 - Source evidence commit `8dd0d1f3` preserves the 18-record gate JSONL for exact
   clean detached commit `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`.
@@ -501,7 +502,7 @@ eligibility expansion, or C5.
   candidate image was promoted or deployed, and no traffic/reset/cohort action
   occurred.
 
-### Canonical Maple RSS bundle checkpoint (2026-07-16)
+### Canonical Maple RSS bundle checkpoint (historical artifact checkpoint)
 
 - Evidence commit `5b0178de` preserves the trusted exact-`7ba5a75c` four-file
   bundle. Smoke session `b5a57172c8424e8faeb2adfe210dacb7` passed 4/4;
@@ -537,13 +538,54 @@ eligibility expansion, or C5.
   offline boundary is a policy pinned to this exact four-file bundle, accepted
   source `7ba5a75c`, the reconciled ledger tip, exact image, and
   `pathsearch_phase_histogram_v1`. Promotion, deployment, measurement, traffic
-  reset, and any new cohort remain separate later decisions.
+  reset, and any new cohort remain separate later decisions. This artifact-only
+  boundary is superseded by the typed-admission checkpoint below.
 
-Remaining sequence: keep the failed driver suspended and Go authoritative;
-reconcile this ledger; update and test immutable admission/promotion pins; issue
-only the typed receipt; then require a green/stable production guard before any
-promotion or internal dark rollout. Dark phase-attributed measurement remains
-separate from traffic. No cohort may start from RSS admission alone.
+### Typed RSS admission checkpoint (2026-07-16)
+
+- Source reconciliation commit
+  `4ea8063ab222bc6fbd067d900d3b984f733b75d5` records the reviewed bundle on the
+  clean pushed integration branch. Its accepted source commit is
+  `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`; both commits resolve
+  `bitmagnet-rs` to tree `892060ce781f8bfa55ed129745885ff3b804c511`.
+- Homelab `f37013a` pins the v2 policy to that source, bundle, and preserved
+  image; `b5b3f1b` adds bucket-derived histogram-sum bounds plus exact
+  scenario-aware phase observation counts; and `c6a32b2` advances both guarded
+  promotion entry points to the hardened validator and canonical bundle. The
+  exact validator SHA-256 is
+  `1052c232d22a8d7aaf2d05dcd3f9287bbda123e0679ea965309af5750cd5c1fa`;
+  policy SHA-256 is
+  `2cd78f57821da8b1394859f558205d2362d075f2ff4817e1946e81177e4fdae7`.
+- Controller-only admission returned
+  `bitmagnet-rss-evidence-admission-receipt/v2` with `ok=true`. It binds accepted
+  commit `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`, reconciled commit
+  `4ea8063ab222bc6fbd067d900d3b984f733b75d5`, accepted root
+  `f3b75877b943ab013f2b78b2242e7c611d7c9e13`, reconciled root
+  `a54c9b5362dde44c6249f7f417950a1cb57519ca`, and the identical accepted and
+  reconciled source tree `892060ce781f8bfa55ed129745885ff3b804c511`.
+- The receipt binds gate session `00b631d0ef534bdeac46780f3f5fcf88` at SHA-256
+  `40692bb6e3137642966a31e1f2db2d64c66a6f262be11d6cbc55c3ded4c9ba65`, smoke
+  session `b5a57172c8424e8faeb2adfe210dacb7` at SHA-256
+  `cdb6563acd18f75a58808ae6646fbb22147eea17f0cd81f1f29f42f862f080dc`, headroom
+  SHA-256 `37ca14c667f5df865455ffda3c020bf7fc767df7758b1d9367c7b71bf571efa8`, and
+  inventory SHA-256
+  `4c39c967d529ba886fc44482c78214fff7303baccc1cd4d9dac6f44c10b1fdb4`.
+- The admitted image is
+  `sha256:23c406f5fcba14d0174f40dc20f83f274b4f19ab6b0e4793f73180774e213a03`
+  with rootfs layers
+  `sha256:81f823b9617547261c907396f63f770deaa554748ff739bedfa650e3bb74595a`,
+  `sha256:ee718217da19b02d1c2465d7f6222de8cc4cf91a499063761f066456e8859636`,
+  and `sha256:a50dd140c6da846b097b7d91b29884e72b7c61a67d34400392d488ef2592fda8`.
+  Admission did not promote, deploy, or measure that image and did not reset
+  traffic or start a cohort. The failed driver remains suspended and Go remains
+  authoritative.
+
+Remaining sequence: first require a fresh green/stable production guard. Only
+under separate authorization may the exact admitted image be promoted
+byte-for-byte and deployed to the internal dark Service; direct dark
+phase-attributed measurement follows as a distinct gate. Traffic reset/re-arm,
+pilot, rotation, a new T0, green hour, and soak remain later decisions. No cohort
+may start from RSS admission alone.
 
 ---
 
@@ -805,13 +847,13 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   failed: rolling Rust p99 moved from `0.90112` to `0.78848` while Go moved from
   `1.55648` to `0.488448`, flipping only the latency row and aggregate gate. The
   aging Go outlier was the immediate trigger, but the retained Rust `>0.512`
-  ranked tail is real and remains unresolved in live evidence. Source-only
+  ranked tail is real and remains unresolved in live evidence. Typed-admitted
   candidate `7ba5a75c` combines request-wide fair facet scheduling, batched
   pathsearch commits, seven fixed phase timings, and fail-closed writer rollback;
   its exact Rust/Go/PostgreSQL source gates, Coder RSS pre-admission, and canonical
-  4/4 smoke plus 12/12 Maple RSS bundle pass. It has no typed receipt, promoted
-  image, deployment, or runtime latency proof, so it is not yet accepted as the
-  fix.
+  4/4 smoke plus 12/12 Maple RSS bundle pass, and its controller-only v2 typed
+  admission is complete. It has no promoted image, deployment, or runtime latency
+  proof, so it is not yet accepted as the fix.
   The supervisor retained CronJob UID
   `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation 3 with `suspend=true`.
   No replacement cohort has started, and no completed green hour or soak exists.
