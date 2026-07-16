@@ -107,11 +107,11 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; candidate `7ba5a75c`; exact-SHA Coder RSS evidence `8dd0d1f3`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` pass exact-SHA Rust, Go, disposable-PostgreSQL, and 12-case Coder RSS gates. The Coder artifact is pre-admission evidence only: no canonical four-artifact Maple bundle, typed receipt, image promotion, or deployment exists for this candidate | keep the failed cohort suspended; extend the validator for the fixed phase histogram, run and admit the canonical Maple bundle for `7ba5a75c`, then dark-measure before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; candidate `7ba5a75c`; Coder RSS evidence `8dd0d1f3`; canonical Maple bundle `5b0178de`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` pass exact-SHA Rust, Go, disposable-PostgreSQL, Coder RSS, and canonical 4/4 smoke plus 12/12 Maple RSS gates. The four Maple artifacts and exact preserved image are reviewed/committed, but no typed receipt, image promotion, or deployment exists for this candidate | keep the failed cohort suspended; pin and issue the typed receipt for the committed bundle, then dark-measure `7ba5a75c` before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; retained-tail candidate `7ba5a75c`; Coder RSS evidence `8dd0d1f3` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate passes source and Coder RSS gates but remains unadmitted | run canonical Maple four-artifact admission and dark measurement before any reset/pilot/new cohort; no replacement green hour or soak exists |
+| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; retained-tail candidate `7ba5a75c`; Maple evidence `5b0178de` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate passes source and canonical RSS gates but still lacks a typed receipt | issue typed admission and dark-measure before any reset/pilot/new cohort; no replacement green hour or soak exists |
 | G0/P1 | `244f66cd` | complete; reference only | none |
 | I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact artifact remains healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The supervisor detected the latency-only break, exited `20`, suspended the exact CronJob at generation `3`, and cleared recurring Jobs; public routing is unchanged | preserve containment and failed evidence; do not restart this cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
@@ -491,20 +491,59 @@ eligibility expansion, or C5.
   (`85d99343-1c48-4748-a62e-cdcd0daadcf9`) passed nested CPU/memory-limit smoke
   before the successful retry. Failed evidence remains distinct at SHA-256
   `996423a3926f44bef67f48d97bfa8f1bb11e7d87bce7d5ec4ace92545e3e90aa`.
-- This is deliberately **not typed admission**. The fail-closed validator
+- At this checkpoint this was deliberately **not typed admission**. The
+  fail-closed validator
   requires one committed canonical Maple bundle containing a same-tip smoke,
   gate, continuous host-headroom stream, and terminal inventory, all bound to
-  the preserved Maple image. It also needs reviewed support for the new fixed
-  `bitmagnet_search_pathsearch_phase_duration_seconds` histogram family before
-  hashes and policy pins can advance. No candidate image was promoted or
-  deployed, and no traffic/reset/cohort action occurred.
+  the preserved Maple image. Homelab `2f3df79` now adds policy-selected exact
+  support for the fixed
+  `bitmagnet_search_pathsearch_phase_duration_seconds` histogram family. No
+  candidate image was promoted or deployed, and no traffic/reset/cohort action
+  occurred.
+
+### Canonical Maple RSS bundle checkpoint (2026-07-16)
+
+- Evidence commit `5b0178de` preserves the trusted exact-`7ba5a75c` four-file
+  bundle. Smoke session `b5a57172c8424e8faeb2adfe210dacb7` passed 4/4;
+  gate session `00b631d0ef534bdeac46780f3f5fcf88` passed all four cases
+  across three repeats (12/12). All evaluation checks, both provenance checks,
+  fixed phase-histogram vocabularies, cgroup/OOM evidence, summaries, and
+  independent cleanup records pass.
+- The repeated gate peaked at `751165440` bytes against the 6-GiB ceiling.
+  Exact successful artifact SHA-256 values are gate
+  `40692bb6e3137642966a31e1f2db2d64c66a6f262be11d6cbc55c3ded4c9ba65`,
+  smoke `cdb6563acd18f75a58808ae6646fbb22147eea17f0cd81f1f29f42f862f080dc`,
+  headroom `37ca14c667f5df865455ffda3c020bf7fc767df7758b1d9367c7b71bf571efa8`,
+  and inventory
+  `4c39c967d529ba886fc44482c78214fff7303baccc1cd4d9dac6f44c10b1fdb4`.
+- Twenty-six continuous headroom samples span smoke start through gate cleanup.
+  Minimum available memory was `21172304` KiB, minimum Docker-root free space
+  was `879449288` KiB, memory PSI maxima were 0.00, and all terminal sampling
+  failure counts were zero. The Hermes identity/readiness/restart snapshot is
+  byte-identical before/after. No benchmark container, volume, or private
+  network remains.
+- Exact gate image `sha256:23c406f5fcba14d0174f40dc20f83f274b4f19ab6b0e4793f73180774e213a03`
+  and its three recorded rootfs layers remain preserved on `maple-bastion`.
+  The inventory binds exact source/ref/fetched tip, both evidence sessions and
+  hashes, headroom, image identities, Hermes, and cleanup with workload/final
+  exit codes zero and no safety errors.
+- The gate ran only after the previously external-only TMDB readiness flap
+  recovered across consecutive production probes. `bitmagnet-0` became unready
+  again after artifact cleanup with the same TMDB-only symptom; route, driver,
+  all other workloads, Coder, and nodes stayed exact. No production mutation
+  occurred. This does not invalidate isolated Maple evidence, but live actions
+  remain paused while the dependency is unstable.
+- This commit records reviewed artifacts, **not the typed receipt**. The next
+  offline boundary is a policy pinned to this exact four-file bundle, accepted
+  source `7ba5a75c`, the reconciled ledger tip, exact image, and
+  `pathsearch_phase_histogram_v1`. Promotion, deployment, measurement, traffic
+  reset, and any new cohort remain separate later decisions.
 
 Remaining sequence: keep the failed driver suspended and Go authoritative;
-restore the full production readiness guard; update and test the histogram
-validator contract; run the trusted exact-`7ba5a75c` Maple four-artifact gate;
-commit and review that bundle; then issue a typed receipt. Dark deployment and
-phase-attributed measurement remain later, separate steps. No traffic cohort may
-start from the Coder artifact alone.
+reconcile this ledger; update and test immutable admission/promotion pins; issue
+only the typed receipt; then require a green/stable production guard before any
+promotion or internal dark rollout. Dark phase-attributed measurement remains
+separate from traffic. No cohort may start from RSS admission alone.
 
 ---
 
@@ -769,9 +808,10 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   ranked tail is real and remains unresolved in live evidence. Source-only
   candidate `7ba5a75c` combines request-wide fair facet scheduling, batched
   pathsearch commits, seven fixed phase timings, and fail-closed writer rollback;
-  its exact Rust/Go/PostgreSQL source gates and a 12-case Coder RSS pre-admission
-  gate pass. It has no canonical Maple bundle, typed receipt, promoted image,
-  deployment, or runtime latency proof, so it is not yet accepted as the fix.
+  its exact Rust/Go/PostgreSQL source gates, Coder RSS pre-admission, and canonical
+  4/4 smoke plus 12/12 Maple RSS bundle pass. It has no typed receipt, promoted
+  image, deployment, or runtime latency proof, so it is not yet accepted as the
+  fix.
   The supervisor retained CronJob UID
   `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation 3 with `suspend=true`.
   No replacement cohort has started, and no completed green hour or soak exists.
