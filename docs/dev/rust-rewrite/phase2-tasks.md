@@ -107,11 +107,11 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed admission, promotion, dark deployment, reset/re-arm, fresh pilot, and complete replacement rotation. Its provisional post-rotation T0 failed latency continuity at stored sample `1784181329.972`; containment suspended the driver | keep the failed cohort suspended; no latency fix is selected; require a wholly new cohort before any green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | live ledger `446650b0`; live accepted source `0dc5542e`; source-only candidate `7ba5a75c`; fresh live RSS evidence `f584452b` | S/C/G/P remain merged in the accepted dark deployment. The replacement cohort failed latency continuity at stored sample `1784181329.972`, and containment suspended the driver. Four retained-tail commits through `7ba5a75c` now pass exact-SHA Rust, Go, and disposable-PostgreSQL source gates, but have no RSS admission, image, promotion, or deployment | keep the failed cohort suspended; admit and measure `7ba5a75c` before any new cohort; require a wholly new pilot/rotation/T0 before a green hour or >=7-day soak; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57` | diagnose the real retained Rust latency tail and select a fix before any reset/pilot/new cohort; no green hour or soak exists |
+| P | `7c5c7eea` + hardening through `41c63910`; live latency source `0dc5542e`; source-only retained-tail candidate `7ba5a75c` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. The exact live image passed pilot and rotation correctness, but its provisional T0 failed on latency alone; direct counters ended perfect at `57/57/57`. The next candidate is source-gated only | run exact RSS/artifact admission and dark measurement before any reset/pilot/new cohort; no replacement green hour or soak exists |
 | G0/P1 | `244f66cd` | complete; reference only | none |
 | I | role `6f3ee63`; fresh evidence `f584452b`; homelab supervisor `00e2590` | the exact artifact remains healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. The supervisor detected the latency-only break, exited `20`, suspended the exact CronJob at generation `3`, and cleared recurring Jobs; public routing is unchanged | preserve containment and failed evidence; do not restart this cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
@@ -435,13 +435,41 @@ below every agreement threshold, so it remains dormant regardless of the formal
   unchanged; Go stays authoritative. No qualifying cohort, green hour, or soak
   exists.
 
+### Retained-tail source candidate and heavy-gate checkpoint (2026-07-16)
+
+- The clean pushed integration source is
+  `7ba5a75c4c5bee76cc12bb9f0b7886c762232198`. It is four commits beyond the
+  failed-cohort ledger tip `a2cff217`: `cf86dba2` fairly interleaves facet groups
+  under one request-wide cap of four with deterministic result assembly;
+  `469b909f` batches each nonempty pathsearch page/tombstone mutation into one
+  Tantivy commit and reader reload; `714dcf30` adds the fixed seven-phase
+  `bitmagnet_search_pathsearch_phase_duration_seconds{phase}` histogram; and
+  `7ba5a75c` rolls back failed writer transactions, permanently marks the writer
+  unwritable if rollback also fails, and makes composer health fail closed.
+- Dedicated Coder workspace `bm-p2s` verified the exact detached source with
+  Rust 1.97.0: workspace fmt, workspace/all-target/all-feature clippy with
+  warnings denied, and the full workspace/all-feature test suite passed.
+  Cache-bypassed `go test -count=1 ./...`, `git diff --check`, exact-HEAD, and
+  clean-tree checks also passed.
+- A workspace-local PostgreSQL 16.14 cluster bound only to localhost:5433 then
+  passed the Go 17-case integration generator and the ignored Rust live parity
+  consumer against the same database. The generated fixture was byte-identical
+  at SHA-256
+  `52e74d3fc01314172267f77c66601db726066a27aa77c9fff192e2a0bc405513`.
+  The temporary database was stopped and removed after the gate.
+- This checkpoint is **source-gated only**. No exact RSS gate, image build,
+  typed artifact admission, promotion, deployment, reset, or new traffic cohort
+  exists for `7ba5a75c`. The failed cohort remains suspended and Go remains
+  authoritative.
+
 Remaining sequence: preserve the suspended failed cohort and its homelab
-companion, diagnose the retained Rust latency tail, and select/review a fix
-before any new reset/re-arm. A future attempt must start from a fresh pilot,
-complete rotation, and new post-rotation T0, then pass an uninterrupted full hour
-before that same future cohort can continue into the separate seven-day soak. No
-result here authorizes Rust responses, public routing, G3 eligibility expansion,
-or C5.
+companion; run the exclusive exact-SHA RSS gate and artifact admission for
+`7ba5a75c`; then dark-deploy and measure the candidate before deciding whether it
+resolves the retained tail. Only a reviewed, admitted result may start a wholly
+new reset/re-arm, pilot, complete rotation, and post-rotation T0. That future
+cohort must pass an uninterrupted full hour before continuing into the separate
+seven-day soak. No result here authorizes Rust responses, public routing, G3
+eligibility expansion, or C5.
 
 ---
 
@@ -703,10 +731,14 @@ pieces are Go→Rust policy and embedded-shadow configuration.
   failed: rolling Rust p99 moved from `0.90112` to `0.78848` while Go moved from
   `1.55648` to `0.488448`, flipping only the latency row and aggregate gate. The
   aging Go outlier was the immediate trigger, but the retained Rust `>0.512`
-  ranked tail is real and remains unresolved. The supervisor retained CronJob UID
+  ranked tail is real and remains unresolved in live evidence. Source-only
+  candidate `7ba5a75c` combines request-wide fair facet scheduling, batched
+  pathsearch commits, seven fixed phase timings, and fail-closed writer rollback;
+  its exact Rust/Go/PostgreSQL source gates pass. It has no RSS admission, image,
+  promotion, deployment, or runtime latency proof, so it is not yet accepted as
+  the fix. The supervisor retained CronJob UID
   `d2d8189f-9e7a-4453-ac8e-951730e8190b` at generation 3 with `suspend=true`.
-  No next fix is selected, no replacement cohort has started, and no completed
-  green-hour or soak exists.
+  No replacement cohort has started, and no completed green hour or soak exists.
 
 ---
 
