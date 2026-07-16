@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | latency candidate `edb112be`; historical accepted evidence `2b8d2912`; deployed ledger `7e5e1360` | S/C/G/P merged; the old accepted artifact remains immutably pinned and the internal-only dark Service is healthy. The bounded aggregation-concurrency candidate is source-gated but has not passed a fresh exact-image RSS gate, promotion, deploy, or production latency proof | fresh Maple four-artifact gate -> exact promotion/pins -> dark deploy -> reset/pilot/new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | latency candidate accepted source `0dc5542e`; fresh RSS evidence `f584452b`; deployed ledger `7e5e1360` | S/C/G/P merged; the old accepted artifact remains immutably deployed and the internal-only dark Service is healthy. The bounded aggregation-concurrency candidate passed a fresh exact-image Maple RSS gate and its evidence is committed, but it has not been promoted, deployed, or production-latency proven | typed controller admission -> exact promotion/pins -> dark deploy -> reset/pilot/new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness, but the live p99 gate failed and the evidence driver is suspended | admit/deploy the source-gated latency candidate, then reset and prove a fresh full green hour before any >=7-day clock |
+| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness but failed live p99; the latency fix now has fresh RSS evidence while the evidence driver remains suspended | typed-admit/promote/deploy the freshly gated candidate, then reset and prove a fresh full green hour before any >=7-day clock |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; RSS evidence `2b8d2912`; homelab pin `4dc037f` | exact accepted artifact promoted without rebuilding; immutable pin and internal-only Deployment/ClusterIP/EndpointSlice/CNPs/ServiceMonitor are live and healthy; generic enablement remains fail-closed and the live L3 workload has no Rust GraphQL shadow env | separately authorize low-rate shadow and >=7-day soak; routing/cutover and C5 remain off |
+| I | role `6f3ee63`; historical RSS evidence `2b8d2912`; fresh evidence `f584452b`; homelab pin `4dc037f` | the historical exact artifact remains deployed without rebuilding; immutable pin and internal-only Deployment/ClusterIP/EndpointSlice/CNPs/ServiceMonitor are live and healthy. Fresh replacement evidence is committed but not yet controller-admitted, promoted, or deployed | typed-admit and promote the exact fresh artifact, dark-deploy it without changing public routing, then separately authorize low-rate shadow and >=7-day soak; routing/cutover and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -291,11 +291,42 @@ below every agreement threshold, so it remains dormant regardless of the formal
   The Coder test cgroup recorded no OOM or OOM-kill events, and no protected
   workspace was restarted or stopped by this work.
 - Homelab `e3c5f06` pins both trusted RSS entry points to the full source commit.
-  This is source evidence only. The old `7e5e1360` image remains deployed; the
-  replacement still requires a fresh trusted Maple smoke/gate/headroom/inventory
-  set, evidence commit, immutable promotion-pin refresh, byte-for-byte promotion,
-  dark deploy attestation, counter reset, supervised pilot, and a wholly new
-  production green-hour cohort before the seven-day clock can start.
+  That checkpoint was source evidence only; the old `7e5e1360` image remains
+  deployed and Go remains authoritative.
+- A fresh isolated native-amd64 Maple run at exact detached clean source
+  `0dc5542e` passed the complete gate. Its root tree is
+  `7f79739c4ad413f48f9579ea6ceae2a824671596` and its `bitmagnet-rs` subtree is
+  the source-gated `8fe7347e47bd250e47d5725bc99cac5752ebb544`. Smoke session
+  `670bbc3fdbba4f25b0d86f26824b920e` passed 4/4 cases, then gate session
+  `e60ca738ef8f4184bb7b4495beb9a327` passed all 12 repeated cases. The gate peak
+  was 850,468,864 bytes and the smoke peak was 30,072,832 bytes, both below the
+  fixed 6,442,450,944-byte ceiling; every response, metric, barrier, provenance,
+  cgroup, OOM, and cleanup invariant passed.
+- The 27-sample headroom record covered smoke start through gate cleanup. Minimum
+  `MemAvailable` was 21,063,616 KiB, minimum Docker-root free space was
+  879,891,096 KiB, memory PSI `some` and `full` maxima were zero, all Docker
+  observations ultimately succeeded after six bounded transient retries, and the
+  Hermes before/after inventory was identical.
+- Fresh evidence is committed at `f584452b` as exactly these four immutable files:
+  - `graphql-rss-gate-maple-20260715-0dc5542e.jsonl` —
+    `289ee8fb990bf63bac6ccf0fc1574887beb689f7fdebd4de6232c5d68dc8ecb3`
+  - `graphql-rss-gate-maple-20260715-0dc5542e.smoke.jsonl` —
+    `d18585cecc412c762a3158461860815163dc2a4cefbb1aa419646cd6c76fb5d6`
+  - `graphql-rss-gate-maple-20260715-0dc5542e.headroom.jsonl` —
+    `3f06fb0f22ec54da89a8895d01e3a50508e453f383fb703753764b4afc18c0e7`
+  - `graphql-rss-gate-maple-20260715-0dc5542e.inventory.json` —
+    `7bc43cedc959c820e19cc9a88c59ffd727cfa02ba24da2d018fd0a71f6b30d0d`
+- The accepted gate image is
+  `sha256:422526288d0f99b0ab9dbec40db627dfd65435d9e6250dfdfbfa8ff5da21003c`
+  (`bm-rss-e60ca738ef-graphql:local`) with rootfs layers
+  `sha256:81f823b9617547261c907396f63f770deaa554748ff739bedfa650e3bb74595a`,
+  `sha256:ee718217da19b02d1c2465d7f6222de8cc4cf91a499063761f066456e8859636`,
+  and `sha256:5a333da0c1bb080a00d4e65c27955c37e5353beef48121f902711b247d9b4c81`.
+  This evidence does not itself authorize promotion or deployment. The remaining
+  sequence is typed controller admission, immutable promotion-pin refresh,
+  byte-for-byte promotion, internal-only dark deploy attestation, counter reset,
+  supervised pilot, and a wholly new production green-hour cohort before the
+  seven-day clock can start.
 
 ---
 
