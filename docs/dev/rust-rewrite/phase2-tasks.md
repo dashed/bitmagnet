@@ -107,13 +107,13 @@ the lane work was produced.
 | Lane | Verified / current tip | Current state | Remaining critical path |
 |---|---|---|---|
 | Base | `cb7c970e` | verified; base check/fmt/clippy/test passed | preserve the currently untracked verification log/helper if desired |
-| Integration | latency candidate accepted source `0dc5542e`; fresh RSS evidence `f584452b`; deployed ledger `7e5e1360` | S/C/G/P merged; the old accepted artifact remains immutably deployed and the internal-only dark Service is healthy. The bounded aggregation-concurrency candidate passed a fresh exact-image Maple RSS gate and its evidence is committed, but it has not been promoted, deployed, or production-latency proven | typed controller admission -> exact promotion/pins -> dark deploy -> reset/pilot/new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
+| Integration | reconciled ledger `446650b0`; accepted source `0dc5542e`; fresh RSS evidence `f584452b` | S/C/G/P merged; the bounded aggregation-concurrency candidate passed the fresh exact-image Maple RSS gate, typed controller admission, byte-for-byte promotion, and internal-only dark deployment. The exact running image is healthy but has not yet been production-latency proven | reset/re-arm -> supervised pilot -> wholly new green-hour cohort; keep G3 point reads outside eligibility; deploy-branch merge |
 | S | `e7e712c8` | S1-S5 complete; 17-case live-PostgreSQL generator/Rust differential gate rerun 2026-07-13 with zero diffs | none for the Phase-2 search builder |
 | C | byte envelope `deb351d7`; component evidence `d173f2e6`; accepted gate `2b8d2912` | C1-C4/C6/C7 integrated; compressed/decompressed, decoded-allocation, and retained-string byte limits close the owned-path defect; release Linux component and repeated whole-container RSS scenarios pass | C5 remains separately quality-gated |
 | G | `3addfd5c` + projection fix in `deb351d7` | SDL/search/file/facet/typeahead/collapse, real S+C runtime, HTTP lifecycle, metrics, container, and lookahead-controlled file retention complete | G3 Queue/Torrent point-read fields remain explicitly unserved; mutations remain declarations only |
-| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness but failed live p99; the latency fix now has fresh RSS evidence while the evidence driver remains suspended | typed-admit/promote/deploy the freshly gated candidate, then reset and prove a fresh full green hour before any >=7-day clock |
+| P | `7c5c7eea` + hardening through `41c63910`; latency source `0dc5542e` | Go-embedded hook executes Go once and admits only root `torrentContent.search` queries plus `__typename`; mixed root siblings, redirects, and invalid response media types fail closed. A corrected 44-row rotation passed correctness but failed live p99; the exact latency-fixed Rust image is now dark-deployed while the evidence driver remains suspended | reset/re-arm and prove a fresh pilot plus full green hour before any >=7-day clock |
 | G0/P1 | `244f66cd` | complete; reference only | none |
-| I | role `6f3ee63`; historical RSS evidence `2b8d2912`; fresh evidence `f584452b`; homelab pin `4dc037f` | the historical exact artifact remains deployed without rebuilding; immutable pin and internal-only Deployment/ClusterIP/EndpointSlice/CNPs/ServiceMonitor are live and healthy. Fresh replacement evidence is committed but not yet controller-admitted, promoted, or deployed | typed-admit and promote the exact fresh artifact, dark-deploy it without changing public routing, then separately authorize low-rate shadow and >=7-day soak; routing/cutover and C5 remain off |
+| I | role `6f3ee63`; fresh evidence `f584452b`; homelab pin `26ab7c4` | the exact latency-fixed artifact passed typed admission, was promoted and dark-deployed without rebuilding, and is healthy behind the internal-only ClusterIP/EndpointSlice/CNPs/ServiceMonitor surface. Public routing is unchanged and generic inventory enablement remains false | supervise the fresh shadow cohort; routing/cutover, Tantivy egress, and C5 remain off |
 
 **C5 status:** `watermark_epoch` is already complete in source and live. C5 is
 blocked only on search-quality evidence; the 2026-07-13 production snapshot is far
@@ -322,11 +322,35 @@ below every agreement threshold, so it remains dormant regardless of the formal
   `sha256:81f823b9617547261c907396f63f770deaa554748ff739bedfa650e3bb74595a`,
   `sha256:ee718217da19b02d1c2465d7f6222de8cc4cf91a499063761f066456e8859636`,
   and `sha256:5a333da0c1bb080a00d4e65c27955c37e5353beef48121f902711b247d9b4c81`.
-  This evidence does not itself authorize promotion or deployment. The remaining
-  sequence is typed controller admission, immutable promotion-pin refresh,
-  byte-for-byte promotion, internal-only dark deploy attestation, counter reset,
-  supervised pilot, and a wholly new production green-hour cohort before the
-  seven-day clock can start.
+  This evidence did not itself authorize promotion or deployment; those remained
+  separate production gates.
+- Homelab `258ee62` versioned the headroom contract without weakening historical
+  v1 evidence, and `d90b507` pinned the reviewed v2 policy and exact four-file
+  artifact set. The controller-local typed receipt passed with validator SHA-256
+  `d314bc068c2182b2f43c82df298f45969cd726b14cdba7cf98d0b4c66c007561`
+  and policy SHA-256
+  `c2458abbe444b77ef30a21aa2d835a6f652db9bd58a481c3a3bd1332c4bd76dc`.
+- The admitted image was promoted byte-for-byte as
+  `graphql-rss-gated-20260715-446650b0` at OCI index digest
+  `sha256:422526288d0f99b0ab9dbec40db627dfd65435d9e6250dfdfbfa8ff5da21003c`.
+  Homelab `26ab7c4` pins that exact image. The retained HEL1 tar SHA-256 is
+  `b87ad4d63e3f93e538f15f50678edef210e7994fbc9a3e5edafc0d6a33e60f3f`.
+- The confirmed dedicated deployment changed only the internal GraphQL
+  Deployment. Pod `bitmagnet-graphql-5c7c77b684-27phl`, UID
+  `568f76ee-9807-4e26-a273-febe130ba8a3`, is Ready with zero restarts at CRI
+  config ID
+  `sha256:3994c43656f1d8def95eff57790e0727acb4a51c357410a87e8a7a2c4a2d2719`;
+  its three runtime `diff_ids` exactly match the admitted layers. `/livez`,
+  `/status` with goose 25, the dependency GraphQL query, and Prometheus `up == 1`
+  pass, with no bounded startup-log error matches.
+- The Service remains ClusterIP-only with no Ingress, Certificate, external IP,
+  or Tantivy egress. Public routing still uses Authentik and `bitmagnet-l3:3333`;
+  Go remains authoritative. The bounded Go comparison hook remains enabled, but
+  the controlled evidence CronJob is suspended with no active Jobs. At the
+  deployment checkpoint all Coder workspaces were stopped and both workspace
+  namespaces were empty. The old failed-cohort counters remain `57/57/57` by
+  design. Counter reset/re-arm, a supervised pilot, and a wholly new green-hour
+  cohort are the remaining gates before the seven-day clock can start.
 
 ---
 
