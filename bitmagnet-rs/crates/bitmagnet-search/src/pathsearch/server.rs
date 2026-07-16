@@ -1,13 +1,15 @@
 //! gRPC server for the L3 [`PathSearchService`](crate::proto::PathSearchService).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
-use tantivy::{Index, IndexReader, IndexWriter};
+use tantivy::{Index, IndexReader, IndexWriter, TantivyError};
 
 use crate::pathsearch::document::PathDocument;
 use crate::pathsearch::prefix::PrefixIndex;
@@ -31,13 +33,50 @@ pub enum PathSearchMutation<'a> {
     Delete(&'a [u8]),
 }
 
+enum WriterState {
+    Writable(Box<IndexWriter>),
+    // Tantivy reconstructs its writer during rollback. If that reconstruction
+    // fails, the old writer may be killed or lockless and must never be reused.
+    Unwritable(TantivyError),
+}
+
+fn rollback_or_disable_writer(
+    state: &mut WriterState,
+    writer_writable: &AtomicBool,
+    apply_error: TantivyError,
+    rollback: impl FnOnce(&mut IndexWriter) -> tantivy::Result<()>,
+) -> TantivyError {
+    let rollback_result = match state {
+        WriterState::Writable(writer) => rollback(writer),
+        WriterState::Unwritable(error) => return error.clone(),
+    };
+
+    match rollback_result {
+        Ok(()) => apply_error,
+        Err(rollback_error) => {
+            let fatal_error = TantivyError::InternalError(format!(
+                "pathsearch writer transaction failed ({apply_error}); rollback also failed \
+                 ({rollback_error}); writer is disabled until restart"
+            ));
+            *state = WriterState::Unwritable(fatal_error.clone());
+            writer_writable.store(false, Ordering::Release);
+            fatal_error
+        }
+    }
+}
+
 /// Pathsearch gRPC entry point.
 #[derive(Clone)]
 pub struct PathSearchServer {
     index: Index,
     reader: IndexReader,
     fields: Fields,
-    writer: Arc<Mutex<IndexWriter>>,
+    writer: Arc<Mutex<WriterState>>,
+    writer_writable: Arc<AtomicBool>,
+    #[cfg(test)]
+    explicit_commit_count: Arc<AtomicUsize>,
+    #[cfg(test)]
+    explicit_reload_count: Arc<AtomicUsize>,
     index_path: Option<PathBuf>,
     watermark_epoch: Arc<AtomicI64>,
     prefix: Option<Arc<PrefixIndex>>,
@@ -61,7 +100,12 @@ impl PathSearchServer {
             index,
             reader,
             fields,
-            writer: Arc::new(Mutex::new(writer)),
+            writer: Arc::new(Mutex::new(WriterState::Writable(Box::new(writer)))),
+            writer_writable: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            explicit_commit_count: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            explicit_reload_count: Arc::new(AtomicUsize::new(0)),
             index_path: None,
             watermark_epoch: Arc::new(AtomicI64::new(0)),
             prefix,
@@ -109,12 +153,51 @@ impl PathSearchServer {
     /// # Errors
     /// Returns Tantivy write/reload failures.
     pub async fn upsert_document(&self, doc: &PathDocument) -> tantivy::Result<()> {
-        {
-            let mut writer = self.writer.lock().await;
-            indexer::upsert(&writer, &self.fields, doc)?;
-            writer.commit()?;
+        let committed = self
+            .apply_writer_transaction(|writer| {
+                indexer::upsert(writer, &self.fields, doc)?;
+                Ok(true)
+            })
+            .await?;
+        if committed {
+            self.reload_reader()?;
         }
+        Ok(())
+    }
+
+    async fn apply_writer_transaction(
+        &self,
+        apply: impl FnOnce(&mut IndexWriter) -> tantivy::Result<bool>,
+    ) -> tantivy::Result<bool> {
+        let mut state = self.writer.lock().await;
+        let apply_result = match &mut *state {
+            WriterState::Writable(writer) => (|| {
+                let changed = apply(writer)?;
+                if changed {
+                    writer.commit()?;
+                    #[cfg(test)]
+                    self.explicit_commit_count.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(changed)
+            })(),
+            WriterState::Unwritable(error) => return Err(error.clone()),
+        };
+
+        match apply_result {
+            Ok(committed) => Ok(committed),
+            Err(apply_error) => Err(rollback_or_disable_writer(
+                &mut state,
+                &self.writer_writable,
+                apply_error,
+                |writer| writer.rollback().map(|_| ()),
+            )),
+        }
+    }
+
+    fn reload_reader(&self) -> tantivy::Result<()> {
         self.reader.reload()?;
+        #[cfg(test)]
+        self.explicit_reload_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -123,12 +206,15 @@ impl PathSearchServer {
     /// # Errors
     /// Returns Tantivy commit/reload failures.
     pub async fn delete_info_hash(&self, info_hash: &[u8]) -> tantivy::Result<()> {
-        {
-            let mut writer = self.writer.lock().await;
-            indexer::delete(&writer, &self.fields, info_hash);
-            writer.commit()?;
+        let committed = self
+            .apply_writer_transaction(|writer| {
+                indexer::delete(writer, &self.fields, info_hash);
+                Ok(true)
+            })
+            .await?;
+        if committed {
+            self.reload_reader()?;
         }
-        self.reader.reload()?;
         Ok(())
     }
 
@@ -141,45 +227,35 @@ impl PathSearchServer {
     /// number of documents it contains.
     ///
     /// # Errors
-    /// Returns Tantivy write/commit/reload failures.
+    /// Returns Tantivy write/commit/reload failures. If both a transaction and
+    /// its rollback fail, the returned error preserves both causes and the
+    /// server reports `writable = false` until restart.
     pub async fn apply_follow_batch<'a>(
         &self,
         mutations: impl IntoIterator<Item = PathSearchMutation<'a>>,
     ) -> tantivy::Result<()> {
-        let committed = {
-            let mut writer = self.writer.lock().await;
-            let apply_result = (|| {
+        let committed = self
+            .apply_writer_transaction(|writer| {
                 let mut changed = false;
                 let mut tombstones = Vec::new();
                 for mutation in mutations {
                     match mutation {
                         PathSearchMutation::Replace(document) => {
-                            indexer::upsert(&writer, &self.fields, &document)?;
+                            indexer::upsert(writer, &self.fields, &document)?;
                             changed = true;
                         }
                         PathSearchMutation::Delete(info_hash) => tombstones.push(info_hash),
                     }
                 }
                 for info_hash in tombstones {
-                    indexer::delete(&writer, &self.fields, info_hash);
+                    indexer::delete(writer, &self.fields, info_hash);
                     changed = true;
                 }
-                if changed {
-                    writer.commit()?;
-                }
                 Ok(changed)
-            })();
-
-            match apply_result {
-                Ok(committed) => committed,
-                Err(error) => {
-                    let _ = writer.rollback();
-                    return Err(error);
-                }
-            }
-        };
+            })
+            .await?;
         if committed {
-            self.reader.reload()?;
+            self.reload_reader()?;
         }
         Ok(())
     }
@@ -260,7 +336,7 @@ impl PathSearchService for PathSearchServer {
             doc_count: self.reader.searcher().num_docs(),
             index_bytes: dir_size(self.index_path.as_deref()),
             watermark_epoch: self.watermark_epoch.load(Ordering::Relaxed),
-            writable: true,
+            writable: self.writer_writable.load(Ordering::Acquire),
             suggest_ready: self.prefix.as_ref().is_some_and(|index| !index.is_empty()),
             suggest_entries: self.prefix.as_ref().map_or(0, |index| index.len() as u64),
         }))
@@ -269,13 +345,16 @@ impl PathSearchService for PathSearchServer {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathSearchMutation, PathSearchServer};
+    use super::{rollback_or_disable_writer, PathSearchMutation, PathSearchServer};
     use crate::pathsearch::document::PathDocument;
+    use crate::pathsearch::indexer;
     use crate::pathsearch::prefix::{PrefixIndex, PrefixIndexBuilder, PrefixIndexConfig};
     use crate::proto::path_search_health::ServingStatus;
     use crate::proto::path_search_service_server::PathSearchService;
     use crate::proto::{HealthCheckRequest, PathCandidatesRequest, SuggestRequest};
+    use std::sync::atomic::Ordering as AtomicOrdering;
     use std::sync::Arc;
+    use tantivy::TantivyError;
     use tempfile::TempDir;
     use tonic::{Code, Request};
 
@@ -413,6 +492,138 @@ mod tests {
                 .candidate_total,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn follow_batch_replay_is_idempotent_and_commits_and_reloads_once() {
+        let server = PathSearchServer::in_ram().expect("server");
+        let tombstoned = [2; 20];
+        let mutations = || {
+            [
+                PathSearchMutation::Replace(doc(1, "Kept.Release.mkv")),
+                PathSearchMutation::Replace(doc(2, "Transient.Release.mkv")),
+                PathSearchMutation::Delete(&tombstoned),
+            ]
+        };
+
+        let before_commits = server.explicit_commit_count.load(AtomicOrdering::Relaxed);
+        let before_reloads = server.explicit_reload_count.load(AtomicOrdering::Relaxed);
+        server
+            .apply_follow_batch(mutations())
+            .await
+            .expect("first batch");
+        assert_eq!(
+            server.explicit_commit_count.load(AtomicOrdering::Relaxed),
+            before_commits + 1,
+            "all replacements and tombstones must share one commit"
+        );
+        assert_eq!(
+            server.explicit_reload_count.load(AtomicOrdering::Relaxed),
+            before_reloads + 1
+        );
+
+        server
+            .apply_follow_batch(mutations())
+            .await
+            .expect("idempotent replay");
+        assert_eq!(
+            server.explicit_commit_count.load(AtomicOrdering::Relaxed),
+            before_commits + 2,
+            "replaying the page adds exactly one more commit"
+        );
+        assert_eq!(
+            server.explicit_reload_count.load(AtomicOrdering::Relaxed),
+            before_reloads + 2
+        );
+        assert_eq!(server.reader.searcher().num_docs(), 1);
+
+        server
+            .apply_follow_batch(std::iter::empty())
+            .await
+            .expect("empty batch");
+        assert_eq!(
+            server.explicit_commit_count.load(AtomicOrdering::Relaxed),
+            before_commits + 2,
+            "an empty batch must not commit"
+        );
+        assert_eq!(
+            server.explicit_reload_count.load(AtomicOrdering::Relaxed),
+            before_reloads + 2,
+            "an empty batch must neither commit nor explicitly reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_rollback_discards_partial_work_and_allows_replay() {
+        let server = PathSearchServer::in_ram().expect("server");
+        let apply_error = TantivyError::SystemError("synthetic apply failure".to_owned());
+
+        let returned = server
+            .apply_writer_transaction(|writer| {
+                indexer::upsert(writer, &server.fields, &doc(1, "Uncommitted.Release.mkv"))?;
+                Err(apply_error.clone())
+            })
+            .await
+            .expect_err("synthetic apply failure must roll back");
+        assert_eq!(returned.to_string(), apply_error.to_string());
+
+        let unrelated = [9; 20];
+        server
+            .apply_follow_batch([PathSearchMutation::Delete(&unrelated)])
+            .await
+            .expect("writer remains usable after rollback");
+        assert_eq!(
+            server.reader.searcher().num_docs(),
+            0,
+            "the later commit must not publish rolled-back partial work"
+        );
+
+        server
+            .apply_follow_batch([PathSearchMutation::Replace(doc(
+                1,
+                "Uncommitted.Release.mkv",
+            ))])
+            .await
+            .expect("replay succeeds");
+        assert_eq!(server.reader.searcher().num_docs(), 1);
+    }
+
+    #[tokio::test]
+    async fn rollback_failure_preserves_both_errors_and_permanently_disables_writer() {
+        let server = PathSearchServer::in_ram().expect("server");
+        let apply_error = TantivyError::SystemError("synthetic apply failure".to_owned());
+        let rollback_error = TantivyError::SystemError("synthetic rollback failure".to_owned());
+
+        // Tantivy's failure points require its optional `failpoints` Cargo
+        // feature. Inject the rollback result at our recovery boundary instead,
+        // so this test remains deterministic without changing workspace features.
+        let returned = {
+            let mut state = server.writer.lock().await;
+            rollback_or_disable_writer(
+                &mut state,
+                &server.writer_writable,
+                apply_error,
+                |_writer| Err(rollback_error),
+            )
+        };
+        let message = returned.to_string();
+        assert!(message.contains("synthetic apply failure"));
+        assert!(message.contains("synthetic rollback failure"));
+        assert!(message.contains("writer is disabled until restart"));
+
+        let health = server
+            .health_check(Request::new(HealthCheckRequest {}))
+            .await
+            .expect("health")
+            .into_inner();
+        assert!(!health.writable);
+
+        let retry = server
+            .apply_follow_batch([PathSearchMutation::Replace(doc(1, "Must.Not.Commit.mkv"))])
+            .await
+            .expect_err("a failed rollback permanently disables this writer");
+        assert_eq!(retry.to_string(), message);
+        assert_eq!(server.reader.searcher().num_docs(), 0);
     }
 
     #[tokio::test]

@@ -108,6 +108,8 @@ pub fn gate(state: Arc<HealthState>) -> crate::candidates::HealthGate {
 
 /// Performs one L3 `HealthCheck`, publishes its trust decision, and logs the
 /// outcome, mirroring Go `searchfx.pollPathsearchHealth` without C6 metrics.
+/// L3 is trusted only when it is serving, non-empty, writable, and (when
+/// configured) fresh enough.
 pub async fn poll_once<C: CandidateSource + ?Sized>(
     client: &C,
     state: &HealthState,
@@ -150,7 +152,8 @@ pub async fn poll_once_with_metrics<C: CandidateSource + ?Sized>(
     let doc_count = response.doc_count as i64;
     let watermark_epoch = response.watermark_epoch;
     let serving = response.status == ServingStatus::Serving as i32;
-    let mut healthy = serving && doc_count > 0;
+    let writable = response.writable;
+    let mut healthy = serving && writable && doc_count > 0;
     let mut stale_lag = None;
 
     if healthy && !config.max_watermark_lag.is_zero() && watermark_epoch > 0 {
@@ -169,7 +172,12 @@ pub async fn poll_once_with_metrics<C: CandidateSource + ?Sized>(
     }
 
     if healthy {
-        tracing::debug!(doc_count, watermark_epoch, "pathsearch: L3 healthy");
+        tracing::debug!(
+            doc_count,
+            watermark_epoch,
+            writable,
+            "pathsearch: L3 healthy"
+        );
     } else if let Some(lag) = stale_lag {
         tracing::warn!(
             lag_seconds = lag.as_secs(),
@@ -181,7 +189,8 @@ pub async fn poll_once_with_metrics<C: CandidateSource + ?Sized>(
         tracing::warn!(
             status = response.status,
             doc_count,
-            "pathsearch: L3 reachable but not trusted (not serving or empty); route failing closed"
+            writable,
+            "pathsearch: L3 reachable but not trusted (not serving, empty, or unwritable); route failing closed"
         );
     }
 }
@@ -303,6 +312,7 @@ mod tests {
             status: status as i32,
             doc_count,
             watermark_epoch,
+            writable: true,
             ..PathSearchHealth::default()
         }
     }
@@ -368,6 +378,26 @@ mod tests {
         };
         poll_once(&serving, &stale_state, &stale_config, 1_000).await;
         assert_eq!(stale_state.snapshot(), (false, 5, 900, 1_000));
+    }
+
+    #[tokio::test]
+    async fn poll_once_fails_closed_when_l3_is_serving_but_unwritable() {
+        let metrics = PathsearchMetrics::new();
+        let state = HealthState::new();
+        let mut response = health(ServingStatus::Serving, 5, 990);
+        response.writable = false;
+        let unwritable = FakeCandidateSource::responding(response);
+        let config = HealthConfig {
+            max_watermark_lag: Duration::from_secs(60),
+            ..HealthConfig::default()
+        };
+
+        poll_once_with_metrics(&unwritable, &state, &config, 1_000, Some(&metrics)).await;
+
+        assert_eq!(state.snapshot(), (false, 5, 990, 1_000));
+        assert_eq!(metrics.health_check_count(true), 1);
+        assert_eq!(metrics.health_check_count(false), 0);
+        assert_eq!(metrics.health_snapshot(), (false, 5, 990, 1_000));
     }
 
     #[tokio::test]
