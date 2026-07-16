@@ -23,6 +23,14 @@ use crate::proto::{
 const DEFAULT_SUGGEST_LIMIT: usize = 10;
 const MAX_SUGGEST_LIMIT: usize = 50;
 
+/// One mutation in a commit-visible pathsearch follow batch.
+pub enum PathSearchMutation<'a> {
+    /// Replace the current path-bag document for this torrent.
+    Replace(PathDocument),
+    /// Delete the path-bag document for this torrent.
+    Delete(&'a [u8]),
+}
+
 /// Pathsearch gRPC entry point.
 #[derive(Clone)]
 pub struct PathSearchServer {
@@ -124,6 +132,58 @@ impl PathSearchServer {
         Ok(())
     }
 
+    /// Apply one incremental follow batch as a single visible index update.
+    ///
+    /// Replacements are applied before tombstones. The follow loop filters
+    /// stale same-window tombstones before calling this method, so a torrent
+    /// that was deleted and then re-added remains present. A non-empty batch
+    /// performs exactly one commit and one reader reload, regardless of the
+    /// number of documents it contains.
+    ///
+    /// # Errors
+    /// Returns Tantivy write/commit/reload failures.
+    pub async fn apply_follow_batch<'a>(
+        &self,
+        mutations: impl IntoIterator<Item = PathSearchMutation<'a>>,
+    ) -> tantivy::Result<()> {
+        let committed = {
+            let mut writer = self.writer.lock().await;
+            let apply_result = (|| {
+                let mut changed = false;
+                let mut tombstones = Vec::new();
+                for mutation in mutations {
+                    match mutation {
+                        PathSearchMutation::Replace(document) => {
+                            indexer::upsert(&writer, &self.fields, &document)?;
+                            changed = true;
+                        }
+                        PathSearchMutation::Delete(info_hash) => tombstones.push(info_hash),
+                    }
+                }
+                for info_hash in tombstones {
+                    indexer::delete(&writer, &self.fields, info_hash);
+                    changed = true;
+                }
+                if changed {
+                    writer.commit()?;
+                }
+                Ok(changed)
+            })();
+
+            match apply_result {
+                Ok(committed) => committed,
+                Err(error) => {
+                    let _ = writer.rollback();
+                    return Err(error);
+                }
+            }
+        };
+        if committed {
+            self.reader.reload()?;
+        }
+        Ok(())
+    }
+
     /// Update the externally reported follow watermark.
     pub fn set_watermark_epoch(&self, watermark_epoch: i64) {
         self.watermark_epoch
@@ -209,7 +269,7 @@ impl PathSearchService for PathSearchServer {
 
 #[cfg(test)]
 mod tests {
-    use super::PathSearchServer;
+    use super::{PathSearchMutation, PathSearchServer};
     use crate::pathsearch::document::PathDocument;
     use crate::pathsearch::prefix::{PrefixIndex, PrefixIndexBuilder, PrefixIndexConfig};
     use crate::proto::path_search_health::ServingStatus;
@@ -273,6 +333,86 @@ mod tests {
             .expect("path candidates")
             .into_inner();
         assert_eq!(out.candidate_total, 0);
+    }
+
+    #[tokio::test]
+    async fn follow_batch_applies_replacements_before_tombstones() {
+        let server = PathSearchServer::in_ram().expect("server");
+        server
+            .upsert_document(&doc(1, "Old.Release.mkv"))
+            .await
+            .expect("seed replacement");
+        server
+            .upsert_document(&doc(2, "Deleted.Release.mkv"))
+            .await
+            .expect("seed tombstone");
+
+        let deleted = [2; 20];
+        let transient = [3; 20];
+        server
+            .apply_follow_batch([
+                PathSearchMutation::Delete(&deleted),
+                PathSearchMutation::Replace(doc(1, "New.Release.mkv")),
+                PathSearchMutation::Replace(doc(3, "Transient.Release.mkv")),
+                PathSearchMutation::Delete(&transient),
+            ])
+            .await
+            .expect("apply follow batch");
+
+        let search = |query: &str| {
+            server.path_candidates(Request::new(PathCandidatesRequest {
+                query: query.to_owned(),
+                limit: 10,
+                oversample: 0,
+                sort: Vec::new(),
+            }))
+        };
+        assert_eq!(
+            search("old.release")
+                .await
+                .expect("old path query")
+                .into_inner()
+                .candidate_total,
+            0
+        );
+        assert_eq!(
+            search("new.release")
+                .await
+                .expect("new path query")
+                .into_inner()
+                .candidate_total,
+            1
+        );
+        assert_eq!(
+            search("deleted.release")
+                .await
+                .expect("deleted path query")
+                .into_inner()
+                .candidate_total,
+            0
+        );
+        assert_eq!(
+            search("transient.release")
+                .await
+                .expect("same-batch tombstone query")
+                .into_inner()
+                .candidate_total,
+            0,
+            "the tombstone phase must run after replacements"
+        );
+
+        server
+            .apply_follow_batch(std::iter::empty())
+            .await
+            .expect("an empty batch is a no-op");
+        assert_eq!(
+            search("new.release")
+                .await
+                .expect("post-no-op query")
+                .into_inner()
+                .candidate_total,
+            1
+        );
     }
 
     #[tokio::test]
