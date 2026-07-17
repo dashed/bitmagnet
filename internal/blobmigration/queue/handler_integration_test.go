@@ -268,6 +268,13 @@ func TestBackfillFull_AllMigratedAndParity(t *testing.T) {
 
 		res := consistency.CompareFiles(blobFiles, rows)
 		assert.True(t, res.Match, "blob<->row parity for %x: %+v", s.h[:4], res.Mismatches)
+
+		// flushChunk stamps compressed_bytes = len(blob) = octet_length(files_data).
+		var summaryBytes *int64
+		require.NoError(t, db.Table("torrent_file_summary").
+			Select("compressed_bytes").Where("info_hash = ?", s.h[:]).Scan(&summaryBytes).Error)
+		require.NotNil(t, summaryBytes, "compressed_bytes set for %x", s.h[:4])
+		assert.Equal(t, int64(len(fd)), *summaryBytes, "compressed_bytes == octet_length for %x", s.h[:4])
 	}
 
 	// Extension-less torrent gets '[]' (not NULL) in both columns.

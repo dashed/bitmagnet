@@ -364,7 +364,7 @@ func flushChunk(
 			infoHash: t.infoHash,
 			blob:     blob,
 			extsJSON: string(extsJSON),
-			summary:  blobmigration.BuildFileSummary(t.infoHash, t.files),
+			summary:  blobmigration.BuildFileSummary(t.infoHash, t.files, len(blob)),
 		})
 	}
 
@@ -409,14 +409,14 @@ func flushChunk(
 
 		ib.WriteString("INSERT INTO torrent_file_summary " +
 			"(info_hash, file_count, total_size, largest_file_size, extensions, " +
-			"has_video, has_subtitle, has_audio, created_at, updated_at) VALUES ")
+			"has_video, has_subtitle, has_audio, compressed_bytes, created_at, updated_at) VALUES ")
 
 		for i, p := range preps {
 			if i > 0 {
 				ib.WriteString(",")
 			}
 
-			ib.WriteString("(decode(?,'hex'),?,?,?,?::jsonb,?,?,?,?,?)")
+			ib.WriteString("(decode(?,'hex'),?,?,?,?::jsonb,?,?,?,?,?,?)")
 
 			s := p.summary
 			iArgs = append(
@@ -429,6 +429,9 @@ func flushChunk(
 				s.HasVideo,
 				s.HasSubtitle,
 				s.HasAudio,
+				// len(p.blob) is the exact blob written to torrents.files_data above,
+				// so compressed_bytes matches octet_length(files_data).
+				len(p.blob),
 				now,
 				now,
 			)
@@ -438,7 +441,8 @@ func flushChunk(
 			"file_count = excluded.file_count, total_size = excluded.total_size, " +
 			"largest_file_size = excluded.largest_file_size, extensions = excluded.extensions, " +
 			"has_video = excluded.has_video, has_subtitle = excluded.has_subtitle, " +
-			"has_audio = excluded.has_audio, updated_at = excluded.updated_at")
+			"has_audio = excluded.has_audio, compressed_bytes = excluded.compressed_bytes, " +
+			"updated_at = excluded.updated_at")
 
 		return tx.Exec(ib.String(), iArgs...).Error
 	})

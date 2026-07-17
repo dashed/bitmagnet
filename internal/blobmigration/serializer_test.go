@@ -244,7 +244,7 @@ func TestBuildFileSummary(t *testing.T) {
 		{Index: 3, Path: "movie/readme.txt", Size: 1_000},
 	}
 
-	summary := BuildFileSummary(infoHash, files)
+	summary := BuildFileSummary(infoHash, files, 4096)
 
 	assert.Equal(t, infoHash, summary.InfoHash)
 	assert.Equal(t, 4, summary.FileCount)
@@ -254,6 +254,7 @@ func TestBuildFileSummary(t *testing.T) {
 	assert.True(t, summary.HasAudio)
 	assert.True(t, summary.HasSubtitle)
 	assert.Equal(t, []string{"mkv", "mp3", "srt", "txt"}, summary.Extensions)
+	assert.Equal(t, model.NewNullInt(4096), summary.CompressedBytes)
 }
 
 func TestBuildFileSummaryNoMedia(t *testing.T) {
@@ -266,19 +267,20 @@ func TestBuildFileSummaryNoMedia(t *testing.T) {
 		{Index: 1, Path: "data/readme.txt", Size: 500},
 	}
 
-	summary := BuildFileSummary(infoHash, files)
+	summary := BuildFileSummary(infoHash, files, 128)
 
 	assert.False(t, summary.HasVideo)
 	assert.False(t, summary.HasAudio)
 	assert.False(t, summary.HasSubtitle)
 	assert.Equal(t, 2, summary.FileCount)
+	assert.Equal(t, model.NewNullInt(128), summary.CompressedBytes)
 }
 
 func TestBuildFileSummaryEmpty(t *testing.T) {
 	t.Parallel()
 
 	var infoHash protocol.ID
-	summary := BuildFileSummary(infoHash, nil)
+	summary := BuildFileSummary(infoHash, nil, 0)
 
 	assert.Equal(t, 0, summary.FileCount)
 	assert.Equal(t, int64(0), summary.TotalSize)

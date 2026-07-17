@@ -51,12 +51,13 @@ func TestProcessBatch_BlobCreation(t *testing.T) {
 	assert.Equal(t, []string{"mkv", "nfo", "srt"}, exts)
 
 	infoHash := makeInfoHash(0xAA)
-	summary := blobmigration.BuildFileSummary(infoHash, files)
+	summary := blobmigration.BuildFileSummary(infoHash, files, len(blob))
 	assert.Equal(t, infoHash, summary.InfoHash)
 	assert.Equal(t, 3, summary.FileCount)
 	assert.Equal(t, int64(1_500_051_000), summary.TotalSize)
 	assert.True(t, summary.HasVideo)
 	assert.True(t, summary.HasSubtitle)
+	assert.Equal(t, model.NewNullInt(len(blob)), summary.CompressedBytes)
 }
 
 func TestSelfChaining_NewJobCreated(t *testing.T) {

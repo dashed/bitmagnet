@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/bytesfill"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/consistency"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/extfix"
 	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/queue"
@@ -59,6 +60,7 @@ func New(p Params) (Result, error) {
 			p.resumeCmd(),
 			p.verifyCmd(),
 			p.backfillExtCmd(),
+			p.backfillBytesCmd(),
 			p.cleanupCmd(),
 		},
 	}
@@ -697,6 +699,118 @@ func (p Params) backfillExtCmd() *cli.Command {
 			if rep.Errors > 0 {
 				return fmt.Errorf("e-backfill completed with %d blob errors", rep.Errors)
 			}
+
+			return nil
+		},
+	}
+}
+
+func (p Params) backfillBytesCmd() *cli.Command {
+	return &cli.Command{
+		Name: "backfill-bytes",
+		Usage: "00026: fill torrent_file_summary.compressed_bytes = octet_length(files_data) " +
+			"for rows written before the column existed; set-based UPDATE, torrents-heap-light",
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:  "dry-run",
+				Usage: "scan + report how many summary rows WOULD be filled WITHOUT writing",
+			},
+			&cli.IntFlag{
+				Name:    "chunk-size",
+				Aliases: []string{"batch-size"},
+				Value:   bytesfill.DefaultChunkSize,
+				Usage:   "summary rows filled (and committed) per chunk",
+			},
+			&cli.IntFlag{
+				Name:  "parallelism",
+				Value: int(p.Config.Parallelism),
+				Usage: "parallel info_hash-range workers (K=16 sustainable; K=32 crashed PG under WAL load)",
+			},
+			&cli.IntFlag{
+				Name:  "limit",
+				Value: 0,
+				Usage: "cap total summary rows scanned (bounded smoke before the full run); 0 = everything",
+			},
+		},
+		Action: func(ctx *cli.Context) error {
+			d, err := p.Dao.Get()
+			if err != nil {
+				return err
+			}
+
+			parallelism := ctx.Int("parallelism")
+			if parallelism < 1 {
+				parallelism = int(p.Config.Parallelism)
+			}
+
+			if parallelism < 1 {
+				parallelism = queue.DefaultConcurrency
+			}
+
+			chunkSize := ctx.Int("chunk-size")
+			if chunkSize < 1 {
+				chunkSize = bytesfill.DefaultChunkSize
+			}
+
+			dryRun := ctx.Bool("dry-run")
+			limit := ctx.Int("limit")
+
+			mode := "filling"
+			if dryRun {
+				mode = "dry-run (no writes)"
+			}
+
+			limitMsg := "all"
+			if limit > 0 {
+				limitMsg = fmt.Sprintf("≤%d", limit)
+			}
+
+			_, _ = fmt.Fprintf(
+				ctx.App.Writer,
+				"00026 compressed_bytes backfill: %s, %d workers, chunk %d, scanning %s rows...\n",
+				mode, parallelism, chunkSize, limitMsg,
+			)
+
+			// Throttled progress: log roughly every 500k scanned rows. progress is
+			// invoked under the aggregator mutex, so the closure's lastLogged is safe.
+			var lastLogged int64
+
+			progress := func(r bytesfill.Report) {
+				if r.Scanned-lastLogged >= 500_000 {
+					lastLogged = r.Scanned
+					_, _ = fmt.Fprintf(
+						ctx.App.Writer,
+						"  progress: scanned=%d updated=%d\n",
+						r.Scanned, r.Updated,
+					)
+				}
+			}
+
+			rep, err := bytesfill.BackfillCompressedBytes(
+				ctx.Context,
+				d,
+				parallelism,
+				chunkSize,
+				limit,
+				dryRun,
+				progress,
+			)
+			if err != nil {
+				return fmt.Errorf("compressed_bytes backfill failed: %w", err)
+			}
+
+			tw := table.NewWriter()
+			tw.SetOutputMirror(ctx.App.Writer)
+			tw.AppendHeader(table.Row{"Metric", "Value"})
+			tw.AppendRow(table.Row{"Scanned (compressed_bytes was NULL)", rep.Scanned})
+
+			if dryRun {
+				tw.AppendRow(table.Row{"Would fill", rep.Updated})
+			} else {
+				tw.AppendRow(table.Row{"Filled (rows affected)", rep.Updated})
+			}
+
+			tw.Render()
 
 			return nil
 		},

@@ -65,7 +65,7 @@ func TestBuildTorrentFileSummarySetsCrawlerTimestamps(t *testing.T) {
 	summary := buildTorrentFileSummary(infoHash, []model.TorrentFile{
 		{InfoHash: infoHash, Index: 0, Path: "show/episode.mkv", Size: 1_000},
 		{InfoHash: infoHash, Index: 1, Path: "show/episode.srt", Size: 100},
-	}, now)
+	}, 256, now)
 
 	assert.Equal(t, infoHash, summary.InfoHash)
 	assert.Equal(t, 2, summary.FileCount)

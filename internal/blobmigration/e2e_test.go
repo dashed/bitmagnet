@@ -556,7 +556,7 @@ func migrateOneTorrent(t *testing.T, ctx context.Context, db *gorm.DB, q *dao.Qu
 	require.NoError(t, err)
 
 	exts := blobmigration.ExtractUniqueExtensions(derefFiles)
-	summary := blobmigration.BuildFileSummary(infoHash, derefFiles)
+	summary := blobmigration.BuildFileSummary(infoHash, derefFiles, len(blob))
 
 	extsJSON, _ := json.Marshal(exts)
 	err = db.WithContext(ctx).Table("torrents").
@@ -583,6 +583,7 @@ func migrateOneTorrent(t *testing.T, ctx context.Context, db *gorm.DB, q *dao.Qu
 					"has_video",
 					"has_subtitle",
 					"has_audio",
+					"compressed_bytes",
 					"updated_at",
 				},
 			),

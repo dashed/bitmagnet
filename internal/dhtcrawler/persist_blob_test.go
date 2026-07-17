@@ -132,10 +132,11 @@ func TestBuildTorrentFileSummaryForFreshCrawl(t *testing.T) {
 		{InfoHash: hash, Index: 1, Path: "movie/subs.srt", Size: 100},
 	}
 
-	summary := buildTorrentFileSummary(hash, files, now)
+	summary := buildTorrentFileSummary(hash, files, 512, now)
 
 	assert.Equal(t, hash, summary.InfoHash)
 	assert.Equal(t, 2, summary.FileCount)
+	assert.Equal(t, model.NewNullInt(512), summary.CompressedBytes)
 	assert.Equal(t, int64(1_100), summary.TotalSize)
 	assert.Equal(t, int64(1_000), summary.LargestFileSize)
 	assert.Equal(t, []string{"mkv", "srt"}, summary.Extensions)

@@ -110,9 +110,18 @@ func ExtractUniqueExtensions(files []model.TorrentFile) []string {
 	return exts
 }
 
-func BuildFileSummary(infoHash protocol.ID, files []model.TorrentFile) model.TorrentFileSummary {
+// BuildFileSummary derives the denormalized summary for a torrent. compressedBytes
+// is the octet length of the torrent's compressed files_data blob (len(blob)); the
+// caller passes the exact bytes it writes to torrents.files_data so the summary's
+// compressed_bytes stays consistent with octet_length(files_data).
+func BuildFileSummary(
+	infoHash protocol.ID,
+	files []model.TorrentFile,
+	compressedBytes int,
+) model.TorrentFileSummary {
 	summary := model.TorrentFileSummary{
-		InfoHash: infoHash,
+		InfoHash:        infoHash,
+		CompressedBytes: model.NewNullInt(compressedBytes),
 	}
 
 	summary.FileCount = len(files)

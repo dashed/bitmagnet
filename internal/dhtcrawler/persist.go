@@ -91,7 +91,9 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 					}
 
 					if len(t.Files) > 0 {
-						summary := buildTorrentFileSummary(i.infoHash, t.Files, now)
+						// len(t.FilesData) is the exact blob written to torrents.files_data
+						// in this same transaction, so compressed_bytes matches octet_length.
+						summary := buildTorrentFileSummary(i.infoHash, t.Files, len(t.FilesData), now)
 						torrentFileSummariesToPersist = append(torrentFileSummariesToPersist, &summary)
 					}
 
@@ -191,6 +193,7 @@ func torrentFileSummaryPersistQuery(ctx context.Context, tx *dao.Query) *gorm.DB
 				"has_video",
 				"has_subtitle",
 				"has_audio",
+				"compressed_bytes",
 				"updated_at",
 			}),
 		})
@@ -298,9 +301,10 @@ func createTorrentModel(
 func buildTorrentFileSummary(
 	infoHash protocol.ID,
 	files []model.TorrentFile,
+	compressedBytes int,
 	now time.Time,
 ) model.TorrentFileSummary {
-	summary := blobmigration.BuildFileSummary(infoHash, files)
+	summary := blobmigration.BuildFileSummary(infoHash, files, compressedBytes)
 	summary.CreatedAt = now
 	summary.UpdatedAt = now
 

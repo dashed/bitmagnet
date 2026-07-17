@@ -17,8 +17,14 @@ type TorrentFileSummary struct {
 	HasVideo        bool        `gorm:"column:has_video;not null;default:false"     json:"hasVideo"`
 	HasSubtitle     bool        `gorm:"column:has_subtitle;not null;default:false"  json:"hasSubtitle"`
 	HasAudio        bool        `gorm:"column:has_audio;not null;default:false"     json:"hasAudio"`
-	CreatedAt       time.Time   `gorm:"column:created_at;not null"                  json:"createdAt"`
-	UpdatedAt       time.Time   `gorm:"column:updated_at;not null"                  json:"updatedAt"`
+	// CompressedBytes is the octet length of the torrent's compressed files_data
+	// blob (denormalized so the L3 refine path reads it without touching the
+	// torrents heap). Nullable: NULL means "not yet backfilled" (or the torrent
+	// has no blob), which the Rust read path treats as a miss and fills from
+	// torrents.files_data.
+	CompressedBytes NullInt   `gorm:"column:compressed_bytes"    json:"compressedBytes"`
+	CreatedAt       time.Time `gorm:"column:created_at;not null" json:"createdAt"`
+	UpdatedAt       time.Time `gorm:"column:updated_at;not null" json:"updatedAt"`
 }
 
 func (*TorrentFileSummary) TableName() string {
