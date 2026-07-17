@@ -183,13 +183,20 @@ def seed(args: argparse.Namespace) -> int:
                         created,
                     ),
                 )
+                # Post-00026 the summary carries compressed_bytes, so seed it to
+                # exercise the FAST summary-first read path for the accepted set
+                # (covered => torrents probe skipped). Leave the adversarial row
+                # NULL so at least one gate case drives the miss-set torrents
+                # `octet_length(files_data)` fallback end-to-end. Both converge to
+                # the same len(blob), so the served result is path-invariant.
+                summary_compressed_bytes = len(blob) if dataset == "accepted" else None
                 cursor.execute(
                     """
                     INSERT INTO torrent_file_summary (
                       info_hash, file_count, total_size, largest_file_size,
                       extensions, has_video, has_subtitle, has_audio,
-                      created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, '[\"mkv\"]'::jsonb, true, false, false, %s, %s)
+                      created_at, updated_at, compressed_bytes
+                    ) VALUES (%s, %s, %s, %s, '[\"mkv\"]'::jsonb, true, false, false, %s, %s, %s)
                     """,
                     (
                         info_hash,
@@ -198,6 +205,7 @@ def seed(args: argparse.Namespace) -> int:
                         max(row["s"] for row in files),
                         created,
                         created,
+                        summary_compressed_bytes,
                     ),
                 )
                 cursor.execute(

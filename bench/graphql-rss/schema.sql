@@ -9,7 +9,7 @@ CREATE TABLE goose_db_version (
   is_applied boolean NOT NULL,
   tstamp timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO goose_db_version (version_id, is_applied) VALUES (25, true);
+INSERT INTO goose_db_version (version_id, is_applied) VALUES (26, true);
 
 CREATE TABLE torrent_sources (
   key text PRIMARY KEY,
@@ -129,7 +129,10 @@ CREATE TABLE torrent_file_summary (
   has_subtitle boolean NOT NULL,
   has_audio boolean NOT NULL,
   created_at timestamptz NOT NULL,
-  updated_at timestamptz NOT NULL
+  updated_at timestamptz NOT NULL,
+  -- Denormalized in migration 00026; nullable so the seed can leave it unset to
+  -- exercise the composer's miss-set torrents fallback end-to-end.
+  compressed_bytes bigint
 );
 
 -- The GraphQL process uses this non-owner role so forced RLS can place a

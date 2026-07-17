@@ -567,6 +567,7 @@ class HarnessTests(unittest.TestCase):
             "files_data bytea",
             "CREATE TABLE torrent_contents (",
             "CREATE TABLE torrent_file_summary (",
+            "compressed_bytes bigint",
             "CREATE TABLE torrents_torrent_sources (",
             "CREATE TABLE goose_db_version (",
             "CREATE FUNCTION rss_refine_barrier_wait()",
