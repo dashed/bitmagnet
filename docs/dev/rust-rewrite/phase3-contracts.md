@@ -324,8 +324,51 @@ proves the canonical normalizer round-trips every `expected`, and runs a
 `ClassifierDriver` **stub** (errors on every fixture) through the shared harness —
 so the plumbing compiles and executes now, and **Lane C only replaces
 `ClassifierDriver::run`'s body** and flips the assertion to `report.ok()`. Gate:
-**100% on the 330 corpus, ≥0.999 on the real-name replay sample** (user decision
-#2; the replay corpus is a separate in-flight base-prep item — see §6).
+**100% on the 330 corpus, ≥0.999 on the real-name replay sample** (§2.6).
+
+### 2.6 Real-name replay corpus (user decision #2) — FROZEN
+
+The 330 synthetic fixtures prove branch coverage, not distributional fidelity
+over ~52.8M real torrents (`06 R2`). Decision #2 adds a frozen **119,991-name**
+production-sampled replay corpus as the **≥0.999 agreement gate** for the Rust
+classifier (Lane R/C), alongside the 100%-synthetic gate. Frozen artifacts under
+`testdata/parity/classifier-replay/` (raw sampling TSVs gitignored;
+`names.jsonl` + `PROVENANCE.md` preserve regeneration):
+
+- `names.jsonl` — `{"id":N,"name":…}` frozen name list, sha256
+  `d333d48c…`; **119,991 unique names** (deduped, sorted by UTF-8 bytes).
+- `inputs.jsonl` — classifier harness inputs, sha256 `fb848626…`.
+- `oracle.golden.jsonl` — full `ContentAttributes` per name from the **pure
+  flags-off Go classifier**, sha256 `34d831e4…`; **119,990 classified / 1
+  deleted / 0 errors**. Determinism verified: regenerated in a clean env,
+  byte-identical (SHA unchanged).
+- Oracle generator: `TestClassifierReplayOracle` in
+  `internal/classifier/corpus_replay_test.go` (skips by default; `-update-replay`
+  regenerates; subsystem tag `classifier-replay`; strict LocalSearch/tmdb mocks =
+  the same flags-off purity assertion as the base corpus, `ContentByID` stubbed
+  `.Maybe()` since replay inputs carry no hint).
+
+**🔑 Input-shaping contract (REQUIRED for CEL rules to fire — freeze this).**
+Each real name is wrapped in a minimal **single-file** synthetic torrent (the
+base `classifierInput` shape, §2.1):
+
+- `filesStatus = "single"` carrying the **real production `size`**.
+- `extension` = name-derived via Go's exact single-file extension regex
+  `[^/.]\.([a-z0-9]+)$` applied to the **lowercased** name
+  (`model.FileExtensionFromPath`, `internal/model/torrent_files.go:33-43`; the
+  same value `internal/model/torrents.go:143` derives for a single-file torrent).
+  45,907 names (38.3%) yield an extension.
+
+**Why `single` + real size, not `no_info`:** the `no_info` proto path gives the
+synthetic file `size = 0`, which **zeroes every size-gated CEL rule** (the
+`torrent.files.map(f, f.extension in extensions.X ? f.size : -f.size).sum()`
+pattern) and suppresses all content-type classification. `single` carries the
+real size into the file so the classifier exercises its real name-parsing paths.
+The Rust port's replay harness must reproduce this exact input shaping or the
+≥0.999 comparison is meaningless. This is a **name-replay** corpus: content-type
+derives from the name + its own trailing extension, not prod file topology
+(multi-file torrents are intentionally reshaped as single-file; the gate only
+requires Rust == Go over these identical frozen inputs).
 
 ---
 
@@ -561,9 +604,10 @@ not a bare 100%.
 
 ## 6. Coordination note
 
-A **separate in-flight base-prep item** (user decision #2, the real-name replay
-oracle) is materializing `internal/classifier/corpus_replay_test.go` +
-`testdata/parity/classifier-replay/` in this worktree. It is **not** owned by
-this contracts commit and is intentionally left uncommitted here to avoid
-clobbering that agent's WIP — flagged to the team-lead for ownership/merge
-sequencing.
+The real-name replay oracle (user decision #2, §2.6) was produced by a separate
+`p3-corpus` agent and folded into this branch as a dedicated commit
+(`internal/classifier/corpus_replay_test.go` + `testdata/parity/classifier-replay/`;
+raw sampling TSVs gitignored). Note `oracle.golden.jsonl` is 52.78 MB — over
+GitHub's 50 MB soft-warning threshold (under the 100 MB hard limit); it pushes
+with a warning. If the fork later wants it off the main history, Git LFS is the
+migration path, but the maintainer directed a plain commit.
