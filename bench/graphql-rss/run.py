@@ -845,22 +845,31 @@ class DockerHarness:
             f"POSTGRES_PASSWORD={self.pg_password}",
             self.postgres_image_id,
         )
+        # pg_isready over the default socket can report the postgres image's
+        # transient init server (which binds the socket only) as ready before the
+        # real server is up, racing the schema load on cache-warm hosts (FSN1 saw
+        # deterministic 3/3 failures). Prove the FINAL server instead with an
+        # authenticated `SELECT 1` over TCP:5432 -- the same endpoint the seed
+        # connects to, and one the init server never binds, so this cannot match
+        # the transient server.
+        probe_dsn = f"postgresql://bitmagnet:{self.pg_password}@127.0.0.1:5432/bitmagnet"
         for _ in range(120):
             ready = self.docker(
                 "exec",
                 self.pg,
-                "pg_isready",
-                "-U",
-                "bitmagnet",
-                "-d",
-                "bitmagnet",
+                "psql",
+                probe_dsn,
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-tAc",
+                "SELECT 1",
                 check=False,
             )
-            if ready.returncode == 0:
+            if ready.returncode == 0 and ready.stdout.decode().strip() == "1":
                 break
             time.sleep(0.25)
         else:
-            raise HarnessError("disposable PostgreSQL did not become ready")
+            raise HarnessError("disposable PostgreSQL did not accept a TCP query")
 
         self.docker(
             "exec",
