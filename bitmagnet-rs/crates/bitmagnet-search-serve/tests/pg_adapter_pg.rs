@@ -165,6 +165,88 @@ async fn refine_metadata_skips_torrents_probe_when_fully_covered() {
     assert_eq!(metadata[&b].compressed_bytes, Some(900));
 }
 
+/// Regression: a pre-00026 schema (rolling deploy / pre-backfill window) whose
+/// `torrent_file_summary` has NO `compressed_bytes` column at all must still
+/// serve — the summary probe reads `file_count` only and every candidate falls
+/// through to the torrents `octet_length(files_data)` probe for its size. This
+/// mirrors the goose-25 RSS gate harness schema. Before the fix the summary SQL
+/// unconditionally selected `compressed_bytes`, so this errored with
+/// `column "compressed_bytes" does not exist`, which the composer surfaced as an
+/// empty result set (item_count=0, total_count=0, estimate=false).
+#[tokio::test]
+async fn refine_metadata_falls_back_when_summary_lacks_compressed_bytes_column() {
+    let Ok(dsn) = std::env::var("BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect to disposable PostgreSQL");
+
+    // Pre-00026 summary table: file_count present, compressed_bytes column absent.
+    sqlx::query(
+        "CREATE TEMP TABLE torrent_file_summary (\
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create pre-00026 summary table");
+    sqlx::query(
+        "CREATE TEMP TABLE torrents (\
+         info_hash bytea PRIMARY KEY, files_count integer NULL, files_data bytea NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create temporary torrent table");
+
+    // has_summary: summary supplies file_count; torrents supplies the size.
+    let has_summary = info_hash(1);
+    // no_summary: absent from summary; torrents supplies both count and size.
+    let no_summary = info_hash(2);
+
+    sqlx::query("INSERT INTO torrent_file_summary (info_hash, file_count) VALUES ($1, 11)")
+        .bind(has_summary.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert pre-00026 summary row");
+    sqlx::query(
+        "INSERT INTO torrents (info_hash, files_count, files_data) VALUES \
+         ($1, 99, decode('01020304', 'hex')), \
+         ($2, 33, decode('010203', 'hex'))",
+    )
+    .bind(has_summary.as_slice())
+    .bind(no_summary.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert torrents rows");
+
+    let metadata = PgSearch::new(pool, SearchBuildConfig::default())
+        .refine_metadata(&[has_summary, no_summary])
+        .await
+        .expect("pre-00026 schema must serve via the torrents fallback, not error");
+
+    // has_summary: authoritative file_count from the summary, size from torrents.
+    assert_eq!(
+        metadata[&has_summary].file_count,
+        Some(11),
+        "summary file_count wins even without the compressed_bytes column"
+    );
+    assert_eq!(
+        metadata[&has_summary].compressed_bytes,
+        Some(4),
+        "torrents octet_length fills the size when the summary column is absent"
+    );
+    // no_summary: torrents fills both.
+    assert_eq!(
+        metadata[&no_summary].file_count,
+        Some(33),
+        "torrents fallback count"
+    );
+    assert_eq!(metadata[&no_summary].compressed_bytes, Some(3));
+}
+
 /// The grouped fast path must reproduce the per-value aggregation map exactly,
 /// including a zero-count filter-selected value and a NULL bucket. A disposable
 /// PostgreSQL is provided via `BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL`; this

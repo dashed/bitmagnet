@@ -21,6 +21,23 @@ const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_c
 \n       compressed_bytes::bigint AS compressed_bytes\
 \nFROM torrent_file_summary\
 \nWHERE info_hash = ANY($1::bytea[])";
+/// Pre-00026 summary probe. `torrent_file_summary` predates the denormalized
+/// `compressed_bytes` column during the rolling-deploy / backfill window, so
+/// this variant reads only the authoritative `file_count` and leaves every
+/// candidate in the miss set for the torrents blob-length fallback.
+const SUMMARY_COUNTS_NO_BYTES_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count\
+\nFROM torrent_file_summary\
+\nWHERE info_hash = ANY($1::bytea[])";
+/// Detect whether the running schema already carries the 00026 denormalized
+/// `compressed_bytes` column. `to_regclass` resolves the very relation the
+/// probes read — honouring the session `search_path`, so a temp table that
+/// shadows the seeded one is inspected, not a same-named public table — which
+/// makes the answer match what `SUMMARY_COUNTS_SQL` would bind against.
+const SUMMARY_HAS_COMPRESSED_BYTES_SQL: &str = "SELECT EXISTS (\
+\n  SELECT 1 FROM pg_attribute\
+\n  WHERE attrelid = to_regclass('torrent_file_summary')\
+\n    AND attname = 'compressed_bytes'\
+\n    AND attnum > 0 AND NOT attisdropped)";
 const TORRENT_REFINE_METADATA_SQL: &str = "SELECT info_hash, files_count::bigint AS file_count,\
 \n       octet_length(files_data)::bigint AS compressed_bytes\
 \nFROM torrents\
@@ -140,6 +157,10 @@ pub struct PgSearch {
     pool: PgPool,
     build_config: SearchBuildConfig,
     metrics: Option<Arc<PathsearchMetrics>>,
+    /// One-shot cache of the 00026 `compressed_bytes` column detection, so the
+    /// summary probe adapts to a pre-migration schema without a per-request
+    /// catalog round trip. See [`Self::summary_has_compressed_bytes`].
+    summary_has_compressed_bytes: tokio::sync::OnceCell<bool>,
 }
 
 impl PgSearch {
@@ -150,7 +171,29 @@ impl PgSearch {
             pool,
             build_config,
             metrics: None,
+            summary_has_compressed_bytes: tokio::sync::OnceCell::const_new(),
         }
+    }
+
+    /// Return whether `torrent_file_summary` carries the denormalized
+    /// `compressed_bytes` column (migration 00026), detected once and cached.
+    ///
+    /// A rolling deploy runs this read path before the non-transactional 00026
+    /// backfill lands, so the summary probe must not assume the column exists.
+    /// When it is absent every candidate is treated as a miss and the torrents
+    /// `octet_length(files_data)` fallback supplies the size — exactly as it
+    /// already does for a present-but-NULL value. Once the column appears the
+    /// process adopts the fast summary-first path after its next restart.
+    async fn summary_has_compressed_bytes(&self) -> crate::Result<bool> {
+        self.summary_has_compressed_bytes
+            .get_or_try_init(|| async {
+                sqlx::query_scalar::<_, bool>(SUMMARY_HAS_COMPRESSED_BYTES_SQL)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|error| crate::Error::Pg(error.to_string()))
+            })
+            .await
+            .copied()
     }
 
     /// Attach the canonical composer metrics so the summary-first and (conditional)
@@ -211,15 +254,23 @@ impl PgSearchBackend for PgSearch {
         }
 
         let requested = bytea_values(ids);
-        // Summary-first: torrent_file_summary now carries both the authoritative
-        // file_count AND (post-00026 backfill) compressed_bytes, so a fully
-        // covered candidate set is answered by this one index probe — the
+        // Summary-first: once the 00026 backfill lands, torrent_file_summary
+        // carries both the authoritative file_count AND compressed_bytes, so a
+        // fully covered candidate set is answered by this one index probe — the
         // torrents blob-length query never runs. That collapses the hot path to
         // the ~23ms summary lookup, avoiding the 240ms+ torrents heap probe that
-        // dominated the phase.
+        // dominated the phase. Before that column exists (rolling deploy /
+        // pre-backfill), we read file_count alone and route every candidate
+        // through the torrents fallback rather than erroring on a missing column.
+        let has_compressed_bytes = self.summary_has_compressed_bytes().await?;
+        let summary_sql = if has_compressed_bytes {
+            SUMMARY_COUNTS_SQL
+        } else {
+            SUMMARY_COUNTS_NO_BYTES_SQL
+        };
         let summary_rows = {
             let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataSummary);
-            sqlx::query(SUMMARY_COUNTS_SQL)
+            sqlx::query(summary_sql)
                 .bind(&requested)
                 .fetch_all(&self.pool)
                 .await
@@ -228,7 +279,8 @@ impl PgSearchBackend for PgSearch {
 
         let mut metadata = HashMap::with_capacity(ids.len());
         // A candidate is "covered" iff its summary row supplies a non-NULL
-        // compressed_bytes; only the rest fall back to the torrents probe.
+        // compressed_bytes; only the rest fall back to the torrents probe. When
+        // the column is absent no candidate is covered, so all fall through.
         let mut covered = std::collections::HashSet::with_capacity(summary_rows.len());
         for row in summary_rows {
             let raw: Vec<u8> = row
@@ -239,7 +291,11 @@ impl PgSearchBackend for PgSearch {
             let count: i64 = row
                 .try_get("file_count")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            let compressed_bytes = try_get_compressed_bytes(&row, info_hash)?;
+            let compressed_bytes = if has_compressed_bytes {
+                try_get_compressed_bytes(&row, info_hash)?
+            } else {
+                None
+            };
             if compressed_bytes.is_some() {
                 covered.insert(info_hash);
             }
