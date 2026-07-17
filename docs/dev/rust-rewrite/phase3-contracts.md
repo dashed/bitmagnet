@@ -11,9 +11,10 @@ corpus, release-parse output, summary-write) plus the **FULL write-shadow
 strategy** (user decision #4). It does **not** implement any lane; it is the
 written target the lanes build against.
 
-> **⚠️ REVIEW GATE:** §5 (the write-shadow mechanism) is a **design proposal that
-> NEEDS team-lead review before any lane builds on it.** §§1–4 are frozen facts
-> with code citations; §5 is the one place I made design choices.
+> **✅ REVIEW STATUS:** §5 (the write-shadow mechanism) was **reviewed and
+> APPROVED by the team-lead on 2026-07-17**, with one amendment to §5.2(B)
+> (sample archived `processed` rows and copy the payload verbatim — now folded
+> in). §§1–4 are frozen facts with code citations.
 
 Companion artifacts checked in with this doc:
 
@@ -468,8 +469,8 @@ consumers persisting the same job double-write the same rows (`06 R4`). The
 approved posture (decision #4) is the heavier **sustained dual-consume
 comparison**: one persisting consumer per queue (Go), plus a Rust shadow that
 materializes its would-be writes, diffs them against what Go actually wrote, and
-discards. Below is the concrete mechanism I propose. **Every choice here is
-mine and must be reviewed before Lane P builds the runtime.**
+discards. The concrete mechanism below was **reviewed and approved by the
+team-lead (2026-07-17)**; §5.2(B) carries the one approved amendment.
 
 ### 5.1 What the Go processor writes (the target write-set)
 
@@ -511,15 +512,36 @@ interference. Two options considered:
 - **(A) Tee-at-enqueue** — hook the Go producer so every Nth `process_torrent`
   insert also writes a scratch row. Exact same payloads, but touches the Go
   producer hot path.
-- **(B) Poll-mirror** — a separate sidecar periodically selects recently
-  processed info-hashes and inserts sampled scratch rows. Zero change to the Go
-  producer; sampling is one external knob.
+- **(B) Poll-mirror off archived rows** — a separate sidecar samples from
+  **already-`processed` `process_torrent` rows** (`queue_jobs WHERE
+  queue='process_torrent' AND status='processed'`) and **copies the original
+  payload verbatim** into a scratch row, changing **only** the queue name. Zero
+  change to the Go producer; sampling is one external knob.
 
-**Recommend (B).** It keeps the Go path untouched (fail-open by construction) and
-makes the sample rate a single config value. **Critical ordering property:** the
-mirror enqueues each scratch job with a **delay** (reuse
-`QueueJobDelayBy`, §1.4) so the Go processor persists the info-hash *first* and
-the shadow diffs against a **settled** live row, not a race.
+**Recommend (B) — REVISED per team-lead review (2026-07-17): sample archived rows
+and copy the payload verbatim; do NOT reconstruct it.** The processed queue row
+**retains the exact original payload** for the 7-day archival window (§1.4 GC
+contract), so copying it preserves **classify-config fidelity** — a live job
+enqueued with non-default `ClassifyMode`/`ClassifierWorkflow`/`ClassifierFlags`
+(reprocess flows, batch runs with explicit flags) is shadowed with those exact
+params, not defaults. (Reconstructing payloads from info-hashes — the original
+draft — would shadow every job with default config and diff spuriously.) Because
+only the queue name changes and the fingerprint is `sha256(queue||payload)`
+(§1.1), the copy **re-fingerprints automatically** with no dedup collision. This
+also **naturally samples the real job mix** (crawler vs batch vs reprocess) in
+its true proportions. Cost: `SELECT` on `queue_jobs` processed rows + `INSERT` of
+scratch rows — both within the fail-safe DB role (§5.4). **Critical ordering
+property:** sampling *already-processed* rows means the Go processor has, by
+definition, already persisted (or deleted) the info-hash, so the shadow diffs
+against a **settled** live row, not a race; enqueue the scratch job with a small
+delay (`QueueJobDelayBy`, §1.4) as belt-and-suspenders for read-replica lag.
+
+🔑 **Corollary (deleted info-hashes).** Because the shadow replays a payload the
+Go processor *already handled*, some info-hashes will have been **deleted** by
+Go's delete path (`ErrDeleteTorrent` → `DELETE torrents`, §5.1). The shadow must
+treat "no live row for this info-hash" as a **first-class diff outcome
+(`live_absent`)**, not an error — and compare it against whether its own pipeline
+also produced a delete signal (a real match/mismatch), rather than aborting.
 
 **(b) Shadow consumer (Rust).** A `bitmagnet-processor` in **shadow mode**: it
 claims from `process_torrent_shadow` via a `bitmagnet-queue` consumer bound to
