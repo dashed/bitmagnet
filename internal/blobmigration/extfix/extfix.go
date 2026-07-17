@@ -260,19 +260,32 @@ func backfillRange(
 		if len(pending) > 0 {
 			if err := db.Transaction(func(tx *gorm.DB) error {
 				for _, p := range pending {
-					// Update files_data ONLY — deliberately do NOT bump updated_at.
+					// Rewrite files_data but deliberately do NOT bump updated_at.
 					// The L2 delta carve (bitmagnet-rs stream.rs: WHERE updated_at >
 					// to_timestamp($1)) and the L3 pathsearch follow loop key on
 					// updated_at; bumping it on every fixed blob would make the next
 					// L2 tick re-carve the entire fixed set and the L3 loop re-index
-					// it — a catastrophic, pointless mass re-index. It is pointless
-					// because the e-canonicalization is INVISIBLE to those consumers:
-					// L2 (decode.rs) and L3 derive the extension from the PATH, never
-					// the blob `e`. This backfill is a silent data canonicalization,
-					// not a content update, so it must not masquerade as one.
+					// it — a catastrophic, pointless mass re-index. It stays pointless
+					// for the extension itself: the e-canonicalization is INVISIBLE to
+					// those consumers because L2 (decode.rs) and L3 derive the
+					// extension from the PATH, never the blob `e`.
 					if err := tx.Exec(
 						"UPDATE torrents SET files_data = ? WHERE info_hash = ?",
 						p.FilesData, p.InfoHash,
+					).Error; err != nil {
+						return err
+					}
+
+					// The blob's BYTE LENGTH, however, IS now an L3 consumer via the
+					// torrent_file_summary.compressed_bytes denorm (summary-first
+					// refine_metadata). A re-encode can change the length, so keep the
+					// denorm in sync in the same tx (WHERE matches nothing => no-op
+					// when the torrent has no summary row). updated_at stays untouched:
+					// nothing keys on the summary's timestamp, so this remains a silent
+					// canonicalization, not a content update.
+					if err := tx.Exec(
+						"UPDATE torrent_file_summary SET compressed_bytes = ? WHERE info_hash = ?",
+						len(p.FilesData), p.InfoHash,
 					).Error; err != nil {
 						return err
 					}

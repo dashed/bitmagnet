@@ -91,9 +91,18 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 					}
 
 					if len(t.Files) > 0 {
-						// len(t.FilesData) is the exact blob written to torrents.files_data
-						// in this same transaction, so compressed_bytes matches octet_length.
-						summary := buildTorrentFileSummary(i.infoHash, t.Files, len(t.FilesData), now)
+						// t.FilesData is the exact blob written to torrents.files_data in
+						// this same transaction, so compressed_bytes tracks octet_length.
+						//
+						// Staleness note: a summary is written ONLY when this crawl has
+						// files. A re-crawl that transitions a torrent to ZERO files leaves
+						// the torrents row's files_data set to NULL (DoUpdates) but skips
+						// this block, so a prior summary row keeps a stale file_count AND
+						// compressed_bytes. This is a pre-existing staleness class (it
+						// already applied to file_count) and is near-impossible in practice:
+						// the infohash is a deterministic digest of the file set, so the
+						// same infohash re-crawling with a different file set does not occur.
+						summary := buildTorrentFileSummary(i.infoHash, t.Files, t.FilesData, now)
 						torrentFileSummariesToPersist = append(torrentFileSummariesToPersist, &summary)
 					}
 
@@ -301,10 +310,17 @@ func createTorrentModel(
 func buildTorrentFileSummary(
 	infoHash protocol.ID,
 	files []model.TorrentFile,
-	compressedBytes int,
+	filesData []byte,
 	now time.Time,
 ) model.TorrentFileSummary {
-	summary := blobmigration.BuildFileSummary(infoHash, files, compressedBytes)
+	summary := blobmigration.BuildFileSummary(infoHash, files, len(filesData))
+	// If serialization failed upstream, files_data is written as SQL NULL; keep
+	// compressed_bytes NULL too (not 0) so the invariant compressed_bytes ==
+	// octet_length(files_data) holds and the L3 read path treats it as a miss.
+	if filesData == nil {
+		summary.CompressedBytes = model.NullInt{}
+	}
+
 	summary.CreatedAt = now
 	summary.UpdatedAt = now
 

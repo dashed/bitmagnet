@@ -132,7 +132,7 @@ func TestBuildTorrentFileSummaryForFreshCrawl(t *testing.T) {
 		{InfoHash: hash, Index: 1, Path: "movie/subs.srt", Size: 100},
 	}
 
-	summary := buildTorrentFileSummary(hash, files, 512, now)
+	summary := buildTorrentFileSummary(hash, files, make([]byte, 512), now)
 
 	assert.Equal(t, hash, summary.InfoHash)
 	assert.Equal(t, 2, summary.FileCount)
@@ -145,4 +145,21 @@ func TestBuildTorrentFileSummaryForFreshCrawl(t *testing.T) {
 	assert.False(t, summary.HasAudio)
 	assert.Equal(t, now, summary.CreatedAt)
 	assert.Equal(t, now, summary.UpdatedAt)
+}
+
+func TestBuildTorrentFileSummaryNilBlobLeavesCompressedBytesNull(t *testing.T) {
+	t.Parallel()
+
+	var hash protocol.ID
+
+	files := []model.TorrentFile{
+		{InfoHash: hash, Index: 0, Path: "movie/video.mkv", Size: 1_000},
+	}
+
+	// nil filesData models a serialization failure: files_data is written as SQL
+	// NULL, so compressed_bytes must stay NULL (not 0) to preserve the invariant.
+	summary := buildTorrentFileSummary(hash, files, nil, time.Unix(1_800_000_000, 0).UTC())
+
+	assert.Equal(t, 1, summary.FileCount)
+	assert.False(t, summary.CompressedBytes.Valid, "nil blob must leave compressed_bytes NULL")
 }

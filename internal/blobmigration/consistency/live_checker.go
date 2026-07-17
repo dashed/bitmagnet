@@ -7,6 +7,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	dbsearch "github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type LiveChecker struct {
@@ -130,10 +131,27 @@ func (lc *LiveChecker) healTorrent(ctx context.Context, infoHash [20]byte) {
 		return
 	}
 
-	err := lc.dao.Torrent.UnderlyingDB().WithContext(ctx).
-		Table("torrents").
-		Where("info_hash = ?", infoHash).
-		Update("files_data", nil).Error
+	// Clear files_data AND the summary's compressed_bytes in one transaction:
+	// compressed_bytes is a denorm of octet_length(files_data), so leaving a
+	// covered summary row with a stale non-NULL byte length would keep the L3
+	// read path (summary-first refine_metadata) trusting a value for a blob that
+	// no longer exists. Nulling it routes the id back into the miss set until the
+	// blob is re-migrated, restoring parity immediately.
+	// Bind the raw 20-byte slice (not the [20]byte array, which the driver won't
+	// encode as bytea) so both updates match the info_hash column.
+	hash := infoHash[:]
+
+	err := lc.dao.Torrent.UnderlyingDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("torrents").
+			Where("info_hash = ?", hash).
+			Update("files_data", nil).Error; err != nil {
+			return err
+		}
+
+		return tx.Table("torrent_file_summary").
+			Where("info_hash = ?", hash).
+			Update("compressed_bytes", nil).Error
+	})
 	if err != nil {
 		lc.logger.Errorw("failed to clear files_data for re-migration", "info_hash", infoHash, "error", err)
 		return
