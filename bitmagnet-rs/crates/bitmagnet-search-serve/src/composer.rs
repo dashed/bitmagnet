@@ -220,6 +220,12 @@ impl Composer {
         result
     }
 
+    // Exact facet-count parity (grouped fast path) depends on this clamp. The
+    // `max_decode_candidates` bound keeps the refined candidate set small enough
+    // that `budgeted_count` never saturates its per-value budget, so every grouped
+    // count stays exact (`is_estimate = false`). Widening the budget past that
+    // clamp would let counts hit the budget ceiling and silently become estimates,
+    // diverging from the per-value path this fast path must match.
     fn candidate_budget(&self, limit: u32, offset: u32) -> u32 {
         let need = u64::from(offset).saturating_add(u64::from(limit)).max(1);
         let budget = need.saturating_mul(u64::from(self.config.oversample_factor));

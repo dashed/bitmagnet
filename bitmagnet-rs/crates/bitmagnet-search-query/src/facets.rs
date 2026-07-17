@@ -464,6 +464,21 @@ fn grouped_facet_sql(column: &str, base_sql: &str) -> String {
     )
 }
 
+/// Map one grouped-facet row's `<col>::text` value to its bucket key.
+///
+/// The per-value path's `"null"` bucket is `Criteria::IsNull(attribute)`, which
+/// matches only SQL-NULL rows — never a row whose column literally holds the text
+/// `"null"`. So for exact count parity the grouped path must send a real SQL-NULL
+/// (`None`) to the `"null"` bucket, and *drop* a `Some("null")` literal-data row
+/// (returns `None` = "no bucket"). Every other value maps to itself.
+fn grouped_bucket_key(value: Option<String>) -> Option<String> {
+    match value {
+        None => Some("null".to_owned()),
+        Some(value) if value == "null" => None,
+        Some(value) => Some(value),
+    }
+}
+
 async fn fetch_facet_group_grouped(
     pool: &PgPool,
     options: &SearchOptions,
@@ -483,14 +498,13 @@ async fn fetch_facet_group_grouped(
         .await?;
     let mut counts = BTreeMap::new();
     for row in rows {
-        // A NULL column value maps to the same `"null"` bucket key the per-value
-        // path uses; unknown non-null values are ignored below.
         let value: Option<String> = row.try_get("facet_value")?;
         let count: i64 = row.try_get("count")?;
-        counts.insert(
-            value.unwrap_or_else(|| "null".to_owned()),
-            nonnegative_count(count)?,
-        );
+        // Only the SQL-NULL row maps to the `"null"` bucket; a literal `"null"`
+        // data value is dropped so it can't be miscounted into the IsNull bucket.
+        if let Some(key) = grouped_bucket_key(value) {
+            counts.insert(key, nonnegative_count(count)?);
+        }
     }
 
     let mut items = Vec::new();
@@ -1739,6 +1753,20 @@ mod tests {
         assert_eq!(
             grouped_facet_column(TorrentContentFacet::VideoSource),
             Some("torrent_contents.video_source")
+        );
+    }
+
+    #[test]
+    fn grouped_bucket_key_only_sql_null_maps_to_null_bucket() {
+        // SQL NULL (None) -> the "null" IsNull bucket.
+        assert_eq!(grouped_bucket_key(None), Some("null".to_owned()));
+        // A literal "null" data value is dropped: the per-value IsNull criterion
+        // never counts it, so counting it here would break exact parity.
+        assert_eq!(grouped_bucket_key(Some("null".to_owned())), None);
+        // Every other value maps to itself.
+        assert_eq!(
+            grouped_bucket_key(Some("movie".to_owned())),
+            Some("movie".to_owned())
         );
     }
 

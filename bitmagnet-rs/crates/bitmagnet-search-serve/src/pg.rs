@@ -17,7 +17,8 @@ use sqlx::{PgPool, Row};
 
 use crate::metrics::{PathsearchMetrics, PathsearchPhase};
 
-const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count\
+const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count,\
+\n       compressed_bytes::bigint AS compressed_bytes\
 \nFROM torrent_file_summary\
 \nWHERE info_hash = ANY($1::bytea[])";
 const TORRENT_REFINE_METADATA_SQL: &str = "SELECT info_hash, files_count::bigint AS file_count,\
@@ -152,12 +153,13 @@ impl PgSearch {
         }
     }
 
-    /// Attach the canonical composer metrics so the two concurrent
-    /// [`Self::refine_metadata`] queries emit their individual subphase timings.
+    /// Attach the canonical composer metrics so the summary-first and (conditional)
+    /// torrents-fallback [`Self::refine_metadata`] probes emit their individual
+    /// subphase timings.
     ///
     /// Production should pass the same value handed to
-    /// [`crate::Composer::with_metrics`]. Without it the queries still run
-    /// concurrently; only the subphase observations are suppressed.
+    /// [`crate::Composer::with_metrics`]. Without it the probes still run; only the
+    /// subphase observations are suppressed.
     #[must_use]
     pub fn with_metrics(mut self, metrics: Arc<PathsearchMetrics>) -> Self {
         self.metrics = Some(metrics);
@@ -209,29 +211,25 @@ impl PgSearchBackend for PgSearch {
         }
 
         let requested = bytea_values(ids);
-        // The two probes read independent tables, so overlap them instead of
-        // paying two serial round trips against cold buffers. Each future owns
-        // its own pooled connection and its own subphase timer, while the
-        // caller's `refine_metadata` timer still wraps the joined pair.
-        let summary_query = async {
+        // Summary-first: torrent_file_summary now carries both the authoritative
+        // file_count AND (post-00026 backfill) compressed_bytes, so a fully
+        // covered candidate set is answered by this one index probe — the
+        // torrents blob-length query never runs. That collapses the hot path to
+        // the ~23ms summary lookup, avoiding the 240ms+ torrents heap probe that
+        // dominated the phase.
+        let summary_rows = {
             let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataSummary);
             sqlx::query(SUMMARY_COUNTS_SQL)
                 .bind(&requested)
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|error| crate::Error::Pg(error.to_string()))
+                .map_err(|error| crate::Error::Pg(error.to_string()))?
         };
-        let torrent_query = async {
-            let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataTorrents);
-            sqlx::query(TORRENT_REFINE_METADATA_SQL)
-                .bind(&requested)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|error| crate::Error::Pg(error.to_string()))
-        };
-        let (summary_rows, torrent_rows) = tokio::try_join!(summary_query, torrent_query)?;
 
         let mut metadata = HashMap::with_capacity(ids.len());
+        // A candidate is "covered" iff its summary row supplies a non-NULL
+        // compressed_bytes; only the rest fall back to the torrents probe.
+        let mut covered = std::collections::HashSet::with_capacity(summary_rows.len());
         for row in summary_rows {
             let raw: Vec<u8> = row
                 .try_get("info_hash")
@@ -241,14 +239,41 @@ impl PgSearchBackend for PgSearch {
             let count: i64 = row
                 .try_get("file_count")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
+            let compressed_bytes = try_get_compressed_bytes(&row, info_hash)?;
+            if compressed_bytes.is_some() {
+                covered.insert(info_hash);
+            }
             metadata.insert(
                 info_hash,
                 RefineMetadata {
                     file_count: Some(count),
-                    compressed_bytes: None,
+                    compressed_bytes,
                 },
             );
         }
+
+        // Miss set = candidates with no summary row OR a NULL compressed_bytes
+        // (the backfill window / blob-less torrents). Empty => skip the torrents
+        // probe entirely, so RefineMetadataTorrents records zero observations on
+        // a fully covered route (documented in CONTRACT.md — no count==1 assert).
+        let misses: Vec<bitmagnet_model::InfoHash> = ids
+            .iter()
+            .copied()
+            .filter(|id| !covered.contains(id))
+            .collect();
+        if misses.is_empty() {
+            return Ok(metadata);
+        }
+
+        let miss_values = bytea_values(&misses);
+        let torrent_rows = {
+            let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataTorrents);
+            sqlx::query(TORRENT_REFINE_METADATA_SQL)
+                .bind(&miss_values)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| crate::Error::Pg(error.to_string()))?
+        };
 
         for row in torrent_rows {
             let raw: Vec<u8> = row
@@ -259,23 +284,17 @@ impl PgSearchBackend for PgSearch {
             let count: Option<i64> = row
                 .try_get("file_count")
                 .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            let compressed_bytes: Option<i64> = row
-                .try_get("compressed_bytes")
-                .map_err(|error| crate::Error::Pg(error.to_string()))?;
-            let compressed_bytes = compressed_bytes
-                .map(|bytes| {
-                    u64::try_from(bytes).map_err(|_| {
-                        crate::Error::Pg(format!(
-                            "negative compressed files_data length for {info_hash}"
-                        ))
-                    })
-                })
-                .transpose()?;
+            let compressed_bytes = try_get_compressed_bytes(&row, info_hash)?;
+            // Precedence: summary file_count wins where present; torrents fills a
+            // missing count. compressed_bytes is NULL on a covered summary hit, so
+            // only misses reach here and take the torrents octet_length.
             let entry = metadata.entry(info_hash).or_default();
             if entry.file_count.is_none() {
                 entry.file_count = count;
             }
-            entry.compressed_bytes = compressed_bytes;
+            if entry.compressed_bytes.is_none() {
+                entry.compressed_bytes = compressed_bytes;
+            }
         }
         Ok(metadata)
     }
@@ -304,6 +323,26 @@ pub(crate) fn empty_result() -> SearchResult {
 
 fn bytea_values(ids: &[bitmagnet_model::InfoHash]) -> Vec<Vec<u8>> {
     ids.iter().map(|id| id.as_slice().to_vec()).collect()
+}
+
+/// Read the `compressed_bytes::bigint` column, mapping SQL NULL to `None` and a
+/// (never-expected) negative length to a hard error rather than a silent wrap.
+fn try_get_compressed_bytes(
+    row: &sqlx::postgres::PgRow,
+    info_hash: bitmagnet_model::InfoHash,
+) -> crate::Result<Option<u64>> {
+    let compressed_bytes: Option<i64> = row
+        .try_get("compressed_bytes")
+        .map_err(|error| crate::Error::Pg(error.to_string()))?;
+    compressed_bytes
+        .map(|bytes| {
+            u64::try_from(bytes).map_err(|_| {
+                crate::Error::Pg(format!(
+                    "negative compressed files_data length for {info_hash}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -402,6 +441,9 @@ mod tests {
     fn refine_metadata_sql_is_two_step_index_keyed_and_blob_safe() {
         assert!(SUMMARY_COUNTS_SQL.contains("FROM torrent_file_summary"));
         assert!(SUMMARY_COUNTS_SQL.contains("info_hash = ANY($1::bytea[])"));
+        // The denormalized compressed_bytes is what lets a covered candidate set
+        // skip the torrents probe entirely (summary-first read path).
+        assert!(SUMMARY_COUNTS_SQL.contains("compressed_bytes"));
         assert!(TORRENT_REFINE_METADATA_SQL.contains("FROM torrents"));
         assert!(TORRENT_REFINE_METADATA_SQL.contains("octet_length(files_data)"));
         for sql in [SUMMARY_COUNTS_SQL, TORRENT_REFINE_METADATA_SQL] {

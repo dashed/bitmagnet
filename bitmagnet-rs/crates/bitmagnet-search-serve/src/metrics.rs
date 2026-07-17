@@ -18,10 +18,14 @@ const PHASE_DURATION_BUCKET_COUNT: usize = 14;
 /// produces one observation only after that chunk hydrates successfully. Every
 /// other phase produces at most one observation per composer route attempt.
 ///
-/// [`Self::RefineMetadata`] wraps the whole pre-hydration metadata backend call;
-/// [`Self::RefineMetadataSummary`] and [`Self::RefineMetadataTorrents`] time the
-/// two now-concurrent metadata queries individually inside that call. This is a
-/// deliberate, documented extension of the Phase-0 phase vocabulary.
+/// [`Self::RefineMetadata`] wraps the whole pre-hydration metadata backend call.
+/// [`Self::RefineMetadataSummary`] times the summary-first probe and is observed
+/// on every route attempt; [`Self::RefineMetadataTorrents`] times the torrents
+/// blob-length fallback and is observed only when the summary set has a miss (no
+/// summary row, or a NULL compressed_bytes) — a fully covered candidate set skips
+/// that query, so this phase records ZERO observations on those routes. Downstream
+/// measurement contracts must not assert a fixed observation count for it. This is
+/// a deliberate, documented extension of the Phase-0 phase vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathsearchPhase {
     CandidateIds,

@@ -449,8 +449,11 @@ self-exclusion, same inlined refined-id `IN` list), only swapping the lean
 base membership query never fans rows out — every facet predicate is an `EXISTS`
 subquery and the only joins (`torrents`, `content`) are 1:1 — the grouped count
 for value `V` equals the per-value `count(*)` over `base ∧ (col = V)`, so counts
-are always exact (`is_estimate = false`). A NULL column value maps to the same
-`"null"` bucket key the per-value path uses. A value is retained iff its count is
+are always exact (`is_estimate = false`). Only a SQL-NULL column value maps to the
+`"null"` bucket key the per-value path uses (whose criterion is `IsNull`, matching
+NULL rows only); a row whose column literally holds the text `"null"` is dropped,
+never counted into that bucket, exactly as the per-value `IsNull` path would never
+count it. A value is retained iff its count is
 `> 0` or it is filter-selected (zero-count filter-selected values keep an
 explicit count-0 entry); grouped rows whose value is not in the facet's
 vocabulary — including the NULL bucket for facets whose vocabulary omits `"null"`
@@ -461,14 +464,26 @@ test (`bitmagnet-search-serve/tests/pg_adapter_pg.rs`) asserts the grouped map
 equals the per-value `fetch_aggregations` map on a seeded corpus that includes a
 zero-count filter-selected value and a NULL bucket.
 
-Related composer instrumentation (`bitmagnet-search-serve`, same pg-tail change):
-the two pre-hydration `refine_metadata` probes (`torrent_file_summary` counts and
-`torrents` blob lengths) now run concurrently instead of as two serial round
-trips. The `PathsearchMetrics` phase vocabulary gains two subphase labels on the
+Related composer instrumentation (`bitmagnet-search-serve`). `refine_metadata` is
+**summary-first**: `torrent_file_summary` now carries the authoritative
+`file_count` **and** (post-migration-00026 backfill) a `compressed_bytes` denorm
+of `octet_length(torrents.files_data)`, so the summary probe answers a fully
+covered candidate set on its own. The `torrents` blob-length probe
+(`TORRENT_REFINE_METADATA_SQL`, unchanged) runs **only** for the miss set —
+candidates with no summary row or a NULL `compressed_bytes` (backfill window /
+blob-less torrents) — bound to just those ids; if the miss set is empty it is
+skipped entirely. Merge precedence is preserved: the summary `file_count` wins
+where present, torrents fills a missing count, and `compressed_bytes` comes from
+the summary when non-NULL else the torrents `octet_length`.
+
+The `PathsearchMetrics` phase vocabulary carries two subphase labels on the
 existing `bitmagnet_search_pathsearch_phase_duration_seconds{phase}` histogram —
-`refine_metadata_summary` and `refine_metadata_torrents` — each observed once per
-route attempt around its respective concurrent query, while the parent
-`refine_metadata` observation still wraps the joined pair. This is a deliberate,
+`refine_metadata_summary` and `refine_metadata_torrents`. `refine_metadata_summary`
+is observed on every route attempt; `refine_metadata_torrents` is observed **only
+when the fallback runs**, so a fully covered route records **zero**
+`refine_metadata_torrents` observations. Downstream measurement contracts must NOT
+assert a fixed (e.g. `== 1`) observation count for that phase. The parent
+`refine_metadata` observation still wraps the whole call. This is a deliberate,
 documented extension of the Phase-0 metric-name golden (the golden asserts metric
 names and label keys, not phase-label values, so it is unchanged).
 

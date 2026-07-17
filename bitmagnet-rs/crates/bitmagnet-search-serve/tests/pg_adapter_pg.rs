@@ -17,7 +17,7 @@ fn info_hash(byte: u8) -> InfoHash {
 }
 
 #[tokio::test]
-async fn refine_metadata_prefers_summary_and_reads_blob_lengths_without_blobs() {
+async fn refine_metadata_prefers_summary_and_falls_back_only_for_misses() {
     let Ok(dsn) = std::env::var("BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL is not set");
         return;
@@ -30,7 +30,7 @@ async fn refine_metadata_prefers_summary_and_reads_blob_lengths_without_blobs() 
 
     sqlx::query(
         "CREATE TEMP TABLE torrent_file_summary (\
-         info_hash bytea PRIMARY KEY, file_count integer NOT NULL)",
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL, compressed_bytes bigint NULL)",
     )
     .execute(&pool)
     .await
@@ -43,37 +43,126 @@ async fn refine_metadata_prefers_summary_and_reads_blob_lengths_without_blobs() 
     .await
     .expect("create temporary torrent table");
 
-    let summary = info_hash(1);
-    let fallback = info_hash(2);
+    // covered: summary supplies both count and bytes -> NOT in the miss set.
+    let covered = info_hash(1);
+    // null_bytes: summary row exists but compressed_bytes is NULL -> miss.
+    let null_bytes = info_hash(2);
+    // no_summary: absent from summary -> miss.
+    let no_summary = info_hash(4);
+    // unknown: a miss whose torrents row carries no data either.
     let unknown = info_hash(3);
-    sqlx::query("INSERT INTO torrent_file_summary (info_hash, file_count) VALUES ($1, 11)")
-        .bind(summary.as_slice())
-        .execute(&pool)
-        .await
-        .expect("insert summary count");
+
+    sqlx::query(
+        "INSERT INTO torrent_file_summary (info_hash, file_count, compressed_bytes) VALUES \
+         ($1, 11, 3), ($2, 22, NULL)",
+    )
+    .bind(covered.as_slice())
+    .bind(null_bytes.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert summary rows");
+    // `covered` also has a DIFFERENT torrents row (99 / 4 bytes): the miss-set query
+    // must never read it, proving the summary wins AND the torrents probe is scoped
+    // to only the miss ids.
     sqlx::query(
         "INSERT INTO torrents (info_hash, files_count, files_data) VALUES \
-         ($1, 99, decode('010203', 'hex')), \
-         ($2, 22, decode('0102', 'hex')), ($3, NULL, NULL)",
+         ($1, 99, decode('01020304', 'hex')), \
+         ($2, 99, decode('0102', 'hex')), \
+         ($3, 33, decode('010203', 'hex')), \
+         ($4, NULL, NULL)",
     )
-    .bind(summary.as_slice())
-    .bind(fallback.as_slice())
+    .bind(covered.as_slice())
+    .bind(null_bytes.as_slice())
+    .bind(no_summary.as_slice())
     .bind(unknown.as_slice())
     .execute(&pool)
     .await
-    .expect("insert fallback counts");
+    .expect("insert torrents rows");
 
     let metadata = PgSearch::new(pool, SearchBuildConfig::default())
-        .refine_metadata(&[summary, fallback, unknown])
+        .refine_metadata(&[covered, null_bytes, no_summary, unknown])
         .await
-        .expect("read two-step refine metadata");
+        .expect("read summary-first refine metadata");
 
-    assert_eq!(metadata[&summary].file_count, Some(11), "summary must win");
-    assert_eq!(metadata[&summary].compressed_bytes, Some(3));
-    assert_eq!(metadata[&fallback].file_count, Some(22), "torrent fallback");
-    assert_eq!(metadata[&fallback].compressed_bytes, Some(2));
+    // covered: summary wins for both, torrents row (99/4) never consulted.
+    assert_eq!(
+        metadata[&covered].file_count,
+        Some(11),
+        "summary count wins"
+    );
+    assert_eq!(
+        metadata[&covered].compressed_bytes,
+        Some(3),
+        "summary bytes win; torrents miss-set query excludes covered ids"
+    );
+    // null_bytes: summary count wins, torrents fills the NULL bytes.
+    assert_eq!(
+        metadata[&null_bytes].file_count,
+        Some(22),
+        "summary count wins"
+    );
+    assert_eq!(
+        metadata[&null_bytes].compressed_bytes,
+        Some(2),
+        "torrents fills the NULL compressed_bytes"
+    );
+    // no_summary: torrents fills both.
+    assert_eq!(
+        metadata[&no_summary].file_count,
+        Some(33),
+        "torrents fallback count"
+    );
+    assert_eq!(metadata[&no_summary].compressed_bytes, Some(3));
+    // unknown: a miss with no data anywhere.
     assert_eq!(metadata[&unknown].file_count, None, "NULL remains unknown");
     assert_eq!(metadata[&unknown].compressed_bytes, None);
+}
+
+/// A fully covered candidate set must never touch the torrents probe. The
+/// torrents relation is deliberately NOT created: if `refine_metadata` still ran
+/// `TORRENT_REFINE_METADATA_SQL`, it would error with "relation torrents does not
+/// exist"; a clean `Ok` with correct metadata proves the skip.
+#[tokio::test]
+async fn refine_metadata_skips_torrents_probe_when_fully_covered() {
+    let Ok(dsn) = std::env::var("BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect to disposable PostgreSQL");
+
+    sqlx::query(
+        "CREATE TEMP TABLE torrent_file_summary (\
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL, compressed_bytes bigint NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create temporary summary table");
+
+    let a = info_hash(1);
+    let b = info_hash(2);
+    sqlx::query(
+        "INSERT INTO torrent_file_summary (info_hash, file_count, compressed_bytes) VALUES \
+         ($1, 7, 700), ($2, 9, 900)",
+    )
+    .bind(a.as_slice())
+    .bind(b.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert covered summary rows");
+
+    let metadata = PgSearch::new(pool, SearchBuildConfig::default())
+        .refine_metadata(&[a, b])
+        .await
+        .expect("fully covered set must not query the (absent) torrents relation");
+
+    assert_eq!(metadata[&a].file_count, Some(7));
+    assert_eq!(metadata[&a].compressed_bytes, Some(700));
+    assert_eq!(metadata[&b].file_count, Some(9));
+    assert_eq!(metadata[&b].compressed_bytes, Some(900));
 }
 
 /// The grouped fast path must reproduce the per-value aggregation map exactly,
