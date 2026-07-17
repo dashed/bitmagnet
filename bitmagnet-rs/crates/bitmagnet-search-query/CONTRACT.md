@@ -420,6 +420,58 @@ The crate returns deterministic `BTreeMap`s keyed by value. Natural sorting by
 the human label (`natsort.Compare` in `gqlmodel/facet.go`) remains Lane G's
 resolver concern.
 
+### Grouped-facet fast path (L3 composer refined-set re-aggregation)
+
+`fetch_aggregations_grouped_for_candidates` is a count-equivalent alternative to
+`fetch_aggregations`, used **only** by the L3 pathsearch composer to re-aggregate
+an already-refined candidate set (`bitmagnet-search-serve`'s composer, via the
+`PgSearchBackend::refined_aggregations` seam). It exists to collapse the
+per-facet-value `BudgetedCount` fan-out — one statement per value — into **one
+`GROUP BY` query per facet**, cutting the statement count on the hot refine
+route.
+
+Scalar-eligibility boundary. A facet uses the grouped path iff it maps to a
+single scalar `torrent_contents` column whose per-value criterion is a plain
+`<col> IN (v)` / `<col> IS NULL`: `content_type`, `video_resolution`,
+`video_source`, `video_codec`, and `video_modifier`. Every other facet falls
+back to the unchanged per-value `BudgetedCount` path. `release_year` is excluded
+because it lives on the joined `content` table (`content.release_year`), not on
+`torrent_contents`; `video_3d` is scalar but deliberately outside this change's
+extension set; `language`, `torrent_tag`, `file_type`, `content_genre`, and
+`torrent_source` are multi-valued or `EXISTS`/join-backed and can never be
+grouped this way. Grouped and fallback work share the one request-wide
+`FACET_DB_CONCURRENCY` cap.
+
+Count equivalence. The grouped query reuses `build_base_query` verbatim (same
+joins, same cross-facet predicates from other facets, same current-facet
+self-exclusion, same inlined refined-id `IN` list), only swapping the lean
+`info_hash` projection for `<col>::text, count(*)` plus `GROUP BY 1`. Because the
+base membership query never fans rows out — every facet predicate is an `EXISTS`
+subquery and the only joins (`torrents`, `content`) are 1:1 — the grouped count
+for value `V` equals the per-value `count(*)` over `base ∧ (col = V)`, so counts
+are always exact (`is_estimate = false`). A NULL column value maps to the same
+`"null"` bucket key the per-value path uses. A value is retained iff its count is
+`> 0` or it is filter-selected (zero-count filter-selected values keep an
+explicit count-0 entry); grouped rows whose value is not in the facet's
+vocabulary — including the NULL bucket for facets whose vocabulary omits `"null"`
+(e.g. `video_source`) — are dropped, exactly as the per-value path never queries
+them. Presentation order stays Lane G's concern (`AggregationGroup::sorted_items`
+natural order, null last). This equivalence is the parity gate: a live-PostgreSQL
+test (`bitmagnet-search-serve/tests/pg_adapter_pg.rs`) asserts the grouped map
+equals the per-value `fetch_aggregations` map on a seeded corpus that includes a
+zero-count filter-selected value and a NULL bucket.
+
+Related composer instrumentation (`bitmagnet-search-serve`, same pg-tail change):
+the two pre-hydration `refine_metadata` probes (`torrent_file_summary` counts and
+`torrents` blob lengths) now run concurrently instead of as two serial round
+trips. The `PathsearchMetrics` phase vocabulary gains two subphase labels on the
+existing `bitmagnet_search_pathsearch_phase_duration_seconds{phase}` histogram —
+`refine_metadata_summary` and `refine_metadata_torrents` — each observed once per
+route attempt around its respective concurrent query, while the parent
+`refine_metadata` observation still wraps the joined pair. This is a deliberate,
+documented extension of the Phase-0 metric-name golden (the golden asserts metric
+names and label keys, not phase-label values, so it is unchanged).
+
 `SearchResultItem` is additive over the frozen Torznab row. The original flat
 fields (`name`, `size`, `content_type`, `published_at`, sources-max
 `seeders`/`leechers`, `files_count`, video fields, episodes, external ids, and

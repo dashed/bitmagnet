@@ -487,7 +487,10 @@ async fn fetch_facet_group_grouped(
         // path uses; unknown non-null values are ignored below.
         let value: Option<String> = row.try_get("facet_value")?;
         let count: i64 = row.try_get("count")?;
-        counts.insert(value.unwrap_or_else(|| "null".to_owned()), nonnegative_count(count)?);
+        counts.insert(
+            value.unwrap_or_else(|| "null".to_owned()),
+            nonnegative_count(count)?,
+        );
     }
 
     let mut items = Vec::new();
@@ -1696,6 +1699,119 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["V720p", "V1080p", "null"]
         );
+    }
+
+    #[test]
+    fn grouped_facet_column_selects_only_scalar_single_column_facets() {
+        for facet in [
+            TorrentContentFacet::ContentType,
+            TorrentContentFacet::VideoResolution,
+            TorrentContentFacet::VideoSource,
+            TorrentContentFacet::VideoCodec,
+            TorrentContentFacet::VideoModifier,
+        ] {
+            assert!(
+                grouped_facet_column(facet).is_some(),
+                "{facet:?} is a scalar single-column facet and must group"
+            );
+        }
+        for facet in [
+            // Scalar but outside the documented extension set.
+            TorrentContentFacet::Video3D,
+            // Join-backed (content.release_year), not a torrent_contents column.
+            TorrentContentFacet::ReleaseYear,
+            // Multi-valued or EXISTS/join-backed.
+            TorrentContentFacet::TorrentSource,
+            TorrentContentFacet::TorrentTag,
+            TorrentContentFacet::FileType,
+            TorrentContentFacet::Language,
+            TorrentContentFacet::ContentGenre,
+        ] {
+            assert!(
+                grouped_facet_column(facet).is_none(),
+                "{facet:?} must fall back to the per-value path"
+            );
+        }
+        assert_eq!(
+            grouped_facet_column(TorrentContentFacet::ContentType),
+            Some("torrent_contents.content_type")
+        );
+        assert_eq!(
+            grouped_facet_column(TorrentContentFacet::VideoSource),
+            Some("torrent_contents.video_source")
+        );
+    }
+
+    #[test]
+    fn grouped_facet_sql_groups_base_query_with_self_exclusion_and_cross_facet() {
+        let candidate = bitmagnet_model::InfoHash::new([7; bitmagnet_model::INFO_HASH_LEN]);
+        let options = SearchOptions::new()
+            .with_filter(Criteria::and([
+                Criteria::SizeRange {
+                    min: Some(42),
+                    max: None,
+                },
+                Criteria::torrent_content_info_hash_in([candidate]),
+            ]))
+            .with_facets([
+                request(TorrentContentFacet::ContentType, &["movie"]),
+                request(TorrentContentFacet::TorrentTag, &["trusted"]),
+            ]);
+        let config = SearchBuildConfig::default();
+        let ctx = CriteriaCtx::new(&config, fixed_now());
+
+        let mut state = BuildState::default();
+        let base = build_base_query(
+            &options,
+            &ctx,
+            Some(TorrentContentFacet::ContentType.key()),
+            None,
+            false,
+            &mut state,
+        )
+        .unwrap();
+        let base = inline_binds(&base, state.binds());
+        let sql = grouped_facet_sql("torrent_contents.content_type", &base);
+
+        assert!(sql.starts_with(
+            "SELECT torrent_contents.content_type::text AS facet_value, count(*) AS count\nFROM torrent_contents"
+        ));
+        assert!(sql.ends_with("\nGROUP BY 1"));
+        // The current OR facet self-excludes its own filter...
+        assert!(!sql.contains("content_type IN"));
+        // ...and no `IS NOT NULL` guard is emitted, so NULLs form their own
+        // grouped bucket exactly like the per-value IsNull count.
+        assert!(!sql.contains("IS NOT NULL"));
+        // Cross-facet predicates from OTHER facets survive unchanged.
+        assert!(sql.contains("torrent_tags.name IN ('trusted')"));
+        assert!(sql.contains("torrent_contents.size >= 42"));
+        // The inlined refined-id IN list is preserved byte-for-byte.
+        assert!(sql.contains(
+            "torrent_contents.info_hash IN ('\\x0707070707070707070707070707070707070707'::bytea)"
+        ));
+    }
+
+    #[test]
+    fn grouped_facet_sql_keeps_and_logic_cross_facet_self_filter() {
+        // With And logic there is no self-exclusion (current_facet is None), so
+        // the base query keeps the facet's own predicate; grouping by the column
+        // still reproduces each selected value's count.
+        let mut facet = request(TorrentContentFacet::VideoSource, &["BluRay"]);
+        facet.logic = Some(FacetLogic::And);
+        let options = SearchOptions::new().with_facets([facet]);
+        let config = SearchBuildConfig::default();
+        let ctx = CriteriaCtx::new(&config, fixed_now());
+
+        let mut state = BuildState::default();
+        let base = build_base_query(&options, &ctx, None, None, false, &mut state).unwrap();
+        let base = inline_binds(&base, state.binds());
+        let sql = grouped_facet_sql("torrent_contents.video_source", &base);
+
+        assert!(sql.starts_with(
+            "SELECT torrent_contents.video_source::text AS facet_value, count(*) AS count\nFROM torrent_contents"
+        ));
+        assert!(sql.contains("torrent_contents.video_source IN ('BluRay')"));
+        assert!(sql.ends_with("\nGROUP BY 1"));
     }
 
     #[test]

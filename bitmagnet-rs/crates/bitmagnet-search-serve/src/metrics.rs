@@ -571,6 +571,29 @@ mod tests {
     }
 
     #[test]
+    fn refine_metadata_subphases_extend_the_phase_vocabulary_uniquely() {
+        assert!(PathsearchPhase::ALL.contains(&PathsearchPhase::RefineMetadataSummary));
+        assert!(PathsearchPhase::ALL.contains(&PathsearchPhase::RefineMetadataTorrents));
+        assert_eq!(
+            PathsearchPhase::RefineMetadataSummary.label(),
+            "refine_metadata_summary"
+        );
+        assert_eq!(
+            PathsearchPhase::RefineMetadataTorrents.label(),
+            "refine_metadata_torrents"
+        );
+
+        let mut labels = PathsearchPhase::ALL
+            .iter()
+            .map(|phase| phase.label())
+            .collect::<Vec<_>>();
+        let total = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), total, "phase labels must stay unique");
+    }
+
+    #[test]
     fn serve_facade_is_observable_without_enabling_c5() {
         let metrics = ServeMetrics::new();
         metrics.set_health(true, 1_700_000_000);

@@ -1714,7 +1714,11 @@ mod tests {
         assert!(result.has_next_page);
         assert_eq!(result.aggregations["content_type"].items["movie"].count, 2);
         let calls = pg.calls();
-        assert_eq!(calls.len(), 1, "torrent_content runs only the hydrate chunk");
+        assert_eq!(
+            calls.len(),
+            1,
+            "torrent_content runs only the hydrate chunk"
+        );
         assert!(calls[0].hydrate.files_data);
         assert_eq!(
             calls[0].hydrate.max_files_data_bytes,
@@ -1730,7 +1734,10 @@ mod tests {
         assert_eq!(agg_calls.len(), 1);
         assert!(!agg_calls[0].hydrate.files_data);
         assert!(agg_calls[0].options.facets[0].aggregate);
-        assert_eq!(candidate_ids(&agg_calls[0].options.filter), vec![id(3), id(2)]);
+        assert_eq!(
+            candidate_ids(&agg_calls[0].options.filter),
+            vec![id(3), id(2)]
+        );
     }
 
     #[test]
@@ -2137,6 +2144,10 @@ mod tests {
         assert!(result.items.is_empty());
         assert!(result.aggregations.is_empty());
         assert_eq!(pg.calls().len(), 1, "only the hydrate backend should run");
+        assert!(
+            pg.agg_calls().is_empty(),
+            "an empty refined set must not reach the grouped aggregation backend"
+        );
         assert_eq!(
             metrics.phase_sample_count(PathsearchPhase::Aggregations),
             0,
