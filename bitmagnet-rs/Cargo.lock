@@ -954,6 +954,7 @@ dependencies = [
  "bitmagnet-model",
  "bitmagnet-proto",
  "bitmagnet-search-query",
+ "chrono",
  "hyper-util",
  "prometheus",
  "sqlx",

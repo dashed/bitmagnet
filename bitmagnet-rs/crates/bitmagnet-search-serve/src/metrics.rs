@@ -17,10 +17,17 @@ const PHASE_DURATION_BUCKET_COUNT: usize = 14;
 /// Hydration produces one observation per attempted bounded chunk. Exact refine
 /// produces one observation only after that chunk hydrates successfully. Every
 /// other phase produces at most one observation per composer route attempt.
+///
+/// [`Self::RefineMetadata`] wraps the whole pre-hydration metadata backend call;
+/// [`Self::RefineMetadataSummary`] and [`Self::RefineMetadataTorrents`] time the
+/// two now-concurrent metadata queries individually inside that call. This is a
+/// deliberate, documented extension of the Phase-0 phase vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathsearchPhase {
     CandidateIds,
     RefineMetadata,
+    RefineMetadataSummary,
+    RefineMetadataTorrents,
     RefineSlotWait,
     HydrateChunk,
     RefineChunk,
@@ -29,9 +36,11 @@ pub(crate) enum PathsearchPhase {
 }
 
 impl PathsearchPhase {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::CandidateIds,
         Self::RefineMetadata,
+        Self::RefineMetadataSummary,
+        Self::RefineMetadataTorrents,
         Self::RefineSlotWait,
         Self::HydrateChunk,
         Self::RefineChunk,
@@ -43,6 +52,8 @@ impl PathsearchPhase {
         match self {
             Self::CandidateIds => "candidate_ids",
             Self::RefineMetadata => "refine_metadata",
+            Self::RefineMetadataSummary => "refine_metadata_summary",
+            Self::RefineMetadataTorrents => "refine_metadata_torrents",
             Self::RefineSlotWait => "refine_slot_wait",
             Self::HydrateChunk => "hydrate_chunk",
             Self::RefineChunk => "refine_chunk",
@@ -101,7 +112,7 @@ impl ServeOutcome {
 }
 
 /// L3 route, exact-refine, and health collectors.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PathsearchMetrics {
     doc_count: prometheus::IntGauge,
     healthy: prometheus::IntGauge,

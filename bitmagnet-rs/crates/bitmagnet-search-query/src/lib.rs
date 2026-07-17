@@ -71,7 +71,7 @@ pub use criteria::{
     ContentCollectionRef, ContentRef, Criteria, Episodes, TorrentContentAttribute, Video3D,
     VideoCodec, VideoModifier, VideoResolution, VideoSource,
 };
-pub use facets::fetch_aggregations;
+pub use facets::{fetch_aggregations, fetch_aggregations_grouped_for_candidates};
 pub use options::{FacetRequest, SearchBuildConfig, SearchOptions, TorrentContentFacet};
 pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;

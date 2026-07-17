@@ -447,8 +447,10 @@ fn build_search_runtime(
             file_extensions_jsonb: build_config.file_extensions_jsonb,
             popularity_sort_default: build_config.popularity_sort_default,
         };
-        let pg: Arc<dyn PgSearchBackend> =
-            Arc::new(bitmagnet_search_serve::PgSearch::new(pool, lane_s_build));
+        let pg: Arc<dyn PgSearchBackend> = Arc::new(
+            bitmagnet_search_serve::PgSearch::new(pool, lane_s_build)
+                .with_metrics(Arc::clone(&pathsearch_metrics)),
+        );
         let candidates: Arc<dyn CandidateSource> = candidate_client.clone();
         let composer = bitmagnet_search_serve::Composer::new(
             candidates,

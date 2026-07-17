@@ -263,6 +263,250 @@ pub async fn fetch_aggregations(
     Ok(aggregations)
 }
 
+/// Grouped-facet fast path for an already-refined candidate set.
+///
+/// This is a byte-for-byte-count-equivalent replacement for
+/// [`fetch_aggregations`] used only by the L3 composer's refined-set
+/// re-aggregation. Instead of one `budgeted_count` statement per facet value,
+/// each *scalar single-valued `torrent_contents` column* facet
+/// ([`grouped_facet_column`]) is aggregated with a single
+/// `SELECT <col>, count(*) ... GROUP BY <col>` over the identical base query
+/// (`build_base_query`), so joins, cross-facet predicates from other facets,
+/// current-facet self-exclusion, and the inlined refined-id `IN` list are
+/// unchanged. Because the base membership query never fans rows out (all facet
+/// predicates are `EXISTS` subqueries; the only joins are 1:1), the grouped
+/// count for each value equals the per-value `count(*)` exactly, so every count
+/// is exact (`is_estimate = false`).
+///
+/// A value is retained iff its grouped count is `> 0` or it is in that facet's
+/// filter selection (zero-count filter-selected values keep an explicit count-0
+/// entry), matching [`fetch_facet_item`]. Grouped rows whose column value is not
+/// in the facet's known vocabulary — including the NULL bucket for facets whose
+/// vocabulary omits `"null"` — are dropped, exactly as the per-value path never
+/// queries them. Facets that are not scalar-eligible fall back to the unchanged
+/// per-value [`fetch_facet_item`] path, and both kinds of work share the one
+/// request-wide [`FACET_DB_CONCURRENCY`] cap.
+pub async fn fetch_aggregations_grouped_for_candidates(
+    pool: &PgPool,
+    options: &SearchOptions,
+    config: &SearchBuildConfig,
+    now: DateTime<Utc>,
+) -> Result<Aggregations> {
+    let ctx = CriteriaCtx::new(config, now);
+    let facet_preparations = options
+        .facets
+        .iter()
+        .filter(|facet| facet.aggregate)
+        .enumerate()
+        .map(|(order, facet)| [(order, Arc::new(facet.clone()))]);
+    let mut prepared = try_collect_facet_work(facet_preparations, |(order, facet)| {
+        prepare_facet_group(pool, order, facet)
+    })
+    .await?;
+    prepared.sort_by_key(|facet| facet.order);
+
+    let mut groups = Vec::with_capacity(prepared.len());
+    let mut work_by_group: Vec<Vec<GroupedFacetWork>> = Vec::with_capacity(prepared.len());
+    for (group_index, prepared) in prepared.into_iter().enumerate() {
+        groups.push((
+            prepared.facet.facet.key().to_owned(),
+            AggregationGroup {
+                label: facet_label(prepared.facet.facet).to_owned(),
+                logic: prepared.logic,
+                items: BTreeMap::new(),
+            },
+        ));
+
+        if let Some(column) = grouped_facet_column(prepared.facet.facet) {
+            work_by_group.push(vec![GroupedFacetWork::Grouped {
+                group_index,
+                facet: Arc::clone(&prepared.facet),
+                current_facet: prepared.current_facet,
+                column,
+                values: Arc::new(prepared.values),
+            }]);
+        } else {
+            let PreparedFacet {
+                facet,
+                logic,
+                current_facet,
+                values,
+                ..
+            } = prepared;
+            work_by_group.push(
+                values
+                    .into_iter()
+                    .map(|(value, label)| {
+                        GroupedFacetWork::PerValue(FacetItemWork {
+                            group_index,
+                            facet: Arc::clone(&facet),
+                            logic,
+                            current_facet,
+                            value,
+                            label,
+                        })
+                    })
+                    .collect(),
+            );
+        }
+    }
+
+    let ctx = &ctx;
+    let entries = try_collect_facet_work(work_by_group, |work| async move {
+        match work {
+            GroupedFacetWork::Grouped {
+                group_index,
+                facet,
+                current_facet,
+                column,
+                values,
+            } => {
+                let items = fetch_facet_group_grouped(
+                    pool,
+                    options,
+                    ctx,
+                    &facet,
+                    current_facet,
+                    column,
+                    &values,
+                )
+                .await?;
+                Ok((group_index, items))
+            }
+            GroupedFacetWork::PerValue(work) => {
+                let item = fetch_facet_item(
+                    pool,
+                    options,
+                    ctx,
+                    &work.facet,
+                    work.logic,
+                    work.current_facet,
+                    work.value,
+                    work.label,
+                )
+                .await?;
+                Ok((work.group_index, item.into_iter().collect::<Vec<_>>()))
+            }
+        }
+    })
+    .await?;
+
+    for (group_index, items) in entries {
+        let group = &mut groups
+            .get_mut(group_index)
+            .expect("prepared facet group must exist")
+            .1;
+        for (value, item) in items {
+            group.items.insert(value, item);
+        }
+    }
+
+    let mut aggregations = Aggregations::new();
+    for (key, group) in groups {
+        aggregations.insert(key, group);
+    }
+
+    Ok(aggregations)
+}
+
+enum GroupedFacetWork {
+    Grouped {
+        group_index: usize,
+        facet: Arc<FacetRequest>,
+        current_facet: Option<&'static str>,
+        column: &'static str,
+        values: Arc<BTreeMap<String, String>>,
+    },
+    PerValue(FacetItemWork),
+}
+
+/// The single-valued scalar `torrent_contents` column a facet aggregates over,
+/// or `None` when the facet must use the per-value fallback.
+///
+/// Only facets backed by exactly one scalar `torrent_contents` column are
+/// eligible: their per-value criterion is a plain `<col> IN (v)` / `<col> IS
+/// NULL`, so partitioning the base query with `GROUP BY <col>` reproduces every
+/// per-value count. `release_year` is deliberately excluded — it lives on the
+/// joined `content` table (`content.release_year`), not on `torrent_contents` —
+/// and so is `video_3d`, which is outside this change's documented extension
+/// set. Multi-valued or join/EXISTS-backed facets (`language`, `torrent_tag`,
+/// `file_type`, `content_genre`, `torrent_source`) can never be grouped this
+/// way.
+const fn grouped_facet_column(facet: TorrentContentFacet) -> Option<&'static str> {
+    match facet {
+        TorrentContentFacet::ContentType => Some("torrent_contents.content_type"),
+        TorrentContentFacet::VideoResolution => Some("torrent_contents.video_resolution"),
+        TorrentContentFacet::VideoSource => Some("torrent_contents.video_source"),
+        TorrentContentFacet::VideoCodec => Some("torrent_contents.video_codec"),
+        TorrentContentFacet::VideoModifier => Some("torrent_contents.video_modifier"),
+        TorrentContentFacet::Video3D
+        | TorrentContentFacet::ReleaseYear
+        | TorrentContentFacet::TorrentSource
+        | TorrentContentFacet::TorrentTag
+        | TorrentContentFacet::FileType
+        | TorrentContentFacet::Language
+        | TorrentContentFacet::ContentGenre => None,
+    }
+}
+
+/// Wrap [`build_base_query`]'s membership SQL as a grouped count over `column`.
+///
+/// The base query is reused verbatim; only its lean `info_hash` projection is
+/// swapped for `<column>::text, count(*)` and a trailing `GROUP BY 1`. The
+/// `::text` cast matches the item query's enum-to-text projection so the grouped
+/// keys line up with the facet vocabulary.
+fn grouped_facet_sql(column: &str, base_sql: &str) -> String {
+    let remainder = base_sql
+        .strip_prefix(BASE_SELECT)
+        .expect("grouped facet base query must start with the canonical base select");
+    format!(
+        "SELECT {column}::text AS facet_value, count(*) AS count\nFROM torrent_contents{remainder}\nGROUP BY 1"
+    )
+}
+
+async fn fetch_facet_group_grouped(
+    pool: &PgPool,
+    options: &SearchOptions,
+    ctx: &CriteriaCtx<'_>,
+    facet: &FacetRequest,
+    current_facet: Option<&str>,
+    column: &str,
+    values: &BTreeMap<String, String>,
+) -> Result<Vec<(String, AggregationItem)>> {
+    let mut state = BuildState::default();
+    let base_sql = build_base_query(options, ctx, current_facet, None, false, &mut state)?;
+    let base_sql = inline_binds(&base_sql, state.binds());
+    let grouped_sql = grouped_facet_sql(column, &base_sql);
+
+    let rows = sqlx::query(sqlx::AssertSqlSafe(grouped_sql))
+        .fetch_all(pool)
+        .await?;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        // A NULL column value maps to the same `"null"` bucket key the per-value
+        // path uses; unknown non-null values are ignored below.
+        let value: Option<String> = row.try_get("facet_value")?;
+        let count: i64 = row.try_get("count")?;
+        counts.insert(value.unwrap_or_else(|| "null".to_owned()), nonnegative_count(count)?);
+    }
+
+    let mut items = Vec::new();
+    for (value, label) in values {
+        let count = counts.get(value).copied().unwrap_or(0);
+        if count > 0 || facet.filter.contains(value) {
+            items.push((
+                value.clone(),
+                AggregationItem {
+                    label: label.clone(),
+                    count,
+                    is_estimate: false,
+                },
+            ));
+        }
+    }
+    Ok(items)
+}
+
 struct PreparedFacet {
     order: usize,
     facet: Arc<FacetRequest>,

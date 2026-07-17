@@ -751,22 +751,21 @@ impl Composer {
             return Aggregations::new();
         }
         let ids: Vec<InfoHash> = refined.iter().map(|item| item.info_hash).collect();
-        let mut request = request.for_candidates(
+        let request = request.for_candidates(
             &ids,
             HydrateOptions {
                 files_data: false,
                 max_files_data_bytes: None,
             },
         );
-        // This call consumes only aggregations. An explicit zero limit makes
-        // Lane S skip membership and scalar/content hydration while retaining
-        // every facet query, matching Go's aggregation-only refine path.
-        request.options.limit = Some(0);
+        // The dedicated aggregation entry point consumes only facets: it never
+        // runs membership or hydration, and folds each scalar single-column
+        // facet into one grouped count instead of one statement per value.
         // No timer is emitted for the empty/deadline no-op above. This phase
         // measures an aggregation backend attempt, excluding request shaping.
         let _aggregations = self.phase_timer(PathsearchPhase::Aggregations);
-        match timeout_at(deadline, self.pg.torrent_content(request)).await {
-            Ok(Ok(result)) => result.aggregations,
+        match timeout_at(deadline, self.pg.refined_aggregations(request)).await {
+            Ok(Ok(aggregations)) => aggregations,
             Ok(Err(error)) => {
                 if let Some(metrics) = &self.metrics {
                     metrics.inc_refine_agg_error();
@@ -1379,11 +1378,13 @@ mod tests {
         items: Vec<SearchResultItem>,
         counts: HashMap<InfoHash, i64>,
         calls: Mutex<Vec<SearchRequest>>,
+        agg_calls: Mutex<Vec<SearchRequest>>,
         delayed_ids: HashSet<InfoHash>,
         delay: Duration,
         fail_counts: bool,
         fail_search: bool,
         fail_on_search_call: Option<usize>,
+        fail_aggregations: bool,
     }
 
     impl FakePg {
@@ -1392,16 +1393,25 @@ mod tests {
                 items,
                 counts,
                 calls: Mutex::new(Vec::new()),
+                agg_calls: Mutex::new(Vec::new()),
                 delayed_ids: HashSet::new(),
                 delay: Duration::ZERO,
                 fail_counts: false,
                 fail_search: false,
                 fail_on_search_call: None,
+                fail_aggregations: false,
             }
         }
 
         fn calls(&self) -> Vec<SearchRequest> {
             self.calls.lock().expect("calls mutex poisoned").clone()
+        }
+
+        fn agg_calls(&self) -> Vec<SearchRequest> {
+            self.agg_calls
+                .lock()
+                .expect("agg_calls mutex poisoned")
+                .clone()
         }
     }
 
@@ -1504,6 +1514,41 @@ mod tests {
                 }
             }
             Ok(metadata)
+        }
+
+        async fn refined_aggregations(
+            &self,
+            request: SearchRequest,
+        ) -> crate::Result<Aggregations> {
+            self.agg_calls
+                .lock()
+                .expect("agg_calls mutex poisoned")
+                .push(request.clone());
+            if self.fail_aggregations {
+                return Err(crate::Error::Pg("aggregation failure".into()));
+            }
+            if !request.options.facets.iter().any(|facet| facet.aggregate) {
+                return Ok(Aggregations::new());
+            }
+            // Stand in for the grouped fast path: one content_type/movie bucket
+            // whose count is the size of the refined candidate set.
+            let count =
+                u64::try_from(candidate_ids(&request.options.filter).len()).unwrap_or(u64::MAX);
+            Ok(Aggregations::from([(
+                "content_type".into(),
+                AggregationGroup {
+                    label: "Content type".into(),
+                    logic: FacetLogic::Or,
+                    items: BTreeMap::from([(
+                        "movie".into(),
+                        AggregationItem {
+                            label: "Movie".into(),
+                            count,
+                            is_estimate: false,
+                        },
+                    )]),
+                },
+            )]))
         }
     }
 
@@ -1669,7 +1714,7 @@ mod tests {
         assert!(result.has_next_page);
         assert_eq!(result.aggregations["content_type"].items["movie"].count, 2);
         let calls = pg.calls();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 1, "torrent_content runs only the hydrate chunk");
         assert!(calls[0].hydrate.files_data);
         assert_eq!(
             calls[0].hydrate.max_files_data_bytes,
@@ -1679,10 +1724,13 @@ mod tests {
             calls[0].options.facets.is_empty(),
             "even a one-chunk route must use refine, not candidate-set combined facets"
         );
-        assert!(!calls[1].hydrate.files_data);
-        assert!(calls[1].options.facets[0].aggregate);
-        assert_eq!(calls[1].options.limit, Some(0));
-        assert_eq!(candidate_ids(&calls[1].options.filter), vec![id(3), id(2)]);
+        // Aggregation now routes through the dedicated grouped entry point over
+        // the refined candidate set, not a second membership query.
+        let agg_calls = pg.agg_calls();
+        assert_eq!(agg_calls.len(), 1);
+        assert!(!agg_calls[0].hydrate.files_data);
+        assert!(agg_calls[0].options.facets[0].aggregate);
+        assert_eq!(candidate_ids(&agg_calls[0].options.filter), vec![id(3), id(2)]);
     }
 
     #[test]
@@ -1832,12 +1880,12 @@ mod tests {
         assert!(served);
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].info_hash, id(1));
-        let calls = pg.calls();
+        let agg_calls = pg.agg_calls();
         assert_eq!(
-            candidate_ids(&calls.last().unwrap().options.filter),
+            candidate_ids(&agg_calls.last().unwrap().options.filter),
             vec![id(1)]
         );
-        assert!(!calls.last().unwrap().hydrate.files_data);
+        assert!(!agg_calls.last().unwrap().hydrate.files_data);
         assert_eq!(metrics.retained_capped_count(), 1);
         assert_eq!(metrics.route_count(RouteResult::Served), 1);
     }
@@ -2102,7 +2150,7 @@ mod tests {
     async fn refined_aggregation_error_serves_items_and_is_observable() {
         let candidates = Arc::new(FakeCandidates::returning(&[id(1)], 1));
         let mut fake_pg = FakePg::new(vec![item(1, 1, true)], HashMap::from([(id(1), 1)]));
-        fake_pg.fail_on_search_call = Some(2);
+        fake_pg.fail_aggregations = true;
         let metrics = Arc::new(PathsearchMetrics::new());
         let composer = Composer::new(candidates, Arc::new(fake_pg), config(), None)
             .with_metrics(Arc::clone(&metrics));

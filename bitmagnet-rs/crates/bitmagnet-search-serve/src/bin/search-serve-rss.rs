@@ -263,6 +263,15 @@ impl PgSearchBackend for DiskPg {
             })
             .collect())
     }
+
+    async fn refined_aggregations(
+        &self,
+        _request: SearchRequest,
+    ) -> bitmagnet_search_serve::Result<bitmagnet_search_serve::Aggregations> {
+        // This blob-load harness exercises hydration and refine only; the
+        // ranked route serves without facets here.
+        Ok(bitmagnet_search_serve::Aggregations::new())
+    }
 }
 
 fn empty_result() -> SearchResult {

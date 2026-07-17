@@ -6,12 +6,16 @@
 //! refine remains the only pagination boundary.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub use bitmagnet_search_query::{
     AggregationGroup, AggregationItem, Aggregations, Criteria, HydrateOptions, SearchBuildConfig,
     SearchOptions, SearchResult, SearchResultItem,
 };
+use chrono::Utc;
 use sqlx::{PgPool, Row};
+
+use crate::metrics::{PathsearchMetrics, PathsearchPhase};
 
 const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count\
 \nFROM torrent_file_summary\
@@ -119,6 +123,14 @@ pub trait PgSearchBackend: Send + Sync {
         &self,
         ids: &[bitmagnet_model::InfoHash],
     ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, RefineMetadata>>;
+
+    /// Aggregate the requested facets over an already-refined candidate set.
+    ///
+    /// The composer serves L3 routes without facets when this fails, so an
+    /// error here declines aggregation rather than the whole route. The
+    /// concrete backend uses the grouped-facet fast path; see
+    /// [`bitmagnet_search_query::fetch_aggregations_grouped_for_candidates`].
+    async fn refined_aggregations(&self, request: SearchRequest) -> crate::Result<Aggregations>;
 }
 
 /// Concrete sqlx implementation of the composer PostgreSQL dependency.
@@ -126,13 +138,36 @@ pub trait PgSearchBackend: Send + Sync {
 pub struct PgSearch {
     pool: PgPool,
     build_config: SearchBuildConfig,
+    metrics: Option<Arc<PathsearchMetrics>>,
 }
 
 impl PgSearch {
     /// Construct the adapter around the GraphQL service's shared pool.
     #[must_use]
     pub const fn new(pool: PgPool, build_config: SearchBuildConfig) -> Self {
-        Self { pool, build_config }
+        Self {
+            pool,
+            build_config,
+            metrics: None,
+        }
+    }
+
+    /// Attach the canonical composer metrics so the two concurrent
+    /// [`Self::refine_metadata`] queries emit their individual subphase timings.
+    ///
+    /// Production should pass the same value handed to
+    /// [`crate::Composer::with_metrics`]. Without it the queries still run
+    /// concurrently; only the subphase observations are suppressed.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<PathsearchMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    fn subphase_timer(&self, phase: PathsearchPhase) -> Option<prometheus::HistogramTimer> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.start_phase_timer(phase))
     }
 
     /// Access the shared pool used by this adapter.
@@ -174,11 +209,28 @@ impl PgSearchBackend for PgSearch {
         }
 
         let requested = bytea_values(ids);
-        let summary_rows = sqlx::query(SUMMARY_COUNTS_SQL)
-            .bind(&requested)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| crate::Error::Pg(error.to_string()))?;
+        // The two probes read independent tables, so overlap them instead of
+        // paying two serial round trips against cold buffers. Each future owns
+        // its own pooled connection and its own subphase timer, while the
+        // caller's `refine_metadata` timer still wraps the joined pair.
+        let summary_query = async {
+            let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataSummary);
+            sqlx::query(SUMMARY_COUNTS_SQL)
+                .bind(&requested)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| crate::Error::Pg(error.to_string()))
+        };
+        let torrent_query = async {
+            let _timer = self.subphase_timer(PathsearchPhase::RefineMetadataTorrents);
+            sqlx::query(TORRENT_REFINE_METADATA_SQL)
+                .bind(&requested)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|error| crate::Error::Pg(error.to_string()))
+        };
+        let (summary_rows, torrent_rows) = tokio::try_join!(summary_query, torrent_query)?;
+
         let mut metadata = HashMap::with_capacity(ids.len());
         for row in summary_rows {
             let raw: Vec<u8> = row
@@ -198,11 +250,6 @@ impl PgSearchBackend for PgSearch {
             );
         }
 
-        let torrent_rows = sqlx::query(TORRENT_REFINE_METADATA_SQL)
-            .bind(&requested)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| crate::Error::Pg(error.to_string()))?;
         for row in torrent_rows {
             let raw: Vec<u8> = row
                 .try_get("info_hash")
@@ -231,6 +278,17 @@ impl PgSearchBackend for PgSearch {
             entry.compressed_bytes = compressed_bytes;
         }
         Ok(metadata)
+    }
+
+    async fn refined_aggregations(&self, request: SearchRequest) -> crate::Result<Aggregations> {
+        bitmagnet_search_query::fetch_aggregations_grouped_for_candidates(
+            &self.pool,
+            &request.options,
+            &self.build_config,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| crate::Error::Pg(error.to_string()))
     }
 }
 
