@@ -482,6 +482,14 @@ func (c *Composer) candidateBudget(limit, offset uint) uint {
 	// maxCands (already applied above): deep pagination is honest but never unbounded.
 	// F5: honest deep pagination + raised decode cap (user-approved latency tradeoff;
 	// the route deadline still backstops worst-case latency).
+	//
+	// PARITY COUPLING — if you change this decode cap, mind facetIDs: raising the
+	// budget grows `refined`, and the facet aggregation is DELIBERATELY pinned to the
+	// shallow ceiling (facetIDs bounds its input to maxDecode) so Go's budgeted_count
+	// EXPLAIN cost never crosses the fixed 5000 aggregation budget and flips
+	// isEstimate — which the Rust grouped facet path never does. The bound keeps
+	// Go/Rust facet counts byte-identical on the shadow gate. Do not "simplify" it
+	// away when touching the budget.
 	if need <= maxDecode && budget > maxDecode {
 		budget = maxDecode
 	}
