@@ -2,31 +2,30 @@
 //! `corpus_test.go normalizeClassifierResult` (the frozen corpus `expected`
 //! schema, contract §2.1/§2.3).
 
-use bitmagnet_release::{Episodes, VideoCodec, VideoResolution, VideoSource};
+use bitmagnet_release::{
+    Episodes, Video3D, VideoCodec, VideoModifier, VideoResolution, VideoSource,
+};
 use serde_json::{json, Value};
 
 use crate::model::{ContentType, Date};
 
-/// `classification.ContentAttributes` + `Content`/`Tags` (`result.go`). Video3D,
-/// VideoModifier and Languages are Lane-R-pending parsers, held here so the
-/// output shape is complete the moment R lands them.
+/// `classification.ContentAttributes` + `Content`/`Tags` (`result.go`). The
+/// video/title/language attributes are produced by Lane R's `parse_video_content`
+/// and merged in by the `parse_video_content` action.
 #[derive(Clone, Debug, Default)]
 pub struct Classification {
     pub content_type: Option<ContentType>,
     pub base_title: Option<String>,
     pub date: Date,
-    /// `l.String()` display forms, in `model.Languages` set order. Empty until
-    /// Lane R lands `InferLanguages`.
+    /// `l.String()` display forms (alpha2 codes) in `model.Languages` set order.
     pub languages: Vec<String>,
     pub language_multi: bool,
     pub episodes: Episodes,
     pub video_resolution: Option<VideoResolution>,
     pub video_source: Option<VideoSource>,
     pub video_codec: Option<VideoCodec>,
-    /// Lane-R-pending (`InferVideo3D`).
-    pub video_3d: Option<String>,
-    /// Lane-R-pending (`InferVideoModifier`).
-    pub video_modifier: Option<String>,
+    pub video_3d: Option<Video3D>,
+    pub video_modifier: Option<VideoModifier>,
     pub release_group: Option<String>,
     /// Whether `AttachContent` ran (a `*model.Content` is set). Always false on
     /// the flags-off corpus path.
@@ -103,8 +102,8 @@ pub(crate) fn to_expected_json(result: &Classification, outcome: &Outcome) -> Va
         "videoResolution": opt_str(attrs.video_resolution.map(VideoResolution::as_str)),
         "videoSource": opt_str(attrs.video_source.map(VideoSource::as_str)),
         "videoCodec": opt_str(attrs.video_codec.map(VideoCodec::as_str)),
-        "video3d": attrs.video_3d.clone().map_or(Value::Null, Value::String),
-        "videoModifier": attrs.video_modifier.clone().map_or(Value::Null, Value::String),
+        "video3d": opt_str(attrs.video_3d.map(Video3D::as_str)),
+        "videoModifier": opt_str(attrs.video_modifier.map(VideoModifier::as_str)),
         "releaseGroup": attrs.release_group.clone().map_or(Value::Null, Value::String),
         "contentAttached": attrs.content_attached,
         "outcome": outcome.tag(),
