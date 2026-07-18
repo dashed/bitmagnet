@@ -1,0 +1,22 @@
+{"id":"simple_dots","input":"The.Matrix.","output":"The Matrix"}
+{"id":"leading_bracket","input":"[Group].Movie.Title.","output":"Movie Title"}
+{"id":"cjk_bracket","input":"【字幕组】The.Movie.","output":"The Movie"}
+{"id":"apostrophe","input":"Ocean's.Eleven.","output":"Ocean's Eleven"}
+{"id":"hyphen_word","input":"Spider-Man.","output":"Spider-Man"}
+{"id":"acronym_dots","input":"S.H.I.E.L.D.","output":"S.H.I.E.L.D."}
+{"id":"leading_space","input":"  Leading.Space.","output":"Leading Space"}
+{"id":"multi_dots","input":"Title...Multiple.Dots.","output":"Title .Multiple Dots "}
+{"id":"just_year","input":"2012.","output":"2012"}
+{"id":"accent","input":"Café.Society.","output":"Café Society"}
+{"id":"empty","input":"","output":""}
+{"id":"underscores","input":"The_Movie_Title_","output":"The Movie Title"}
+{"id":"two_letter_acr","input":"A.B.C.","output":"A.B.C."}
+{"id":"paren_year","input":"Movie (2019).","output":"Movie (2019)"}
+{"id":"punct_end","input":"Title!.End.","output":"Title! End"}
+{"id":"trailing_junk","input":"Movie.Title.---.","output":"Movie Title"}
+{"id":"mixed_sep","input":"The Movie_Title.Name","output":"The Movie Title Name"}
+{"id":"quotes","input":"\"Quoted\".Title.","output":"Quoted\" Title"}
+{"id":"numbers_in_title","input":"300.Rise.Of.An.Empire.","output":"300 Rise Of An Empire"}
+{"id":"single_word","input":"Inception.","output":"Inception"}
+{"id":"only_separators","input":"..._...","output":"..._..."}
+{"id":"double_bracket","input":"[A][B].Title.","output":"[A ][B ]Title "}

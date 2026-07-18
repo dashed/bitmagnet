@@ -24,19 +24,23 @@ struct TyeFixture {
     rest: String,
 }
 
-#[test]
-fn title_year_episodes_match_go() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../testdata/parity/release/title_year_episodes.jsonl"
-    );
-    let raw = std::fs::read_to_string(path).expect("read fixture");
-    let fixtures: Vec<TyeFixture> = raw
-        .lines()
+fn load_tye(rel: &str, base: &str) -> Vec<TyeFixture> {
+    let path = format!("{base}/../../../testdata/parity/release/{rel}");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("read {path}"));
+    raw.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("json"))
-        .collect();
-    assert!(fixtures.len() >= 14);
+        .collect()
+}
+
+#[test]
+fn title_year_episodes_match_go() {
+    let base = env!("CARGO_MANIFEST_DIR");
+    let mut fixtures = load_tye("title_year_episodes.jsonl", base);
+    // Dedicated title/year edge cases (18xx-20xx boundaries, glued years,
+    // only-year, double-year, tv hint without episodes).
+    fixtures.extend(load_tye("title_year_edges.jsonl", base));
+    assert!(fixtures.len() >= 24);
 
     for f in &fixtures {
         match parse_title_year_episodes_dispatch(ct(&f.hint), &f.name) {

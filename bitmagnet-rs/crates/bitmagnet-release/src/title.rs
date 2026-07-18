@@ -230,4 +230,37 @@ mod tests {
         LazyLock::force(&TRIM_TITLE_RE);
         LazyLock::force(&MULTI_RE);
     }
+
+    // `cleanTitle` is the highest-churn surface; lock its exact behavior against
+    // the Go oracle, including its quirks (multi-dot artifacts, only-first
+    // bracket stripped, preserved acronyms/apostrophes/accents).
+    #[derive(serde::Deserialize)]
+    struct CleanFixture {
+        id: String,
+        input: String,
+        output: String,
+    }
+
+    #[test]
+    fn clean_title_matches_go() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../testdata/parity/release/clean_title.jsonl"
+        );
+        let raw = std::fs::read_to_string(path).expect("read clean_title.jsonl");
+        let fixtures: Vec<CleanFixture> = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        assert!(fixtures.len() >= 20);
+        for f in &fixtures {
+            assert_eq!(
+                clean_title(&f.input),
+                f.output,
+                "clean_title mismatch: {}",
+                f.id
+            );
+        }
+    }
 }
