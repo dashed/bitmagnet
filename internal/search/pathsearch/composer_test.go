@@ -407,15 +407,44 @@ func TestComposer_CandidateBudget_DecodeLatencyCap(t *testing.T) {
 		}
 	}
 
-	// An explicit cap is honored and can bind below the memory cap.
+	// An explicit cap is honored and can bind below the memory cap FOR SHALLOW pages.
 	tuned := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000, MaxDecodeCandidates: 120}, nil)
 	if got := tuned.candidateBudget(100, 0); got != 120 {
 		t.Errorf("budget(limit=100, decodeCap=120) = %d, want 120", got)
 	}
 
-	// 0/unset is never "unbounded": even an absurd window is bounded by the default.
-	if got := def.candidateBudget(1<<20, 0); got != DefaultMaxDecodeCandidates {
-		t.Errorf("budget(huge, decodeCap unset) = %d, want DefaultMaxDecodeCandidates(%d)", got, DefaultMaxDecodeCandidates)
+	// F5: an absurd window is still bounded, but now by the MEMORY ceiling
+	// (MaxCandidates) — the latency floor no longer caps deep windows, so deep
+	// pagination can be served. Never "unbounded".
+	if got := def.candidateBudget(1<<20, 0); got != DefaultMaxCandidates {
+		t.Errorf("budget(huge window) = %d, want DefaultMaxCandidates(%d) — deep windows grow to the memory ceiling", got, DefaultMaxCandidates)
+	}
+}
+
+// TestComposer_CandidateBudget_DeepPaginationGrows is the F5 core: the decode
+// latency floor (MaxDecodeCandidates=200) applies ONLY to shallow pages, so a DEEP
+// offset grows its decode window past 200 (up to MaxCandidates) — otherwise the
+// page could never be served (the window would stop at 200 < offset). Page 1 and
+// other shallow windows stay byte-identical to before.
+func TestComposer_CandidateBudget_DeepPaginationGrows(t *testing.T) {
+	c := NewComposer(nil, nil, ComposerConfig{OversampleFactor: 4, MaxCandidates: 2000}, nil)
+
+	for _, tc := range []struct {
+		name                string
+		limit, offset, want uint
+	}{
+		// Shallow: unchanged (need <= MaxDecodeCandidates=200 keeps the 200 floor).
+		{"page1 limit 50", 50, 0, 200},
+		{"page1 limit 100 capped", 100, 0, 200},
+		{"shallow offset 40", 20, 40, 200},
+		// Deep: need > 200 lifts the floor and grows toward the memory ceiling.
+		{"deep offset 400", 50, 400, 1800},    // need=450 -> 450*4=1800, under 2000
+		{"deep offset 1000", 50, 1000, 2000},  // need=1050 -> 4200 -> capped to 2000
+		{"deep small limit", 20, 400, 1680},   // need=420 -> 1680, servable (was 200)
+	} {
+		if got := c.candidateBudget(tc.limit, tc.offset); got != tc.want {
+			t.Errorf("%s: budget(limit=%d, offset=%d) = %d, want %d", tc.name, tc.limit, tc.offset, got, tc.want)
+		}
 	}
 }
 
@@ -802,6 +831,58 @@ func TestComposer_TorrentContent_HasNextPage(t *testing.T) {
 	res, _, _ = c.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 2, nil)
 	if res.HasNextPage {
 		t.Fatal("final page must report HasNextPage=false")
+	}
+}
+
+// TestComposer_TorrentContent_HasNextPageHonestOnTruncation is F5: when a page
+// EXHAUSTS its decoded window but the window was budget-truncated (candidate_total
+// exceeds what we decoded), HasNextPage must be TRUE while there is still room to
+// grow the decode budget — the old refined-only signal wrongly reported false while
+// TotalCount advertised "About N". At the hard decode ceiling it must go back to
+// false: the route can never serve past MaxCandidates candidates.
+func TestComposer_TorrentContent_HasNextPageHonestOnTruncation(t *testing.T) {
+	const sidecarTotal = 5000
+
+	// The sidecar returns 8 matching candidates with a full-corpus candidate_total
+	// of 5000. The page (offset=6, limit=2) consumes the whole 8-row refined window,
+	// so the honest signal must come from the truncation branch, not leftover rows.
+	mk := func() (cands []*pb.PathCandidate, items []search.TorrentContentResultItem) {
+		for i := 1; i <= 8; i++ {
+			cands = append(cands, candidate(byte(i)))
+			items = append(items, item(byte(i), tf("Inception.2010.1080p.mkv", "mkv", uint(i))))
+		}
+		return cands, items
+	}
+
+	// Below the ceiling: MaxCandidates=1000. The 8-row window is fully consumed, but
+	// candidate_total=5000 > 8 decoded AND 8 < 1000 ceiling → honest TRUE.
+	cands, items := mk()
+	l3 := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands, CandidateTotal: sidecarTotal, Estimated: true}}
+	pg := &fakePG{result: search.TorrentContentResult{Items: items}}
+	below := newTestComposer(l3, pg) // MaxCandidates=1000, oversample=4
+
+	res, served, err := below.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 6, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+	if !res.HasNextPage {
+		t.Fatal("truncated window below the ceiling must report HasNextPage=true (more candidates exist)")
+	}
+
+	// At the ceiling: MaxCandidates=8, so the decode window == the ceiling. Even
+	// though candidate_total=5000 is larger, no deeper page can ever grow past 8
+	// decoded candidates → honest FALSE.
+	cands, items = mk()
+	l3c := &fakeL3{resp: &pb.PathCandidatesResponse{Candidates: cands, CandidateTotal: sidecarTotal, Estimated: true}}
+	pgc := &fakePG{result: search.TorrentContentResult{Items: items}}
+	ceiling := NewComposer(l3c, pgc, ComposerConfig{MinQueryLength: 3, OversampleFactor: 4, MaxCandidates: 8}, nil)
+
+	res, served, err = ceiling.TorrentContent(context.Background(), Filters{Query: "inception"}, QueryOptions{}, 2, 6, nil)
+	if err != nil || !served {
+		t.Fatalf("expected served, got served=%v err=%v", served, err)
+	}
+	if res.HasNextPage {
+		t.Fatal("at the decode ceiling HasNextPage must be false — the route never serves past MaxCandidates")
 	}
 }
 

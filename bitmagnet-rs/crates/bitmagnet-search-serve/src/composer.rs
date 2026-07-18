@@ -17,7 +17,7 @@ use tokio::time::{timeout_at, Instant};
 
 use crate::api::SearchServe;
 use crate::candidates::{CandidateSource, HealthGate};
-use crate::config::ComposerConfig;
+use crate::config::{ComposerConfig, DEFAULT_MAX_CANDIDATES, DEFAULT_MAX_DECODE_CANDIDATES};
 use crate::filters::{FileRow, FileRowSort, FileRowsResult, Filters, PathGroup};
 use crate::metrics::{PathsearchMetrics, PathsearchPhase, RouteResult};
 use crate::pg::{
@@ -220,20 +220,66 @@ impl Composer {
         result
     }
 
-    // Exact facet-count parity (grouped fast path) depends on this clamp. The
-    // `max_decode_candidates` bound keeps the refined candidate set small enough
-    // that `budgeted_count` never saturates its per-value budget, so every grouped
-    // count stays exact (`is_estimate = false`). Widening the budget past that
-    // clamp would let counts hit the budget ceiling and silently become estimates,
-    // diverging from the per-value path this fast path must match.
+    // Effective hard decode ceiling (0/unset → DEFAULT_MAX_CANDIDATES): the most
+    // candidates the route will ever decode for one request. Deep pagination cannot
+    // serve past it, so `has_next_page` uses it as the honesty ceiling. Mirrors Go
+    // `maxCandidatesCap`.
+    fn max_candidates_cap(&self) -> u32 {
+        if self.config.max_candidates == 0 {
+            DEFAULT_MAX_CANDIDATES
+        } else {
+            self.config.max_candidates
+        }
+    }
+
+    // Effective shallow-page decode ceiling (0/unset → DEFAULT_MAX_DECODE_CANDIDATES).
+    // Also bounds the id set fed to the facet aggregation (`facet_ids`). Mirrors Go
+    // `decodeLatencyCap`.
+    fn decode_latency_cap(&self) -> u32 {
+        if self.config.max_decode_candidates == 0 {
+            DEFAULT_MAX_DECODE_CANDIDATES
+        } else {
+            self.config.max_decode_candidates
+        }
+    }
+
+    // Decode budget = (offset+limit) * oversample, capped for latency/memory (F5).
+    // The latency floor (`max_decode_candidates`) applies ONLY to SHALLOW pages
+    // whose window fits within it — today's ~200-decode fast first page. A DEEP page
+    // (need > max_decode) LIFTS that floor so the window can grow to REACH the
+    // requested offset (otherwise a deep page is served empty), bounded above by the
+    // hard memory ceiling `max_candidates`. Exact facet-count parity is NO LONGER
+    // held by this clamp; it is held by bounding the facet-aggregation input to the
+    // shallow ceiling in `facet_ids`, so this budget can grow without flipping Go's
+    // `budgeted_count` to an estimate. Mirrors Go `candidateBudget`.
     fn candidate_budget(&self, limit: u32, offset: u32) -> u32 {
         let need = u64::from(offset).saturating_add(u64::from(limit)).max(1);
-        let budget = need.saturating_mul(u64::from(self.config.oversample_factor));
-        budget
-            .min(u64::from(self.config.max_candidates))
-            .min(u64::from(self.config.max_decode_candidates))
-            .try_into()
-            .unwrap_or(u32::MAX)
+        let max_cands = u64::from(self.max_candidates_cap());
+        let max_decode = u64::from(self.decode_latency_cap());
+        let mut budget = need
+            .saturating_mul(u64::from(self.config.oversample_factor))
+            .min(max_cands);
+        if need <= max_decode && budget > max_decode {
+            budget = max_decode;
+        }
+        budget.try_into().unwrap_or(u32::MAX)
+    }
+
+    // Bounds the refined id set fed to the decode-free facet aggregation to the
+    // shallow decode ceiling. Deep pagination lets `refined` grow toward
+    // `max_candidates`, but Go's facet path costs an EXPLAIN over an IN(refined)
+    // list whose planner cost crosses the fixed aggregation budget (5000) once the
+    // list is large — flipping Go counts to planner ESTIMATES while the Rust grouped
+    // path stays exact, diverging the shadow gate. Capping the facet input here
+    // keeps facet cost (and the exact counts) identical to before deep pagination
+    // existed, so Go and Rust stay byte-identical. Mirrors Go `facetIDs`. (F5)
+    fn facet_ids(&self, refined: &[SearchResultItem]) -> Vec<InfoHash> {
+        let cap = self.decode_latency_cap() as usize;
+        refined
+            .iter()
+            .take(cap)
+            .map(|item| item.info_hash)
+            .collect()
     }
 
     fn effective_file_cap(&self) -> u32 {
@@ -756,7 +802,7 @@ impl Composer {
         if refined.is_empty() || Instant::now() >= deadline {
             return Aggregations::new();
         }
-        let ids: Vec<InfoHash> = refined.iter().map(|item| item.info_hash).collect();
+        let ids = self.facet_ids(refined);
         let request = request.for_candidates(
             &ids,
             HydrateOptions {
@@ -957,13 +1003,23 @@ impl Composer {
         let page = paginate(refined, u64::from(offset), u64::from(limit));
         let consumed =
             u64::from(offset).saturating_add(u64::try_from(page.len()).unwrap_or(u64::MAX));
+        // Honest HasNextPage (F5): more refined rows remain in THIS decoded window,
+        // OR the window was budget-truncated (more candidates exist than we decoded)
+        // AND we are still below the hard decode ceiling (a deeper page can grow its
+        // budget toward max_candidates and surface them). At the ceiling honesty
+        // demands false — the route never serves past max_candidates. `ids.len()`
+        // equals the decode budget when truncated, so `< max_candidates_cap` is
+        // exactly "budget can still grow". Mirrors Go `hasNextPage`.
+        let decoded = u64::try_from(ids.len()).unwrap_or(u64::MAX);
+        let has_next_page = consumed < refined_count
+            || (candidate_total > decoded && decoded < u64::from(self.max_candidates_cap()));
         self.inc_route(RouteResult::Served);
         (
             SearchResult {
                 items: page,
                 total_count,
                 total_count_is_estimate: true,
-                has_next_page: consumed < refined_count,
+                has_next_page,
                 aggregations,
             },
             true,
@@ -1807,8 +1863,103 @@ mod tests {
         let (result, served) = search(&composer, u32::MAX, u32::MAX).await;
 
         assert!(served);
-        assert_eq!(candidate_source.requested_limit.load(Ordering::Relaxed), 2);
+        // F5: this window is DEEP (need = u32::MAX+u32::MAX > max_decode_candidates),
+        // so the latency floor (2) no longer binds — the window grows to the hard
+        // MEMORY ceiling max_candidates (3). It is still hard-capped, just at the
+        // memory cap rather than the shallow latency cap.
+        assert_eq!(candidate_source.requested_limit.load(Ordering::Relaxed), 3);
         assert_eq!(result.total_count, 10_000);
+    }
+
+    fn budget_composer(cfg: ComposerConfig) -> Composer {
+        Composer::new(
+            Arc::new(FakeCandidates::returning(&[], 0)),
+            Arc::new(FakePg::new(Vec::new(), HashMap::new())),
+            cfg,
+            None,
+        )
+    }
+
+    #[test]
+    fn candidate_budget_deep_pagination_grows() {
+        // Parity with Go TestComposer_CandidateBudget_DeepPaginationGrows.
+        // config(): oversample 4, max_candidates 2000, max_decode_candidates 200.
+        let composer = budget_composer(config());
+
+        // Shallow: unchanged (need <= max_decode keeps the ~200 fast-path floor).
+        assert_eq!(composer.candidate_budget(50, 0), 200);
+        assert_eq!(composer.candidate_budget(100, 0), 200);
+        assert_eq!(composer.candidate_budget(20, 40), 200);
+        // Deep: need > max_decode lifts the floor, growing toward the memory ceiling.
+        assert_eq!(composer.candidate_budget(50, 400), 1800); // need 450 -> 1800
+        assert_eq!(composer.candidate_budget(50, 1000), 2000); // need 1050 -> capped 2000
+        assert_eq!(composer.candidate_budget(20, 400), 1680); // need 420 -> 1680 (was 200)
+    }
+
+    #[test]
+    fn facet_ids_bounded_to_decode_cap() {
+        // The facet-aggregation input is capped at the shallow decode ceiling so
+        // deep pagination cannot enlarge it (which would flip Go's budgeted_count to
+        // an estimate while Rust stays exact — a shadow-gate divergence).
+        let mut cfg = config();
+        cfg.max_decode_candidates = 3;
+        let composer = budget_composer(cfg);
+
+        let refined: Vec<SearchResultItem> = (1..=5).map(|b| item(b, 1, true)).collect();
+        let ids = composer.facet_ids(&refined);
+        assert_eq!(
+            ids,
+            vec![id(1), id(2), id(3)],
+            "facet input bounded to the cap"
+        );
+        // A refined set already within the cap is untouched (no-op today).
+        assert_eq!(composer.facet_ids(&refined[..2]).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn has_next_page_honest_on_truncation_and_ceiling() {
+        // Parity with Go TestComposer_TorrentContent_HasNextPageHonestOnTruncation.
+        // 8 matching candidates, full-corpus candidate_total 5000; the page
+        // (offset 6, limit 2) consumes the whole 8-row window.
+        let ids: Vec<InfoHash> = (1..=8).map(id).collect();
+        let mk_pg = || {
+            FakePg::new(
+                (1..=8).map(|b| item(b, 1, true)).collect(),
+                (1..=8).map(|b| (id(b), 1i64)).collect(),
+            )
+        };
+
+        // Below the ceiling (max_candidates 2000): window fully consumed, but
+        // candidate_total 5000 > 8 decoded AND 8 < 2000 → honest true.
+        let below = Composer::new(
+            Arc::new(FakeCandidates::returning(&ids, 5000)),
+            Arc::new(mk_pg()),
+            config(),
+            None,
+        );
+        let (result, served) = search(&below, 2, 6).await;
+        assert!(served);
+        assert!(
+            result.has_next_page,
+            "truncated window below the ceiling must report has_next_page=true"
+        );
+
+        // At the ceiling (max_candidates 8 == decoded): no deeper page can grow, so
+        // honesty demands false even though candidate_total is larger.
+        let mut cfg = config();
+        cfg.max_candidates = 8;
+        let ceiling = Composer::new(
+            Arc::new(FakeCandidates::returning(&ids, 5000)),
+            Arc::new(mk_pg()),
+            cfg,
+            None,
+        );
+        let (result, served) = search(&ceiling, 2, 6).await;
+        assert!(served);
+        assert!(
+            !result.has_next_page,
+            "at the decode ceiling has_next_page must be false"
+        );
     }
 
     #[tokio::test]

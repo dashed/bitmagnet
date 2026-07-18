@@ -473,15 +473,95 @@ func (c *Composer) candidateBudget(limit, offset uint) uint {
 		budget = maxCands
 	}
 
-	// Bound decode COUNT for latency independently of the memory cap. This can pull
-	// the budget below `need` (e.g. a limit-100 page window of 400 → 200): the L3
-	// route then serves the top-relevance prefix of what refine yields and reports
-	// the fuller total via candidate_total, rather than blocking ~5s on the decode.
-	if budget > maxDecode {
+	// The LATENCY floor (maxDecode) applies ONLY to SHALLOW pages — those whose
+	// window (offset+limit) fits within it. A shallow page keeps today's ~200-decode
+	// fast first page unchanged. A DEEP page (need > maxDecode) LIFTS that floor so
+	// the decode window can grow enough to REACH the requested offset — otherwise a
+	// deep offset can never be served (the page would be empty because the window
+	// stopped at 200 < offset). Growth stays bounded above by the hard memory ceiling
+	// maxCands (already applied above): deep pagination is honest but never unbounded.
+	// F5: honest deep pagination + raised decode cap (user-approved latency tradeoff;
+	// the route deadline still backstops worst-case latency).
+	if need <= maxDecode && budget > maxDecode {
 		budget = maxDecode
 	}
 
 	return budget
+}
+
+// maxCandidatesCap is the effective hard decode ceiling (0/unset →
+// DefaultMaxCandidates), i.e. the most candidates the route will ever decode for
+// one request. Deep pagination cannot serve past it, so HasNextPage uses it as the
+// honesty ceiling.
+func (c *Composer) maxCandidatesCap() uint {
+	if c.cfg.MaxCandidates == 0 {
+		return DefaultMaxCandidates
+	}
+
+	return c.cfg.MaxCandidates
+}
+
+// decodeLatencyCap is the effective shallow-page decode ceiling (0/unset →
+// DefaultMaxDecodeCandidates). It also bounds the id set fed to the facet
+// aggregation (facetIDs).
+func (c *Composer) decodeLatencyCap() uint {
+	if c.cfg.MaxDecodeCandidates == 0 {
+		return DefaultMaxDecodeCandidates
+	}
+
+	return c.cfg.MaxDecodeCandidates
+}
+
+// facetIDs bounds the refined id set fed to the decode-free facet aggregation to
+// the shallow decode ceiling (decodeLatencyCap). Deep pagination lets `refined`
+// grow toward MaxCandidates, but the facet aggregation costs an EXPLAIN over an
+// IN(refined) list whose planner cost crosses the fixed aggregation budget (5000)
+// once the list is large — which would flip counts to planner ESTIMATES on the Go
+// path while the Rust grouped path stays exact, diverging the shadow gate. Capping
+// the facet input at the shallow ceiling keeps the facet cost (and the exact
+// counts) IDENTICAL to before deep pagination existed — `refined` never exceeded
+// this bound then — so Go and Rust remain byte-identical. Facets are a global
+// top-relevance sidebar, so the top-cap prefix is exactly the set they reflected
+// before. (F5)
+func (c *Composer) facetIDs(refined []search.TorrentContentResultItem) []protocol.ID {
+	ids := infoHashesOf(refined)
+	if cap := c.decodeLatencyCap(); uint(len(ids)) > cap {
+		ids = ids[:cap]
+	}
+
+	return ids
+}
+
+// hasNextPage reports HONESTLY whether a page after this one exists (F5). The old
+// signal was computed from the refined window ALONE, so it reported false the
+// moment a page consumed the decoded window — even while TotalCount still
+// advertised "About N" from candidate_total, stranding the user with no way to
+// reach the rest. Two cases:
+//
+//  1. More refined rows remain in THIS decoded window past the served page → yes.
+//  2. The window was budget-TRUNCATED (candidate_total exceeds what we decoded, so
+//     more matching candidates exist) AND we have not yet hit the hard decode
+//     ceiling (a deeper page grows its budget toward MaxCandidates and surfaces
+//     them). At the ceiling honesty demands FALSE: the route never serves past
+//     MaxCandidates candidates, so there is no reachable next page no matter what
+//     candidate_total says.
+//
+// `ids` is the decoded candidate set; when truncated it equals the decode budget,
+// so `len(ids) < maxCandidatesCap` is exactly "budget can still grow".
+func (c *Composer) hasNextPage(
+	offset uint,
+	page, refined []search.TorrentContentResultItem,
+	ids []protocol.ID,
+	candidateTotal uint,
+) bool {
+	if offset+uint(len(page)) < uint(len(refined)) {
+		return true
+	}
+
+	truncated := candidateTotal > uint(len(ids))
+	belowCeiling := uint(len(ids)) < c.maxCandidatesCap()
+
+	return truncated && belowCeiling
 }
 
 // candidates dials L3 for the page's candidate budget and returns the decoded
@@ -1173,7 +1253,7 @@ func (c *Composer) TorrentContent(
 		// symptom fix: zero items ⇒ zero facet counts.
 		aggs = query.Aggregations{}
 	} else {
-		aggRes, qErr := c.candidateRows(ctx, opts.Agg, infoHashesOf(refined))
+		aggRes, qErr := c.candidateRows(ctx, opts.Agg, c.facetIDs(refined))
 		if qErr != nil {
 			// gate7-9 (N2 graceful degradation): the decode+exact-refine ALREADY
 			// succeeded and produced correct items; only this cheap decode-free facet
@@ -1227,11 +1307,7 @@ func (c *Composer) TorrentContent(
 		Items:                page,
 		TotalCount:           totalCount,
 		TotalCountIsEstimate: true,
-		// HasNextPage is computed from rows actually consumed by THIS page, not from
-		// offset+limit: with limit==0 paginate returns ALL remaining rows, so there
-		// is no next page even though offset+0 < len(refined). Base it on whether
-		// refined rows remain after the returned page. (#10)
-		HasNextPage: offset+uint(len(page)) < uint(len(refined)),
+		HasNextPage:          c.hasNextPage(offset, page, refined, ids, candidateTotal),
 		// Facets/aggregations are computed over the REFINED result set (gate7-8), so
 		// the UI facet sidebar reconciles with the served items: empty result ⇒ empty
 		// facets, N items ⇒ per-facet counts that sum to N. (#6 first restored
