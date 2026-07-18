@@ -210,11 +210,13 @@ where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
   the denormalized column disagrees with the blob length, and in presence, e.g. single-file torrents
   with an empty blob but `files_count = 1`.) The crate therefore derives the `files` attr from
   `SearchResultItem::files_attr_count`, projected in the id-keyed hydration query as
-  `CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count ELSE NULL END`.
+  `CASE WHEN octet_length(torrents.files_data) > 0 THEN torrent_file_summary.file_count ELSE NULL END`.
   `torrent_file_summary.file_count` is co-written with `files_data` from the same file slice
   (`BuildFileSummary` sets it to `len(files)`; see `dhtcrawler/persist.go` + the blob-migration
   backfill), so it equals `len(files_data)` **without decoding the heavyweight blob**. The
-  presence gate reads only the null bitmap / TOAST pointer (`IS NOT NULL`, no detoast). This is
+  presence gate is `octet_length(files_data) > 0` — the exact mirror of Go's `AfterFind` guard
+  `len(FilesData) > 0` (an empty-but-non-NULL blob is treated as absent by both), and
+  `octet_length` reads the bytea length header WITHOUT detoasting the blob. This is
   byte-identical to live Go for every row carrying a summary row; the bounded legacy tail of
   `files_data`-present-but-no-summary rows is closed by a one-shot summary backfill before the
   route flip. `torrent_contents.files_count` remains projected as `files_count` for ordering and the

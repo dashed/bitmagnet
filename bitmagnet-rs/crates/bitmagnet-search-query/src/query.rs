@@ -682,7 +682,7 @@ const HYDRATION_SELECT: &str = r#"SELECT torrent_contents.id AS id,
        torrents.files_status::text AS torrent_files_status,
        torrents.extension AS torrent_extension,
        torrents.files_count::bigint AS torrent_files_count,
-       CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count,
+       CASE WHEN octet_length(torrents.files_data) > 0 THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count,
        COALESCE(torrents.file_extensions, '[]'::jsonb) AS torrent_file_extensions,
        torrents.info_hash_v1 AS info_hash_v1,
        torrents.info_hash_v2 AS info_hash_v2,
@@ -1888,7 +1888,7 @@ mod tests {
             "LEFT JOIN torrent_file_summary ON torrent_file_summary.info_hash = torrents.info_hash"
         ));
         assert!(sql.contains(
-            "CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count"
+            "CASE WHEN octet_length(torrents.files_data) > 0 THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count"
         ));
         assert!(sql.contains("LEFT JOIN content ON"));
         assert!(sql.contains("content_attributes ca_imdb"));
@@ -1923,11 +1923,12 @@ mod tests {
         });
 
         // The heavy blob is never PROJECTED by default. Its only default-path
-        // reference is the presence gate for the Torznab `files` attr, which
-        // reads the null bitmap / TOAST pointer and never materialises the blob.
+        // reference is the presence gate for the Torznab `files` attr, whose
+        // octet_length reads the bytea length header and never materialises
+        // (detoasts) the blob.
         assert!(!default_sql.contains("AS torrent_files_data"));
         assert!(default_sql.contains(
-            "CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count"
+            "CASE WHEN octet_length(torrents.files_data) > 0 THEN torrent_file_summary.file_count"
         ));
         assert!(files_sql.contains("torrents.files_data AS torrent_files_data"));
         assert!(bounded_files_sql.contains("octet_length(torrents.files_data) <= 67108864"));
