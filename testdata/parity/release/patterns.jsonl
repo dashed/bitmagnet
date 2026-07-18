@@ -1,0 +1,14 @@
+{"id":"dsl_star","keywords":["a*b"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa][\\p{L}\\d]*[Bb])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_opt","keywords":["a?b"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa]?[Bb])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_plus","keywords":["ab+"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa][Bb]+)))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_hash","keywords":["s##"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Ss]\\d\\d)))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_space","keywords":["a b"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa][^\\p{L}\\d][Bb])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_alt","keywords":["a(b|c)d"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa](?:(?:[Bb])|(?:[Cc]))[Dd])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_optgroup","keywords":["a(bc)?d"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa](?:(?:[Bb][Cc]))?[Dd])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_escape","keywords":["a\\.b"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Aa]\\.[Bb])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_toplevel_alt","keywords":["x|y"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Xx])|(?:[Yy])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_multi","keywords":["multi","dual"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Mm][Uu][Ll][Tt][Ii]))|(?:(?:[Dd][Uu][Aa][Ll])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"dsl_hyphen","keywords":["web-dl"],"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Ww][Ee][Bb]\\x2D[Dd][Ll])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"video_resolution","go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:360[Pp]))|(?:(?:480[Pp]))|(?:(?:540[Pp]))|(?:(?:576[Pp]))|(?:(?:720[Pp]))|(?:(?:1080[Pp]))|(?:(?:1440[Pp]))|(?:(?:2160[Pp]))|(?:(?:4320[Pp]))|(?:(?:1920[Xx]1080))|(?:(?:3840[Xx]2160))|(?:(?:1080[Ii]))|(?:(?:[Ff][Hh][Dd]))|(?:(?:[Uu][Hh][Dd]))|(?:(?:2[Kk]))|(?:(?:4[Kk]))|(?:(?:8[Kk]))|(?:(?:[Hh][Dd]))|(?:(?:[Ss][Dd])))(?:$|[^\\p{L}\\d]+)"}
+{"id":"video_source","go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Cc][Aa][Mm]))|(?:(?:[Tt][Ee][Ll][Ee][Ss][Yy][Nn][Cc]))|(?:(?:[Tt][Ee][Ll][Ee][Cc][Ii][Nn][Ee]))|(?:(?:[Ww][Oo][Rr][Kk][Pp][Rr][Ii][Nn][Tt]))|(?:(?:[Dd][Vv][Dd]))|(?:(?:[Tt][Vv]))|(?:(?:[Ww][Ee][Bb][Dd][Ll]))|(?:(?:[Ww][Ee][Bb][Rr][Ii][Pp]))|(?:(?:[Bb][Ll][Uu][Rr][Aa][Yy]))|(?:(?:[Bb][Dd][Rr][Ee][Mm][Uu][Xx]))|(?:(?:[Bb][Ll][Uu]\\x2D[Rr][Aa][Yy]))|(?:(?:[Ii][Pp][Tt][Vv][Rr][Ii][Pp]))|(?:(?:[Ww][Ee][Bb]\\x2D[Rr][Ii][Pp]))|(?:(?:[Dd][Vv][Dd][Rr][Ii][Pp]))|(?:(?:[Ss][Aa][Tt][Rr][Ii][Pp]))|(?:(?:[Ww][Ee][Bb]\\x2D[Dd][Ll]))|(?:(?:[Bb][Dd][Rr][Ii][Pp]))|(?:(?:[Bb][Rr][Rr][Ii][Pp]))|(?:(?:[Dd][Vv][Dd]5))|(?:(?:[Dd][Vv][Dd]9))|(?:(?:[Hh][Dd][Tt][Vv]))|(?:(?:[Ww][Ee][Bb])))(?:$|[^\\p{L}\\d]+)"}
+{"go_pattern":"(?:^|[^\\p{L}\\d]+)((?:(?:[Hh]264))|(?:(?:[Xx]264))|(?:(?:[Xx]265))|(?:(?:[Xx][Vv][Ii][Dd]))|(?:(?:[Dd][Ii][Vv][Xx]))|(?:(?:[Mm][Pp][Ee][Gg]2))|(?:(?:[Mm][Pp][Ee][Gg]4))|(?:(?:[Aa][Vv][Cc])))(?:$|(?:\\x2D([\\p{L}\\d]+))|[^\\p{L}\\d]+)","id":"video_codec"}
