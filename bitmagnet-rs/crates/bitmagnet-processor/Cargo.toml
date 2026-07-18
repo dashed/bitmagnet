@@ -1,0 +1,13 @@
+[package]
+name = "bitmagnet-processor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase-3 Lane P — processor orchestration + write-shadow for the bitmagnet Rust rewrite."
+
+[dependencies]
+
+[lints]
+workspace = true

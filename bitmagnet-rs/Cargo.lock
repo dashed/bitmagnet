@@ -765,6 +765,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-classifier"
+version = "0.1.0"
+
+[[package]]
 name = "bitmagnet-common"
 version = "0.1.0"
 dependencies = [
@@ -895,6 +899,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-processor"
+version = "0.1.0"
+
+[[package]]
 name = "bitmagnet-proto"
 version = "0.1.0"
 dependencies = [
@@ -903,6 +911,14 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
 ]
+
+[[package]]
+name = "bitmagnet-queue"
+version = "0.1.0"
+
+[[package]]
+name = "bitmagnet-release"
+version = "0.1.0"
 
 [[package]]
 name = "bitmagnet-search"

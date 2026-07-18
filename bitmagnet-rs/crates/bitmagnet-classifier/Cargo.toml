@@ -1,0 +1,13 @@
+[package]
+name = "bitmagnet-classifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase-3 Lane C — content classifier for the bitmagnet Rust rewrite."
+
+[dependencies]
+
+[lints]
+workspace = true
