@@ -201,15 +201,18 @@ fn content_type_or_null(types: impl IntoIterator<Item = ContentType>) -> Criteri
     ])
 }
 
+/// Constrains an imdb/tmdb identifier lookup by content type only for the two
+/// functions where the type is unambiguous: `t=movie` ⇒ Movie, `t=tvsearch` ⇒
+/// TvShow. `t=search`, `t=music` and `t=book` return `None` so the identifier is
+/// matched regardless of content type. The previous
+/// `if type != TV { Movie } else if type != Movie { TV }` branches could never
+/// leave the type unset, forcing `content.type = 'movie'` for `t=search` — so a
+/// TV imdbid requested via `t=search` matched nothing (F6).
 fn identifier_content_type(function: &str) -> Option<ContentType> {
-    // Keep the Go `if type != TV { Movie } else if type != Movie { TV }`
-    // branches literally: notably, `t=search` is scoped to Movie here.
-    if function != FUNCTION_TV_SEARCH {
-        Some(ContentType::Movie)
-    } else if function != FUNCTION_MOVIE {
-        Some(ContentType::TvShow)
-    } else {
-        None
+    match function {
+        FUNCTION_MOVIE => Some(ContentType::Movie),
+        FUNCTION_TV_SEARCH => Some(ContentType::TvShow),
+        _ => None,
     }
 }
 
@@ -220,7 +223,7 @@ mod tests {
         TorznabSearchParams, Video3D, VideoResolution,
     };
 
-    use super::{content_type_or_null, to_search_params};
+    use super::{content_type_or_null, identifier_content_type, to_search_params};
     use crate::categories::{
         CATEGORY_AUDIO, CATEGORY_AUDIO_AUDIOBOOK, CATEGORY_BOOKS, CATEGORY_BOOKS_COMICS,
         CATEGORY_BOOKS_EBOOK, CATEGORY_MOVIES, CATEGORY_MOVIES_3D, CATEGORY_MOVIES_HD,
@@ -335,16 +338,17 @@ mod tests {
         assert_eq!(actual.query.as_deref(), Some("needle"));
         assert_eq!(actual.order, Some(TorrentContentOrder::published_at_desc()));
         assert_eq!(actual.limit, 50);
+        // F6: t=search no longer forces content.type='movie' on the identifier.
         assert_eq!(
             actual.filter,
             Some(Criteria::and([
                 Criteria::alternative_identifier([ContentRef {
-                    content_type: Some(ContentType::Movie),
+                    content_type: None,
                     source: "imdb".to_owned(),
                     id: "tt42".to_owned(),
                 }]),
                 Criteria::canonical_identifier([ContentRef {
-                    content_type: Some(ContentType::Movie),
+                    content_type: None,
                     source: "tmdb".to_owned(),
                     id: "7".to_owned(),
                 }]),
@@ -596,6 +600,42 @@ mod tests {
             Some(Criteria::and([Criteria::or([Criteria::and([
                 content_type_or_null([ContentType::Movie])
             ])])]))
+        );
+    }
+
+    // ---- F6: imdb/tmdb content-type only forced for t=movie / t=tvsearch ------
+
+    #[test]
+    fn identifier_content_type_is_unset_for_untyped_functions() {
+        assert_eq!(identifier_content_type("movie"), Some(ContentType::Movie));
+        assert_eq!(
+            identifier_content_type("tvsearch"),
+            Some(ContentType::TvShow)
+        );
+        assert_eq!(identifier_content_type("search"), None);
+        assert_eq!(identifier_content_type("music"), None);
+        assert_eq!(identifier_content_type("book"), None);
+    }
+
+    #[test]
+    fn search_imdbid_no_longer_forces_movie() {
+        let request = TorznabRequest {
+            type_: "search".to_owned(),
+            imdb_id: Some("tt123".to_owned()),
+            ..TorznabRequest::default()
+        };
+
+        let actual = to_search_params(&request, &Profile::default_profile())
+            .expect("search imdbid request maps");
+        assert_eq!(
+            actual.filter,
+            Some(Criteria::and([Criteria::alternative_identifier([
+                ContentRef {
+                    content_type: None,
+                    source: "imdb".to_owned(),
+                    id: "tt123".to_owned(),
+                }
+            ])]))
         );
     }
 }

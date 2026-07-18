@@ -1731,6 +1731,26 @@ mod tests {
     }
 
     #[test]
+    fn alternative_identifier_without_content_type_omits_the_type_constraint() {
+        // F6: an imdb lookup issued via t=search carries no content type, so the
+        // EXISTS sub-select matches the identifier regardless of the content's
+        // type (no trailing `content_attributes.content_type = $` predicate).
+        let params =
+            TorznabSearchParams::new(25).with_filter(Criteria::AlternativeIdentifier(vec![
+                content_ref(None, "imdb", "tt0133093"),
+            ]));
+
+        assert_query(
+            params,
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nLEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id\nWHERE EXISTS (SELECT 1 FROM content_attributes WHERE content_attributes.content_type = content.type AND content_attributes.content_source = content.source AND content_attributes.content_id = content.id AND content_attributes.source = $1 AND content_attributes.value IN ($2))\nORDER BY torrent_contents.published_at DESC\nLIMIT 25",
+            &[
+                Bind::Text("imdb".to_owned()),
+                Bind::Text("tt0133093".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
     fn builds_torrent_tag_with_torrents_join() {
         let params =
             TorznabSearchParams::new(10).with_filter(Criteria::TorrentTag(vec!["x".to_owned()]));

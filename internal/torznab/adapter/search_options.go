@@ -156,15 +156,8 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 			imdbID = "tt" + imdbID
 		}
 
-		var ct model.ContentType
-		if r.Type != torznab.FunctionTV {
-			ct = model.ContentTypeMovie
-		} else if r.Type != torznab.FunctionMovie {
-			ct = model.ContentTypeTvShow
-		}
-
 		options = append(options, query.Where(search.ContentAlternativeIdentifierCriteria(model.ContentRef{
-			Type:   ct,
+			Type:   identifierContentType(r.Type),
 			Source: "imdb",
 			ID:     imdbID,
 		})))
@@ -173,15 +166,8 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 	if r.TMDBID.Valid {
 		tmdbID := r.TMDBID.String
 
-		var ct model.ContentType
-		if r.Type != torznab.FunctionTV {
-			ct = model.ContentTypeMovie
-		} else if r.Type != torznab.FunctionMovie {
-			ct = model.ContentTypeTvShow
-		}
-
 		options = append(options, query.Where(search.ContentCanonicalIdentifierCriteria(model.ContentRef{
-			Type:   ct,
+			Type:   identifierContentType(r.Type),
 			Source: "tmdb",
 			ID:     tmdbID,
 		})))
@@ -205,4 +191,22 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 	}
 
 	return options, nil
+}
+
+// identifierContentType constrains an imdb/tmdb identifier lookup by content type
+// only for the two functions where the type is unambiguous: t=movie ⇒ movie,
+// t=tvsearch ⇒ tv_show. For t=search, t=music and t=book it returns the nil
+// content type so the identifier matches regardless of type. The previous
+// `if r.Type != FunctionTV { movie } else if r.Type != FunctionMovie { tvshow }`
+// branches could never leave the type unset, forcing content.type='movie' for
+// t=search — so a TV imdbid requested via t=search matched nothing (F6).
+func identifierContentType(function string) model.ContentType {
+	switch function {
+	case torznab.FunctionMovie:
+		return model.ContentTypeMovie
+	case torznab.FunctionTV:
+		return model.ContentTypeTvShow
+	default:
+		return ""
+	}
 }
