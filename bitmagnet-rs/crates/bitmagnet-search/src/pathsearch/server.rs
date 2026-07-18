@@ -361,6 +361,7 @@ mod tests {
     fn doc(byte: u8, path: &str) -> PathDocument {
         PathDocument {
             info_hash: vec![byte; 20],
+            name: String::new(),
             paths: vec![path.to_owned()],
             size: 1,
             files_count: 1,

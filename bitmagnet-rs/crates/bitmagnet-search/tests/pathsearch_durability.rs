@@ -30,6 +30,7 @@ fn doc(i: u32) -> PathDocument {
     info_hash[0..4].copy_from_slice(&i.to_le_bytes());
     PathDocument {
         info_hash,
+        name: format!("Episode.{i}.1080p"),
         paths: vec![format!("Season{}/Episode.{i}.1080p.mkv", i % 10)],
         size: 1_000 + u64::from(i),
         files_count: 1,

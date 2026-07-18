@@ -242,6 +242,75 @@ func TestTorrentRefine_SingleFileExtFilterRefinesAgainstName(t *testing.T) {
 	}
 }
 
+// --- F1 name rescue: keep a name-only match, but only when sound -------------
+
+// A multi-file torrent whose FILES never contain the term but whose NAME does is
+// kept when unfiltered (matching PG name-search semantics). The extension/size
+// predicate is empty, so the name surrogate is sound.
+func TestNameRescue_KeepsNameOnlyMatchUnfiltered(t *testing.T) {
+	p := refinePredicate{substr: "sorefordays"}
+
+	if !nameRescue("OmegaPACK.SoreForDays.Complete", p) {
+		t.Fatal("name-only match with no filters must be rescued")
+	}
+
+	// Case-insensitive, mirroring PG lower-cased tsv/name search.
+	if !nameRescue("omegapack.SOREFORDAYS.complete", p) {
+		t.Fatal("name rescue must be case-insensitive")
+	}
+
+	if nameRescue("OmegaPACK.Something.Else", p) {
+		t.Fatal("name without the substring must not be rescued")
+	}
+}
+
+// The rescue is UNSOUND under an extension or size filter (a name carries neither
+// a file extension nor a per-file size), so it must return false and let the
+// candidate fall through to a normal drop.
+func TestNameRescue_DropsUnderExtensionOrSizeFilter(t *testing.T) {
+	name := "OmegaPACK.SoreForDays.Complete"
+
+	if nameRescue(name, refinePredicate{substr: "sorefordays", extensions: extSet("mkv")}) {
+		t.Fatal("name rescue must be disabled when an extension filter is active")
+	}
+
+	if nameRescue(name, refinePredicate{substr: "sorefordays", minSize: 1}) {
+		t.Fatal("name rescue must be disabled when a min-size bound is active")
+	}
+
+	if nameRescue(name, refinePredicate{substr: "sorefordays", maxSize: 1}) {
+		t.Fatal("name rescue must be disabled when a max-size bound is active")
+	}
+}
+
+// End-to-end at the refineMatches decision: OmegaPACK-shaped candidate — 0 files
+// match, term only in the name. Kept when unfiltered, dropped once any
+// extension/size filter is present. This mirrors the composer's keep-decision
+// `torrentMatches(files, pred) || nameRescue(name, pred)`.
+func TestNameRescue_OmegaPACKShapedKeepDecision(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("disc1/track01.flac", "flac", 10),
+		tf("disc1/track02.flac", "flac", 20),
+	}
+	name := "OmegaPACK.SoreForDays.Complete"
+
+	keep := func(p refinePredicate) bool {
+		return torrentMatches(files, p) || nameRescue(name, p)
+	}
+
+	if !keep(refinePredicate{substr: "sorefordays"}) {
+		t.Fatal("unfiltered name-only candidate must be kept")
+	}
+
+	if keep(refinePredicate{substr: "sorefordays", extensions: extSet("flac")}) {
+		t.Fatal("name-only candidate must be dropped when an extension filter is present")
+	}
+
+	if keep(refinePredicate{substr: "sorefordays", minSize: 5}) {
+		t.Fatal("name-only candidate must be dropped when a size filter is present")
+	}
+}
+
 // --- refine-before-paginate (the key correctness guarantee) ------------------
 
 type prow struct {

@@ -89,6 +89,29 @@ func torrentMatches(files []model.TorrentFile, p refinePredicate) bool {
 	return false
 }
 
+// nameRescue reports whether a candidate whose FILES do not match should still be
+// kept because the search substring is present in its torrent display NAME.
+//
+// L3's path-bag now indexes the torrent name too (F1), so a multi-file torrent
+// carrying the term only in its name is recalled — but the file-level exact
+// refine above would still drop it, because no file path contains the term. This
+// rescue keeps it, matching PostgreSQL name-search semantics (PG matches the
+// name/tsv, not arbitrary file paths).
+//
+// SOUNDNESS (CAVEAT C): a name carries the substring but NOT any file's extension
+// or size. The rescue is therefore sound ONLY when no extension filter and no
+// size bound is active; under either filter a name-only candidate cannot be
+// proven to satisfy it and MUST fall through to a normal DROP (never fail-loud —
+// it is a genuine non-match, not an unobtainable file list). A rescued torrent
+// keeps its full file list and needs no >=1-matched-file invariant.
+func nameRescue(name string, p refinePredicate) bool {
+	if p.hasExtensionFilter() || p.minSize > 0 || p.maxSize > 0 {
+		return false
+	}
+
+	return p.substr != "" && strings.Contains(strings.ToLower(name), p.substr)
+}
+
 // filesForRefine resolves the file list to verify a candidate against. t.Files is
 // NOT guaranteed populated for the L3 route: gqlmodel.Search hydrates torrents
 // with config.files=false, so the torrent_files relation is not preloaded — the

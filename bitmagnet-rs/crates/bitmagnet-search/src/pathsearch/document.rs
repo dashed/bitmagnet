@@ -7,6 +7,11 @@ use bitmagnet_db::TorrentWithBlob;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PathDocument {
     pub info_hash: Vec<u8>,
+    /// Torrent display name, always indexed alongside `paths` so a term that
+    /// lives only in the name (not any file path) is still recall-visible on the
+    /// relevance route (F1). Independent of the single-file empty-`paths`
+    /// surrogate below.
+    pub name: String,
     pub paths: Vec<String>,
     pub size: u64,
     pub files_count: u64,
@@ -52,6 +57,7 @@ impl PathDocument {
 
         Ok(Some(Self {
             info_hash: row.info_hash.as_slice().to_vec(),
+            name: row.name.trim().to_owned(),
             paths,
             size: u64::try_from(row.size).unwrap_or(0),
             files_count,
@@ -93,6 +99,9 @@ mod tests {
             .unwrap();
         assert_eq!(doc.paths, vec!["Season 01/Episode.mkv"]);
         assert_eq!(doc.files_count, 1);
+        // The display name is always captured, independent of the file paths, so a
+        // multi-file torrent whose term lives only in the name stays recall-visible.
+        assert_eq!(doc.name, "Release.Name.mkv");
     }
 
     #[test]

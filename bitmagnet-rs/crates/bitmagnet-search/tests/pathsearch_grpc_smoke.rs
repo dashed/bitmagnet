@@ -40,6 +40,7 @@ async fn boot(server: PathSearchServer) -> PathSearchServiceClient<tonic::transp
 fn doc(byte: u8, path: &str, seeders: u64) -> PathDocument {
     PathDocument {
         info_hash: vec![byte; 20],
+        name: String::new(),
         paths: vec![path.to_owned()],
         size: 8_000_000_000,
         files_count: 1,

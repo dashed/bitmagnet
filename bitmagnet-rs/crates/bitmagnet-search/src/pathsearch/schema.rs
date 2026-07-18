@@ -12,6 +12,7 @@ pub const PATH_TOKENIZER: &str = "path_ngram";
 
 mod name {
     pub(super) const PATH: &str = "path";
+    pub(super) const NAME: &str = "name";
     pub(super) const INFO_HASH: &str = "info_hash";
     pub(super) const SIZE: &str = "size";
     pub(super) const FILES_COUNT: &str = "files_count";
@@ -20,8 +21,9 @@ mod name {
 }
 
 /// Field names in declaration order.
-pub const FIELD_NAMES: [&str; 6] = [
+pub const FIELD_NAMES: [&str; 7] = [
     name::PATH,
+    name::NAME,
     name::INFO_HASH,
     name::SIZE,
     name::FILES_COUNT,
@@ -31,18 +33,26 @@ pub const FIELD_NAMES: [&str; 6] = [
 
 /// Build the production L3 path-bag schema.
 ///
-/// The `path` field is `WithFreqs` only: ngram substring queries are boolean
-/// conjunctions over grams and never use positions. The `info_hash` is indexed
-/// for `delete_term(info_hash)` supersession and stored for candidate output.
+/// The `path` and `name` fields are `WithFreqs` only: ngram substring queries
+/// are boolean conjunctions over grams and never use positions. Both reuse the
+/// shared [`PATH_TOKENIZER`] so a term matches identically whether it appears in
+/// a file path or the torrent display name (F1 name visibility). The `info_hash`
+/// is indexed for `delete_term(info_hash)` supersession and stored for candidate
+/// output.
 #[must_use]
 pub fn build_schema() -> Schema {
     let mut builder = Schema::builder();
 
-    let path_indexing = TextFieldIndexing::default()
-        .set_tokenizer(PATH_TOKENIZER)
-        .set_index_option(IndexRecordOption::WithFreqs);
-    let path_options = TextOptions::default().set_indexing_options(path_indexing);
+    let ngram_indexing = || {
+        TextFieldIndexing::default()
+            .set_tokenizer(PATH_TOKENIZER)
+            .set_index_option(IndexRecordOption::WithFreqs)
+    };
+    let path_options = TextOptions::default().set_indexing_options(ngram_indexing());
     builder.add_text_field(name::PATH, path_options);
+
+    let name_options = TextOptions::default().set_indexing_options(ngram_indexing());
+    builder.add_text_field(name::NAME, name_options);
 
     builder.add_bytes_field(
         name::INFO_HASH,
@@ -74,6 +84,7 @@ pub fn register_tokenizer(index: &Index) -> tantivy::Result<()> {
 #[derive(Debug, Clone, Copy)]
 pub struct Fields {
     pub path: Field,
+    pub name: Field,
     pub info_hash: Field,
     pub size: Field,
     pub files_count: Field,
@@ -89,6 +100,7 @@ impl Fields {
     pub fn from_schema(schema: &Schema) -> tantivy::Result<Self> {
         Ok(Self {
             path: schema.get_field(name::PATH)?,
+            name: schema.get_field(name::NAME)?,
             info_hash: schema.get_field(name::INFO_HASH)?,
             size: schema.get_field(name::SIZE)?,
             files_count: schema.get_field(name::FILES_COUNT)?,

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BooleanQuery, EmptyQuery, Occur, Query, TermQuery};
-use tantivy::schema::Value;
+use tantivy::query::{BooleanQuery, BoostQuery, EmptyQuery, Occur, Query, TermQuery};
+use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
 use tantivy::{DocAddress, Index, IndexReader, Order, Score, Searcher, TantivyDocument, Term};
 
@@ -15,6 +15,25 @@ use crate::proto::{PathCandidate, PathCandidatesRequest, PathCandidatesResponse,
 const DEFAULT_LIMIT: usize = 50;
 const DEFAULT_OVERSAMPLE: usize = 200;
 const MAX_CANDIDATES: usize = 5_000;
+
+/// Environment override for the relevance boost applied to torrent-name matches
+/// relative to file-path matches. See [`name_boost`].
+const NAME_BOOST_ENV: &str = "BITMAGNET_PATHSEARCH_NAME_BOOST";
+
+/// Default multiplier by which a name-field gram match outscores a path-field
+/// match. >1 so a torrent whose display name contains the term ranks above one
+/// where the term only appears deep in a file path, while both remain candidates.
+const DEFAULT_NAME_BOOST: f32 = 1.75;
+
+/// Resolve the name-match relevance boost from [`NAME_BOOST_ENV`], falling back
+/// to [`DEFAULT_NAME_BOOST`]. Non-finite or non-positive overrides are ignored.
+fn name_boost() -> f32 {
+    std::env::var(NAME_BOOST_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(DEFAULT_NAME_BOOST)
+}
 
 /// Run a path candidate search.
 ///
@@ -45,19 +64,44 @@ pub fn run_path_candidates(
     })
 }
 
-/// Build a path ngram conjunction query.
+/// Build the ngram query that recalls a torrent when the term appears in EITHER
+/// a file path OR the torrent display name (F1 name visibility).
 ///
-/// Empty/too-short queries intentionally match nothing; a blank path query must
-/// not become a full-index scan.
+/// The same gram-token set is built once, then required (`Must`) as a
+/// conjunction over the `path` field and, separately, over the `name` field. The
+/// two conjunctions are combined as top-level `Should` clauses so a doc is a
+/// candidate if it matches either — and the name conjunction is wrapped in a
+/// [`BoostQuery`] (weight [`name_boost`]) so name matches rank above path-only
+/// matches under `order_by_score`.
+///
+/// Empty/too-short queries intentionally match nothing; a blank query must not
+/// become a full-index scan.
 pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Query> {
-    let raw = raw.trim();
-    if raw.chars().count() < 2 {
-        return Box::new(EmptyQuery);
-    }
-
-    let Some(mut analyzer) = index.tokenizers().get(PATH_TOKENIZER) else {
+    let Some(tokens) = gram_tokens(index, raw) else {
         return Box::new(EmptyQuery);
     };
+
+    let path_clause = gram_conjunction(fields.path, &tokens);
+    let name_clause = gram_conjunction(fields.name, &tokens);
+    let boosted_name = BoostQuery::new(Box::new(name_clause), name_boost());
+
+    Box::new(BooleanQuery::new(vec![
+        (Occur::Should, Box::new(path_clause) as Box<dyn Query>),
+        (Occur::Should, Box::new(boosted_name) as Box<dyn Query>),
+    ]))
+}
+
+/// Tokenize `raw` into the de-duplicated gram set used for both field clauses.
+///
+/// Returns `None` (⇒ [`EmptyQuery`]) when the query is too short, the tokenizer
+/// is unregistered, or it produces no grams.
+fn gram_tokens(index: &Index, raw: &str) -> Option<Vec<String>> {
+    let raw = raw.trim();
+    if raw.chars().count() < 2 {
+        return None;
+    }
+
+    let mut analyzer = index.tokenizers().get(PATH_TOKENIZER)?;
     let mut tokens = Vec::new();
     let mut seen = HashSet::new();
     let mut stream = analyzer.token_stream(raw);
@@ -68,23 +112,24 @@ pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Qu
         }
     }
 
-    if tokens.is_empty() {
-        return Box::new(EmptyQuery);
-    }
+    (!tokens.is_empty()).then_some(tokens)
+}
 
+/// Build a `Must` conjunction of gram term-queries over a single `field`.
+fn gram_conjunction(field: Field, tokens: &[String]) -> BooleanQuery {
     let clauses = tokens
-        .into_iter()
+        .iter()
         .map(|token| {
             (
                 Occur::Must,
                 Box::new(TermQuery::new(
-                    Term::from_field_text(fields.path, &token),
-                    tantivy::schema::IndexRecordOption::WithFreqs,
+                    Term::from_field_text(field, token),
+                    IndexRecordOption::WithFreqs,
                 )) as Box<dyn Query>,
             )
         })
         .collect();
-    Box::new(BooleanQuery::new(clauses))
+    BooleanQuery::new(clauses)
 }
 
 fn candidate_limit(limit: u32, oversample: u32) -> usize {
@@ -193,8 +238,13 @@ mod tests {
     use tantivy::Index;
 
     fn doc(byte: u8, paths: &[&str], seeders: u64) -> PathDocument {
+        doc_named(byte, "", paths, seeders)
+    }
+
+    fn doc_named(byte: u8, name: &str, paths: &[&str], seeders: u64) -> PathDocument {
         PathDocument {
             info_hash: vec![byte; 20],
+            name: name.to_owned(),
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
             size: 1_000,
             files_count: paths.len() as u64,
@@ -235,6 +285,61 @@ mod tests {
         assert_eq!(out.candidate_total, 1);
         assert_eq!(out.candidates[0].info_hash, vec![1; 20]);
         assert!(out.estimated);
+    }
+
+    #[test]
+    fn name_only_match_returns_candidate() {
+        // OmegaPACK-shaped: a multi-file torrent whose files never contain the
+        // term, but whose display name does. Before F1 this doc was un-indexed
+        // for the term and invisible on the relevance route.
+        let (index, reader, fields) = index_docs(&[doc_named(
+            1,
+            "OmegaPACK.SoreForDays.Complete",
+            &["disc1/track01.flac", "disc1/track02.flac"],
+            5,
+        )]);
+        let out = run_path_candidates(
+            &index,
+            &reader,
+            &fields,
+            PathCandidatesRequest {
+                query: "sorefordays".to_owned(),
+                limit: 10,
+                oversample: 0,
+                sort: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.candidate_total, 1);
+        assert_eq!(out.candidates[0].info_hash, vec![1; 20]);
+    }
+
+    #[test]
+    fn name_match_outranks_path_only_match() {
+        // Two docs match "aurora": one only in a file path, one in its name. The
+        // name-boosted doc must sort first under relevance (order_by_score).
+        let (index, reader, fields) = index_docs(&[
+            doc_named(1, "unrelated release", &["films/aurora.borealis.mkv"], 5),
+            doc_named(2, "Aurora.2021.1080p", &["films/movie.mkv"], 5),
+        ]);
+        let out = run_path_candidates(
+            &index,
+            &reader,
+            &fields,
+            PathCandidatesRequest {
+                query: "aurora".to_owned(),
+                limit: 10,
+                oversample: 0,
+                sort: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.candidate_total, 2);
+        assert_eq!(
+            out.candidates[0].info_hash,
+            vec![2; 20],
+            "name match must outrank the path-only match"
+        );
     }
 
     #[test]

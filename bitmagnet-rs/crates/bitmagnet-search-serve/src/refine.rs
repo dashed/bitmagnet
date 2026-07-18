@@ -69,6 +69,29 @@ impl RefinePredicate {
     fn has_extension_filter(&self) -> bool {
         !self.extensions.is_empty()
     }
+
+    /// Reports whether a candidate whose FILES do not match should still be kept
+    /// because the search substring is present in its torrent display `name`.
+    ///
+    /// This ports Go's `nameRescue` in
+    /// `internal/search/pathsearch/refine.go` byte-for-byte. L3's path-bag now
+    /// indexes the torrent name too (F1), so a multi-file torrent carrying the
+    /// term only in its name is recalled — but the file-level exact refine would
+    /// still drop it because no file path contains the term. This rescue keeps
+    /// it, matching PostgreSQL name-search semantics.
+    ///
+    /// SOUNDNESS (Go CAVEAT C): a name carries the substring but NOT any file's
+    /// extension or size. The rescue is sound ONLY when no extension filter and
+    /// no size bound is active; under either filter a name-only candidate cannot
+    /// be proven to satisfy it and MUST fall through to a normal drop (never
+    /// fail-loud — it is a genuine non-match).
+    pub(crate) fn name_rescue(&self, name: &str) -> bool {
+        if self.has_extension_filter() || self.min_size > 0 || self.max_size > 0 {
+            return false;
+        }
+
+        !self.substr.is_empty() && name.to_lowercase().contains(&self.substr)
+    }
 }
 
 /// Returns a file's lower-cased extension.
@@ -533,6 +556,47 @@ mod tests {
             torrent_refine(&torrent, &predicate("inception", &["mkv"], 0, 0)),
             (false, true)
         );
+    }
+
+    #[test]
+    fn name_rescue_keeps_name_only_match_unfiltered() {
+        // Parity with Go's TestNameRescue_KeepsNameOnlyMatchUnfiltered: a name
+        // that contains the term is rescued when no extension/size filter applies.
+        let predicate = predicate("sorefordays", &[], 0, 0);
+
+        assert!(predicate.name_rescue("OmegaPACK.SoreForDays.Complete"));
+        // Case-insensitive, mirroring the Go strings.ToLower + PG tsv semantics.
+        assert!(predicate.name_rescue("omegapack.SOREFORDAYS.complete"));
+        assert!(!predicate.name_rescue("OmegaPACK.Something.Else"));
+    }
+
+    #[test]
+    fn name_rescue_drops_under_extension_or_size_filter() {
+        // Parity with Go's TestNameRescue_DropsUnderExtensionOrSizeFilter: the
+        // rescue is unsound under any extension or size filter and must be off.
+        let name = "OmegaPACK.SoreForDays.Complete";
+
+        assert!(!predicate("sorefordays", &["mkv"], 0, 0).name_rescue(name));
+        assert!(!predicate("sorefordays", &[], 1, 0).name_rescue(name));
+        assert!(!predicate("sorefordays", &[], 0, 1).name_rescue(name));
+    }
+
+    #[test]
+    fn name_rescue_omegapack_shaped_keep_decision() {
+        // Parity with Go's TestNameRescue_OmegaPACKShapedKeepDecision, at the
+        // composer's `torrent_matches || name_rescue` keep-decision: 0 files
+        // match, term only in the name.
+        let files = vec![
+            file("disc1/track01.flac", "flac", 10),
+            file("disc1/track02.flac", "flac", 20),
+        ];
+        let name = "OmegaPACK.SoreForDays.Complete";
+
+        let keep = |p: &RefinePredicate| torrent_matches(&files, p) || p.name_rescue(name);
+
+        assert!(keep(&predicate("sorefordays", &[], 0, 0)));
+        assert!(!keep(&predicate("sorefordays", &["flac"], 0, 0)));
+        assert!(!keep(&predicate("sorefordays", &[], 5, 0)));
     }
 
     #[test]

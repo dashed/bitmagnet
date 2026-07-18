@@ -14,6 +14,9 @@ pub fn document_to_tantivy(fields: &Fields, doc: &PathDocument) -> TantivyDocume
             td.add_text(fields.path, path);
         }
     }
+    if !doc.name.is_empty() {
+        td.add_text(fields.name, &doc.name);
+    }
     td.add_bytes(fields.info_hash, &doc.info_hash);
     td.add_u64(fields.size, doc.size);
     td.add_u64(fields.files_count, doc.files_count);
@@ -52,6 +55,7 @@ mod tests {
     fn doc(byte: u8, path: &str) -> PathDocument {
         PathDocument {
             info_hash: vec![byte; 20],
+            name: String::new(),
             paths: vec![path.to_owned()],
             size: 10,
             files_count: 1,

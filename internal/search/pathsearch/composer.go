@@ -875,8 +875,8 @@ func (c *Composer) refineMatches(
 			continue
 		}
 
-		if !torrentMatches(files, pred) {
-			continue // L3 false positive
+		if !torrentMatches(files, pred) && !nameRescue(it.Torrent.Name, pred) {
+			continue // L3 false positive with no name rescue
 		}
 
 		// Stop before exceeding the retained budget — but always keep at least one
