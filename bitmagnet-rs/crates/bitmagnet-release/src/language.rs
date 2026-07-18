@@ -170,4 +170,34 @@ mod tests {
     fn parses_62_languages() {
         assert_eq!(LANGUAGES.len(), 62);
     }
+
+    // 🔑 Case-mapping drift guard. The keyword compiler uses Rust's *full*
+    // Unicode case mapping (`char::to_lowercase`/`to_uppercase`, which can yield
+    // multiple chars — e.g. `ß`→`SS`, `İ`→`i̇`), whereas Go's rex/compiler use
+    // *simple* 1:1 mapping (`strings.ToLower`/`ToUpper` over runes,
+    // `unicode.To{Lower,Upper}`). They diverge ONLY for chars whose full mapping
+    // is multi-char ( or has locale-special rules). None exist in the current
+    // `languages.csv` (á/ñ/CJK are all 1:1 case-mapping-safe), so the compiled
+    // regex matches Go. This test asserts every CSV char stays 1:1 in both
+    // directions, so a future ß/İ-class alias fires here instead of silently
+    // drifting the regex away from Go.
+    #[test]
+    fn csv_chars_have_simple_case_mapping() {
+        for c in LANGUAGES_CSV.chars() {
+            let lower_len = c.to_lowercase().count();
+            let upper_len = c.to_uppercase().count();
+            assert_eq!(
+                lower_len, 1,
+                "char {c:?} (U+{:04X}) has multi-char lowercase (full != simple case mapping); \
+                 the keyword compiler would diverge from Go — handle it explicitly",
+                c as u32
+            );
+            assert_eq!(
+                upper_len, 1,
+                "char {c:?} (U+{:04X}) has multi-char uppercase (full != simple case mapping); \
+                 the keyword compiler would diverge from Go — handle it explicitly",
+                c as u32
+            );
+        }
+    }
 }

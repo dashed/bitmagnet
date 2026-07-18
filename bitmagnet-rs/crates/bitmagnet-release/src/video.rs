@@ -437,6 +437,18 @@ mod tests {
 
     // The video regexes must be byte-identical to Go's `rex` output after the
     // one documented ASCII adaptation (`\d` -> `[0-9]`).
+    //
+    // ⚠️ Scope of this assertion for `video_resolution` (and, latently,
+    // `video_codec`): the stored `go[...]` fixture is Go's keyword compiler run
+    // over the ALREADY-SORTED (longest-first) alias list, NOT Go's actual
+    // runtime `videoResolutionRegex` — whose alias order is randomized by Go map
+    // iteration (contracts §3.3). So this byte-equality proves the two compilers
+    // agree on identical input (generator consistency of my sort + emitter), it
+    // does NOT prove equality with Go's randomized runtime regex string.
+    // Runtime/behavioral parity — that sorting longest-first yields Go-identical
+    // *results* — is proven separately by the `video_attributes` fixtures (Go's
+    // real `Infer*` outputs). `video_source` is exempt: Go sorts it, so its
+    // fixture already is the runtime form.
     #[test]
     fn video_patterns_match_go() {
         let go = load_go_patterns();
