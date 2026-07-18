@@ -25,7 +25,7 @@
 //! | `\x`    | literal `x`                               | escaped `x`        |
 
 use crate::lexer::{is_word_char, Lexer};
-use crate::regexutil::{any_non_word_char, any_word_char, digits, single_char};
+use crate::regexutil::{any_non_word_char, any_word_char, digits, runes_class, single_char};
 
 /// Errors from compiling a keyword. Mirrors the sentinels in
 /// `internal/keywords/parser.go` (`ErrEOF` is an internal control signal and is
@@ -200,8 +200,9 @@ impl KeywordsLexer {
                     // Caseless (digits, symbols-as-letters): a literal single char.
                     Ok(ClassOutcome::Token(single_char(ch)))
                 } else {
-                    // rex.Chars.Runes(ucChar + lcChar) => "[Uu]"
-                    Ok(ClassOutcome::Token(format!("[{uc}{lc}]")))
+                    // rex.Chars.Runes(ucChar + lcChar) => "[Uu]" (non-ASCII
+                    // members hex-escaped, e.g. accented letters -> [\xC1\xE1]).
+                    Ok(ClassOutcome::Token(runes_class(&format!("{uc}{lc}"))))
                 }
             }
             '#' => Ok(ClassOutcome::Token(digits())),

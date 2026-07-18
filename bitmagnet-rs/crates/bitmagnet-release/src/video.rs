@@ -317,13 +317,126 @@ pub fn infer_video_codec_and_release_group(input: &str) -> (Option<VideoCodec>, 
     (None, None)
 }
 
+// --- Modifier (alias-less enum) --------------------------------------------
+
+/// Video modifier. Canonical `as_str` matches Go's enum `String()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoModifier {
+    Regional,
+    Screener,
+    RawHd,
+    BrDisk,
+    Remux,
+}
+
+impl VideoModifier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Regional => "REGIONAL",
+            Self::Screener => "SCREENER",
+            Self::RawHd => "RAWHD",
+            Self::BrDisk => "BRDISK",
+            Self::Remux => "REMUX",
+        }
+    }
+
+    fn parse_ci(s: &str) -> Option<Self> {
+        let lower = s.to_lowercase();
+        VARIANTS_MODIFIER
+            .iter()
+            .copied()
+            .find(|v| v.as_str().to_lowercase() == lower)
+    }
+}
+
+const VARIANTS_MODIFIER: [VideoModifier; 5] = [
+    VideoModifier::Regional,
+    VideoModifier::Screener,
+    VideoModifier::RawHd,
+    VideoModifier::BrDisk,
+    VideoModifier::Remux,
+];
+
+pub(crate) fn modifier_pattern() -> String {
+    let kws: Vec<String> = VARIANTS_MODIFIER
+        .iter()
+        .map(|v| v.as_str().to_lowercase())
+        .collect();
+    let refs: Vec<&str> = kws.iter().map(String::as_str).collect();
+    regex_pattern_from_keywords(&refs).expect("modifier keywords compile")
+}
+
+static MODIFIER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&modifier_pattern()).expect("modifier regex compiles"));
+
+/// Port of `InferVideoModifier` (no alias table).
+pub fn infer_video_modifier(input: &str) -> Option<VideoModifier> {
+    let caps = MODIFIER_RE.captures(input)?;
+    VideoModifier::parse_ci(caps.get(1)?.as_str())
+}
+
+// --- 3D (alias-less enum, `V` prefix like resolution) ----------------------
+
+/// Video 3D type. Canonical `as_str` matches Go's enum `String()`.
+///
+/// 🚨 Parity note (contracts §0 correction #2): the proto `Classification`
+/// transformer DROPS `video3d` (and `year`), so the CEL `result` never sees it.
+/// This value lives on the ContentAttributes surface only — exactly as Go. The
+/// omission belongs in Lane C's proto transformer; the parser here still
+/// produces it (Go's `InferVideo3D` does too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Video3D {
+    V3D,
+    V3DSbs,
+    V3DOu,
+}
+
+impl Video3D {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V3D => "V3D",
+            Self::V3DSbs => "V3DSBS",
+            Self::V3DOu => "V3DOU",
+        }
+    }
+
+    fn parse_ci(s: &str) -> Option<Self> {
+        let lower = s.to_lowercase();
+        VARIANTS_3D
+            .iter()
+            .copied()
+            .find(|v| v.as_str().to_lowercase() == lower)
+    }
+}
+
+const VARIANTS_3D: [Video3D; 3] = [Video3D::V3D, Video3D::V3DSbs, Video3D::V3DOu];
+
+pub(crate) fn video3d_pattern() -> String {
+    // enum names, `V`-prefix stripped + lowercased (like resolution).
+    let kws: Vec<String> = VARIANTS_3D
+        .iter()
+        .map(|v| v.as_str()[1..].to_lowercase())
+        .collect();
+    let refs: Vec<&str> = kws.iter().map(String::as_str).collect();
+    regex_pattern_from_keywords(&refs).expect("video3d keywords compile")
+}
+
+static VIDEO3D_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&video3d_pattern()).expect("video3d regex compiles"));
+
+/// Port of `InferVideo3D` (prepends `V` before parsing, like resolution).
+pub fn infer_video_3d(input: &str) -> Option<Video3D> {
+    let caps = VIDEO3D_RE.captures(input)?;
+    Video3D::parse_ci(&format!("V{}", caps.get(1)?.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testsupport::{adapt_go_pattern, load_go_patterns};
 
-    // The three video regexes must be byte-identical to Go's `rex` output
-    // after the one documented ASCII adaptation (`\d` -> `[0-9]`).
+    // The video regexes must be byte-identical to Go's `rex` output after the
+    // one documented ASCII adaptation (`\d` -> `[0-9]`).
     #[test]
     fn video_patterns_match_go() {
         let go = load_go_patterns();
@@ -333,6 +446,8 @@ mod tests {
         );
         assert_eq!(source_pattern(), adapt_go_pattern(&go["video_source"]));
         assert_eq!(codec_pattern(), adapt_go_pattern(&go["video_codec"]));
+        assert_eq!(modifier_pattern(), adapt_go_pattern(&go["video_modifier"]));
+        assert_eq!(video3d_pattern(), adapt_go_pattern(&go["video_3d"]));
     }
 
     // Sorted-alias determinism proof (frozen longest-first, alpha tiebreak).

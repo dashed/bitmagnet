@@ -10,13 +10,18 @@
 //!   (`video_resolution`, `video_codec`, `video_source`).
 //! * M2 — the episode parser (`ParseEpisodes` / `Episodes`), reproducing Go's
 //!   group-index bugs verbatim (see `episodes`).
+//! * M3 — language detection (`languages.csv`, `infer_languages` /
+//!   `parse_language`, natsort order) + the `video3d` / `video_modifier` tables.
 //!
-//! Still pending: language parsing (`languages.csv`), the `video3d` /
-//! `video_modifier` tables, and title/year extraction in `parsers/video.go`.
+//! Still pending: title/year extraction in `parsers/video.go`
+//! (`ParseTitleYearEpisodes`, `cleanTitle`) and the combined
+//! `ParseVideoContent` orchestration that ties the attributes together.
 
 mod episodes;
 mod keywords;
+mod language;
 mod lexer;
+mod natsort;
 mod regexutil;
 mod video;
 
@@ -25,7 +30,9 @@ mod testsupport;
 
 pub use episodes::{parse_episodes, Episodes};
 pub use keywords::{regex_pattern_from_keywords, rex_tokens_from_keywords, KeywordError};
+pub use language::{infer_languages, parse_language};
 pub use video::{
-    infer_video_codec_and_release_group, infer_video_resolution, infer_video_source, VideoCodec,
+    infer_video_3d, infer_video_codec_and_release_group, infer_video_modifier,
+    infer_video_resolution, infer_video_source, Video3D, VideoCodec, VideoModifier,
     VideoResolution, VideoSource,
 };

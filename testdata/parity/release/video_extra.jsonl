@@ -1,0 +1,14 @@
+{"id":"mod_remux","name":"movie.1080p.remux.mkv","video_modifier":"REMUX","video_3d":null}
+{"id":"mod_screener","name":"movie.screener.mkv","video_modifier":"SCREENER","video_3d":null}
+{"id":"mod_regional","name":"movie.regional.mkv","video_modifier":"REGIONAL","video_3d":null}
+{"id":"mod_rawhd","name":"movie.rawhd.mkv","video_modifier":"RAWHD","video_3d":null}
+{"id":"mod_brdisk","name":"movie.brdisk.mkv","video_modifier":"BRDISK","video_3d":null}
+{"id":"mod_upper","name":"movie.REMUX.mkv","video_modifier":"REMUX","video_3d":null}
+{"id":"mod_none","name":"movie.1080p.x264.mkv","video_modifier":null,"video_3d":null}
+{"id":"3d_v3d","name":"movie.3d.mkv","video_modifier":null,"video_3d":"V3D"}
+{"id":"3d_sbs","name":"movie.3dsbs.mkv","video_modifier":null,"video_3d":"V3DSBS"}
+{"id":"3d_ou","name":"movie.3dou.mkv","video_modifier":null,"video_3d":"V3DOU"}
+{"id":"3d_upper","name":"movie.3D.mkv","video_modifier":null,"video_3d":"V3D"}
+{"id":"3d_none","name":"movie.1080p.mkv","video_modifier":null,"video_3d":null}
+{"id":"3d_and_mod","name":"movie.3dsbs.remux.1080p.mkv","video_modifier":"REMUX","video_3d":"V3DSBS"}
+{"id":"3d_prefix_boundary","name":"movie.3d.bluray.mkv","video_modifier":null,"video_3d":"V3D"}

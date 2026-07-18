@@ -30,6 +30,19 @@ fn is_quote_meta(c: char) -> bool {
     )
 }
 
+/// Faithful port of `hedhyw/rex`'s `CharsBaseDialect.Runes`: a character class
+/// whose members are each emitted via `single_char` (so non-ASCII runes are
+/// hex-escaped, e.g. `Áá` -> `[\xC1\xE1]`, matching Go). Brackets are dropped
+/// for a single rune, as Go does.
+pub(crate) fn runes_class(s: &str) -> String {
+    let members: String = s.chars().map(single_char).collect();
+    if s.chars().count() <= 1 {
+        members
+    } else {
+        format!("[{members}]")
+    }
+}
+
 /// Faithful port of `hedhyw/rex`'s `CharsBaseDialect.Single`: printable-ASCII
 /// runes (except `-` and `%`) are emitted via `regexp.QuoteMeta`; everything
 /// else is hex-escaped (`\xHH` for two hex digits, `\x{…}` otherwise). `-` and
