@@ -114,6 +114,11 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # Hex for info-hash <-> text at the export/Parquet boundary.
 hex = "0.4"
 
+# Regex — Lane R's keyword-glob -> regex compiler + video parsers and Lane C's
+# classifier both build on it. Rust `regex` defaults to Unicode; the ASCII
+# parity adaptations live in the pattern strings the compiler emits.
+regex = "1"
+
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D
 # warnings`.

@@ -8,6 +8,12 @@ repository.workspace = true
 description = "Phase-3 Lane R — release-name parsing for the bitmagnet Rust rewrite."
 
 [dependencies]
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
