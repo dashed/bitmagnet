@@ -231,6 +231,65 @@ func (v Tsvector) AddText(text string, weight TsvectorWeight) {
 	}
 }
 
+// MaxTsvectorBytes caps a tsvector's serialized size safely below PostgreSQL's
+// hard limit: a tsvector may not exceed 1048575 bytes, and a single row that
+// exceeds it aborts its whole CreateInBatches transaction — so up to 99 innocent
+// neighbours in the same batch never persist, and the batch deterministically
+// re-fails. Callers building an unbounded lexeme bag (torrent file paths) use
+// AddTextBounded to stay under this.
+const MaxTsvectorBytes = 900_000
+
+// AddTextBounded is AddText with a byte budget: it appends tokenized lexemes only
+// while the vector's serialized size is estimated to stay within budget, and
+// returns the remaining budget. Once the budget is exhausted it stops adding, so
+// later (lowest-priority) lexemes are dropped rather than growing the vector past
+// what PostgreSQL will accept. Higher-weight lexemes the caller adds before the
+// bounded bag are unaffected.
+func (v Tsvector) AddTextBounded(text string, weight TsvectorWeight, budget int) int {
+	if budget <= 0 {
+		return budget
+	}
+
+	nextPos := 1
+
+	for _, pls := range v {
+		for pos := range pls {
+			if pos >= nextPos {
+				nextPos = pos + 1
+			}
+		}
+	}
+
+	if nextPos > 1 {
+		nextPos++
+	}
+
+	for _, lexeme := range TokenizeFlat(text) {
+		if budget <= 0 {
+			break
+		}
+
+		if _, ok := v[lexeme]; !ok {
+			v[lexeme] = make(map[int]TsvectorWeight)
+		}
+
+		v[lexeme][nextPos] = weight
+		nextPos++
+		budget -= tsvectorLexemeCost(lexeme)
+	}
+
+	return budget
+}
+
+// tsvectorLexemeCost over-estimates one lexeme's contribution to the serialized
+// tsvector (see String): the force-quoted lexeme plus a generous allowance for
+// its `:position` label (colon, up to six position digits, weight letter,
+// separator). Over-estimating keeps the running budget conservative — the real
+// serialized size is always at most the charged size.
+func tsvectorLexemeCost(lexeme string) int {
+	return len(lexeme) + 12
+}
+
 var nonWordChar = regexp.MustCompile(`\W`)
 
 func quoteLexeme(str string, force bool) string {

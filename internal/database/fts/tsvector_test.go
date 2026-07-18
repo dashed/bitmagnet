@@ -49,3 +49,44 @@ func TestParseTsvector(t *testing.T) {
 		})
 	}
 }
+
+// F7: AddTextBounded stops appending once the byte budget is exhausted and
+// reports the remaining budget, so an oversized bag can't grow the vector past
+// PostgreSQL's tsvector limit.
+func TestAddTextBounded(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stops once the budget is exhausted", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		// A budget large enough for only the first couple of lexemes.
+		remaining := v.AddTextBounded("alpha bravo charlie delta echo", fts.TsvectorWeightD, 30)
+
+		assert.LessOrEqual(t, remaining, 0, "budget should be spent")
+		assert.Contains(t, v, "alpha", "the first lexeme must be added")
+		assert.NotContains(t, v, "echo", "later lexemes must be dropped once over budget")
+	})
+
+	t.Run("adds nothing when the budget is already gone", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		remaining := v.AddTextBounded("alpha bravo", fts.TsvectorWeightD, 0)
+
+		assert.Equal(t, 0, remaining)
+		assert.Empty(t, v)
+	})
+
+	t.Run("adds every lexeme when the budget is ample", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		remaining := v.AddTextBounded("alpha bravo charlie", fts.TsvectorWeightD, fts.MaxTsvectorBytes)
+
+		assert.Greater(t, remaining, 0)
+		for _, lexeme := range []string{"alpha", "bravo", "charlie"} {
+			assert.Contains(t, v, lexeme)
+		}
+	})
+}
