@@ -83,9 +83,12 @@ pub fn run_path_candidates(
 /// pre-F12 whole-string form.
 ///
 /// Words too short to produce grams (fewer than 2 chars) are skipped for recall;
-/// they are still enforced by the downstream refine (F11), so recall stays a
-/// superset of refine. Empty/whitespace-only or all-too-short queries match
-/// nothing; a blank query must not become a full-index scan.
+/// they are still enforced by the downstream refine (F11). When EVERY word is
+/// too short (e.g. `"a b"`) the per-word loop yields no clauses, so we fall back
+/// to the pre-F12 whole-string gram set — those space-crossing grams recall the
+/// same docs the old query did, keeping recall an unconditional superset of
+/// refine. Empty/whitespace-only queries still match nothing; a blank query must
+/// not become a full-index scan.
 pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Query> {
     let mut word_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
     for word in raw.split_whitespace() {
@@ -96,7 +99,13 @@ pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Qu
     }
 
     match word_clauses.len() {
-        0 => Box::new(EmptyQuery),
+        // No word produced grams (all sub-2-char, or empty). Recall via the
+        // whole trimmed string's grams so short spaced queries stay a superset
+        // of refine; a truly empty/whitespace-only query yields None ⇒ nothing.
+        0 => match gram_tokens(index, raw) {
+            Some(tokens) => word_clause(fields, &tokens),
+            None => Box::new(EmptyQuery),
+        },
         // A lone word IS the whole query: return its clause unwrapped so the
         // top-level structure matches the pre-F12 single-string query exactly.
         1 => word_clauses.pop().expect("len checked == 1").1,
@@ -497,6 +506,19 @@ mod tests {
             just_ab,
             "a sub-2-char word must not affect recall"
         );
+    }
+
+    #[test]
+    fn all_short_words_fall_back_to_whole_string() {
+        // Every whitespace token is a single char, so the per-word loop yields no
+        // clauses. Recall must fall back to the pre-F12 whole-string grams
+        // ("a ", " b", "a b") rather than collapsing to EmptyQuery — F11 refine
+        // would keep such docs, so recall must too.
+        let (index, reader, fields) = index_docs(&[
+            doc_named(1, "a b canonical", &["disc/track.flac"], 5),
+            doc_named(2, "zztop unrelated", &["disc/other.flac"], 5),
+        ]);
+        assert_eq!(recalled_tags(&index, &reader, &fields, "a b"), vec![1]);
     }
 
     #[test]
