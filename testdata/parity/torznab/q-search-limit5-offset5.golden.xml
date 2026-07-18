@@ -61,7 +61,6 @@
       <torznab:attr name="seeders" value="15"/>
       <torznab:attr name="leechers" value="1"/>
       <torznab:attr name="peers" value="16"/>
-      <torznab:attr name="files" value="1"/>
       <torznab:attr name="video" value="x264"/>
       <torznab:attr name="resolution" value="480p"/>
     </item>

@@ -5,23 +5,6 @@
     <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
     <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
     <item>
-      <title>Comet 2018 480p DVDRip XviD-RARL</title>
-      <guid>2e4474b2a3512a5fdf66c4328e2a76e8a895ea58</guid>
-      <pubDate>Fri, 24 Jan 2020 00:00:00 +0000</pubDate>
-      <category>movie</category>
-      <size>730000000</size>
-      <enclosure length="730000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:2e4474b2a3512a5fdf66c4328e2a76e8a895ea58&amp;dn=Comet+2018+480p+DVDRip+XviD-RARL&amp;xl=730000000"/>
-      <torznab:attr name="infohash" value="2e4474b2a3512a5fdf66c4328e2a76e8a895ea58"/>
-      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:2e4474b2a3512a5fdf66c4328e2a76e8a895ea58&amp;dn=Comet+2018+480p+DVDRip+XviD-RARL&amp;xl=730000000"/>
-      <torznab:attr name="category" value="2000"/>
-      <torznab:attr name="size" value="730000000"/>
-      <torznab:attr name="publishdate" value="Fri, 24 Jan 2020 00:00:00 +0000"/>
-      <torznab:attr name="files" value="1"/>
-      <torznab:attr name="video" value="XviD"/>
-      <torznab:attr name="resolution" value="480p"/>
-      <torznab:attr name="team" value="RARL"/>
-    </item>
-    <item>
       <title>Meteor 2016 480p WEBRip x264</title>
       <guid>18f19bd92e28ae94ee49208ca3aeb23765d4d72c</guid>
       <pubDate>Sun, 19 Jan 2020 00:00:00 +0000</pubDate>

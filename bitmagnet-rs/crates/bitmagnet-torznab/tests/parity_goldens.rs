@@ -218,7 +218,14 @@ impl Fixture {
             published_at: PUBLISHED_AT_BASE + self.pub_index * 86_400,
             seeders: self.seeders,
             leechers: self.leechers,
-            files_count: Some(self.files.len() as u32),
+            // The Torznab `files` attr mirrors live Go's `len(Torrent.Files)`,
+            // which Go derives from the `files_data` blob — NOT the fixture's
+            // `filesCount` (`torrent_contents.files_count`, which Lane G seeds
+            // independently to exercise the divergence). Every fixture seeds a
+            // `files_data` blob, so the presence-gated summary count equals the
+            // enumerated file-list length; an empty list yields `Some(0)`, which
+            // the `>0` guard omits, matching Go's single-file behavior.
+            files_attr_count: Some(self.files.len() as u32),
             video_resolution: video_resolution(&self.video_resolution),
             video_codec: none_if_empty(&self.video_codec),
             release_group: none_if_empty(&self.release_group),

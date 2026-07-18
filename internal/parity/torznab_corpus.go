@@ -50,6 +50,12 @@ type TorznabFixture struct {
 	Leechers        *uint
 	Episodes        map[int][]int
 	Files           []string
+	// FilesCount seeds torrent_contents.files_count independently of the Files
+	// slice, so a fixture can exercise the divergence between the denormalized
+	// count column and the hydrated file list (len(files_data)). When nil the
+	// column is left at its default; the Torznab `files` attr never derives from
+	// it (live Go and the Rust adapter both use len(files_data)).
+	FilesCount *uint
 }
 
 type corpusQueryJSON struct {
@@ -79,6 +85,7 @@ type torznabFixtureJSON struct {
 	Leechers        *uint            `json:"leechers"`
 	Episodes        map[string][]int `json:"episodes"`
 	Files           []string         `json:"files"`
+	FilesCount      *uint            `json:"filesCount"`
 }
 
 // LoadTorznabCorpus loads a JSONL corpus in file order.
@@ -166,6 +173,7 @@ func LoadTorznabFixtures(path string) ([]TorznabFixture, error) {
 			Seeders:         wire.Seeders,
 			Leechers:        wire.Leechers,
 			Files:           wire.Files,
+			FilesCount:      wire.FilesCount,
 		}
 		if wire.Episodes != nil {
 			fixture.Episodes = make(map[int][]int, len(wire.Episodes))

@@ -124,8 +124,8 @@ func TestTorznabCorpusAndFixtureLoaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTorznabCorpus: %v", err)
 	}
-	if len(corpus) != 66 {
-		t.Fatalf("corpus length = %d, want 66", len(corpus))
+	if len(corpus) != 67 {
+		t.Fatalf("corpus length = %d, want 67", len(corpus))
 	}
 	if corpus[0].ID != "caps" || corpus[0].GoldenName() != "caps.golden.xml" {
 		t.Fatalf("first corpus query = %+v, want caps query", corpus[0])

@@ -206,6 +206,18 @@ func seedTorznabFixtures(t *testing.T, db *gorm.DB) map[string]string {
 				"file_extensions": gorm.Expr("?::jsonb", string(extensionsJSON)),
 			}).Error, "update files blob for fixture %q", fixture.ID)
 
+		// Co-write torrent_file_summary alongside files_data, mirroring the
+		// production crawler dual-write and blob-migration backfill. Its
+		// file_count (= len(files)) is the presence-gated source the Rust adapter
+		// projects for the Torznab `files` attr, so a live Rust query against this
+		// fixture DB reproduces Go's blob-derived output. Go's own serve path does
+		// not read the summary, so this leaves the Go goldens unchanged.
+		summary := blobmigration.BuildFileSummary(infohash, files, len(filesBlob))
+		summary.CreatedAt = now
+		summary.UpdatedAt = now
+		require.NoError(t, db.WithContext(ctx).Create(&summary).Error,
+			"create file summary for fixture %q", fixture.ID)
+
 		if fixture.Seeders != nil || fixture.Leechers != nil {
 			source := &model.TorrentsTorrentSource{
 				Source:      "dht",
@@ -264,6 +276,15 @@ func seedTorznabFixtures(t *testing.T, db *gorm.DB) map[string]string {
 		}
 		if fixture.ContentType != "" {
 			torrentContent.ContentType = model.NewNullContentType(model.ContentType(fixture.ContentType))
+		}
+		// Seed torrent_contents.files_count independently of the files_data blob
+		// (len(fixture.Files)) so a fixture can exercise the divergence between
+		// the denormalized count column and the hydrated file list. Live Go emits
+		// the Torznab `files` attr from len(Torrent.Files) (deserialized from
+		// files_data), NOT this column, so this value must never surface in the
+		// golden — its presence guards against a regression back to files_count.
+		if fixture.FilesCount != nil {
+			torrentContent.FilesCount = model.NewNullUint(*fixture.FilesCount)
 		}
 		if hasContent {
 			torrentContent.ContentSource = model.NewNullString("tmdb")
