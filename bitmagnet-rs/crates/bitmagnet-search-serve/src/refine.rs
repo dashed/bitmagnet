@@ -831,6 +831,41 @@ mod tests {
         }
     }
 
+    // Superset property for multi-word: a candidate matched by the pre-F11
+    // verbatim phrase (the space-joined query is a literal substring of one path)
+    // is STILL kept under token-AND. Parity with Go's
+    // TestTorrentTokenMatch_MultiTokenVerbatimSuperset.
+    #[test]
+    fn torrent_token_match_multi_token_verbatim_superset() {
+        let files = vec![file("movies/foo bar/release.mkv", "mkv", 100)];
+        let p = predicate("foo bar", &[], 0, 0);
+
+        // Precondition: this IS a verbatim-phrase match the pre-F11 keep would take.
+        assert!(torrent_matches(&files, &p));
+        assert!(torrent_token_match(&files, "unrelated name", &p));
+    }
+
+    // Multi-token under a SIZE bound (symmetric to the extension-filter case): a
+    // token that appears ONLY in a size-excluded file cannot be rescued by the
+    // name (rescue OFF under a size bound) → drop. Parity with Go's
+    // TestTorrentTokenMatch_MultiTokenUnderSizeBound.
+    #[test]
+    fn torrent_token_match_multi_token_under_size_bound() {
+        let files = vec![
+            file("omegapack/sorefordays.part1.mkv", "mkv", 5_000),
+            file("omegapack/sample.mkv", "mkv", 5),
+        ];
+        let name = "OmegaPACK SoreForDays Sample";
+
+        let kept = predicate("omegapack sorefordays", &[], 1_000, 0);
+        assert!(torrent_token_match(&files, name, &kept));
+
+        // 'sample' only matches the size-excluded file; the name cannot rescue
+        // under a size bound → dropped.
+        let dropped = predicate("sorefordays sample", &[], 1_000, 0);
+        assert!(!torrent_token_match(&files, name, &dropped));
+    }
+
     // Multi-token under an extension filter: the name rescue is OFF, so EVERY
     // token must be found in a path of a file that passes the extension filter.
     // Parity with Go's TestTorrentTokenMatch_MultiTokenUnderExtensionFilter.

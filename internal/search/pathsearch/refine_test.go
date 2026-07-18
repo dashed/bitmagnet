@@ -471,6 +471,50 @@ func TestTorrentTokenMatch_EmptyQueryDrops(t *testing.T) {
 	}
 }
 
+// Superset property for multi-word: a candidate matched by the pre-F11 verbatim
+// phrase (the space-joined query is a literal substring of one path) is STILL
+// kept under token-AND. Token-AND is a strict superset of the old keep, so the
+// verbatim case must never regress.
+func TestTorrentTokenMatch_MultiTokenVerbatimSuperset(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("movies/foo bar/release.mkv", "mkv", 100),
+	}
+	p := Filters{Query: "foo bar"}.predicate()
+
+	// Precondition: this IS a verbatim-phrase match the pre-F11 keep would take.
+	if !torrentMatches(files, p) {
+		t.Fatal("guard: the space-joined phrase must be a literal path substring here")
+	}
+
+	if !torrentTokenMatch(files, "unrelated name", p) {
+		t.Fatal("a verbatim multi-word phrase match must remain kept under token-AND")
+	}
+}
+
+// Multi-token under a SIZE bound (symmetric to the extension-filter case): the
+// name rescue is OFF under a size bound, so a token that appears ONLY in a file
+// excluded by the size bound cannot be rescued → drop.
+func TestTorrentTokenMatch_MultiTokenUnderSizeBound(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("omegapack/sorefordays.part1.mkv", "mkv", 5_000),
+		tf("omegapack/sample.mkv", "mkv", 5), // 'sample' only lives in the too-small file
+	}
+	name := "OmegaPACK SoreForDays Sample" // both tokens, but name ineligible under a size bound
+
+	// Both tokens live in the in-bounds file → kept.
+	kept := Filters{Query: "omegapack sorefordays", MinSize: 1_000}.predicate()
+	if !torrentTokenMatch(files, name, kept) {
+		t.Fatal("both tokens in an in-bounds file must be kept under the size bound")
+	}
+
+	// 'sample' only appears in the size-excluded file; the name cannot rescue it
+	// under a size bound → dropped.
+	dropped := Filters{Query: "sorefordays sample", MinSize: 1_000}.predicate()
+	if torrentTokenMatch(files, name, dropped) {
+		t.Fatal("a token that only matches a size-excluded file must not be rescued by the name")
+	}
+}
+
 // Multi-token under an extension filter: the name rescue is OFF, so EVERY token
 // must be found in a path of a file that passes the extension filter.
 func TestTorrentTokenMatch_MultiTokenUnderExtensionFilter(t *testing.T) {
