@@ -25,7 +25,7 @@ use crate::pg::{
     SearchRequest, SearchResult, SearchResultItem,
 };
 use crate::refine::{
-    file_extension, files_for_refine_bounded, match_file, paginate, torrent_matches,
+    file_extension, files_for_refine_bounded, match_file, paginate, torrent_token_match,
     BoundedRefineFiles, RefinePredicate,
 };
 
@@ -766,7 +766,8 @@ impl Composer {
                 );
                 continue;
             }
-            if !torrent_matches(&files, predicate) && !predicate.name_matches(&item.torrent.name) {
+            if !torrent_token_match(&files, &item.torrent.name, predicate) {
+                // L3 false positive: some query token matches nowhere (F11).
                 continue;
             }
             if retain_refine_files {

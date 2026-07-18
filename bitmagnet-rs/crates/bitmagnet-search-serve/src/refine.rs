@@ -22,8 +22,16 @@ use crate::filters::Filters;
 /// this predicate to remove torrent-level false positives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefinePredicate {
-    /// Lower-cased real path substring to verify.
+    /// Lower-cased real path substring to verify. Stays the whole verbatim query:
+    /// file-level filtering ([`match_file`] / [`matched_files`]) and the
+    /// single-token candidate keep both verify it unchanged.
     substr: String,
+    /// Lower-cased whitespace-split query tokens, used by the token-AND candidate
+    /// keep ([`torrent_token_match`]). A single-token query has
+    /// `tokens == [substr]`, keeping that decision byte-identical to the verbatim
+    /// substring match; multi-word queries pass iff EVERY token matches somewhere
+    /// in the union of the name and file paths (F11).
+    tokens: Vec<String>,
     /// Allowed lower-cased extensions; empty accepts any extension.
     extensions: HashSet<String>,
     /// Minimum file size in bytes; zero is unbounded.
@@ -38,8 +46,11 @@ impl Filters {
     /// This ports Go's `Filters.predicate` in
     /// `internal/search/pathsearch/refine.go`.
     pub fn predicate(&self) -> RefinePredicate {
+        let substr = self.query.trim().to_lowercase();
+        let tokens = tokenize_query(&substr);
         RefinePredicate {
-            substr: self.query.trim().to_lowercase(),
+            substr,
+            tokens,
             extensions: self
                 .extensions
                 .iter()
@@ -96,6 +107,20 @@ impl RefinePredicate {
         }
 
         name.to_lowercase().contains(&self.substr)
+    }
+
+    /// Returns a copy of this predicate whose verified substring is a single
+    /// query token, keeping the same extension/size filters. Used by
+    /// [`torrent_token_match`] to evaluate each token as its own single-substring
+    /// predicate, mirroring Go's `tp := p; tp.substr = tok`.
+    fn with_substr(&self, substr: &str) -> RefinePredicate {
+        RefinePredicate {
+            substr: substr.to_owned(),
+            tokens: Vec::new(),
+            extensions: self.extensions.clone(),
+            min_size: self.min_size,
+            max_size: self.max_size,
+        }
     }
 }
 
@@ -155,6 +180,49 @@ fn matched_files(files: &[BlobFile], predicate: &RefinePredicate) -> Vec<BlobFil
 /// file is a recall false positive and must be dropped.
 pub fn torrent_matches(files: &[BlobFile], predicate: &RefinePredicate) -> bool {
     files.iter().any(|file| match_file(file, predicate))
+}
+
+/// Splits a lower-cased query into its whitespace-separated tokens, dropping
+/// empties.
+///
+/// This ports Go's `tokenizeQuery` in
+/// `internal/search/pathsearch/refine.go`. It is fed the already
+/// lower-cased+trimmed substring, so `split_whitespace` (Unicode-whitespace
+/// split, empties dropped) yields the F11 token set directly, matching Go's
+/// `strings.Fields`. A single-word query yields exactly `[substr]`.
+fn tokenize_query(lowered_query: &str) -> Vec<String> {
+    lowered_query
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// F11 token-AND candidate keep: a candidate is kept iff EVERY query token
+/// appears (case-insensitive substring) SOMEWHERE in the union of the torrent
+/// name and its file paths — tokens may match in different strings.
+///
+/// This ports Go's `torrentTokenMatch` in
+/// `internal/search/pathsearch/refine.go`. It mirrors PostgreSQL FTS, which ANDs
+/// lexemes across the whole torrent tsv (name + paths) rather than requiring the
+/// verbatim phrase. Each token is evaluated as its own single-substring
+/// predicate over the SAME structured extension/size filters via [`torrent_matches`]
+/// and [`RefinePredicate::name_matches`], so every existing soundness guard (the
+/// ext/size coupling on a single file, the F1 name-rescue guard) stays intact per
+/// token. For a single-token query (`tokens == [substr]`) this is byte-identical
+/// to the pre-F11 `torrent_matches || name_matches` keep.
+pub(crate) fn torrent_token_match(
+    files: &[BlobFile],
+    name: &str,
+    predicate: &RefinePredicate,
+) -> bool {
+    if predicate.tokens.is_empty() {
+        return false;
+    }
+
+    predicate.tokens.iter().all(|token| {
+        let token_predicate = predicate.with_substr(token);
+        torrent_matches(files, &token_predicate) || token_predicate.name_matches(name)
+    })
 }
 
 /// Resolves the file list used to exact-refine a candidate torrent.
@@ -654,6 +722,133 @@ mod tests {
         assert!(files_for_refine_bounded(&bad, 4_096, 4_096, 16)
             .unwrap()
             .is_none());
+    }
+
+    // --- F11 token-AND candidate keep ---------------------------------------
+
+    #[test]
+    fn tokenize_query_splits_and_drops_empties() {
+        assert!(tokenize_query("").is_empty());
+        assert!(tokenize_query("   ").is_empty());
+        assert_eq!(tokenize_query("inception"), vec!["inception".to_owned()]);
+        assert_eq!(
+            tokenize_query("omegapack sorefordays"),
+            vec!["omegapack".to_owned(), "sorefordays".to_owned()]
+        );
+        assert_eq!(
+            tokenize_query("  omegapack   sorefordays  "),
+            vec!["omegapack".to_owned(), "sorefordays".to_owned()]
+        );
+        assert_eq!(
+            tokenize_query("a\tb\nc"),
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    // A single-token query must be byte-identical to the pre-F11 keep decision
+    // `torrent_matches || name_matches` for every filter shape. Parity with Go's
+    // TestTorrentTokenMatch_SingleTokenIdenticalToLegacyKeep.
+    #[test]
+    fn torrent_token_match_single_token_identical_to_legacy_keep() {
+        let files = vec![
+            file("movies/Inception.2010.1080p.mkv", "mkv", 1_500),
+            file("movies/readme.txt", "txt", 10),
+        ];
+        let name = "Inception.2010.Bluray";
+
+        let cases = [
+            predicate("inception", &[], 0, 0),
+            predicate("inception", &["mkv"], 0, 0),
+            predicate("inception", &["avi"], 0, 0),
+            predicate("readme", &[], 0, 0),
+            predicate("bluray", &[], 0, 0),
+            predicate("bluray", &["mkv"], 0, 0),
+            predicate("inception", &[], 1_000, 0),
+            predicate("inception", &[], 2_000, 0),
+            predicate("absent", &[], 0, 0),
+        ];
+
+        for p in &cases {
+            let legacy = torrent_matches(&files, p) || p.name_matches(name);
+            assert_eq!(
+                torrent_token_match(&files, name, p),
+                legacy,
+                "single-token keep must match legacy for substr {:?}",
+                p.substr()
+            );
+        }
+    }
+
+    // The live regression: "OmegaPACK SoreForDays" — each token in a different
+    // string (one in the name, one in a path), no verbatim phrase anywhere.
+    // Parity with Go's TestTorrentTokenMatch_UnionAcrossNameAndPaths.
+    #[test]
+    fn torrent_token_match_union_across_name_and_paths() {
+        let files = vec![file("Emily Willis/SoreForDays - Part 1.mp4", "mp4", 100)];
+        let name = "Emily Willis - OmegaPACK Collection";
+        let p = predicate("OmegaPACK SoreForDays", &[], 0, 0);
+
+        assert!(torrent_token_match(&files, name, &p));
+        // Guard: the verbatim phrase is in neither the name nor a path.
+        assert!(!torrent_matches(&files, &p) && !p.name_matches(name));
+    }
+
+    #[test]
+    fn torrent_token_match_both_tokens_in_one_path() {
+        let files = vec![file("shows/omegapack.sorefordays.part1.mkv", "mkv", 100)];
+        let p = predicate("omegapack sorefordays", &[], 0, 0);
+
+        assert!(torrent_token_match(&files, "unrelated name", &p));
+    }
+
+    #[test]
+    fn torrent_token_match_missing_token_drops() {
+        let files = vec![file("Emily Willis/SoreForDays - Part 1.mp4", "mp4", 100)];
+        let name = "Emily Willis Collection";
+        let p = predicate("OmegaPACK SoreForDays", &[], 0, 0);
+
+        assert!(!torrent_token_match(&files, name, &p));
+    }
+
+    #[test]
+    fn torrent_token_match_is_case_insensitive() {
+        let files = vec![file("DISC1/SoreForDays.MKV", "MKV", 100)];
+        let name = "OMEGAPACK release";
+        let p = predicate("omegapack sorefordays", &[], 0, 0);
+
+        assert!(torrent_token_match(&files, name, &p));
+    }
+
+    // An empty query yields zero tokens; the route is gated on a non-empty substr
+    // before refine, but the keep must fail-closed (drop) rather than keep-all.
+    #[test]
+    fn torrent_token_match_empty_query_drops() {
+        let files = vec![file("anything.mkv", "mkv", 1)];
+        for query in ["", "   "] {
+            let p = predicate(query, &[], 0, 0);
+            assert!(p.tokens.is_empty(), "query {query:?} must tokenize to none");
+            assert!(!torrent_token_match(&files, "any name", &p));
+        }
+    }
+
+    // Multi-token under an extension filter: the name rescue is OFF, so EVERY
+    // token must be found in a path of a file that passes the extension filter.
+    // Parity with Go's TestTorrentTokenMatch_MultiTokenUnderExtensionFilter.
+    #[test]
+    fn torrent_token_match_multi_token_under_extension_filter() {
+        let files = vec![
+            file("omegapack/sorefordays.part1.mkv", "mkv", 100),
+            file("omegapack/sample.avi", "avi", 5),
+        ];
+        let name = "OmegaPACK SoreForDays";
+
+        let kept = predicate("omegapack sorefordays", &["mkv"], 0, 0);
+        assert!(torrent_token_match(&files, name, &kept));
+
+        // 'avi' token only matches the avi path, excluded by the mkv filter, and
+        // the name cannot rescue under a filter → dropped.
+        let dropped = predicate("sorefordays avi", &["mkv"], 0, 0);
+        assert!(!torrent_token_match(&files, name, &dropped));
     }
 
     #[test]
