@@ -720,7 +720,7 @@ impl Composer {
                 );
                 continue;
             }
-            if !torrent_matches(&files, predicate) && !predicate.name_rescue(&item.torrent.name) {
+            if !torrent_matches(&files, predicate) && !predicate.name_matches(&item.torrent.name) {
                 continue;
             }
             if retain_refine_files {

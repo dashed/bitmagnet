@@ -89,13 +89,14 @@ func torrentMatches(files []model.TorrentFile, p refinePredicate) bool {
 	return false
 }
 
-// nameRescue reports whether a candidate whose FILES do not match should still be
-// kept because the search substring is present in its torrent display NAME.
+// nameMatches reports whether a candidate whose FILES do not match should still
+// be kept because the search substring is present in its torrent display NAME.
 //
-// L3's path-bag now indexes the torrent name too (F1), so a multi-file torrent
-// carrying the term only in its name is recalled — but the file-level exact
-// refine above would still drop it, because no file path contains the term. This
-// rescue keeps it, matching PostgreSQL name-search semantics (PG matches the
+// L3's path-bag now indexes the torrent name too (F1), for every files_status —
+// including the ~21.9M no_info torrents that carry no file list at all and the
+// ~17.5M multi-file torrents whose term lives only in the name. The file-level
+// exact refine would still drop these, because no file path contains the term.
+// This keeps them, matching PostgreSQL name-search semantics (PG matches the
 // name/tsv, not arbitrary file paths).
 //
 // SOUNDNESS (CAVEAT C): a name carries the substring but NOT any file's extension
@@ -103,13 +104,14 @@ func torrentMatches(files []model.TorrentFile, p refinePredicate) bool {
 // size bound is active; under either filter a name-only candidate cannot be
 // proven to satisfy it and MUST fall through to a normal DROP (never fail-loud —
 // it is a genuine non-match, not an unobtainable file list). A rescued torrent
-// keeps its full file list and needs no >=1-matched-file invariant.
-func nameRescue(name string, p refinePredicate) bool {
-	if p.hasExtensionFilter() || p.minSize > 0 || p.maxSize > 0 {
+// keeps whatever file list it has (possibly empty) and needs no >=1-matched-file
+// invariant.
+func nameMatches(name string, p refinePredicate) bool {
+	if p.substr == "" || p.hasExtensionFilter() || p.minSize > 0 || p.maxSize > 0 {
 		return false
 	}
 
-	return p.substr != "" && strings.Contains(strings.ToLower(name), p.substr)
+	return strings.Contains(strings.ToLower(name), p.substr)
 }
 
 // filesForRefine resolves the file list to verify a candidate against. t.Files is
@@ -158,7 +160,20 @@ func filesForRefine(t model.Torrent) (files []model.TorrentFile, ok bool) {
 		return []model.TorrentFile{{Path: t.Name, Size: t.Size}}, true
 	}
 
-	// Multi-file torrent with no obtainable file list: cannot verify.
+	// A no_info / over_threshold torrent has no stored file list BY NATURE (not a
+	// missing-blob failure): no_info never had one, over_threshold's was too large
+	// to persist. Resolve it to an EMPTY file list (ok=true) so the name-rescue in
+	// the composer can keep it on the name path — mirroring PG, which matches such
+	// torrents by name/tsv regardless of files, and correctly drops them under an
+	// extension/size filter (they have no file rows to satisfy one). This is NOT a
+	// CAVEAT-B fail-loud: those statuses legitimately carry no files, so there is
+	// nothing "unobtainable" to fall back for.
+	if t.FilesStatus == model.FilesStatusNoInfo || t.FilesStatus == model.FilesStatusOverThreshold {
+		return nil, true
+	}
+
+	// Multi-file torrent whose files SHOULD exist but are unobtainable: cannot
+	// verify — fail loud (CAVEAT B).
 	return nil, false
 }
 

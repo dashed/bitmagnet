@@ -504,11 +504,29 @@ mod tests {
         );
         assert_eq!(candidate_total(&server, "new.feature").await, 1);
 
-        // The torrent loses its files (multi-file, no blob): tombstone it so no
-        // stale candidate survives.
+        // The torrent loses its files (multi-file, no blob) but KEEPS its name:
+        // under F1 the name is always indexed, so it is re-indexed by name (not
+        // tombstoned). The doc survives, its old path is gone, and it is now
+        // recalled by its name instead.
         let batch = apply_changed_batch(&server, &[changed_row(1, "multi", None)])
             .await
             .unwrap();
+        assert_eq!(batch.upserts, 1);
+        assert_eq!(batch.skips, 0);
+        assert_eq!(batch.blob_errors, 0);
+        assert_eq!(doc_count(&server).await, 1);
+        assert_eq!(
+            candidate_total(&server, "new.feature").await,
+            0,
+            "old path must be gone once the torrent is re-indexed by name only"
+        );
+        assert_eq!(candidate_total(&server, "release.name").await, 1);
+
+        // A torrent with NEITHER a name NOR path text is genuinely tombstoned
+        // (from_torrent returns None), so no stale candidate survives.
+        let mut nameless = changed_row(1, "multi", None);
+        nameless.name = "   ".to_owned();
+        let batch = apply_changed_batch(&server, &[nameless]).await.unwrap();
         assert_eq!(batch.upserts, 0);
         assert_eq!(batch.skips, 1);
         assert_eq!(batch.blob_errors, 0);
@@ -566,19 +584,28 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(batch.upserts, 2);
-        assert_eq!(batch.skips, 1);
+        // Row 2 (no blob) keeps its name under F1, so it is re-indexed by name —
+        // an upsert now, not a skip. Row 3 (corrupt blob) is still a blob-error
+        // tombstone.
+        assert_eq!(batch.upserts, 3);
+        assert_eq!(batch.skips, 0);
         assert_eq!(batch.blob_errors, 1);
         assert_eq!(
             batch.upserted_info_hashes,
-            vec![vec![1; 20], vec![4; 20]],
+            vec![vec![1; 20], vec![2; 20], vec![4; 20]],
             "the window-level stale-tombstone filter receives only successful upserts"
         );
-        assert_eq!(doc_count(&server).await, 2);
+        // Rows 1, 2 (name-only), 4 present; row 3 tombstoned by its corrupt blob.
+        assert_eq!(doc_count(&server).await, 3);
         assert_eq!(candidate_total(&server, "fresh.one").await, 1);
         assert_eq!(candidate_total(&server, "fresh.four").await, 1);
+        // Row 2's old path is gone (superseded to a name-only doc); row 3 is fully
+        // gone. All three surviving docs (1, 2, 4) share the display name, so the
+        // name term recalls every one of them — proving name indexing is live for
+        // the name-only row too.
         assert_eq!(candidate_total(&server, "stale.two").await, 0);
         assert_eq!(candidate_total(&server, "stale.three").await, 0);
+        assert_eq!(candidate_total(&server, "release.name").await, 3);
     }
 
     /// The HARD-FAIL guard: a deleted-torrent read that reaches its runaway

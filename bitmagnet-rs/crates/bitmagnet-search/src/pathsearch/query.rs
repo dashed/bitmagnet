@@ -315,6 +315,28 @@ mod tests {
     }
 
     #[test]
+    fn no_info_name_only_doc_is_candidate() {
+        // no_info-shaped: EMPTY paths, name only. Proves an empty-path doc is
+        // still recallable purely by its name field (the ~21.9M no_info case).
+        let (index, reader, fields) =
+            index_docs(&[doc_named(7, "OmegaPACK.SoreForDays.Complete", &[], 5)]);
+        let out = run_path_candidates(
+            &index,
+            &reader,
+            &fields,
+            PathCandidatesRequest {
+                query: "sorefordays".to_owned(),
+                limit: 10,
+                oversample: 0,
+                sort: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.candidate_total, 1);
+        assert_eq!(out.candidates[0].info_hash, vec![7; 20]);
+    }
+
+    #[test]
     fn name_match_outranks_path_only_match() {
         // Two docs match "aurora": one only in a file path, one in its name. The
         // name-boosted doc must sort first under relevance (order_by_score).

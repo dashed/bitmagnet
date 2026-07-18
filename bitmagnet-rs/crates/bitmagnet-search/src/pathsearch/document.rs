@@ -22,12 +22,19 @@ pub struct PathDocument {
 impl PathDocument {
     /// Build a pathsearch document from a torrent+blob row.
     ///
-    /// Returns `Ok(None)` for torrents that expose no path text. For single-file
-    /// torrents without a file blob, the torrent name is the path-equivalent.
+    /// The torrent display `name` is ALWAYS indexed (all `files_status`), so a
+    /// term that lives only in the name is recall-visible — this covers the
+    /// ~21.9M `no_info` torrents (no file list at all) and the ~17.5M multi-file
+    /// torrents whose term is in the name, not any path. File `paths` are indexed
+    /// when present. Returns `Ok(None)` only when there is NOTHING to index (both
+    /// an empty name AND no path text). For single-file torrents without a file
+    /// blob, the name is also kept as the path-equivalent (unchanged).
     ///
     /// # Errors
     /// Returns blob decode errors from [`TorrentWithBlob::files`].
     pub fn from_torrent(row: &TorrentWithBlob) -> anyhow::Result<Option<Self>> {
+        let name = row.name.trim().to_owned();
+
         let files = row
             .files()
             .with_context(|| format!("decoding files_data for {}", row.info_hash))?;
@@ -39,14 +46,13 @@ impl PathDocument {
             })
             .collect();
 
-        if paths.is_empty() && row.files_status.eq_ignore_ascii_case("single") {
-            let name = row.name.trim();
-            if !name.is_empty() {
-                paths.push(name.to_owned());
-            }
+        if paths.is_empty() && !name.is_empty() && row.files_status.eq_ignore_ascii_case("single") {
+            paths.push(name.clone());
         }
 
-        if paths.is_empty() {
+        // Index the torrent whenever it carries ANY searchable text: a name OR at
+        // least one path. Only a torrent with neither is skipped.
+        if paths.is_empty() && name.is_empty() {
             return Ok(None);
         }
 
@@ -57,7 +63,7 @@ impl PathDocument {
 
         Ok(Some(Self {
             info_hash: row.info_hash.as_slice().to_vec(),
-            name: row.name.trim().to_owned(),
+            name,
             paths,
             size: u64::try_from(row.size).unwrap_or(0),
             files_count,
@@ -74,9 +80,13 @@ mod tests {
     use bitmagnet_model::{serialize_files, BlobFile};
 
     fn row(files_status: &str, files_data: Option<Vec<u8>>) -> TorrentWithBlob {
+        named_row("Release.Name.mkv", files_status, files_data)
+    }
+
+    fn named_row(name: &str, files_status: &str, files_data: Option<Vec<u8>>) -> TorrentWithBlob {
         TorrentWithBlob {
             info_hash: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
-            name: "Release.Name.mkv".to_owned(),
+            name: name.to_owned(),
             size: 123,
             files_status: files_status.to_owned(),
             files_count: None,
@@ -113,9 +123,35 @@ mod tests {
     }
 
     #[test]
-    fn no_path_text_skips_document() {
-        assert!(PathDocument::from_torrent(&row("multi", None))
+    fn multi_file_without_paths_is_indexed_by_name() {
+        // F1: a multi-file torrent with no obtainable paths is no longer skipped —
+        // its name is indexed (empty paths, populated name) so a name-only term
+        // recalls it.
+        let doc = PathDocument::from_torrent(&row("multi", None))
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert!(doc.paths.is_empty());
+        assert_eq!(doc.name, "Release.Name.mkv");
+    }
+
+    #[test]
+    fn no_info_torrent_is_indexed_by_name() {
+        // The ~21.9M no_info case: zero files, non-empty name → a doc with empty
+        // paths and a populated, queryable name field.
+        let doc = PathDocument::from_torrent(&named_row("OmegaPACK.SoreForDays", "no_info", None))
+            .unwrap()
+            .unwrap();
+        assert!(doc.paths.is_empty());
+        assert_eq!(doc.name, "OmegaPACK.SoreForDays");
+    }
+
+    #[test]
+    fn empty_name_and_no_paths_skips_document() {
+        // Nothing to index (empty name AND no path text) → still Ok(None).
+        assert!(
+            PathDocument::from_torrent(&named_row("   ", "no_info", None))
+                .unwrap()
+                .is_none()
+        );
     }
 }

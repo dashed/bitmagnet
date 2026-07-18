@@ -250,16 +250,16 @@ func TestTorrentRefine_SingleFileExtFilterRefinesAgainstName(t *testing.T) {
 func TestNameRescue_KeepsNameOnlyMatchUnfiltered(t *testing.T) {
 	p := refinePredicate{substr: "sorefordays"}
 
-	if !nameRescue("OmegaPACK.SoreForDays.Complete", p) {
+	if !nameMatches("OmegaPACK.SoreForDays.Complete", p) {
 		t.Fatal("name-only match with no filters must be rescued")
 	}
 
 	// Case-insensitive, mirroring PG lower-cased tsv/name search.
-	if !nameRescue("omegapack.SOREFORDAYS.complete", p) {
+	if !nameMatches("omegapack.SOREFORDAYS.complete", p) {
 		t.Fatal("name rescue must be case-insensitive")
 	}
 
-	if nameRescue("OmegaPACK.Something.Else", p) {
+	if nameMatches("OmegaPACK.Something.Else", p) {
 		t.Fatal("name without the substring must not be rescued")
 	}
 }
@@ -270,15 +270,15 @@ func TestNameRescue_KeepsNameOnlyMatchUnfiltered(t *testing.T) {
 func TestNameRescue_DropsUnderExtensionOrSizeFilter(t *testing.T) {
 	name := "OmegaPACK.SoreForDays.Complete"
 
-	if nameRescue(name, refinePredicate{substr: "sorefordays", extensions: extSet("mkv")}) {
+	if nameMatches(name, refinePredicate{substr: "sorefordays", extensions: extSet("mkv")}) {
 		t.Fatal("name rescue must be disabled when an extension filter is active")
 	}
 
-	if nameRescue(name, refinePredicate{substr: "sorefordays", minSize: 1}) {
+	if nameMatches(name, refinePredicate{substr: "sorefordays", minSize: 1}) {
 		t.Fatal("name rescue must be disabled when a min-size bound is active")
 	}
 
-	if nameRescue(name, refinePredicate{substr: "sorefordays", maxSize: 1}) {
+	if nameMatches(name, refinePredicate{substr: "sorefordays", maxSize: 1}) {
 		t.Fatal("name rescue must be disabled when a max-size bound is active")
 	}
 }
@@ -286,7 +286,7 @@ func TestNameRescue_DropsUnderExtensionOrSizeFilter(t *testing.T) {
 // End-to-end at the refineMatches decision: OmegaPACK-shaped candidate — 0 files
 // match, term only in the name. Kept when unfiltered, dropped once any
 // extension/size filter is present. This mirrors the composer's keep-decision
-// `torrentMatches(files, pred) || nameRescue(name, pred)`.
+// `torrentMatches(files, pred) || nameMatches(name, pred)`.
 func TestNameRescue_OmegaPACKShapedKeepDecision(t *testing.T) {
 	files := []model.TorrentFile{
 		tf("disc1/track01.flac", "flac", 10),
@@ -295,7 +295,7 @@ func TestNameRescue_OmegaPACKShapedKeepDecision(t *testing.T) {
 	name := "OmegaPACK.SoreForDays.Complete"
 
 	keep := func(p refinePredicate) bool {
-		return torrentMatches(files, p) || nameRescue(name, p)
+		return torrentMatches(files, p) || nameMatches(name, p)
 	}
 
 	if !keep(refinePredicate{substr: "sorefordays"}) {
@@ -308,6 +308,42 @@ func TestNameRescue_OmegaPACKShapedKeepDecision(t *testing.T) {
 
 	if keep(refinePredicate{substr: "sorefordays", minSize: 5}) {
 		t.Fatal("name-only candidate must be dropped when a size filter is present")
+	}
+}
+
+// A no_info torrent (no file list by nature) must be REFINABLE (ok=true) with an
+// empty file list — NOT fail-loud — so the name rescue can keep it. A genuine
+// multi-file torrent whose files are unobtainable still fails loud (CAVEAT B).
+func TestFilesForRefine_NoInfoIsEmptyRefinableNotFailLoud(t *testing.T) {
+	for _, status := range []model.FilesStatus{model.FilesStatusNoInfo, model.FilesStatusOverThreshold} {
+		tor := model.Torrent{FilesStatus: status, Name: "OmegaPACK.SoreForDays.Complete"}
+
+		files, ok := filesForRefine(tor)
+		if !ok {
+			t.Fatalf("%s torrent must be refinable (ok=true), not fail-loud", status)
+		}
+
+		if len(files) != 0 {
+			t.Fatalf("%s torrent must resolve to an empty file list, got %v", status, files)
+		}
+
+		// Unfiltered: kept by name rescue at the composer's keep-decision.
+		p := refinePredicate{substr: "sorefordays"}
+		if !(torrentMatches(files, p) || nameMatches(tor.Name, p)) {
+			t.Fatalf("%s name-only torrent must be kept when unfiltered", status)
+		}
+
+		// Under an extension filter: cannot be satisfied → dropped (PG-consistent).
+		pf := refinePredicate{substr: "sorefordays", extensions: extSet("mkv")}
+		if torrentMatches(files, pf) || nameMatches(tor.Name, pf) {
+			t.Fatalf("%s name-only torrent must be dropped under an extension filter", status)
+		}
+	}
+
+	// A genuine multi-file torrent with no obtainable files is STILL fail-loud.
+	bad := model.Torrent{FilesStatus: model.FilesStatusMulti, Name: "has.the.term"}
+	if _, ok := filesForRefine(bad); ok {
+		t.Fatal("multi-file torrent with no obtainable files must stay fail-loud (ok=false)")
 	}
 }
 

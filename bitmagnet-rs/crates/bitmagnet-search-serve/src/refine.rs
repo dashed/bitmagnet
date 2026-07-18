@@ -73,24 +73,29 @@ impl RefinePredicate {
     /// Reports whether a candidate whose FILES do not match should still be kept
     /// because the search substring is present in its torrent display `name`.
     ///
-    /// This ports Go's `nameRescue` in
+    /// This ports Go's `nameMatches` in
     /// `internal/search/pathsearch/refine.go` byte-for-byte. L3's path-bag now
-    /// indexes the torrent name too (F1), so a multi-file torrent carrying the
-    /// term only in its name is recalled — but the file-level exact refine would
-    /// still drop it because no file path contains the term. This rescue keeps
-    /// it, matching PostgreSQL name-search semantics.
+    /// indexes the torrent name too (F1), for every files_status — including the
+    /// no_info torrents with no file list and the multi-file torrents whose term
+    /// lives only in the name. The file-level exact refine would still drop these
+    /// because no file path contains the term. This keeps them, matching
+    /// PostgreSQL name-search semantics.
     ///
     /// SOUNDNESS (Go CAVEAT C): a name carries the substring but NOT any file's
     /// extension or size. The rescue is sound ONLY when no extension filter and
     /// no size bound is active; under either filter a name-only candidate cannot
     /// be proven to satisfy it and MUST fall through to a normal drop (never
     /// fail-loud — it is a genuine non-match).
-    pub(crate) fn name_rescue(&self, name: &str) -> bool {
-        if self.has_extension_filter() || self.min_size > 0 || self.max_size > 0 {
+    pub(crate) fn name_matches(&self, name: &str) -> bool {
+        if self.is_empty_substr()
+            || self.has_extension_filter()
+            || self.min_size > 0
+            || self.max_size > 0
+        {
             return false;
         }
 
-        !self.substr.is_empty() && name.to_lowercase().contains(&self.substr)
+        name.to_lowercase().contains(&self.substr)
     }
 }
 
@@ -181,7 +186,20 @@ pub(crate) fn files_for_refine(torrent: &Torrent) -> Option<Vec<BlobFile>> {
         }]);
     }
 
+    if is_fileless_by_nature(torrent.files_status) {
+        return Some(Vec::new());
+    }
+
     None
+}
+
+/// Reports whether a torrent has no stored file list BY NATURE (not a
+/// missing-blob failure): `no_info` never had one and `over_threshold`'s was too
+/// large to persist. Such a torrent is refinable with an EMPTY file list so the
+/// composer's name rescue can keep it, rather than fail-loud (Go CAVEAT B). This
+/// mirrors Go's `filesForRefine` fileless-status branch.
+fn is_fileless_by_nature(status: FilesStatus) -> bool {
+    matches!(status, FilesStatus::NoInfo | FilesStatus::OverThreshold)
 }
 
 /// One bounded file-list decode used by the composer.
@@ -251,6 +269,14 @@ pub(crate) fn files_for_refine_bounded(
             files: vec![file],
             decompressed_bytes: 0,
             owned_string_bytes,
+        }));
+    }
+
+    if is_fileless_by_nature(torrent.files_status) {
+        return Ok(Some(BoundedRefineFiles {
+            files: Vec::new(),
+            decompressed_bytes: 0,
+            owned_string_bytes: 0,
         }));
     }
 
@@ -559,32 +585,32 @@ mod tests {
     }
 
     #[test]
-    fn name_rescue_keeps_name_only_match_unfiltered() {
+    fn name_matches_keeps_name_only_match_unfiltered() {
         // Parity with Go's TestNameRescue_KeepsNameOnlyMatchUnfiltered: a name
         // that contains the term is rescued when no extension/size filter applies.
         let predicate = predicate("sorefordays", &[], 0, 0);
 
-        assert!(predicate.name_rescue("OmegaPACK.SoreForDays.Complete"));
+        assert!(predicate.name_matches("OmegaPACK.SoreForDays.Complete"));
         // Case-insensitive, mirroring the Go strings.ToLower + PG tsv semantics.
-        assert!(predicate.name_rescue("omegapack.SOREFORDAYS.complete"));
-        assert!(!predicate.name_rescue("OmegaPACK.Something.Else"));
+        assert!(predicate.name_matches("omegapack.SOREFORDAYS.complete"));
+        assert!(!predicate.name_matches("OmegaPACK.Something.Else"));
     }
 
     #[test]
-    fn name_rescue_drops_under_extension_or_size_filter() {
+    fn name_matches_drops_under_extension_or_size_filter() {
         // Parity with Go's TestNameRescue_DropsUnderExtensionOrSizeFilter: the
         // rescue is unsound under any extension or size filter and must be off.
         let name = "OmegaPACK.SoreForDays.Complete";
 
-        assert!(!predicate("sorefordays", &["mkv"], 0, 0).name_rescue(name));
-        assert!(!predicate("sorefordays", &[], 1, 0).name_rescue(name));
-        assert!(!predicate("sorefordays", &[], 0, 1).name_rescue(name));
+        assert!(!predicate("sorefordays", &["mkv"], 0, 0).name_matches(name));
+        assert!(!predicate("sorefordays", &[], 1, 0).name_matches(name));
+        assert!(!predicate("sorefordays", &[], 0, 1).name_matches(name));
     }
 
     #[test]
-    fn name_rescue_omegapack_shaped_keep_decision() {
+    fn name_matches_omegapack_shaped_keep_decision() {
         // Parity with Go's TestNameRescue_OmegaPACKShapedKeepDecision, at the
-        // composer's `torrent_matches || name_rescue` keep-decision: 0 files
+        // composer's `torrent_matches || name_matches` keep-decision: 0 files
         // match, term only in the name.
         let files = vec![
             file("disc1/track01.flac", "flac", 10),
@@ -592,11 +618,42 @@ mod tests {
         ];
         let name = "OmegaPACK.SoreForDays.Complete";
 
-        let keep = |p: &RefinePredicate| torrent_matches(&files, p) || p.name_rescue(name);
+        let keep = |p: &RefinePredicate| torrent_matches(&files, p) || p.name_matches(name);
 
         assert!(keep(&predicate("sorefordays", &[], 0, 0)));
         assert!(!keep(&predicate("sorefordays", &["flac"], 0, 0)));
         assert!(!keep(&predicate("sorefordays", &[], 5, 0)));
+    }
+
+    #[test]
+    fn fileless_by_nature_is_empty_refinable_not_none() {
+        // Parity with Go's TestFilesForRefine_NoInfoIsEmptyRefinableNotFailLoud:
+        // a no_info / over_threshold torrent resolves to an EMPTY file list (Some,
+        // not None) so the name rescue can keep it — never the fail-loud None.
+        for status in [FilesStatus::NoInfo, FilesStatus::OverThreshold] {
+            let torrent = torrent(status, "OmegaPACK.SoreForDays.Complete", 0, None);
+
+            assert_eq!(files_for_refine(&torrent), Some(Vec::new()));
+
+            let decoded = files_for_refine_bounded(&torrent, 4_096, 4_096, 16)
+                .unwrap()
+                .expect("fileless torrent must be refinable, not None");
+            assert!(decoded.files.is_empty());
+
+            let keep = |p: &RefinePredicate| {
+                torrent_matches(&decoded.files, p) || p.name_matches(&torrent.name)
+            };
+            assert!(keep(&predicate("sorefordays", &[], 0, 0)));
+            assert!(!keep(&predicate("sorefordays", &["mkv"], 0, 0)));
+        }
+
+        // A genuine multi-file torrent with no obtainable files stays None
+        // (CAVEAT B fail-loud), unchanged.
+        let bad = torrent(FilesStatus::Multi, "has.the.term", 42, None);
+        assert_eq!(files_for_refine(&bad), None);
+        assert!(files_for_refine_bounded(&bad, 4_096, 4_096, 16)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
