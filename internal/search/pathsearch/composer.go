@@ -135,8 +135,10 @@ type Filters struct {
 
 // predicate builds the lower-cased exact-refine predicate from the filters.
 func (f Filters) predicate() refinePredicate {
+	substr := strings.ToLower(strings.TrimSpace(f.Query))
 	p := refinePredicate{
-		substr:  strings.ToLower(strings.TrimSpace(f.Query)),
+		substr:  substr,
+		tokens:  tokenizeQuery(substr),
 		minSize: f.MinSize,
 		maxSize: f.MaxSize,
 	}
@@ -963,8 +965,8 @@ func (c *Composer) refineMatches(
 			continue
 		}
 
-		if !torrentMatches(files, pred) && !nameMatches(it.Torrent.Name, pred) {
-			continue // L3 false positive with no name rescue
+		if !torrentTokenMatch(files, it.Torrent.Name, pred) {
+			continue // L3 false positive: some query token matches nowhere (F11)
 		}
 
 		// Stop before exceeding the retained budget — but always keep at least one

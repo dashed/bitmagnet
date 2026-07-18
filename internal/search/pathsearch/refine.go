@@ -13,8 +13,16 @@ import (
 // L3 carries (PathCandidate has no path text, extension, or size).
 type refinePredicate struct {
 	// substr is the lower-cased real path substring to verify. Required: the
-	// composer only takes the L3 route when there is path text to match.
+	// composer only takes the L3 route when there is path text to match. It stays
+	// the whole verbatim query — file-LEVEL filtering (matchFile / matchedFiles)
+	// and the single-token candidate keep both verify it unchanged.
 	substr string
+	// tokens is the lower-cased whitespace-split query, used by the token-AND
+	// candidate keep (torrentTokenMatch). A single-token query has tokens ==
+	// []string{substr}, so the keep decision stays byte-identical to the verbatim
+	// substr match; multi-word queries pass iff EVERY token matches somewhere in
+	// the union of the name and file paths (F11).
+	tokens []string
 	// extensions is the set of allowed lower-cased extensions; empty = any.
 	// Built from the typed file-type/extension filters, expanded via
 	// model.FileType.Extensions().
@@ -112,6 +120,47 @@ func nameMatches(name string, p refinePredicate) bool {
 	}
 
 	return strings.Contains(strings.ToLower(name), p.substr)
+}
+
+// tokenizeQuery splits a lower-cased query into its whitespace-separated tokens,
+// dropping empty tokens. It is fed the already lower-cased+trimmed substr, so
+// strings.Fields (Unicode-whitespace split, empties dropped) yields the F11
+// token set directly. A single-word query yields exactly []string{substr}.
+func tokenizeQuery(loweredQuery string) []string {
+	return strings.Fields(loweredQuery)
+}
+
+// torrentTokenMatch is the F11 token-AND candidate keep: a candidate is kept iff
+// EVERY query token appears (case-insensitive substring) SOMEWHERE in the union
+// of the torrent name and its file paths — tokens may match in different strings.
+// This mirrors PostgreSQL FTS, which ANDs lexemes across the whole torrent tsv
+// (name + paths) rather than requiring the verbatim phrase.
+//
+// It generalizes the pre-F11 keep decision (torrentMatches || nameMatches) by
+// evaluating each token as its own single-substring predicate over the SAME
+// structured extension/size filters: a token is satisfied when some file whose
+// extension/size pass the filter has the token in its path (torrentMatches), or
+// when the F1 name rescue is open and the name carries it (nameMatches). Reusing
+// those two helpers keeps every existing soundness guard — the ext/size coupling
+// on a single file and the name-rescue guard — intact per token.
+//
+// For a single-token query (tokens == []string{substr}) this is byte-identical
+// to the old torrentMatches || nameMatches decision.
+func torrentTokenMatch(files []model.TorrentFile, name string, p refinePredicate) bool {
+	if len(p.tokens) == 0 {
+		return false
+	}
+
+	for _, tok := range p.tokens {
+		tp := p
+		tp.substr = tok
+
+		if !torrentMatches(files, tp) && !nameMatches(name, tp) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // filesForRefine resolves the file list to verify a candidate against. t.Files is

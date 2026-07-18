@@ -347,6 +347,153 @@ func TestFilesForRefine_NoInfoIsEmptyRefinableNotFailLoud(t *testing.T) {
 	}
 }
 
+// --- F11 token-AND candidate keep --------------------------------------------
+
+func TestTokenizeQuery(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"   ", []string{}},
+		{"inception", []string{"inception"}},
+		{"omegapack sorefordays", []string{"omegapack", "sorefordays"}},
+		{"  omegapack   sorefordays  ", []string{"omegapack", "sorefordays"}},
+		{"a\tb\nc", []string{"a", "b", "c"}},
+	} {
+		got := tokenizeQuery(tc.in)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("tokenizeQuery(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A single-token query must be byte-identical to the pre-F11 keep decision
+// `torrentMatches(files, p) || nameMatches(name, p)` for every filter shape.
+func TestTorrentTokenMatch_SingleTokenIdenticalToLegacyKeep(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("movies/Inception.2010.1080p.mkv", "mkv", 1500),
+		tf("movies/readme.txt", "txt", 10),
+	}
+	name := "Inception.2010.Bluray"
+
+	for _, f := range []Filters{
+		{Query: "inception"},
+		{Query: "inception", Extensions: []string{"mkv"}},
+		{Query: "inception", Extensions: []string{"avi"}},
+		{Query: "readme"}, // matches a file path, not the name
+		{Query: "bluray"}, // matches the name only (rescue)
+		{Query: "bluray", Extensions: []string{"mkv"}}, // rescue disabled by ext filter
+		{Query: "inception", MinSize: 1000},
+		{Query: "inception", MinSize: 2000},
+		{Query: "absent"},
+	} {
+		p := f.predicate()
+		legacy := torrentMatches(files, p) || nameMatches(name, p)
+
+		if got := torrentTokenMatch(files, name, p); got != legacy {
+			t.Fatalf("query=%q filters=%+v: torrentTokenMatch=%v, legacy=%v", f.Query, f, got, legacy)
+		}
+	}
+}
+
+// The live regression: "OmegaPACK SoreForDays" against a torrent whose name/paths
+// carry both words but NOT the verbatim phrase. Each token lives in a different
+// string (one in the name, one in a path) — token-AND must keep it, while the
+// pre-F11 verbatim-substring keep dropped it.
+func TestTorrentTokenMatch_UnionAcrossNameAndPaths(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("Emily Willis/SoreForDays - Part 1.mp4", "mp4", 100),
+	}
+	name := "Emily Willis - OmegaPACK Collection"
+	p := Filters{Query: "OmegaPACK SoreForDays"}.predicate()
+
+	if !torrentTokenMatch(files, name, p) {
+		t.Fatal("both tokens present across name+paths must be kept (F11)")
+	}
+
+	// Pre-F11 verbatim keep drops it: the phrase is in neither the name nor a path.
+	if torrentMatches(files, p) || nameMatches(name, p) {
+		t.Fatal("guard: the verbatim phrase must NOT be a substring anywhere (else the test proves nothing)")
+	}
+}
+
+// Both tokens in the same string (a single file path) is still a match.
+func TestTorrentTokenMatch_BothTokensInOnePath(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("shows/omegapack.sorefordays.part1.mkv", "mkv", 100),
+	}
+	p := Filters{Query: "omegapack sorefordays"}.predicate()
+
+	if !torrentTokenMatch(files, "unrelated name", p) {
+		t.Fatal("both tokens in one path must be kept")
+	}
+}
+
+// One token absent everywhere → dropped, even if the other token matches.
+func TestTorrentTokenMatch_MissingTokenDrops(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("Emily Willis/SoreForDays - Part 1.mp4", "mp4", 100),
+	}
+	name := "Emily Willis Collection"
+	p := Filters{Query: "OmegaPACK SoreForDays"}.predicate()
+
+	if torrentTokenMatch(files, name, p) {
+		t.Fatal("omegapack token is absent from name+paths → candidate must be dropped")
+	}
+}
+
+func TestTorrentTokenMatch_CaseInsensitive(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("DISC1/SoreForDays.MKV", "MKV", 100),
+	}
+	name := "OMEGAPACK release"
+	p := Filters{Query: "omegapack sorefordays"}.predicate()
+
+	if !torrentTokenMatch(files, name, p) {
+		t.Fatal("token match must be case-insensitive across name+paths")
+	}
+}
+
+// An empty query yields zero tokens; the route is gated on substr!="" before
+// refine, but torrentTokenMatch must fail-closed (drop) rather than keep-all.
+func TestTorrentTokenMatch_EmptyQueryDrops(t *testing.T) {
+	files := []model.TorrentFile{tf("anything.mkv", "mkv", 1)}
+	for _, q := range []string{"", "   "} {
+		p := Filters{Query: q}.predicate()
+		if len(p.tokens) != 0 {
+			t.Fatalf("query %q should tokenize to zero tokens, got %v", q, p.tokens)
+		}
+
+		if torrentTokenMatch(files, "any name", p) {
+			t.Fatalf("empty-token predicate (query %q) must drop, not keep-all", q)
+		}
+	}
+}
+
+// Multi-token under an extension filter: the name rescue is OFF, so EVERY token
+// must be found in a path of a file that passes the extension filter.
+func TestTorrentTokenMatch_MultiTokenUnderExtensionFilter(t *testing.T) {
+	files := []model.TorrentFile{
+		tf("omegapack/sorefordays.part1.mkv", "mkv", 100),
+		tf("omegapack/sample.avi", "avi", 5),
+	}
+	name := "OmegaPACK SoreForDays" // both tokens, but name is ineligible under ext filter
+
+	// Both tokens live in the mkv path → kept.
+	kept := Filters{Query: "omegapack sorefordays", Extensions: []string{"mkv"}}.predicate()
+	if !torrentTokenMatch(files, name, kept) {
+		t.Fatal("both tokens present in an mkv path must be kept under the mkv filter")
+	}
+
+	// 'part1' only appears in the mkv path here; 'avi' token only in the avi path,
+	// which is excluded by the mkv filter → dropped (name cannot rescue under a filter).
+	dropped := Filters{Query: "sorefordays avi", Extensions: []string{"mkv"}}.predicate()
+	if torrentTokenMatch(files, name, dropped) {
+		t.Fatal("a token that only matches an ext-excluded path must not be rescued by the name")
+	}
+}
+
 // --- refine-before-paginate (the key correctness guarantee) ------------------
 
 type prow struct {
