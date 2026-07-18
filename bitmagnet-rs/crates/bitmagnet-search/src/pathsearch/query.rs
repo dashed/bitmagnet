@@ -64,25 +64,52 @@ pub fn run_path_candidates(
     })
 }
 
-/// Build the ngram query that recalls a torrent when the term appears in EITHER
-/// a file path OR the torrent display name (F1 name visibility).
+/// Build the ngram query that recalls a torrent when EVERY whitespace-separated
+/// query word appears in EITHER a file path OR the torrent display name (F1 name
+/// visibility, F12 per-word recall).
 ///
-/// The same gram-token set is built once, then required (`Must`) as a
-/// conjunction over the `path` field and, separately, over the `name` field. The
-/// two conjunctions are combined as top-level `Should` clauses so a doc is a
-/// candidate if it matches either — and the name conjunction is wrapped in a
+/// The raw query is first split on whitespace into words. For each word its
+/// de-duplicated gram set is built once and required (`Must`) as a conjunction
+/// over the `path` field and, separately, over the `name` field; those two
+/// conjunctions are combined as `Should` clauses so the word matches when it
+/// appears in either field — with the name conjunction wrapped in a
 /// [`BoostQuery`] (weight [`name_boost`]) so name matches rank above path-only
-/// matches under `order_by_score`.
+/// matches under `order_by_score`. The per-word clauses are then ANDed
+/// (`Must`) so a doc is a candidate only when all words are present, though each
+/// word may land in a different field and the words need not be adjacent.
 ///
-/// Empty/too-short queries intentionally match nothing; a blank query must not
-/// become a full-index scan.
+/// A single-word query yields exactly one per-word clause, returned directly so
+/// its structure — `Should(path) OR Should(boosted name)` — is identical to the
+/// pre-F12 whole-string form.
+///
+/// Words too short to produce grams (fewer than 2 chars) are skipped for recall;
+/// they are still enforced by the downstream refine (F11), so recall stays a
+/// superset of refine. Empty/whitespace-only or all-too-short queries match
+/// nothing; a blank query must not become a full-index scan.
 pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Query> {
-    let Some(tokens) = gram_tokens(index, raw) else {
-        return Box::new(EmptyQuery);
-    };
+    let mut word_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+    for word in raw.split_whitespace() {
+        let Some(tokens) = gram_tokens(index, word) else {
+            continue;
+        };
+        word_clauses.push((Occur::Must, word_clause(fields, &tokens)));
+    }
 
-    let path_clause = gram_conjunction(fields.path, &tokens);
-    let name_clause = gram_conjunction(fields.name, &tokens);
+    match word_clauses.len() {
+        0 => Box::new(EmptyQuery),
+        // A lone word IS the whole query: return its clause unwrapped so the
+        // top-level structure matches the pre-F12 single-string query exactly.
+        1 => word_clauses.pop().expect("len checked == 1").1,
+        _ => Box::new(BooleanQuery::new(word_clauses)),
+    }
+}
+
+/// Build the per-word recall clause: the word's gram conjunction over `path`
+/// combined (`Should`) with its boosted conjunction over `name`, so the word
+/// matches in either field.
+fn word_clause(fields: &Fields, tokens: &[String]) -> Box<dyn Query> {
+    let path_clause = gram_conjunction(fields.path, tokens);
+    let name_clause = gram_conjunction(fields.name, tokens);
     let boosted_name = BoostQuery::new(Box::new(name_clause), name_boost());
 
     Box::new(BooleanQuery::new(vec![
@@ -91,10 +118,11 @@ pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Qu
     ]))
 }
 
-/// Tokenize `raw` into the de-duplicated gram set used for both field clauses.
+/// Tokenize a single query `word` into the de-duplicated gram set used for both
+/// field clauses.
 ///
-/// Returns `None` (⇒ [`EmptyQuery`]) when the query is too short, the tokenizer
-/// is unregistered, or it produces no grams.
+/// Returns `None` when the word is too short (⇒ skipped for recall), the
+/// tokenizer is unregistered, or it produces no grams.
 fn gram_tokens(index: &Index, raw: &str) -> Option<Vec<String>> {
     let raw = raw.trim();
     if raw.chars().count() < 2 {
@@ -381,5 +409,114 @@ mod tests {
         .unwrap();
         assert_eq!(out.candidate_total, 0);
         assert!(out.candidates.is_empty());
+    }
+
+    /// Convenience: run a query and return the matching info_hash byte-tags.
+    fn recalled_tags(
+        index: &Index,
+        reader: &tantivy::IndexReader,
+        fields: &Fields,
+        query: &str,
+    ) -> Vec<u8> {
+        let out = run_path_candidates(
+            index,
+            reader,
+            fields,
+            PathCandidatesRequest {
+                query: query.to_owned(),
+                limit: 50,
+                oversample: 0,
+                sort: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut tags: Vec<u8> = out.candidates.iter().map(|c| c.info_hash[0]).collect();
+        tags.sort_unstable();
+        assert_eq!(tags.len() as u64, out.candidate_total);
+        tags
+    }
+
+    #[test]
+    fn single_word_regression_recall_unchanged() {
+        // A single-word query must recall exactly the doc containing the word and
+        // exclude one that does not — the F12 single-clause path is structurally
+        // the pre-F12 query.
+        let (index, reader, fields) = index_docs(&[
+            doc_named(1, "Aurora.2021.1080p", &["films/movie.mkv"], 5),
+            doc_named(2, "Unrelated.Release", &["films/other.mkv"], 5),
+        ]);
+        assert_eq!(recalled_tags(&index, &reader, &fields, "aurora"), vec![1]);
+    }
+
+    #[test]
+    fn multiword_non_adjacent_recalled() {
+        // Name reads "OmegaPACK by SoreForDays": the two query words appear in the
+        // name but NOT space-adjacent and in reversed order. Pre-F12 the
+        // whole-string gram AND (with the "by" and inter-word grams) dropped this
+        // doc; F12 recalls it because each word matches independently.
+        let (index, reader, fields) = index_docs(&[doc_named(
+            1,
+            "OmegaPACK by SoreForDays",
+            &["disc1/track01.flac"],
+            5,
+        )]);
+        assert_eq!(
+            recalled_tags(&index, &reader, &fields, "sorefordays omegapack"),
+            vec![1],
+            "reordered non-adjacent multi-word query must recall the doc"
+        );
+        // A word genuinely absent still excludes the doc — recall is an AND.
+        assert_eq!(
+            recalled_tags(&index, &reader, &fields, "omegapack missingword"),
+            Vec::<u8>::new(),
+            "an absent word must drop the candidate"
+        );
+    }
+
+    #[test]
+    fn word_split_across_name_and_path_recalled() {
+        // "aurora" appears only in the name, "borealis" only in a file path.
+        // Recall must union across fields per word and AND across words.
+        let (index, reader, fields) =
+            index_docs(&[doc_named(3, "Aurora Complete", &["disc/borealis.flac"], 5)]);
+        assert_eq!(
+            recalled_tags(&index, &reader, &fields, "aurora borealis"),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn sub_two_char_word_skipped_for_recall() {
+        // "Grab" contains the grams for "ab" but no "c". The 1-char word "c"
+        // yields no grams and is skipped, so "ab c" recalls exactly as "ab".
+        let (index, reader, fields) = index_docs(&[doc_named(4, "Grab", &["misc/file.mkv"], 5)]);
+        let just_ab = recalled_tags(&index, &reader, &fields, "ab");
+        assert_eq!(just_ab, vec![4]);
+        assert_eq!(
+            recalled_tags(&index, &reader, &fields, "ab c"),
+            just_ab,
+            "a sub-2-char word must not affect recall"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_query_is_empty() {
+        let (index, reader, fields) = index_docs(&[doc(1, &["Show.mkv"], 5)]);
+        for q in ["", "   ", "\t \n"] {
+            let out = run_path_candidates(
+                &index,
+                &reader,
+                &fields,
+                PathCandidatesRequest {
+                    query: q.to_owned(),
+                    limit: 10,
+                    oversample: 0,
+                    sort: Vec::new(),
+                },
+            )
+            .unwrap();
+            assert_eq!(out.candidate_total, 0, "query {q:?} must recall nothing");
+            assert!(out.candidates.is_empty());
+        }
     }
 }
