@@ -62,8 +62,24 @@ pub struct SearchResultItem {
     pub seeders: Option<u32>,
     /// Maximum source-row leechers, preserved for Torznab byte parity.
     pub leechers: Option<u32>,
-    /// `torrent_contents.files_count`.
+    /// `torrent_contents.files_count`. The denormalized file count carried for
+    /// ordering and the GraphQL surface; NOT the source of the Torznab `files`
+    /// attribute (see [`Self::files_attr_count`]).
     pub files_count: Option<u32>,
+    /// Source of the Torznab `files` attribute, matching live Go's observable
+    /// output. Go's `Torrent.AfterFind` deserialises `torrents.files_data` into
+    /// `Torrent.Files`, so the live serve path emits `files = len(files_data
+    /// entries)` when the blob is present and omits the attribute otherwise —
+    /// it does NOT use `torrent_contents.files_count`. This field reproduces
+    /// that with the presence-gated summary projection `CASE WHEN
+    /// torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count ELSE
+    /// NULL END`: the summary's `file_count` is co-written with `files_data`
+    /// from the same file slice, so it equals `len(files_data)` without
+    /// decoding the heavyweight blob. `None` when the row has no `files_data`
+    /// blob (e.g. single-file torrents with no enumerated file rows), which is
+    /// exactly when Go omits the attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files_attr_count: Option<u32>,
     /// `torrent_contents.video_resolution`.
     pub video_resolution: Option<VideoResolution>,
     /// `torrent_contents.video_3d`.
@@ -216,6 +232,7 @@ impl SearchResultItem {
             seeders: None,
             leechers: None,
             files_count: None,
+            files_attr_count: None,
             video_resolution: None,
             video_3d: None,
             video_codec: None,

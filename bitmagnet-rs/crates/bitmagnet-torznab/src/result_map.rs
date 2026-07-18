@@ -110,7 +110,7 @@ pub struct FixtureItemFields {
     pub published_at: i64,
     pub seeders: Option<u32>,
     pub leechers: Option<u32>,
-    pub files_count: Option<u32>,
+    pub files_attr_count: Option<u32>,
     pub video_resolution: Option<VideoResolution>,
     pub video_codec: Option<String>,
     pub release_group: Option<String>,
@@ -136,7 +136,7 @@ pub fn item_from_fixture_fields(fields: &FixtureItemFields) -> Item {
         published_at: fields.published_at,
         seeders: fields.seeders,
         leechers: fields.leechers,
-        files_count: fields.files_count,
+        files_attr_count: fields.files_attr_count,
         video_resolution: fields.video_resolution,
         video_codec: fields.video_codec.as_deref(),
         release_group: fields.release_group.as_deref(),
@@ -157,7 +157,7 @@ struct ResultFields<'a> {
     published_at: i64,
     seeders: Option<u32>,
     leechers: Option<u32>,
-    files_count: Option<u32>,
+    files_attr_count: Option<u32>,
     video_resolution: Option<VideoResolution>,
     video_codec: Option<&'a str>,
     release_group: Option<&'a str>,
@@ -179,7 +179,7 @@ impl<'a> From<&'a SearchResultItem> for ResultFields<'a> {
             published_at: row.published_at,
             seeders: row.seeders,
             leechers: row.leechers,
-            files_count: row.files_count,
+            files_attr_count: row.files_attr_count,
             video_resolution: row.video_resolution,
             video_codec: row.video_codec.as_deref(),
             release_group: row.release_group.as_deref(),
@@ -232,8 +232,13 @@ fn map_fields(row: ResultFields<'_>) -> Item {
             (u64::from(seeders) + u64::from(leechers)).to_string(),
         ));
     }
-    if let Some(files_count) = row.files_count.filter(|count| *count > 0) {
-        attrs.push(attr("files", files_count.to_string()));
+    // Match live Go's observable `files` attr: emit `len(Torrent.Files)` (which
+    // Go's AfterFind derives from the `files_data` blob), NOT
+    // `torrent_contents.files_count`. `files_attr_count` is the presence-gated
+    // summary count that equals `len(files_data)`; it is `None` (attr omitted)
+    // exactly when Go's blob is absent. See `SearchResultItem::files_attr_count`.
+    if let Some(files_attr_count) = row.files_attr_count.filter(|count| *count > 0) {
+        attrs.push(attr("files", files_attr_count.to_string()));
     }
     if let Some(release_year) = row.release_year {
         attrs.push(attr("year", release_year.to_string()));
@@ -333,7 +338,7 @@ mod tests {
             published_at: 0,
             seeders: Some(5),
             leechers: Some(7),
-            files_count: Some(4),
+            files_attr_count: Some(4),
             video_resolution: Some(VideoResolution::V1080p),
             video_codec: Some("x265"),
             release_group: Some("ExampleTeam"),

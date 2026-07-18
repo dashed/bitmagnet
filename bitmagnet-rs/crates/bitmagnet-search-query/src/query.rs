@@ -113,6 +113,7 @@ struct Hydration {
     tmdb_id: Option<String>,
     seeders: Option<u32>,
     leechers: Option<u32>,
+    files_attr_count: Option<u32>,
     torrent_content: Option<TorrentContent>,
     torrent_content_video_modifier: Option<String>,
     torrent_content_created_at: i64,
@@ -344,6 +345,10 @@ impl SearchQuery {
                     tmdb_id: row.try_get("tmdb_id")?,
                     seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
                     leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
+                    files_attr_count: decode_optional_u32(
+                        "files_attr_count",
+                        row.try_get("files_attr_count")?,
+                    )?,
                     torrent_content: Some(torrent_content),
                     torrent_content_video_modifier: row.try_get("tc_video_modifier")?,
                     torrent_content_created_at: row.try_get("tc_created_at")?,
@@ -477,6 +482,7 @@ impl SearchQuery {
                 seeders: h.seeders,
                 leechers: h.leechers,
                 files_count: row.files_count,
+                files_attr_count: h.files_attr_count,
                 video_resolution: row.video_resolution,
                 video_3d: row.video_3d,
                 video_codec: row.video_codec,
@@ -676,6 +682,7 @@ const HYDRATION_SELECT: &str = r#"SELECT torrent_contents.id AS id,
        torrents.files_status::text AS torrent_files_status,
        torrents.extension AS torrent_extension,
        torrents.files_count::bigint AS torrent_files_count,
+       CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count,
        COALESCE(torrents.file_extensions, '[]'::jsonb) AS torrent_file_extensions,
        torrents.info_hash_v1 AS info_hash_v1,
        torrents.info_hash_v2 AS info_hash_v2,
@@ -700,6 +707,7 @@ const HYDRATION_SELECT: &str = r#"SELECT torrent_contents.id AS id,
 const HYDRATION_FROM: &str = r#"
 FROM torrent_contents
 LEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash
+LEFT JOIN torrent_file_summary ON torrent_file_summary.info_hash = torrents.info_hash
 LEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id
 LEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'
 LEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'
@@ -1876,6 +1884,12 @@ mod tests {
     fn hydration_by_id_sql_shape() {
         let sql = hydration_by_id_sql(HydrateOptions::default());
         assert!(sql.contains("LEFT JOIN torrents"));
+        assert!(sql.contains(
+            "LEFT JOIN torrent_file_summary ON torrent_file_summary.info_hash = torrents.info_hash"
+        ));
+        assert!(sql.contains(
+            "CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count::bigint ELSE NULL END AS files_attr_count"
+        ));
         assert!(sql.contains("LEFT JOIN content ON"));
         assert!(sql.contains("content_attributes ca_imdb"));
         assert!(sql.contains("content_attributes ca_tmdb"));
@@ -1908,7 +1922,13 @@ mod tests {
             max_files_data_bytes: Some(67_108_864),
         });
 
-        assert!(!default_sql.contains("torrents.files_data"));
+        // The heavy blob is never PROJECTED by default. Its only default-path
+        // reference is the presence gate for the Torznab `files` attr, which
+        // reads the null bitmap / TOAST pointer and never materialises the blob.
+        assert!(!default_sql.contains("AS torrent_files_data"));
+        assert!(default_sql.contains(
+            "CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count"
+        ));
         assert!(files_sql.contains("torrents.files_data AS torrent_files_data"));
         assert!(bounded_files_sql.contains("octet_length(torrents.files_data) <= 67108864"));
         assert!(bounded_files_sql.contains("THEN torrents.files_data ELSE NULL"));

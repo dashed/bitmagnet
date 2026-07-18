@@ -198,10 +198,27 @@ The Torznab adapter builds options directly and never traverses gqlmodel, so its
 relevance order is the raw `ts_rank_cd` order above. (The phase-1 ledger's "FIND-2
 where Torznab hits them" resolves to: it doesn't. Recorded as a deviation.)
 
-- **`files` attr from `files_count`.** The crate projects `files_count` from
-  `torrent_contents.files_count`; Lane T emits the `files` attr from it. Live Go instead uses
-  `len(Torrent.Files)` which is empty under the D1 `torrent_files` read-disable, so live Go omits
-  `files`. Deliberate: the Rust behavior restores data the D1 cutover removed from Go's feed.
+- **`files` attr matches live Go's `len(Torrent.Files)` (presence-gated summary count), NOT
+  `torrent_contents.files_count`.** Live Go's Torznab serve path does NOT preload the
+  `torrent_files` relation (`TorrentContentDefaultOption` omits `WithFiles`), but
+  `Torrent.AfterFind` (`internal/model/torrents.go`) deserialises the `torrents.files_data` **blob**
+  into `Torrent.Files` whenever the blob is present. The D1 `torrent_files` read-disable gates only
+  the legacy relation, NOT the blob path — so live Go emits `files = len(DeserializeFiles(files_data))`
+  when the blob is present and omits the attr otherwise. (A prior version of this note wrongly
+  claimed live Go omits `files` under D1; the G2 replay disproved it — Go emitted `files` from the
+  blob, diverging from a `torrent_contents.files_count` projection both in value, e.g. 30 vs 35 when
+  the denormalized column disagrees with the blob length, and in presence, e.g. single-file torrents
+  with an empty blob but `files_count = 1`.) The crate therefore derives the `files` attr from
+  `SearchResultItem::files_attr_count`, projected in the id-keyed hydration query as
+  `CASE WHEN torrents.files_data IS NOT NULL THEN torrent_file_summary.file_count ELSE NULL END`.
+  `torrent_file_summary.file_count` is co-written with `files_data` from the same file slice
+  (`BuildFileSummary` sets it to `len(files)`; see `dhtcrawler/persist.go` + the blob-migration
+  backfill), so it equals `len(files_data)` **without decoding the heavyweight blob**. The
+  presence gate reads only the null bitmap / TOAST pointer (`IS NOT NULL`, no detoast). This is
+  byte-identical to live Go for every row carrying a summary row; the bounded legacy tail of
+  `files_data`-present-but-no-summary rows is closed by a one-shot summary backfill before the
+  route flip. `torrent_contents.files_count` remains projected as `files_count` for ordering and the
+  GraphQL surface, but is NEVER the source of the Torznab `files` attr.
 - **Ordered path must be lean (two-query hydration).** Literal LIMIT was necessary but not
   sufficient: a single statement that also carries the hydration LEFT JOINs + correlated
   subselects still plans as a parallel Gather Merge that shuffles equal-rank ties per execution.
