@@ -16,6 +16,17 @@ const DEFAULT_LIMIT: usize = 50;
 const DEFAULT_OVERSAMPLE: usize = 200;
 const MAX_CANDIDATES: usize = 5_000;
 
+/// Maximum number of per-word recall clauses built from a multi-word query.
+///
+/// Each per-word clause is an independent gram conjunction, and the sidecar
+/// search is synchronous and uncancellable, so an unbounded word count is a DoS
+/// amplifier (≈50 dense 2-char words project to ~12.7s on the 48.8M-doc prod
+/// index; abandoned requests keep burning workers). Capping at 12 bounds the
+/// worst case to ≈ K × dense-scan ≈ 2.4s, under the Go side's 5s RPC-abandon
+/// deadline. Dropping the least-selective words only WIDENS recall — F11 refine
+/// re-enforces the FULL token set downstream — so precision is unaffected.
+const MAX_RECALL_WORDS: usize = 12;
+
 /// Environment override for the relevance boost applied to torrent-name matches
 /// relative to file-path matches. See [`name_boost`].
 const NAME_BOOST_ENV: &str = "BITMAGNET_PATHSEARCH_NAME_BOOST";
@@ -89,14 +100,33 @@ pub fn run_path_candidates(
 /// same docs the old query did, keeping recall an unconditional superset of
 /// refine. Empty/whitespace-only queries still match nothing; a blank query must
 /// not become a full-index scan.
+///
+/// At most [`MAX_RECALL_WORDS`] per-word clauses are built; excess words are
+/// dropped from recall (keeping the most-selective, i.e. gram-richest, words).
+/// This only widens recall, so refine downstream keeps precision intact.
 pub fn build_path_query(index: &Index, fields: &Fields, raw: &str) -> Box<dyn Query> {
-    let mut word_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-    for word in raw.split_whitespace() {
-        let Some(tokens) = gram_tokens(index, word) else {
-            continue;
-        };
-        word_clauses.push((Occur::Must, word_clause(fields, &tokens)));
+    // Gram set of every recallable word, in first-occurrence order.
+    let mut words: Vec<Vec<String>> = raw
+        .split_whitespace()
+        .filter_map(|word| gram_tokens(index, word))
+        .collect();
+
+    // DoS guard: cap the per-word clause count. When more words than the cap
+    // yield grams, keep the K with the MOST grams (longest ⇒ most selective ⇒
+    // cheapest to scan and most useful), tie-broken by first-occurrence order
+    // for determinism, then restore query order for stable clause layout.
+    if words.len() > MAX_RECALL_WORDS {
+        let mut ranked: Vec<(usize, Vec<String>)> = words.into_iter().enumerate().collect();
+        ranked.sort_by(|(ai, a), (bi, b)| b.len().cmp(&a.len()).then_with(|| ai.cmp(bi)));
+        ranked.truncate(MAX_RECALL_WORDS);
+        ranked.sort_by_key(|(i, _)| *i);
+        words = ranked.into_iter().map(|(_, tokens)| tokens).collect();
     }
+
+    let mut word_clauses: Vec<(Occur, Box<dyn Query>)> = words
+        .iter()
+        .map(|tokens| (Occur::Must, word_clause(fields, tokens)))
+        .collect();
 
     match word_clauses.len() {
         // No word produced grams (all sub-2-char, or empty). Recall via the
@@ -540,5 +570,50 @@ mod tests {
             assert_eq!(out.candidate_total, 0, "query {q:?} must recall nothing");
             assert!(out.candidates.is_empty());
         }
+    }
+
+    #[test]
+    fn over_cap_drops_least_selective_words_and_widens_recall() {
+        // K+2 gram-yielding words: 12 gram-rich words that ARE in the doc, plus
+        // two 2-char words (fewest grams) that are NOT. With MAX_RECALL_WORDS=12
+        // the two shortest are dropped from recall, so the doc is still recalled
+        // — proving the cap WIDENS recall. An un-capped 14-way AND would exclude
+        // the doc on the two absent words.
+        let present: [&str; 12] = [
+            "wolfgang",
+            "tangerine",
+            "mango",
+            "papaya",
+            "kiwifruit",
+            "blueberry",
+            "raspberry",
+            "cranberry",
+            "pineapple",
+            "coconut",
+            "apricot",
+            "nectarine",
+        ];
+        let name = present.join(" ");
+        let (index, reader, fields) =
+            index_docs(&[doc_named(1, &name, &["disc/track.flac"], 5)]);
+
+        // Two absent 2-char words bracket the gram-rich ones; neither substring
+        // occurs in the doc, so an un-capped query would drop it.
+        let query = format!("zz {} qq", present.join(" "));
+        assert_eq!(recalled_tags(&index, &reader, &fields, &query), vec![1]);
+    }
+
+    #[test]
+    fn recall_is_deterministic() {
+        // The clause-selection ordering is deterministic, so the same query must
+        // yield the same candidate set on repeated runs.
+        let (index, reader, fields) = index_docs(&[
+            doc_named(1, "Aurora Complete", &["disc/borealis.flac"], 5),
+            doc_named(2, "zztop unrelated", &["disc/other.flac"], 5),
+        ]);
+        let first = recalled_tags(&index, &reader, &fields, "aurora borealis");
+        let second = recalled_tags(&index, &reader, &fields, "aurora borealis");
+        assert_eq!(first, second);
+        assert_eq!(first, vec![1]);
     }
 }
