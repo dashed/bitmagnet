@@ -6,13 +6,14 @@
 //! normalized to the frozen corpus `expected` schema. Contract:
 //! `docs/dev/rust-rewrite/phase3-contracts.md` §2.
 //!
-//! Milestone 1 (this commit): the CEL engine foundation — env binding, the YAML
-//! action-tree loader, the 13 actions + 4 conditions framework, the three
-//! custom CEL functions core.yml calls (`sum`, `join`, `matches`), the date
-//! parser, and the `bitmagnet-diff` driver. `parse_video_content`'s title/year
-//! extraction, `InferLanguages`, `InferVideo3D`, and `InferVideoModifier` are
-//! Lane-R-pending (see `parsers::video`); the four `attach_*` actions resolve to
-//! `unmatched` on the flags-off corpus path (contract §2.2).
+//! Scope: the CEL engine (env binding, the YAML action-tree loader, the 13
+//! actions + 4 conditions framework, the three custom CEL functions core.yml
+//! calls — `sum`, `join`, `matches`), the date parser, and `parse_video_content`
+//! via Lane R's parser (title/year/episode/language/video attributes). The Rust
+//! classifier matches all 330 flags-off golden fixtures exactly (see the
+//! `bitmagnet-diff` `classifier_pair` gate). The four `attach_*` actions resolve
+//! to `unmatched` on the flags-off corpus path (contract §2.2); the TMDB client
+//! (decision #3) lands as a later milestone.
 
 mod cel_value;
 mod engine;

@@ -1,6 +1,5 @@
-//! Classifier-owned parsers: the date lexer (fully ported) and the
-//! video-content orchestration (Lane-R-backed, with the title/year extraction
-//! still pending on R — see `video`).
+//! Classifier-owned parsers: the date lexer (fully ported here) and the
+//! `parse_video_content` adapter over Lane R's parser (see `video`).
 
 mod date;
 mod video;
