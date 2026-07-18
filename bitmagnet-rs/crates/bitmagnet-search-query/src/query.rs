@@ -1713,6 +1713,24 @@ mod tests {
     }
 
     #[test]
+    fn content_type_or_null_admits_null_rows_and_excludes_other_types() {
+        // Torznab's F3 widening renders `content_type IN (...) OR content_type IS
+        // NULL`: an unclassified (NULL) row passes via the second branch, while a
+        // row classified as a *different* type satisfies neither branch and is
+        // still excluded.
+        let params = TorznabSearchParams::new(100).with_filter(Criteria::Or(vec![
+            Criteria::ContentTypeIn(vec![ContentType::Movie]),
+            Criteria::IsNull(TorrentContentAttribute::ContentType),
+        ]));
+
+        assert_query(
+            params,
+            "SELECT torrent_contents.info_hash\nFROM torrent_contents\nWHERE (torrent_contents.content_type IN ($1) OR torrent_contents.content_type IS NULL)\nORDER BY torrent_contents.published_at DESC\nLIMIT 100",
+            &[Bind::Text("movie".to_owned())],
+        );
+    }
+
+    #[test]
     fn builds_torrent_tag_with_torrents_join() {
         let params =
             TorznabSearchParams::new(10).with_filter(Criteria::TorrentTag(vec!["x".to_owned()]));

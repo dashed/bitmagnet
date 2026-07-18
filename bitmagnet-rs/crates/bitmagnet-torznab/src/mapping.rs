@@ -1,8 +1,8 @@
 //! Torznab request-to-search-domain mapping.
 
 use bitmagnet_search_query::{
-    ContentRef, ContentType, Criteria, Episodes, TorrentContentOrder, TorznabSearchParams, Video3D,
-    VideoResolution,
+    ContentRef, ContentType, Criteria, Episodes, TorrentContentAttribute, TorrentContentOrder,
+    TorznabSearchParams, Video3D, VideoResolution,
 };
 
 use crate::categories::{
@@ -28,10 +28,10 @@ pub fn to_search_params(
     match request.type_.as_str() {
         FUNCTION_SEARCH => {}
         FUNCTION_MOVIE => {
-            criteria.push(Criteria::content_type_in([ContentType::Movie]));
+            criteria.push(content_type_or_null([ContentType::Movie]));
         }
         FUNCTION_TV_SEARCH => {
-            criteria.push(Criteria::content_type_in([ContentType::TvShow]));
+            criteria.push(content_type_or_null([ContentType::TvShow]));
             if let Some(season) = request.season {
                 let episodes = match request.episode {
                     Some(episode) => Episodes::new().add_episode(season, episode),
@@ -41,7 +41,7 @@ pub fn to_search_params(
             }
         }
         FUNCTION_MUSIC => {
-            criteria.push(Criteria::content_type_in([ContentType::Music]));
+            criteria.push(content_type_or_null([ContentType::Music]));
         }
         FUNCTION_BOOK => {
             criteria.push(book_content_types());
@@ -60,7 +60,7 @@ pub fn to_search_params(
 
         if category_has(CATEGORY_MOVIES, category_id) {
             if request.type_ != FUNCTION_MOVIE || category_id == CATEGORY_MOVIES {
-                per_category.push(Criteria::content_type_in([ContentType::Movie]));
+                per_category.push(content_type_or_null([ContentType::Movie]));
             }
             match category_id {
                 CATEGORY_MOVIES_SD => {
@@ -84,7 +84,7 @@ pub fn to_search_params(
             }
         } else if category_has(CATEGORY_TV, category_id) {
             if request.type_ != FUNCTION_TV_SEARCH || category_id == CATEGORY_TV {
-                per_category.push(Criteria::content_type_in([ContentType::TvShow]));
+                per_category.push(content_type_or_null([ContentType::TvShow]));
             }
             match category_id {
                 CATEGORY_TV_SD => {
@@ -102,18 +102,18 @@ pub fn to_search_params(
                 _ => {}
             }
         } else if category_has(CATEGORY_XXX, category_id) {
-            per_category.push(Criteria::content_type_in([ContentType::Xxx]));
+            per_category.push(content_type_or_null([ContentType::Xxx]));
         } else if category_has(CATEGORY_PC, category_id) {
-            per_category.push(Criteria::content_type_in([
+            per_category.push(content_type_or_null([
                 ContentType::Software,
                 ContentType::Game,
             ]));
         } else if category_id == CATEGORY_AUDIO_AUDIOBOOK {
-            per_category.push(Criteria::content_type_in([ContentType::Audiobook]));
+            per_category.push(content_type_or_null([ContentType::Audiobook]));
         } else if category_has(CATEGORY_AUDIO, category_id) {
-            per_category.push(Criteria::content_type_in([ContentType::Music]));
+            per_category.push(content_type_or_null([ContentType::Music]));
         } else if category_id == CATEGORY_BOOKS_COMICS {
-            per_category.push(Criteria::content_type_in([ContentType::Comic]));
+            per_category.push(content_type_or_null([ContentType::Comic]));
         } else if category_has(CATEGORY_BOOKS, category_id) {
             // Go appends this directly to `options`, outside `catsCriteria`.
             criteria.push(book_content_types());
@@ -183,10 +183,21 @@ fn category_has(category_id: i32, requested_id: i32) -> bool {
 }
 
 fn book_content_types() -> Criteria {
-    Criteria::content_type_in([
+    content_type_or_null([
         ContentType::Ebook,
         ContentType::Comic,
         ContentType::Audiobook,
+    ])
+}
+
+/// `content_type IN (types) OR content_type IS NULL` — the widened content-type
+/// criterion Torznab typed/category searches use so the ~64% of the corpus with a
+/// NULL content_type is not hidden on an exact title match (F3). The general
+/// search / GraphQL API keeps the strict `Criteria::content_type_in`.
+fn content_type_or_null(types: impl IntoIterator<Item = ContentType>) -> Criteria {
+    Criteria::or([
+        Criteria::content_type_in(types),
+        Criteria::is_null(TorrentContentAttribute::ContentType),
     ])
 }
 
@@ -205,11 +216,11 @@ fn identifier_content_type(function: &str) -> Option<ContentType> {
 #[cfg(test)]
 mod tests {
     use bitmagnet_search_query::{
-        ContentRef, ContentType, Criteria, Episodes, TorrentContentOrder, TorznabSearchParams,
-        Video3D, VideoResolution,
+        ContentRef, ContentType, Criteria, Episodes, TorrentContentAttribute, TorrentContentOrder,
+        TorznabSearchParams, Video3D, VideoResolution,
     };
 
-    use super::to_search_params;
+    use super::{content_type_or_null, to_search_params};
     use crate::categories::{
         CATEGORY_AUDIO, CATEGORY_AUDIO_AUDIOBOOK, CATEGORY_BOOKS, CATEGORY_BOOKS_COMICS,
         CATEGORY_BOOKS_EBOOK, CATEGORY_MOVIES, CATEGORY_MOVIES_3D, CATEGORY_MOVIES_HD,
@@ -235,9 +246,9 @@ mod tests {
         let expected = TorznabSearchParams {
             query: None,
             filter: Some(Criteria::and([
-                Criteria::content_type_in([ContentType::Movie]),
+                content_type_or_null([ContentType::Movie]),
                 Criteria::or([
-                    Criteria::and([Criteria::content_type_in([ContentType::Movie])]),
+                    Criteria::and([content_type_or_null([ContentType::Movie])]),
                     Criteria::and([Criteria::video_resolution_in([VideoResolution::V480p])]),
                 ]),
             ])),
@@ -265,7 +276,7 @@ mod tests {
         assert_eq!(
             actual.filter,
             Some(Criteria::and([
-                Criteria::content_type_in([ContentType::TvShow]),
+                content_type_or_null([ContentType::TvShow]),
                 Criteria::episodes(Episodes::new().add_season(1)),
                 Criteria::alternative_identifier([ContentRef {
                     content_type: Some(ContentType::TvShow),
@@ -291,7 +302,7 @@ mod tests {
         assert_eq!(
             actual.filter,
             Some(Criteria::and([
-                Criteria::content_type_in([ContentType::TvShow]),
+                content_type_or_null([ContentType::TvShow]),
                 Criteria::episodes(Episodes::new().add_episode(2, 3)),
                 Criteria::canonical_identifier([ContentRef {
                     content_type: Some(ContentType::TvShow),
@@ -355,13 +366,13 @@ mod tests {
         assert_eq!(
             actual.filter,
             Some(Criteria::and([
-                Criteria::content_type_in([
+                content_type_or_null([
                     ContentType::Ebook,
                     ContentType::Comic,
                     ContentType::Audiobook,
                 ]),
                 Criteria::or([Criteria::and([
-                    Criteria::content_type_in([ContentType::Movie]),
+                    content_type_or_null([ContentType::Movie]),
                     Criteria::video_resolution_in([VideoResolution::V480p]),
                 ])]),
             ]))
@@ -379,7 +390,7 @@ mod tests {
             ])
         };
         let books = || {
-            vec![Criteria::content_type_in([
+            vec![content_type_or_null([
                 ContentType::Ebook,
                 ContentType::Comic,
                 ContentType::Audiobook,
@@ -388,26 +399,26 @@ mod tests {
         let cases = [
             (
                 CATEGORY_MOVIES,
-                vec![Criteria::content_type_in([ContentType::Movie])],
+                vec![content_type_or_null([ContentType::Movie])],
                 false,
             ),
             (
                 CATEGORY_MOVIES_SD,
                 vec![
-                    Criteria::content_type_in([ContentType::Movie]),
+                    content_type_or_null([ContentType::Movie]),
                     Criteria::video_resolution_in([VideoResolution::V480p]),
                 ],
                 false,
             ),
             (
                 CATEGORY_MOVIES_HD,
-                vec![Criteria::content_type_in([ContentType::Movie]), hd()],
+                vec![content_type_or_null([ContentType::Movie]), hd()],
                 false,
             ),
             (
                 CATEGORY_MOVIES_UHD,
                 vec![
-                    Criteria::content_type_in([ContentType::Movie]),
+                    content_type_or_null([ContentType::Movie]),
                     Criteria::video_resolution_in([VideoResolution::V2160p]),
                 ],
                 false,
@@ -415,50 +426,50 @@ mod tests {
             (
                 CATEGORY_MOVIES_3D,
                 vec![
-                    Criteria::content_type_in([ContentType::Movie]),
+                    content_type_or_null([ContentType::Movie]),
                     Criteria::video_3d_in([Video3D::V3D, Video3D::V3DSBS, Video3D::V3DOU]),
                 ],
                 false,
             ),
             (
                 CATEGORY_TV,
-                vec![Criteria::content_type_in([ContentType::TvShow])],
+                vec![content_type_or_null([ContentType::TvShow])],
                 false,
             ),
             (
                 CATEGORY_TV_SD,
                 vec![
-                    Criteria::content_type_in([ContentType::TvShow]),
+                    content_type_or_null([ContentType::TvShow]),
                     Criteria::video_resolution_in([VideoResolution::V480p]),
                 ],
                 false,
             ),
             (
                 CATEGORY_TV_HD,
-                vec![Criteria::content_type_in([ContentType::TvShow]), hd()],
+                vec![content_type_or_null([ContentType::TvShow]), hd()],
                 false,
             ),
             (
                 CATEGORY_TV_UHD,
                 vec![
-                    Criteria::content_type_in([ContentType::TvShow]),
+                    content_type_or_null([ContentType::TvShow]),
                     Criteria::video_resolution_in([VideoResolution::V2160p]),
                 ],
                 false,
             ),
             (
                 CATEGORY_XXX,
-                vec![Criteria::content_type_in([ContentType::Xxx])],
+                vec![content_type_or_null([ContentType::Xxx])],
                 false,
             ),
             (
                 CATEGORY_XXX_OTHER,
-                vec![Criteria::content_type_in([ContentType::Xxx])],
+                vec![content_type_or_null([ContentType::Xxx])],
                 false,
             ),
             (
                 CATEGORY_PC,
-                vec![Criteria::content_type_in([
+                vec![content_type_or_null([
                     ContentType::Software,
                     ContentType::Game,
                 ])],
@@ -466,7 +477,7 @@ mod tests {
             ),
             (
                 CATEGORY_PC_GAMES,
-                vec![Criteria::content_type_in([
+                vec![content_type_or_null([
                     ContentType::Software,
                     ContentType::Game,
                 ])],
@@ -474,17 +485,17 @@ mod tests {
             ),
             (
                 CATEGORY_AUDIO_AUDIOBOOK,
-                vec![Criteria::content_type_in([ContentType::Audiobook])],
+                vec![content_type_or_null([ContentType::Audiobook])],
                 false,
             ),
             (
                 CATEGORY_AUDIO,
-                vec![Criteria::content_type_in([ContentType::Music])],
+                vec![content_type_or_null([ContentType::Music])],
                 false,
             ),
             (
                 CATEGORY_BOOKS_COMICS,
-                vec![Criteria::content_type_in([ContentType::Comic])],
+                vec![content_type_or_null([ContentType::Comic])],
                 false,
             ),
             (CATEGORY_BOOKS, books(), true),
@@ -537,5 +548,54 @@ mod tests {
         let actual =
             to_search_params(&request, &Profile::default_profile()).expect("query request maps");
         assert_eq!(actual.order, Some(TorrentContentOrder::relevance_desc()));
+    }
+
+    // ---- F3: typed/category content-type widens to `IN (...) OR IS NULL` ------
+
+    #[test]
+    fn content_type_or_null_is_a_disjunction_with_the_is_null_branch() {
+        // The widened criterion admits the requested types OR an unclassified
+        // (NULL content_type) row, while still excluding a row classified as a
+        // *different* type (it satisfies neither the IN nor the IS NULL branch).
+        assert_eq!(
+            content_type_or_null([ContentType::Movie]),
+            Criteria::or([
+                Criteria::content_type_in([ContentType::Movie]),
+                Criteria::is_null(TorrentContentAttribute::ContentType),
+            ])
+        );
+    }
+
+    #[test]
+    fn typed_movie_search_admits_null_content_type() {
+        let request = TorznabRequest {
+            type_: "movie".to_owned(),
+            ..TorznabRequest::default()
+        };
+
+        let actual =
+            to_search_params(&request, &Profile::default_profile()).expect("movie request maps");
+        assert_eq!(
+            actual.filter,
+            Some(Criteria::and([content_type_or_null([ContentType::Movie])]))
+        );
+    }
+
+    #[test]
+    fn category_movies_admits_null_content_type() {
+        let request = TorznabRequest {
+            type_: "search".to_owned(),
+            cats: vec![CATEGORY_MOVIES],
+            ..TorznabRequest::default()
+        };
+
+        let actual = to_search_params(&request, &Profile::default_profile())
+            .expect("movie category request maps");
+        assert_eq!(
+            actual.filter,
+            Some(Criteria::and([Criteria::or([Criteria::and([
+                content_type_or_null([ContentType::Movie])
+            ])])]))
+        );
     }
 }

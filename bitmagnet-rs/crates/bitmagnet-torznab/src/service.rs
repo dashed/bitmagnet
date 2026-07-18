@@ -157,8 +157,8 @@ mod tests {
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request, StatusCode};
     use bitmagnet_search_query::{
-        ContentRef, ContentType, Criteria, Episodes, SearchResultItem, TorznabSearchParams,
-        VideoResolution,
+        ContentRef, ContentType, Criteria, Episodes, SearchResultItem, TorrentContentAttribute,
+        TorznabSearchParams, VideoResolution,
     };
     use tower::ServiceExt;
 
@@ -278,15 +278,22 @@ mod tests {
 
     #[tokio::test]
     async fn search_http_params_map_to_the_expected_lane_q_tree() {
+        // F3: Torznab typed/category content-type filters admit NULL rows.
+        let ct_or_null = |content_type: ContentType| {
+            Criteria::or([
+                Criteria::content_type_in([content_type]),
+                Criteria::is_null(TorrentContentAttribute::ContentType),
+            ])
+        };
         let cases = [
             (
                 "/torznab/?t=movie&cat=2000%2C2030&limit=10&offset=100",
                 TorznabSearchParams {
                     query: None,
                     filter: Some(Criteria::and([
-                        Criteria::content_type_in([ContentType::Movie]),
+                        ct_or_null(ContentType::Movie),
                         Criteria::or([
-                            Criteria::and([Criteria::content_type_in([ContentType::Movie])]),
+                            Criteria::and([ct_or_null(ContentType::Movie)]),
                             Criteria::and([Criteria::video_resolution_in([
                                 VideoResolution::V480p,
                             ])]),
@@ -302,7 +309,7 @@ mod tests {
                 TorznabSearchParams {
                     query: None,
                     filter: Some(Criteria::and([
-                        Criteria::content_type_in([ContentType::TvShow]),
+                        ct_or_null(ContentType::TvShow),
                         Criteria::episodes(Episodes::new().add_season(1)),
                         Criteria::alternative_identifier([ContentRef {
                             content_type: Some(ContentType::TvShow),
@@ -320,7 +327,7 @@ mod tests {
                 TorznabSearchParams {
                     query: None,
                     filter: Some(Criteria::and([
-                        Criteria::content_type_in([ContentType::TvShow]),
+                        ct_or_null(ContentType::TvShow),
                         Criteria::episodes(Episodes::new().add_episode(2, 3)),
                         Criteria::canonical_identifier([ContentRef {
                             content_type: Some(ContentType::TvShow),
