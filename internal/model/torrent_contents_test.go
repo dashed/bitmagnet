@@ -60,6 +60,38 @@ func TestUpdateTsv_BoundsOversizedFilePathBag(t *testing.T) {
 	}
 }
 
+// F7 follow-up: a single unbroken word-char run longer than PostgreSQL's 2046-
+// byte per-word limit — in the torrent NAME (weight A) or a file path (weight D)
+// — must be dropped so the row's tsvector casts cleanly and can't abort its
+// persist batch, regardless of total tsv size.
+func TestUpdateTsv_DropsOverlongLexemes(t *testing.T) {
+	overlong := strings.Repeat("z", 3000)
+
+	tc := TorrentContent{
+		Torrent: Torrent{
+			Name: "Real Title " + overlong + " Edition",
+			Files: []TorrentFile{
+				{Index: 0, Path: "dir/" + overlong + "/episode.mkv"},
+			},
+		},
+	}
+	tc.UpdateTsv()
+
+	// Every lexeme must be within Postgres' per-word limit, so `::tsvector`
+	// accepts the value (Postgres rejects any word > 2046 bytes).
+	for lexeme := range tc.Tsv {
+		assert.LessOrEqualf(t, len(lexeme), fts.MaxLexemeBytes,
+			"lexeme of %d bytes exceeds Postgres' per-word limit", len(lexeme))
+	}
+
+	got := tc.Tsv.String()
+	assert.NotContains(t, got, overlong, "the overlong run must be dropped, not indexed")
+	// The surrounding real words survive.
+	for _, lexeme := range []string{"real", "title", "edition", "episode"} {
+		assert.Contains(t, got, "'"+lexeme+"'", "normal lexeme %q must still be indexed", lexeme)
+	}
+}
+
 // A file list that fits comfortably under budget is added in full — the guard
 // only truncates when a row would otherwise overflow.
 func TestUpdateTsv_KeepsSmallFilePathBag(t *testing.T) {

@@ -1,6 +1,7 @@
 package fts_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/fts"
@@ -56,16 +57,19 @@ func TestParseTsvector(t *testing.T) {
 func TestAddTextBounded(t *testing.T) {
 	t.Parallel()
 
-	t.Run("stops once the budget is exhausted", func(t *testing.T) {
+	t.Run("stops once the budget cannot fit the next lexeme", func(t *testing.T) {
 		t.Parallel()
 
 		v := fts.Tsvector{}
-		// A budget large enough for only the first couple of lexemes.
-		remaining := v.AddTextBounded("alpha bravo charlie delta echo", fts.TsvectorWeightD, 30)
+		// "alpha" costs len+12 = 17; a 20-byte budget fits it but not "bravo".
+		remaining := v.AddTextBounded("alpha bravo charlie delta echo", fts.TsvectorWeightD, 20)
 
-		assert.LessOrEqual(t, remaining, 0, "budget should be spent")
 		assert.Contains(t, v, "alpha", "the first lexeme must be added")
-		assert.NotContains(t, v, "echo", "later lexemes must be dropped once over budget")
+		assert.NotContains(t, v, "bravo", "later lexemes must be dropped once the budget can't fit them")
+		assert.NotContains(t, v, "echo")
+		// Charge-before-commit: the budget never overshoots (goes negative).
+		assert.GreaterOrEqual(t, remaining, 0, "budget must not overshoot below zero")
+		assert.Less(t, remaining, 20, "the added lexeme must have been charged")
 	})
 
 	t.Run("adds nothing when the budget is already gone", func(t *testing.T) {
@@ -88,5 +92,50 @@ func TestAddTextBounded(t *testing.T) {
 		for _, lexeme := range []string{"alpha", "bravo", "charlie"} {
 			assert.Contains(t, v, lexeme)
 		}
+	})
+}
+
+// F7 follow-up: a single lexeme longer than PostgreSQL's per-word limit
+// (2046 bytes) is dropped by both AddText and AddTextBounded — otherwise it
+// throws `word is too long` and aborts the persist batch regardless of total
+// tsv size. Normal-length neighbours are still indexed.
+func TestPerLexemeByteCap(t *testing.T) {
+	t.Parallel()
+
+	oversized := strings.Repeat("a", fts.MaxLexemeBytes+1)
+	atLimit := strings.Repeat("b", fts.MaxLexemeBytes)
+
+	t.Run("AddText drops the oversized lexeme", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		v.AddText("keepme "+oversized+" alsokeep", fts.TsvectorWeightA)
+
+		assert.Contains(t, v, "keepme")
+		assert.Contains(t, v, "alsokeep")
+		assert.NotContains(t, v, oversized, "a >2046-byte lexeme must be dropped")
+		for lexeme := range v {
+			assert.LessOrEqual(t, len(lexeme), fts.MaxLexemeBytes)
+		}
+	})
+
+	t.Run("AddText keeps a lexeme exactly at the limit", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		v.AddText(atLimit, fts.TsvectorWeightA)
+
+		assert.Contains(t, v, atLimit, "a 2046-byte lexeme is accepted by Postgres and must be kept")
+	})
+
+	t.Run("AddTextBounded drops the oversized lexeme", func(t *testing.T) {
+		t.Parallel()
+
+		v := fts.Tsvector{}
+		v.AddTextBounded("keepme "+oversized+" alsokeep", fts.TsvectorWeightD, fts.MaxTsvectorBytes)
+
+		assert.Contains(t, v, "keepme")
+		assert.Contains(t, v, "alsokeep")
+		assert.NotContains(t, v, oversized)
 	})
 }

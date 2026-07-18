@@ -222,6 +222,10 @@ func (v Tsvector) AddText(text string, weight TsvectorWeight) {
 	}
 
 	for _, lexeme := range TokenizeFlat(text) {
+		if len(lexeme) > MaxLexemeBytes {
+			continue
+		}
+
 		if _, ok := v[lexeme]; !ok {
 			v[lexeme] = make(map[int]TsvectorWeight)
 		}
@@ -238,6 +242,16 @@ func (v Tsvector) AddText(text string, weight TsvectorWeight) {
 // re-fails. Callers building an unbounded lexeme bag (torrent file paths) use
 // AddTextBounded to stay under this.
 const MaxTsvectorBytes = 900_000
+
+// MaxLexemeBytes is the largest single lexeme PostgreSQL accepts in a tsvector;
+// a longer "word" throws `ERROR: word is too long (max 2046 bytes)` and aborts
+// the whole persist batch — the same batch-poisoning the total-size cap guards
+// against, but per lexeme and independent of total size (it can be tripped by a
+// single unbroken word-char run in any field, e.g. the torrent name). An
+// unbroken run this long is never a real search term, so AddText/AddTextBounded
+// drop it rather than truncate it. Verified against PostgreSQL 16: a 2046-byte
+// lexeme is accepted, 2047 is rejected.
+const MaxLexemeBytes = 2046
 
 // AddTextBounded is AddText with a byte budget: it appends tokenized lexemes only
 // while the vector's serialized size is estimated to stay within budget, and
@@ -265,9 +279,17 @@ func (v Tsvector) AddTextBounded(text string, weight TsvectorWeight, budget int)
 	}
 
 	for _, lexeme := range TokenizeFlat(text) {
-		if budget <= 0 {
+		if len(lexeme) > MaxLexemeBytes {
+			continue
+		}
+
+		// Charge and check the budget before committing the lexeme so the vector
+		// never overshoots by one lexeme's cost.
+		cost := tsvectorLexemeCost(lexeme)
+		if cost > budget {
 			break
 		}
+		budget -= cost
 
 		if _, ok := v[lexeme]; !ok {
 			v[lexeme] = make(map[int]TsvectorWeight)
@@ -275,7 +297,6 @@ func (v Tsvector) AddTextBounded(text string, weight TsvectorWeight, budget int)
 
 		v[lexeme][nextPos] = weight
 		nextPos++
-		budget -= tsvectorLexemeCost(lexeme)
 	}
 
 	return budget
