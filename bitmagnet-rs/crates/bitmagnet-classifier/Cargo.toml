@@ -8,6 +8,25 @@ repository.workspace = true
 description = "Phase-3 Lane C — content classifier for the bitmagnet Rust rewrite."
 
 [dependencies]
+# CEL engine (cel-rust). `structs` enables custom struct defs, `json` enables
+# Value<->JSON conversion, `regex` powers the built-in `matches()`. Version
+# pinned locally rather than in the workspace table to keep Lane C's dependency
+# edge off the shared manifest during the lane race.
+cel = { version = "0.14.0", features = ["json", "structs", "regex"] }
+# YAML source loader for `classifier.core.yml`.
+serde_yaml = "0.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Enum discriminants for the CEL `contentType` / `fileType` namespaces and the
+# `result.contentType` binding — sourced from the shared proto so they cannot
+# drift from the Go `bitmagnet.Classification` enum (frozen contract §0.5).
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+# Lane R release-name parsers (keyword-glob -> regex compiler + video-attribute
+# parsers + episode parser). Contract §3: Lane R blocks Lane C.
+bitmagnet-release = { path = "../bitmagnet-release" }
 
 [lints]
 workspace = true
