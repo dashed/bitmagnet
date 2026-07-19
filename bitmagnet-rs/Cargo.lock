@@ -951,6 +951,13 @@ dependencies = [
 [[package]]
 name = "bitmagnet-processor"
 version = "0.1.0"
+dependencies = [
+ "bitmagnet-classifier",
+ "bitmagnet-queue",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "bitmagnet-proto"
