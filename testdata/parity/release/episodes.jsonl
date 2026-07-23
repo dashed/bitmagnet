@@ -1,0 +1,30 @@
+{"id":"single_season","name":"S01","episodes":"S01"}
+{"id":"season_range","name":"S01-03","episodes":"S00-01"}
+{"id":"season_list","name":"S01,03,05","episodes":"S00E00"}
+{"id":"single_episode","name":"S01E01","episodes":"S01"}
+{"id":"episode_range","name":"S01E01-05","episodes":"S01"}
+{"id":"episode_list","name":"S01E01,03,05","episodes":"S01"}
+{"id":"xformat","name":"1x05","episodes":"S00"}
+{"id":"xformat_range","name":"1x05-08","episodes":"S00"}
+{"id":"season_word","name":"Season 1","episodes":"S01"}
+{"id":"season_word_ep","name":"season 1 episode 5","episodes":"S01"}
+{"id":"s1e1","name":"S1E1","episodes":"S01"}
+{"id":"lower","name":"s01e01","episodes":"S01"}
+{"id":"season_range_1digit","name":"S1-3","episodes":"S00-01"}
+{"id":"xformat_2digit","name":"12x34","episodes":"S00"}
+{"id":"e_short","name":"S01E1","episodes":"S01"}
+{"id":"ep_short","name":"S01EP01","episodes":"S01"}
+{"id":"episode_word","name":"S01 episode 05","episodes":"S01"}
+{"id":"spaces","name":"S 01 E 05","episodes":"S01"}
+{"id":"hyphen_spaces","name":"S01 - 03","episodes":"S00-01"}
+{"id":"high_season","name":"S99","episodes":"S99"}
+{"id":"s00","name":"S00","episodes":"S00"}
+{"id":"no_match_word","name":"movie","episodes":""}
+{"id":"no_match_empty","name":"","episodes":""}
+{"id":"no_match_partial","name":"S","episodes":""}
+{"id":"no_match_year","name":"2020","episodes":""}
+{"id":"comma_seasons_many","name":"S01,02,03,04","episodes":"S00E00"}
+{"id":"x_with_letters","name":"S01x05","episodes":""}
+{"id":"e_only","name":"E05","episodes":""}
+{"id":"ep_range_hyphen_letter","name":"S01E01-E05","episodes":"S01"}
+{"id":"season_dash_list","name":"S01-03,05","episodes":""}

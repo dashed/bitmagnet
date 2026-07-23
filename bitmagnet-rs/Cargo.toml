@@ -15,6 +15,10 @@ members = [
     "crates/bitmagnet-fts",
     "crates/bitmagnet-search-serve",
     "crates/bitmagnet-graphql",
+    "crates/bitmagnet-queue",
+    "crates/bitmagnet-release",
+    "crates/bitmagnet-classifier",
+    "crates/bitmagnet-processor",
 ]
 
 [workspace.package]
@@ -109,6 +113,13 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 # Hex for info-hash <-> text at the export/Parquet boundary.
 hex = "0.4"
+
+# Regex engine for release-name parsing (Lane R). The Go release parser compiles
+# keyword-glob DSL + alias tables to RE2 patterns; the `regex` crate is the RE2
+# analog. Parity note: Go `regexp` `\d` is ASCII [0-9] while this crate's `\d`
+# is Unicode by default, so the Lane R port emits `[0-9]` (never `\d`) and keeps
+# `\p{L}` in Unicode mode (matching Go's `[\p{L}\d]` word-char helper).
+regex = "1"
 
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D
