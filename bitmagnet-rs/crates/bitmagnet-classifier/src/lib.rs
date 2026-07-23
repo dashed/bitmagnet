@@ -30,7 +30,7 @@ use cel::to_value;
 use serde_json::Value as Json;
 
 pub use errors::FlowError;
-pub use model::ClassifierInput;
+pub use model::{ClassifierInput, InputFile, InputHint};
 pub use result::{Classification, Outcome};
 pub use source::{FlagType, FlagValue, Source, SourceError};
 

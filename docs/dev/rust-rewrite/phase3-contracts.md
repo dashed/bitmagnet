@@ -542,24 +542,62 @@ definition, already persisted (or deleted) the info-hash, so the shadow diffs
 against a **settled** live row, not a race; enqueue the scratch job with a small
 delay (`QueueJobDelayBy`, §1.4) as belt-and-suspenders for read-replica lag.
 
-The approved queue-only write role has no durable cursor table. The Rust mirror
-therefore exposes a caller-owned `(ran_at,id)` cursor. A deployment must start
-from a deliberate server-time watermark and checkpoint the cursor externally if
-replay across restarts is required; silently rescanning the seven-day archive is
-not safe because the partial unique index covers only active jobs.
+Migration 28 adds a durable `(ran_at,id)` checkpoint keyed by the
+`(source_queue,shadow_queue)` mirror identity. The mirror initializes, locks,
+reads, and advances that row in the same transaction as its scratch inserts.
+The target-queue advisory transaction lock remains the fail-closed serialization
+boundary for the active-depth cap. A waiting or restarted replica always reads
+the committed database cursor, so it cannot replay a stale process-local
+checkpoint or skip source rows. If the cap blocks a sampled candidate, the
+cursor stops before that candidate; silently advancing past deferred work is
+forbidden.
 
-🔑 **Corollary (deleted info-hashes).** Because the shadow replays a payload the
-Go processor *already handled*, some info-hashes will have been **deleted** by
-Go's delete path (`ErrDeleteTorrent` → `DELETE torrents`, §5.1). The shadow must
-treat "no live row for this info-hash" as a **first-class diff outcome
-(`live_absent`)**, not an error — and compare it against whether its own pipeline
-also produced a delete signal (a real match/mismatch), rather than aborting.
+On first creation, the production-safe bootstrap stores the database server's
+current `clock_timestamp()` (with the empty ID lower bound) and therefore does
+not silently replay the retained archive. Archive-start and explicit
+`(ran_at,id)` bootstrap modes are deliberate operator/test choices. Once the
+identity exists, its durable cursor wins over later bootstrap configuration.
+
+Until the Rust processor implements the `attach_*` actions, shadow admission is
+fail-closed to archived payloads whose `ClassifierWorkflow` is explicitly
+`default` and whose `ClassifierFlags` explicitly contain
+`local_search_enabled=false`, `apis_enabled=false`, and `tmdb_enabled=false`.
+Omitted workflows resolve through mutable Go deployment configuration and
+omitted flags inherit Go's enabled defaults, so neither is eligible. Every
+requested info-hash must also still exist in `torrents`, its `updated_at` must
+not be newer than the settled source job, no requested hash may have any
+`torrent_hints` row, and no requested hash may have a source-backed
+`torrent_contents` association. Rust does not yet reproduce every field in an
+explicit hint, so even a type-only hint is excluded. Deleted, recrawled,
+explicit-hint, and unconditional source-backed `attach_local_content_by_id`
+inputs are therefore excluded honestly. Ineligible rows are still scanned and
+advance the durable cursor, so they cannot starve later eligible work; the cap
+only defers (and stops before) an eligible sampled candidate. The admission
+query needs `SELECT` on `torrents`, `torrent_hints`, and `torrent_contents` but
+acquires no live-row locks.
+
+Explicitly naming `default` is necessary but not sufficient for a soak: the
+deployed Go effective classifier can merge `classifier.yml` workflow, keyword,
+extension, flag, and default-workflow overrides, while this Rust milestone
+embeds `classifier.core.yml`. Operators must prove the effective Go classifier
+configuration digest equals the embedded Rust source/defaults, or add a shared
+effective-source loader. Until then, a nonzero sample would not be a trustworthy
+parity measurement.
+
+🔑 **Limitation (deleted info-hashes).** The pure comparator represents an
+absent live row as the first-class `live_absent` outcome and can compare it with
+a Rust delete signal. The archived-payload mirror cannot exercise that outcome:
+after Go deletes a torrent, the payload contains only its hash and the
+classifier input is gone. Admission therefore excludes missing source rows.
+Measuring delete parity requires pre-delete hydration or a durable write-set
+ledger; it must not be claimed by this mirror.
 
 **(b) Shadow consumer (Rust).** A `bitmagnet-processor` in **shadow mode**: it
 claims from `process_torrent_shadow` via a `bitmagnet-queue` consumer bound to
 that queue name, runs the identical classify+build pipeline to produce the
 in-memory `persistPayload`, then — instead of persisting — **reads the current
-live rows** for those info-hashes (non-locking `SELECT`s on
+live rows** for those info-hashes (one read-only repeatable-read snapshot using
+non-locking `SELECT`s on
 `content`/`torrent_contents`/`torrent_tags`), canonically normalizes both its
 would-be write-set and the live rows, **diffs**, emits metrics, and **discards**.
 The only write it performs is marking its own scratch-queue job `processed`.
@@ -572,7 +610,9 @@ stable projection) and compare per info-hash:
   `size`, `files_count`, and the **`InferID()` value** (`processor.go:151`, a
   pure function of the classification — a mismatch there is real drift).
 - `content` rows keyed by `(type,source,id)`: title/release_year/identifiers.
-- `torrent_tags`: sorted name set.
+- `torrent_tags`: every tag the replay would add must be present in the sorted
+  live name set; unrelated pre-existing live tags are valid because Go only
+  inserts with `ON CONFLICT DO NOTHING`.
 - delete signal: whether Go deleted the torrent (`ErrDeleteTorrent`).
 - **Excluded (volatile):** `id` surrogate, `created_at`/`updated_at`, `tsv`,
   `seeders`/`leechers`/`published_at` snapshots — time- or source-derived, not
@@ -604,11 +644,17 @@ flags.
    holds nothing the Go processor's tx needs. A crash returns its claimed scratch
    job to `pending`/`retry` (shared-queue semantics) — harmless.
 4. **DB-permission fail-safe (strongest guarantee).** Run the shadow under a DB
-   role **granted `SELECT` only** on `content`/`torrent_contents`/`torrent_tags`/
-   `torrents` and write access **only** to `queue_jobs` (for its scratch claims).
-   Then even a bug **cannot** mutate live data — "discards" is enforced at the
-   permission layer, not just in code. A negative-control test asserts an
-   attempted live write is rejected.
+   role **granted `SELECT` only** on `content`/`torrent_contents`/`torrent_hints`/
+   `torrent_tags`/`torrents`. Queue writes must be enforced at the row boundary:
+   the mirror may insert only `queue='process_torrent_shadow'`, the consumer may
+   settle only that queue, and neither may insert or update
+   `queue='process_torrent'`. `queue_mirror_cursors` writes must likewise be
+   scoped to the configured mirror identity. Broad `INSERT`/`UPDATE` grants on
+   `queue_jobs` do **not** satisfy this contract even when the application code
+   uses the scratch queue correctly. Use reviewed RLS or security-definer queue
+   operations, then prove negative controls against both live-table and
+   live-queue mutation. Until that boundary exists, the runtime may land and run
+   in disposable PostgreSQL tests but is **not production-deployable**.
 
 ### 5.5 The operating rule + cutover (`04 §3.3`, `06 R4`)
 

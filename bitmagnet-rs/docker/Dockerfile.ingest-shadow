@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+#
+# One fail-closed executable, run as separate `mirror` and `consume`
+# Deployments. Neither mode persists processor writes to live tables.
+
+FROM rust:1.97-slim-bookworm AS builder
+ENV RUSTUP_TOOLCHAIN=1.97.0
+WORKDIR /build
+COPY bitmagnet-rs ./bitmagnet-rs
+COPY internal/classifier/classifier.core.yml ./internal/classifier/classifier.core.yml
+RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release \
+      -p bitmagnet-processor --bin bitmagnet-ingest-shadow \
+    && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-ingest-shadow \
+      /out/bitmagnet-ingest-shadow \
+    && rm -rf bitmagnet-rs/target
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
+
+COPY --from=builder /out/bitmagnet-ingest-shadow /usr/local/bin/bitmagnet-ingest-shadow
+
+USER 65532:65532
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/bitmagnet-ingest-shadow"]

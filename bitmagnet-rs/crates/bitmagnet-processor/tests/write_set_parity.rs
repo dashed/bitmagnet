@@ -52,6 +52,7 @@ fn go_write_set_oracle_matches_all_classifier_corpus_torrents() {
                     info_hash: fixture.input.info_hash,
                     classifier_input: fixture.input.classifier,
                     existing_content_ids: fixture.input.existing_content_ids,
+                    attach_hint_unsupported: false,
                 }],
             )
             .unwrap_or_else(|err| panic!("{}: materialize: {err}", fixture.id));

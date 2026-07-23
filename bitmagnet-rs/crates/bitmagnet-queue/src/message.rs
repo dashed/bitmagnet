@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::id::ProtocolId;
@@ -73,7 +73,8 @@ fn flags_omit(v: &Option<BTreeMap<String, Value>>) -> bool {
 /// `process_torrent` payload — `internal/processor/MessageParams` (`:22-27`).
 /// PascalCase; declaration order `ClassifyMode, ClassifierWorkflow,
 /// ClassifierFlags, InfoHashes`. Only `InfoHashes` lacks `omitempty`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct ProcessTorrentParams {
     #[serde(rename = "ClassifyMode", skip_serializing_if = "is_zero_i32")]
     pub classify_mode: i32,
@@ -235,4 +236,19 @@ pub fn blob_migration_job(
         params.num_ranges = 1;
     }
     new_queue_job(BLOB_MIGRATION, &params, opts.with_max_retries(2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProcessTorrentParams, CLASSIFY_MODE_DEFAULT};
+
+    #[test]
+    fn process_torrent_decode_applies_go_zero_values_for_omitted_fields() {
+        let params: ProcessTorrentParams =
+            serde_json::from_str(r#"{"InfoHashes":[]}"#).expect("decode minimal Go payload");
+        assert_eq!(params.classify_mode, CLASSIFY_MODE_DEFAULT);
+        assert!(params.classifier_workflow.is_empty());
+        assert!(params.classifier_flags.is_none());
+        assert!(params.info_hashes.is_empty());
+    }
 }

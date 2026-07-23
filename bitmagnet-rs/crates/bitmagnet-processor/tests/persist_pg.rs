@@ -1,6 +1,6 @@
 //! Live-PostgreSQL gate for the Lane P transaction kernel.
 //!
-//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to a disposable goose-26
+//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to a disposable goose-28
 //! database. The test truncates processor-owned rows and must never target a
 //! production database.
 
@@ -9,8 +9,11 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bitmagnet_processor::{
-    persist_write_set, read_live_snapshot, BlockingManager, BoxError, LiveTorrentState,
-    TorrentContentPersistence, TorrentContentWrite, WriteSet,
+    load_torrents, persist_write_set, read_live_snapshot, BlockingManager, BoxError,
+    LiveTorrentState, ShadowRuntime, TorrentContentPersistence, TorrentContentWrite, WriteSet,
+};
+use bitmagnet_queue::{
+    DequeuedJob, ProcessTorrentParams, ProtocolId, QueueJobStatus, PROCESS_TORRENT_SHADOW,
 };
 use futures::future::BoxFuture;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -106,6 +109,7 @@ fn assert_insufficient_privilege(error: sqlx::Error) {
 }
 
 #[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable goose-28 PostgreSQL"]
 async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
@@ -296,7 +300,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         .await
         .expect("grant schema usage");
     sqlx::query(
-        "GRANT SELECT ON content, torrent_contents, torrent_tags, torrents \
+        "GRANT SELECT ON content, torrent_contents, torrent_tags, torrents, torrent_hints \
          TO bitmagnet_shadow_test",
     )
     .execute(&pool)
@@ -324,6 +328,56 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     .await
     .expect("shadow role can read the stable live image");
     assert_eq!(role_snapshot, live_snapshot);
+    let loaded = load_torrents(
+        &shadow_pool,
+        &ProcessTorrentParams {
+            info_hashes: vec![
+                ProtocolId::from_hex(HASH_A).unwrap(),
+                ProtocolId::from_hex(HASH_B).unwrap(),
+                ProtocolId::from_hex(HASH_C).unwrap(),
+            ],
+            ..ProcessTorrentParams::default()
+        },
+    )
+    .await
+    .expect("shadow role can hydrate the classifier image");
+    assert_eq!(loaded.len(), 2, "the deleted hash remains a missing input");
+
+    sqlx::query(
+        "UPDATE torrents \
+         SET name = 'Synthetic Story.m4b', size = 60000000, files_status = 'single' \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .execute(&pool)
+    .await
+    .expect("prepare a classifier-supported live shadow input");
+    let params = ProcessTorrentParams {
+        classifier_workflow: "default".into(),
+        classifier_flags: Some(BTreeMap::from([
+            ("local_search_enabled".into(), serde_json::json!(false)),
+            ("apis_enabled".into(), serde_json::json!(false)),
+            ("tmdb_enabled".into(), serde_json::json!(false)),
+        ])),
+        info_hashes: vec![ProtocolId::from_hex(HASH_A).unwrap()],
+        ..ProcessTorrentParams::default()
+    };
+    let runtime = ShadowRuntime::from_core(shadow_pool.clone()).expect("compile shadow runtime");
+    let comparison = runtime
+        .process_job(&DequeuedJob {
+            id: "shadow-runtime-test".into(),
+            fingerprint: "shadow-runtime-test".into(),
+            queue: PROCESS_TORRENT_SHADOW.into(),
+            original_status: QueueJobStatus::Pending,
+            payload: serde_json::to_string(&params).unwrap(),
+            retries: 0,
+            max_retries: 2,
+            priority: 0,
+        })
+        .await
+        .expect("run the read-only shadow pipeline end to end");
+    assert_eq!(comparison.torrents.len(), 1);
+    assert_eq!(comparison.mismatch_count(), 1);
 
     sqlx::query(
         "INSERT INTO queue_jobs \

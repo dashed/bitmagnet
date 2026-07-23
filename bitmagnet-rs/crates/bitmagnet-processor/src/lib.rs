@@ -6,8 +6,9 @@
 //! before opening its persistence transaction. The supported unattached-content
 //! path can be persisted in one PostgreSQL transaction, and the shadow path can
 //! read a stable live-row comparison image under the frozen restricted role.
-//! Queue retries, attached-content enrichment, post-commit Tantivy dual-write,
-//! and the dark shadow runtime remain later milestones. Contract:
+//! The durable supported-subset dark shadow runtime is included; attached
+//! content enrichment, post-commit Tantivy dual-write, and production-safe
+//! row-scoped queue privileges remain later milestones. Contract:
 //! `docs/dev/rust-rewrite/phase3-contracts.md` §5.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,12 +18,21 @@ use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod compare;
+mod load;
 mod persist;
+mod runtime;
 mod shadow;
 
+pub use compare::{
+    compare_write_set, CompareError, ComparisonVerdict, DriftField, ShadowComparison,
+    TorrentComparison,
+};
+pub use load::{load_torrents, LoadError};
 pub use persist::{
     persist_write_set, BlockingManager, BoxError, PersistError, TorrentContentPersistence,
 };
+pub use runtime::{ShadowMetrics, ShadowRuntime, ShadowRuntimeError};
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
 };
@@ -38,6 +48,13 @@ pub struct LoadedTorrent {
     pub info_hash: String,
     pub classifier_input: ClassifierInput,
     pub existing_content_ids: Vec<String>,
+    /// Whether Go would apply an explicit hint or reuse a source-backed
+    /// association before classification.
+    ///
+    /// Lane P rejects this input until Rust models the complete hint and
+    /// enrichment surface. The origin bit preserves SQL NULL semantics,
+    /// including a non-null empty source string.
+    pub attach_hint_unsupported: bool,
 }
 
 /// The stable, classification-derived projection of a `torrent_contents` row.

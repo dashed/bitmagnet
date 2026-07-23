@@ -265,6 +265,7 @@ pub struct MirrorCursor {
 pub struct MirrorConfig {
     pub source_queue: String,
     pub shadow_queue: String,
+    pub bootstrap: MirrorBootstrap,
     pub sample_basis_points: u16,
     pub page_size: u32,
     pub active_depth_cap: u32,
@@ -272,11 +273,24 @@ pub struct MirrorConfig {
     pub archival_duration: Duration,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirrorBootstrap {
+    /// Start at the database clock when the durable mirror identity is first
+    /// created. This is the production-safe default and does not replay the
+    /// retained processed-row archive.
+    Latest,
+    /// Deliberately scan retained history from the oldest available row.
+    ArchiveStart,
+    /// Start strictly after an explicitly approved source position.
+    Cursor(MirrorCursor),
+}
+
 impl Default for MirrorConfig {
     fn default() -> Self {
         Self {
             source_queue: crate::message::PROCESS_TORRENT.to_owned(),
             shadow_queue: PROCESS_TORRENT_SHADOW.to_owned(),
+            bootstrap: MirrorBootstrap::Latest,
             sample_basis_points: 100,
             page_size: 100,
             active_depth_cap: 1_000,
@@ -300,22 +314,75 @@ struct MirrorCandidate {
     payload: String,
     max_retries: u32,
     priority: i32,
+    eligible: bool,
 }
 
 impl QueueStore {
     pub async fn mirror_processed_page(
         &self,
         config: &MirrorConfig,
-        cursor: Option<&MirrorCursor>,
     ) -> Result<MirrorReport, QueuePgError> {
         validate_mirror(config)?;
         let mut tx = self.pool.begin().await?;
-        // Serialize mirror writers for this scratch queue so the count-then-
-        // insert depth cap remains a hard bound across replicas.
+        // Keep the existing fail-closed scratch-queue lock. It makes the
+        // count-then-insert depth cap a hard bound even if another mirror
+        // identity is ever permitted to target this queue.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&config.shadow_queue)
             .execute(&mut *tx)
             .await?;
+        let (bootstrap_latest, bootstrap_ran_at, bootstrap_id) = match &config.bootstrap {
+            MirrorBootstrap::Latest => (true, None, None),
+            MirrorBootstrap::ArchiveStart => (false, None, None),
+            MirrorBootstrap::Cursor(cursor) => (
+                false,
+                Some(cursor.ran_at.as_str()),
+                Some(cursor.id.as_str()),
+            ),
+        };
+        sqlx::query(
+            "INSERT INTO queue_mirror_cursors \
+               (source_queue, shadow_queue, ran_at, source_job_id) \
+             VALUES (\
+               $1, $2, \
+               CASE WHEN $3 THEN clock_timestamp() ELSE $4::timestamptz END, \
+               CASE WHEN $3 THEN '' ELSE $5 END\
+             ) \
+             ON CONFLICT (source_queue, shadow_queue) DO NOTHING",
+        )
+        .bind(&config.source_queue)
+        .bind(&config.shadow_queue)
+        .bind(bootstrap_latest)
+        .bind(bootstrap_ran_at)
+        .bind(bootstrap_id)
+        .execute(&mut *tx)
+        .await?;
+        // The durable row is the authority. Waiting replicas reread it only
+        // after obtaining this lock, so no process-local stale cursor can
+        // replay or skip source rows.
+        let cursor_row = sqlx::query(
+            "SELECT ran_at::text AS ran_at, source_job_id \
+             FROM queue_mirror_cursors \
+             WHERE source_queue = $1 AND shadow_queue = $2 \
+             FOR UPDATE",
+        )
+        .bind(&config.source_queue)
+        .bind(&config.shadow_queue)
+        .fetch_one(&mut *tx)
+        .await?;
+        let cursor = match (
+            cursor_row.try_get::<Option<String>, _>("ran_at")?,
+            cursor_row.try_get::<Option<String>, _>("source_job_id")?,
+        ) {
+            (Some(ran_at), Some(id)) => Some(MirrorCursor { ran_at, id }),
+            (None, None) => None,
+            _ => {
+                return Err(QueuePgError::InvalidMirrorConfig(
+                    "durable mirror cursor is internally inconsistent",
+                ));
+            }
+        };
+
         let active: i64 = sqlx::query_scalar(
             "SELECT count(*)::bigint FROM queue_jobs \
              WHERE queue = $1 AND status IN ('pending','retry')",
@@ -327,7 +394,7 @@ impl QueueStore {
         if active >= config.active_depth_cap {
             tx.commit().await?;
             return Ok(MirrorReport {
-                cursor: cursor.cloned(),
+                cursor,
                 scanned: 0,
                 inserted: 0,
                 active_depth: active,
@@ -335,15 +402,53 @@ impl QueueStore {
             });
         }
 
-        let cursor_ran_at = cursor.map_or("-infinity", |value| value.ran_at.as_str());
-        let cursor_id = cursor.map_or("", |value| value.id.as_str());
+        let cursor_ran_at = cursor
+            .as_ref()
+            .map_or("-infinity", |value| value.ran_at.as_str());
+        let cursor_id = cursor.as_ref().map_or("", |value| value.id.as_str());
         let rows = sqlx::query(
-            "SELECT id, payload::text AS payload, max_retries::bigint AS max_retries, priority, \
-                    ran_at::text AS ran_at \
-             FROM queue_jobs \
-             WHERE queue = $1 AND status = 'processed' AND ran_at IS NOT NULL \
-               AND (ran_at, id) > ($2::timestamptz, $3) \
-             ORDER BY ran_at, id LIMIT $4",
+            "SELECT source_job.id, source_job.payload::text AS payload, \
+                    source_job.max_retries::bigint AS max_retries, source_job.priority, \
+                    source_job.ran_at::text AS ran_at, \
+                    source_job.payload @> \
+                      '{\"ClassifierWorkflow\":\"default\",\
+                      \"ClassifierFlags\":{\"local_search_enabled\":false,\
+                      \"apis_enabled\":false,\"tmdb_enabled\":false}}'::jsonb \
+                    AND jsonb_array_length(\
+                      CASE WHEN jsonb_typeof(source_job.payload->'InfoHashes') = 'array' \
+                           THEN source_job.payload->'InfoHashes' ELSE '[]'::jsonb END\
+                    ) > 0 \
+                    AND NOT EXISTS (\
+                      SELECT 1 \
+                      FROM jsonb_array_elements(\
+                        CASE WHEN jsonb_typeof(source_job.payload->'InfoHashes') = 'array' \
+                             THEN source_job.payload->'InfoHashes' ELSE '[]'::jsonb END\
+                      ) AS requested(value) \
+                      LEFT JOIN torrents AS source_torrent \
+                        ON source_torrent.info_hash = CASE \
+                          WHEN jsonb_typeof(requested.value) = 'string' \
+                           AND (requested.value #>> '{}') ~ '^[0-9A-Fa-f]{40}$' \
+                          THEN decode(requested.value #>> '{}', 'hex') \
+                          ELSE NULL \
+                        END \
+                      WHERE source_torrent.info_hash IS NULL \
+                         OR source_torrent.updated_at > source_job.ran_at \
+                         OR EXISTS (\
+                           SELECT 1 FROM torrent_hints AS source_hint \
+                           WHERE source_hint.info_hash = source_torrent.info_hash\
+                         ) \
+                         OR EXISTS (\
+                           SELECT 1 FROM torrent_contents AS source_content \
+                           WHERE source_content.info_hash = source_torrent.info_hash \
+                             AND source_content.content_source IS NOT NULL\
+                         )\
+                    ) \
+                      AS shadow_eligible \
+             FROM queue_jobs AS source_job \
+             WHERE source_job.queue = $1 AND source_job.status = 'processed' \
+               AND source_job.ran_at IS NOT NULL \
+               AND (source_job.ran_at, source_job.id) > ($2::timestamptz, $3) \
+             ORDER BY source_job.ran_at, source_job.id LIMIT $4",
         )
         .bind(&config.source_queue)
         .bind(cursor_ran_at)
@@ -363,19 +468,20 @@ impl QueueStore {
                     payload: row.try_get("payload")?,
                     max_retries: to_u32("max_retries", row.try_get("max_retries")?)?,
                     priority: row.try_get("priority")?,
+                    eligible: row.try_get("shadow_eligible")?,
                 })
             })
             .collect::<Result<Vec<_>, QueuePgError>>()?;
 
         let mut report = MirrorReport {
-            cursor: cursor.cloned(),
+            cursor,
             scanned: 0,
             inserted: 0,
             active_depth: active,
             capped: false,
         };
         for candidate in candidates {
-            if sampled(&candidate.cursor.id, config.sample_basis_points) {
+            if candidate.eligible && sampled(&candidate.cursor.id, config.sample_basis_points) {
                 if active >= config.active_depth_cap {
                     report.capped = true;
                     break;
@@ -409,6 +515,20 @@ impl QueueStore {
             report.cursor = Some(candidate.cursor);
         }
         report.active_depth = active;
+        if let Some(cursor) = &report.cursor {
+            sqlx::query(
+                "UPDATE queue_mirror_cursors \
+                 SET ran_at = $3::timestamptz, source_job_id = $4, \
+                     updated_at = clock_timestamp() \
+                 WHERE source_queue = $1 AND shadow_queue = $2",
+            )
+            .bind(&config.source_queue)
+            .bind(&config.shadow_queue)
+            .bind(&cursor.ran_at)
+            .bind(&cursor.id)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(report)
     }

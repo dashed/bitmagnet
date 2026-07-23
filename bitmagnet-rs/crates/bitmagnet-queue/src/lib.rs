@@ -31,6 +31,6 @@ pub use message::{
     PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
 };
 pub use pg::{
-    ConsumeOutcome, Consumer, ConsumerConfig, DequeuedJob, MirrorConfig, MirrorCursor,
-    MirrorReport, QueuePgError, QueueStore, PROCESS_TORRENT_SHADOW,
+    ConsumeOutcome, Consumer, ConsumerConfig, DequeuedJob, MirrorBootstrap, MirrorConfig,
+    MirrorCursor, MirrorReport, QueuePgError, QueueStore, PROCESS_TORRENT_SHADOW,
 };

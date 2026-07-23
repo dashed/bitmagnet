@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
 use super::{validate_info_hash, ContentWrite, TorrentContentWrite};
 
@@ -34,12 +34,26 @@ pub struct LiveTorrentSnapshot {
 
 /// Read the current live image without row locks.
 ///
-/// The queries are intentionally plain `SELECT`s; there is no transaction,
-/// `FOR UPDATE`, or mutation. `content.identifiers` remains empty because the
-/// normalized M1 image does not expose attached content and the frozen shadow
-/// role has no `content_attributes` grant.
+/// The plain `SELECT`s share one read-only repeatable-read snapshot so a
+/// concurrent Go transaction cannot create a torn multi-table image.
+/// `content.identifiers` remains empty because the normalized M1 image does not
+/// expose attached content and the frozen shadow role has no
+/// `content_attributes` grant.
 pub async fn read_live_snapshot(
     pool: &PgPool,
+    info_hashes: &[String],
+) -> Result<LiveSnapshot, ShadowReadError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let snapshot = read_live_snapshot_in(&mut tx, info_hashes).await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+pub(crate) async fn read_live_snapshot_in(
+    connection: &mut PgConnection,
     info_hashes: &[String],
 ) -> Result<LiveSnapshot, ShadowReadError> {
     let mut snapshot = LiveSnapshot::new();
@@ -62,7 +76,7 @@ pub async fn read_live_snapshot(
          FROM torrents WHERE info_hash = ANY($1::bytea[])",
     )
     .bind(&decoded)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     for row in present {
         let info_hash = row.try_get::<String, _>("info_hash")?;
@@ -87,7 +101,7 @@ pub async fn read_live_snapshot(
          ORDER BY tc.info_hash, tc.id",
     )
     .bind(&decoded)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     for row in content_rows {
@@ -158,7 +172,7 @@ pub async fn read_live_snapshot(
          ORDER BY info_hash, name",
     )
     .bind(&decoded)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     for row in tags {
         let info_hash = row.try_get::<String, _>("info_hash")?;

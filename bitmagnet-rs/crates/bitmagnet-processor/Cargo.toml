@@ -9,16 +9,26 @@ description = "Phase-3 Lane P — processor orchestration + write-shadow for the
 
 [dependencies]
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
+bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-queue = { path = "../bitmagnet-queue" }
+anyhow.workspace = true
+clap.workspace = true
 futures.workspace = true
 hex.workspace = true
+prometheus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+
+[[bin]]
+name = "bitmagnet-ingest-shadow"
+path = "src/bin/bitmagnet-ingest-shadow.rs"
 
 [lints]
 workspace = true

@@ -952,15 +952,21 @@ dependencies = [
 name = "bitmagnet-processor"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bitmagnet-classifier",
+ "bitmagnet-common",
+ "bitmagnet-model",
  "bitmagnet-queue",
+ "clap",
  "futures",
  "hex",
+ "prometheus",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
