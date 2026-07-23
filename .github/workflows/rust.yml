@@ -116,7 +116,7 @@ jobs:
       - run: cargo deny check licenses bans sources
 
   test-pg:
-    name: live-PG integration (bitmagnet-db)
+    name: live-PG integration (bitmagnet-db + queue)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -136,6 +136,7 @@ jobs:
       # sslmode=disable: the alpine PG service speaks plaintext on localhost, and
       # goose (lib/pq) otherwise defaults to sslmode=require.
       BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -153,7 +154,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bitmagnet-rs
-      # The #[ignore]d bitmagnet-db tests connect to the migrated schema; they
-      # tolerate an empty database (streams return an empty first page).
+      # These #[ignore]d tests connect to the migrated schema. The queue gate
+      # truncates queue_jobs, so the CI service must remain disposable.
       - name: Run live-PG (ignored) tests
-        run: cargo test -p bitmagnet-db -- --ignored
+        run: |
+          cargo test -p bitmagnet-db -- --ignored
+          cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1

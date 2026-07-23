@@ -505,29 +505,35 @@ same (`batch/queue/handler.go:154-155`).
 ingest and inserts copies into a **scratch queue name `process_torrent_shadow`**
 that **no Go worker consumes** (the Go dispatcher filters `WHERE queue =
 'process_torrent'`, §1.4, so scratch rows are invisible to it). Because the
-fingerprint is `sha256(queue || payload)` (§1.1) and the queue name differs, a
-shadow copy's fingerprint **cannot collide** with the live job's — no dedup
-interference. Two options considered:
+fingerprint is `sha256(queue || payload)` (§1.1) and the queue name differs, the
+shadow copy has a distinct preimage. Accidental SHA-256 collision risk is
+cryptographically negligible, so there is no practical dedup interference.
+Two options considered:
 
 - **(A) Tee-at-enqueue** — hook the Go producer so every Nth `process_torrent`
   insert also writes a scratch row. Exact same payloads, but touches the Go
   producer hot path.
 - **(B) Poll-mirror off archived rows** — a separate sidecar samples from
   **already-`processed` `process_torrent` rows** (`queue_jobs WHERE
-  queue='process_torrent' AND status='processed'`) and **copies the original
-  payload verbatim** into a scratch row, changing **only** the queue name. Zero
-  change to the Go producer; sampling is one external knob.
+  queue='process_torrent' AND status='processed'`) and **copies the stored
+  JSONB payload without reconstructing it** into a scratch row. Zero change to
+  the Go producer; sampling is one external knob.
 
 **Recommend (B) — REVISED per team-lead review (2026-07-17): sample archived rows
-and copy the payload verbatim; do NOT reconstruct it.** The processed queue row
-**retains the exact original payload** for the 7-day archival window (§1.4 GC
-contract), so copying it preserves **classify-config fidelity** — a live job
+and copy the stored JSONB value; do NOT reconstruct parameters from torrent
+rows.** PostgreSQL `jsonb` does not retain the original lexical bytes or object
+key order, so the original Go fingerprint input cannot be recovered from an
+archived row. Copying the JSONB datum still preserves **classify-config
+fidelity** — a live job
 enqueued with non-default `ClassifyMode`/`ClassifierWorkflow`/`ClassifierFlags`
 (reprocess flows, batch runs with explicit flags) is shadowed with those exact
 params, not defaults. (Reconstructing payloads from info-hashes — the original
 draft — would shadow every job with default config and diff spuriously.) Because
-only the queue name changes and the fingerprint is `sha256(queue||payload)`
-(§1.1), the copy **re-fingerprints automatically** with no dedup collision. This
+the queue name differs, the scratch writer deterministically hashes
+`process_torrent_shadow || payload::text`; this is a shadow fingerprint over
+PostgreSQL's canonical JSON representation, not a reconstruction of the live
+job's original byte fingerprint. It cannot collide with the live job's active
+fingerprint. This
 also **naturally samples the real job mix** (crawler vs batch vs reprocess) in
 its true proportions. Cost: `SELECT` on `queue_jobs` processed rows + `INSERT` of
 scratch rows — both within the fail-safe DB role (§5.4). **Critical ordering
@@ -535,6 +541,12 @@ property:** sampling *already-processed* rows means the Go processor has, by
 definition, already persisted (or deleted) the info-hash, so the shadow diffs
 against a **settled** live row, not a race; enqueue the scratch job with a small
 delay (`QueueJobDelayBy`, §1.4) as belt-and-suspenders for read-replica lag.
+
+The approved queue-only write role has no durable cursor table. The Rust mirror
+therefore exposes a caller-owned `(ran_at,id)` cursor. A deployment must start
+from a deliberate server-time watermark and checkpoint the cursor externally if
+replay across restarts is required; silently rescanning the seven-day archive is
+not safe because the partial unique index covers only active jobs.
 
 🔑 **Corollary (deleted info-hashes).** Because the shadow replays a payload the
 Go processor *already handled*, some info-hashes will have been **deleted** by

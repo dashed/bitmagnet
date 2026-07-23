@@ -10,15 +10,14 @@
 //! - **Backoff** ([`backoff`]): the deterministic base + bounded jitter of
 //!   `queue.CalculateBackoff`.
 //!
-//! Deferred to later milestones (need a live PG): the dequeue differential
-//! (`ORDER BY (status='retry'), priority, run_after` + `SKIP LOCKED` +
-//! literal `LIMIT 1`), the poll loop, the producer/consumer API, and the
-//! scratch-queue shadow mirror-writer.
+//! The PostgreSQL runtime owns the frozen dequeue/settlement transaction, the
+//! poll-only consumer, and the bounded processed-row shadow mirror.
 
 pub mod backoff;
 pub mod id;
 pub mod job;
 pub mod message;
+pub mod pg;
 
 pub use id::ProtocolId;
 pub use job::{
@@ -30,4 +29,8 @@ pub use message::{
     GoTime, ProcessTorrentBatchParams, ProcessTorrentParams, BLOB_MIGRATION,
     BLOB_MIGRATION_DEFAULT_CHUNK_SIZE, CLASSIFY_MODE_DEFAULT, CLASSIFY_MODE_REMATCH,
     PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
+};
+pub use pg::{
+    ConsumeOutcome, Consumer, ConsumerConfig, DequeuedJob, MirrorConfig, MirrorCursor,
+    MirrorReport, QueuePgError, QueueStore, PROCESS_TORRENT_SHADOW,
 };
