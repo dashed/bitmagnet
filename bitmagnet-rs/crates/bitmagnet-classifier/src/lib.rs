@@ -32,7 +32,7 @@ use serde_json::Value as Json;
 pub use errors::FlowError;
 pub use model::{ClassifierInput, InputFile, InputHint};
 pub use result::{Classification, Outcome};
-pub use source::{FlagType, FlagValue, Source, SourceError};
+pub use source::{core_config_digest, FlagType, FlagValue, Source, SourceError};
 
 use cel_value::build_cel_torrent;
 use engine::{compile_workflows, run_action, Action, CompileError, ExecCtx};

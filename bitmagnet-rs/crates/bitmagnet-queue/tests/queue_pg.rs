@@ -1,9 +1,10 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables; point it only at a
-//! disposable goose-28 database and invoke it explicitly with
+//! disposable goose-29 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
     fingerprint, ConsumeOutcome, MirrorConfig, QueueStore, PROCESS_TORRENT, PROCESS_TORRENT_SHADOW,
 };
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tokio::sync::{oneshot, Mutex};
 
@@ -86,8 +88,19 @@ async fn seed_torrent(pool: &PgPool, info_hash: &str) {
     .unwrap_or_else(|error| panic!("seed torrent {info_hash}: {error}"));
 }
 
+fn assert_insufficient_privilege(error: sqlx::Error) {
+    assert_database_code(error, "42501");
+}
+
+fn assert_database_code(error: sqlx::Error, expected: &str) {
+    let sqlx::Error::Database(error) = error else {
+        panic!("expected a PostgreSQL database error, got {error}");
+    };
+    assert_eq!(error.code().as_deref(), Some(expected));
+}
+
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-28 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-29 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -807,6 +820,209 @@ async fn queue_runtime_matches_go_contract() {
     .await
     .expect("count concurrent scratch rows");
     assert_eq!(concurrent_scratch, 2);
+
+    // A minimally granted runtime role can use the reviewed shadow
+    // capabilities, but it cannot directly write either queue or any cursor
+    // identity. Queue names and the cursor identity are hardcoded inside the
+    // SECURITY DEFINER functions.
+    reset(&pool).await;
+    seed(
+        &pool,
+        "boundary-source",
+        PROCESS_TORRENT,
+        "processed",
+        0,
+        -1,
+        0,
+        2,
+        payload_b,
+    )
+    .await;
+    seed_torrent(&pool, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").await;
+    sqlx::query(
+        "UPDATE queue_jobs SET ran_at = clock_timestamp() - interval '1 second' \
+         WHERE id = 'boundary-source'",
+    )
+    .execute(&pool)
+    .await
+    .expect("settle boundary source");
+    sqlx::query(
+        "UPDATE torrents SET updated_at = clock_timestamp() - interval '2 seconds' \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    .execute(&pool)
+    .await
+    .expect("prepare boundary source");
+    sqlx::query(
+        "DO $$ BEGIN \
+         IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'bitmagnet_queue_shadow_test') THEN \
+           EXECUTE 'DROP OWNED BY bitmagnet_queue_shadow_test'; \
+           EXECUTE 'DROP ROLE bitmagnet_queue_shadow_test'; \
+         END IF; END $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("remove prior queue shadow role");
+    sqlx::query(
+        "CREATE ROLE bitmagnet_queue_shadow_test LOGIN PASSWORD 'queue-shadow-test-password' \
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
+    )
+    .execute(&pool)
+    .await
+    .expect("create queue shadow role");
+    sqlx::query("GRANT USAGE ON SCHEMA public TO bitmagnet_queue_shadow_test")
+        .execute(&pool)
+        .await
+        .expect("grant public schema usage");
+    sqlx::query(
+        "GRANT SELECT ON queue_jobs, torrents, torrent_hints, torrent_contents \
+         TO bitmagnet_queue_shadow_test",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant bounded shadow reads");
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION \
+           public.ingest_shadow_lock_cursor(boolean, timestamptz, text), \
+           public.ingest_shadow_advance_cursor(timestamptz, text), \
+           public.ingest_shadow_enqueue_job(text, jsonb, bigint, bigint, bigint, integer), \
+           public.ingest_shadow_claim_job(), \
+           public.ingest_shadow_settle_processed(text, bigint), \
+           public.ingest_shadow_settle_retry(text, bigint, text, bigint), \
+           public.ingest_shadow_settle_failed(text, bigint, text) \
+         TO bitmagnet_queue_shadow_test",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant reviewed shadow capabilities");
+
+    let shadow_options = PgConnectOptions::from_str(&database_url)
+        .expect("parse PostgreSQL URL")
+        .username("bitmagnet_queue_shadow_test")
+        .password("queue-shadow-test-password");
+    let shadow_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(shadow_options)
+        .await
+        .expect("connect minimally granted queue shadow role");
+    let null_bootstrap = sqlx::query(
+        "SELECT * FROM public.ingest_shadow_lock_cursor(\
+           NULL::boolean, NULL::timestamptz, NULL::text\
+         )",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow cursor bootstrap mode must be explicit");
+    assert_database_code(null_bootstrap, "22023");
+    let direct_live_insert = sqlx::query(
+        "INSERT INTO queue_jobs \
+         (fingerprint, queue, payload, run_after, archival_duration, created_at) \
+         VALUES ('forbidden-live', 'process_torrent', '{}'::jsonb, \
+                 clock_timestamp(), interval '1 hour', clock_timestamp())",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow role must not directly insert into the live queue");
+    assert_insufficient_privilege(direct_live_insert);
+    let direct_scratch_insert = sqlx::query(
+        "INSERT INTO queue_jobs \
+         (fingerprint, queue, payload, run_after, archival_duration, created_at) \
+         VALUES ('forbidden-scratch', 'process_torrent_shadow', '{}'::jsonb, \
+                 clock_timestamp(), interval '1 hour', clock_timestamp())",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow role must not bypass the scratch enqueue capability");
+    assert_insufficient_privilege(direct_scratch_insert);
+    let direct_live_update =
+        sqlx::query("UPDATE queue_jobs SET status = 'failed' WHERE id = 'boundary-source'")
+            .execute(&shadow_pool)
+            .await
+            .expect_err("shadow role must not directly settle a live queue job");
+    assert_insufficient_privilege(direct_live_update);
+    let capability_live_settle = sqlx::query(
+        "SELECT public.ingest_shadow_settle_failed(\
+           'boundary-source', 0, 'forbidden live settlement'\
+         )",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow settle capability must reject a live queue job ID");
+    assert_database_code(capability_live_settle, "P0002");
+    let live_status: String =
+        sqlx::query_scalar("SELECT status::text FROM queue_jobs WHERE id = 'boundary-source'")
+            .fetch_one(&pool)
+            .await
+            .expect("read live source status after rejected capability call");
+    assert_eq!(live_status, "processed");
+    let caller_selected_enqueue = sqlx::query(
+        "SELECT public.ingest_shadow_enqueue_job(\
+           'process_torrent', 'forbidden-fingerprint', '{}'::jsonb, 0, 0, 3600, 0\
+         )",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("enqueue capability must expose no caller-selected queue argument");
+    assert_database_code(caller_selected_enqueue, "42883");
+    let direct_cursor_insert = sqlx::query(
+        "INSERT INTO queue_mirror_cursors (source_queue, shadow_queue) \
+         VALUES ('arbitrary_source', 'arbitrary_shadow')",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow role must not create an arbitrary cursor identity");
+    assert_insufficient_privilege(direct_cursor_insert);
+
+    let shadow_store = QueueStore::new(shadow_pool.clone());
+    let boundary_report = shadow_store
+        .mirror_processed_page(&MirrorConfig {
+            bootstrap: MirrorBootstrap::ArchiveStart,
+            sample_basis_points: 10_000,
+            delay: Duration::ZERO,
+            ..MirrorConfig::default()
+        })
+        .await
+        .expect("mirror through row-scoped capabilities");
+    assert_eq!(boundary_report.scanned, 1);
+    assert_eq!(boundary_report.inserted, 1);
+    let direct_cursor_update = sqlx::query(
+        "UPDATE queue_mirror_cursors SET source_job_id = 'forbidden' \
+         WHERE source_queue = 'process_torrent' \
+           AND shadow_queue = 'process_torrent_shadow'",
+    )
+    .execute(&shadow_pool)
+    .await
+    .expect_err("shadow role must not directly advance the fixed cursor");
+    assert_insufficient_privilege(direct_cursor_update);
+
+    let consumed = shadow_store
+        .consume_one(PROCESS_TORRENT_SHADOW, |_| async { Ok::<(), String>(()) })
+        .await
+        .expect("claim and settle through row-scoped capabilities");
+    assert!(matches!(
+        consumed,
+        ConsumeOutcome::Processed { ref job }
+            if job.queue == PROCESS_TORRENT_SHADOW
+    ));
+    let boundary_status: String = sqlx::query_scalar(
+        "SELECT status::text FROM queue_jobs \
+         WHERE queue = 'process_torrent_shadow'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read function-settled scratch status");
+    assert_eq!(boundary_status, "processed");
+
+    shadow_pool.close().await;
+    sqlx::query("DROP OWNED BY bitmagnet_queue_shadow_test")
+        .execute(&pool)
+        .await
+        .expect("remove queue shadow grants");
+    sqlx::query("DROP ROLE bitmagnet_queue_shadow_test")
+        .execute(&pool)
+        .await
+        .expect("drop queue shadow role");
 
     pool.close().await;
 }

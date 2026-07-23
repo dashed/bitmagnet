@@ -137,4 +137,49 @@ mutation, and coordinated application of migrations 27 and 28 (including the
 Go services' expected goose head). Deleted-input parity also remains
 unmeasurable without pre-delete hydration or a durable write-set ledger. A
 nonzero soak also requires proof that Go's effective merged classifier
-configuration matches Rust's embedded core source and defaults.
+configuration matches Rust's embedded core source and defaults. The
+authoritative value is the structured Go log emitted when the live processor
+initializes the exact cached source used by its classifier runner:
+
+```text
+msg="classifier runner initialized"
+effective_config_digest="sha256:..."
+default_workflow="..."
+```
+
+Do not substitute a digest recomputed by a separate process: the live runner
+caches its source, while mounted configuration files can change afterward.
+`bitmagnet classifier digest` is only a deployment preflight/cross-check. When
+using that command, run it inside the Go processor container, or in a one-shot
+container with the same image, environment, config mounts, working directory,
+and `XDG_CONFIG_HOME`. Go resolves embedded core YAML, XDG and
+working-directory `classifier.yml` overlays, application config
+flags/keywords/extensions, TMDB enablement, and the configured default workflow
+before hashing. Pass the runtime-loaded log value unchanged to the Rust
+consumer as `BITMAGNET_INGEST_SHADOW_EXPECTED_CLASSIFIER_CONFIG_DIGEST` (or
+`--expected-classifier-config-digest`). The consume command refuses to start
+when it is missing or differs from Rust's embedded effective configuration.
+
+The digest wire contract is version 1. Hash the UTF-8 bytes of one compact JSON
+object (no insignificant whitespace and no HTML escaping) with SHA-256, then
+emit `sha256:` plus lowercase hexadecimal. U+2028 and U+2029 are encoded as the
+six ASCII bytes `\u2028` and `\u2029`; floating-point values are outside v1 and
+must fail digest construction. Integer values use their shortest decimal form.
+Keys within configuration maps are lexicographically sorted and array order is
+preserved. The document's fixed field order and shape are:
+
+```json
+{"version":1,"default_workflow":"...","source":{"workflows":{},"flag_definitions":{},"flags":{},"keywords":{},"extensions":{}}}
+```
+
+The five `source` values are the fully merged/defaulted Go values. `$schema` is
+excluded because it does not affect behavior; classifier concurrency is also
+excluded because it affects scheduling rather than classification results.
+Changing the selected default workflow or any workflow, flag definition,
+effective flag value, keyword, or extension changes the digest.
+
+This gate does not authorize future classifier-core or overlay support by
+itself. In particular, Go compiles `content_type_list: [unknown]` as enum value
+zero while the current Rust classifier drops `unknown` from that list. Any
+future core/default or Rust overlay work must align that behavior and extend
+the cross-language parity corpus before its digest can be accepted in a soak.

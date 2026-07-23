@@ -74,21 +74,27 @@ impl QueueStore {
         E: std::fmt::Display,
     {
         let mut tx = self.pool.begin().await?;
-        let Some(row) = sqlx::query(
-            "SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
-                    retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
-                    deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
-             FROM queue_jobs \
-             WHERE queue = $1 AND status IN ('pending','retry') \
-               AND run_after <= clock_timestamp() \
-             ORDER BY (status = 'retry'), priority, run_after \
-             FOR UPDATE SKIP LOCKED \
-             LIMIT 1",
-        )
-        .bind(queue)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
+        let row = if queue == PROCESS_TORRENT_SHADOW {
+            sqlx::query("SELECT * FROM public.ingest_shadow_claim_job()")
+                .fetch_optional(&mut *tx)
+                .await?
+        } else {
+            sqlx::query(
+                "SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
+                        retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
+                        deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
+                 FROM queue_jobs \
+                 WHERE queue = $1 AND status IN ('pending','retry') \
+                   AND run_after <= clock_timestamp() \
+                 ORDER BY (status = 'retry'), priority, run_after \
+                 FOR UPDATE SKIP LOCKED \
+                 LIMIT 1",
+            )
+            .bind(queue)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
+        let Some(row) = row else {
             tx.commit().await?;
             return Ok(ConsumeOutcome::Empty);
         };
@@ -128,40 +134,69 @@ impl QueueStore {
         let outcome = if let Some(error) = handler_error {
             if job.retries < job.max_retries {
                 let delay = calculate_backoff(job.retries);
-                sqlx::query(
-                    "UPDATE queue_jobs \
-                     SET status = 'retry', retries = $2, ran_at = clock_timestamp(), error = $3, \
-                         run_after = clock_timestamp() + make_interval(secs => $4) \
-                     WHERE id = $1",
-                )
-                .bind(&job.id)
-                .bind(i64::from(job.retries))
-                .bind(&error)
-                .bind(i64::try_from(delay.as_secs()).unwrap_or(i64::MAX))
-                .execute(&mut *tx)
-                .await?;
+                let delay_seconds = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
+                if queue == PROCESS_TORRENT_SHADOW {
+                    sqlx::query("SELECT public.ingest_shadow_settle_retry($1, $2, $3, $4)")
+                        .bind(&job.id)
+                        .bind(i64::from(job.retries))
+                        .bind(&error)
+                        .bind(delay_seconds)
+                        .execute(&mut *tx)
+                        .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE queue_jobs \
+                         SET status = 'retry', retries = $2, ran_at = clock_timestamp(), \
+                             error = $3, \
+                             run_after = clock_timestamp() + make_interval(secs => $4) \
+                         WHERE id = $1",
+                    )
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .bind(&error)
+                    .bind(delay_seconds)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 ConsumeOutcome::RetryScheduled { job, delay }
             } else {
-                sqlx::query(
-                    "UPDATE queue_jobs SET status = 'failed', retries = $2, \
-                     ran_at = clock_timestamp(), error = $3 WHERE id = $1",
-                )
-                .bind(&job.id)
-                .bind(i64::from(job.retries))
-                .bind(&error)
-                .execute(&mut *tx)
-                .await?;
+                if queue == PROCESS_TORRENT_SHADOW {
+                    sqlx::query("SELECT public.ingest_shadow_settle_failed($1, $2, $3)")
+                        .bind(&job.id)
+                        .bind(i64::from(job.retries))
+                        .bind(&error)
+                        .execute(&mut *tx)
+                        .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE queue_jobs SET status = 'failed', retries = $2, \
+                         ran_at = clock_timestamp(), error = $3 WHERE id = $1",
+                    )
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .bind(&error)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 ConsumeOutcome::Failed { job, error }
             }
         } else {
-            sqlx::query(
-                "UPDATE queue_jobs SET status = 'processed', retries = $2, \
-                 ran_at = clock_timestamp() WHERE id = $1",
-            )
-            .bind(&job.id)
-            .bind(i64::from(job.retries))
-            .execute(&mut *tx)
-            .await?;
+            if queue == PROCESS_TORRENT_SHADOW {
+                sqlx::query("SELECT public.ingest_shadow_settle_processed($1, $2)")
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                sqlx::query(
+                    "UPDATE queue_jobs SET status = 'processed', retries = $2, \
+                     ran_at = clock_timestamp() WHERE id = $1",
+                )
+                .bind(&job.id)
+                .bind(i64::from(job.retries))
+                .execute(&mut *tx)
+                .await?;
+            }
             ConsumeOutcome::Processed { job }
         };
         tx.commit().await?;
@@ -324,13 +359,6 @@ impl QueueStore {
     ) -> Result<MirrorReport, QueuePgError> {
         validate_mirror(config)?;
         let mut tx = self.pool.begin().await?;
-        // Keep the existing fail-closed scratch-queue lock. It makes the
-        // count-then-insert depth cap a hard bound even if another mirror
-        // identity is ever permitted to target this queue.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(&config.shadow_queue)
-            .execute(&mut *tx)
-            .await?;
         let (bootstrap_latest, bootstrap_ran_at, bootstrap_id) = match &config.bootstrap {
             MirrorBootstrap::Latest => (true, None, None),
             MirrorBootstrap::ArchiveStart => (false, None, None),
@@ -340,34 +368,16 @@ impl QueueStore {
                 Some(cursor.id.as_str()),
             ),
         };
-        sqlx::query(
-            "INSERT INTO queue_mirror_cursors \
-               (source_queue, shadow_queue, ran_at, source_job_id) \
-             VALUES (\
-               $1, $2, \
-               CASE WHEN $3 THEN clock_timestamp() ELSE $4::timestamptz END, \
-               CASE WHEN $3 THEN '' ELSE $5 END\
-             ) \
-             ON CONFLICT (source_queue, shadow_queue) DO NOTHING",
+        // This SECURITY DEFINER capability hardcodes both queue identities,
+        // acquires the target advisory lock, initializes the fixed cursor when
+        // absent, and returns it under FOR UPDATE.
+        let cursor_row = sqlx::query(
+            "SELECT ran_at, source_job_id \
+             FROM public.ingest_shadow_lock_cursor($1, $2::timestamptz, $3)",
         )
-        .bind(&config.source_queue)
-        .bind(&config.shadow_queue)
         .bind(bootstrap_latest)
         .bind(bootstrap_ran_at)
         .bind(bootstrap_id)
-        .execute(&mut *tx)
-        .await?;
-        // The durable row is the authority. Waiting replicas reread it only
-        // after obtaining this lock, so no process-local stale cursor can
-        // replay or skip source rows.
-        let cursor_row = sqlx::query(
-            "SELECT ran_at::text AS ran_at, source_job_id \
-             FROM queue_mirror_cursors \
-             WHERE source_queue = $1 AND shadow_queue = $2 \
-             FOR UPDATE",
-        )
-        .bind(&config.source_queue)
-        .bind(&config.shadow_queue)
         .fetch_one(&mut *tx)
         .await?;
         let cursor = match (
@@ -487,26 +497,20 @@ impl QueueStore {
                     break;
                 }
                 let scratch_fingerprint = fingerprint(&config.shadow_queue, &candidate.payload);
-                let inserted = sqlx::query(
-                    "INSERT INTO queue_jobs \
-                     (fingerprint, queue, status, payload, retries, max_retries, run_after, \
-                      archival_duration, created_at, priority) \
-                     VALUES ($1, $2, 'pending', $3::jsonb, 0, $4, \
-                             clock_timestamp() + make_interval(secs => $5), \
-                             make_interval(secs => $6), clock_timestamp(), $7) \
-                     ON CONFLICT (fingerprint) WHERE status IN ('pending','retry') DO NOTHING",
+                let inserted: bool = sqlx::query_scalar(
+                    "SELECT public.ingest_shadow_enqueue_job(\
+                       $1, $2::jsonb, $3, $4, $5, $6\
+                     )",
                 )
                 .bind(scratch_fingerprint)
-                .bind(&config.shadow_queue)
                 .bind(&candidate.payload)
                 .bind(i64::from(candidate.max_retries))
                 .bind(i64::try_from(config.delay.as_secs()).unwrap_or(i64::MAX))
                 .bind(i64::try_from(config.archival_duration.as_secs()).unwrap_or(i64::MAX))
                 .bind(candidate.priority)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-                if inserted == 1 {
+                .fetch_one(&mut *tx)
+                .await?;
+                if inserted {
                     active += 1;
                     report.inserted += 1;
                 }
@@ -516,18 +520,11 @@ impl QueueStore {
         }
         report.active_depth = active;
         if let Some(cursor) = &report.cursor {
-            sqlx::query(
-                "UPDATE queue_mirror_cursors \
-                 SET ran_at = $3::timestamptz, source_job_id = $4, \
-                     updated_at = clock_timestamp() \
-                 WHERE source_queue = $1 AND shadow_queue = $2",
-            )
-            .bind(&config.source_queue)
-            .bind(&config.shadow_queue)
-            .bind(&cursor.ran_at)
-            .bind(&cursor.id)
-            .execute(&mut *tx)
-            .await?;
+            sqlx::query("SELECT public.ingest_shadow_advance_cursor($1::timestamptz, $2)")
+                .bind(&cursor.ran_at)
+                .bind(&cursor.id)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(report)

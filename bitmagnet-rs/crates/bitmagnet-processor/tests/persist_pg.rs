@@ -1,6 +1,6 @@
 //! Live-PostgreSQL gate for the Lane P transaction kernel.
 //!
-//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to a disposable goose-28
+//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to a disposable goose-29
 //! database. The test truncates processor-owned rows and must never target a
 //! production database.
 
@@ -109,7 +109,7 @@ fn assert_insufficient_privilege(error: sqlx::Error) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable goose-28 PostgreSQL"]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable goose-29 PostgreSQL"]
 async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
@@ -300,16 +300,27 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         .await
         .expect("grant schema usage");
     sqlx::query(
-        "GRANT SELECT ON content, torrent_contents, torrent_tags, torrents, torrent_hints \
+        "GRANT SELECT ON content, torrent_contents, torrent_tags, torrents, torrent_hints, \
+           queue_jobs \
          TO bitmagnet_shadow_test",
     )
     .execute(&pool)
     .await
-    .expect("grant live-table reads");
-    sqlx::query("GRANT SELECT, INSERT, UPDATE ON queue_jobs TO bitmagnet_shadow_test")
-        .execute(&pool)
-        .await
-        .expect("grant scratch-queue access");
+    .expect("grant bounded shadow reads");
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION \
+           public.ingest_shadow_lock_cursor(boolean, timestamptz, text), \
+           public.ingest_shadow_advance_cursor(timestamptz, text), \
+           public.ingest_shadow_enqueue_job(text, jsonb, bigint, bigint, bigint, integer), \
+           public.ingest_shadow_claim_job(), \
+           public.ingest_shadow_settle_processed(text, bigint), \
+           public.ingest_shadow_settle_retry(text, bigint, text, bigint), \
+           public.ingest_shadow_settle_failed(text, bigint, text) \
+         TO bitmagnet_shadow_test",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant reviewed shadow queue capabilities");
 
     let shadow_options = PgConnectOptions::from_str(&database_url)
         .expect("parse PostgreSQL URL")
@@ -362,7 +373,10 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         info_hashes: vec![ProtocolId::from_hex(HASH_A).unwrap()],
         ..ProcessTorrentParams::default()
     };
-    let runtime = ShadowRuntime::from_core(shadow_pool.clone()).expect("compile shadow runtime");
+    let digest =
+        bitmagnet_classifier::core_config_digest().expect("digest embedded classifier config");
+    let runtime = ShadowRuntime::from_core(shadow_pool.clone(), Some(&digest))
+        .expect("compile shadow runtime");
     let comparison = runtime
         .process_job(&DequeuedJob {
             id: "shadow-runtime-test".into(),
@@ -379,23 +393,6 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     assert_eq!(comparison.torrents.len(), 1);
     assert_eq!(comparison.mismatch_count(), 1);
 
-    sqlx::query(
-        "INSERT INTO queue_jobs \
-         (fingerprint, queue, payload, max_retries, run_after, archival_duration, created_at) \
-         VALUES ('shadow-permission-test', 'process_torrent_shadow', '{}'::jsonb, \
-         1, NOW(), INTERVAL '1 hour', NOW())",
-    )
-    .execute(&shadow_pool)
-    .await
-    .expect("shadow role can insert a scratch job");
-    sqlx::query(
-        "UPDATE queue_jobs SET status = 'processed' \
-         WHERE fingerprint = 'shadow-permission-test'",
-    )
-    .execute(&shadow_pool)
-    .await
-    .expect("shadow role can settle its scratch job");
-
     let live_write_error =
         sqlx::query("UPDATE torrents SET name = name WHERE info_hash = decode($1, 'hex')")
             .bind(HASH_A)
@@ -411,10 +408,6 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     assert_insufficient_privilege(attributes_read_error);
 
     shadow_pool.close().await;
-    sqlx::query("DELETE FROM queue_jobs WHERE fingerprint = 'shadow-permission-test'")
-        .execute(&pool)
-        .await
-        .expect("remove scratch permission-test job");
     sqlx::query("DROP OWNED BY bitmagnet_shadow_test")
         .execute(&pool)
         .await

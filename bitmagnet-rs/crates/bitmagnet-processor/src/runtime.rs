@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use bitmagnet_classifier::{core_config_digest, SourceError};
 use bitmagnet_common::metrics::registry;
 use bitmagnet_queue::{DequeuedJob, ProcessTorrentParams, ProtocolId, PROCESS_TORRENT_SHADOW};
 use prometheus::{IntCounterVec, Opts};
@@ -22,7 +23,24 @@ pub struct ShadowRuntime {
 }
 
 impl ShadowRuntime {
-    pub fn from_core(pool: PgPool) -> Result<Self, ShadowRuntimeError> {
+    /// Compile the embedded core only when it exactly matches the digest
+    /// reported by the live Go processor's effective classifier config.
+    pub fn from_core(
+        pool: PgPool,
+        expected_classifier_config_digest: Option<&str>,
+    ) -> Result<Self, ShadowRuntimeError> {
+        let expected = expected_classifier_config_digest
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(ShadowRuntimeError::ClassifierConfigDigestMissing)?;
+        let actual = core_config_digest()?;
+        if expected != actual {
+            return Err(ShadowRuntimeError::ClassifierConfigDigestMismatch {
+                expected: expected.to_string(),
+                actual,
+            });
+        }
+
         Ok(Self {
             pool,
             materializer: Materializer::from_core()?,
@@ -102,6 +120,12 @@ fn require_default_workflow(params: &ProcessTorrentParams) -> Result<(), ShadowR
 pub enum ShadowRuntimeError {
     #[error("shadow runtime refuses queue '{0}'")]
     WrongQueue(String),
+    #[error("shadow runtime requires the live Go effective classifier configuration digest")]
+    ClassifierConfigDigestMissing,
+    #[error(
+        "shadow runtime classifier configuration mismatch: expected live Go digest {expected}, Rust embedded digest {actual}"
+    )]
+    ClassifierConfigDigestMismatch { expected: String, actual: String },
     #[error("shadow runtime requires ClassifierWorkflow to be explicitly 'default'")]
     ClassifierWorkflowUnsupported,
     #[error(
@@ -122,6 +146,8 @@ pub enum ShadowRuntimeError {
     Read(#[from] ShadowReadError),
     #[error(transparent)]
     Compare(#[from] CompareError),
+    #[error(transparent)]
+    ClassifierSource(#[from] SourceError),
 }
 
 impl ShadowRuntimeError {
@@ -220,7 +246,34 @@ mod tests {
     use bitmagnet_queue::ProcessTorrentParams;
     use serde_json::json;
 
-    use super::{require_default_workflow, require_flags_off, ShadowRuntimeError};
+    use bitmagnet_classifier::core_config_digest;
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::{require_default_workflow, require_flags_off, ShadowRuntime, ShadowRuntimeError};
+
+    #[tokio::test]
+    async fn classifier_config_digest_is_required_and_must_match_before_consumption() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://shadow:shadow@127.0.0.1/shadow")
+            .expect("create lazy test pool");
+
+        assert!(matches!(
+            ShadowRuntime::from_core(pool.clone(), None),
+            Err(ShadowRuntimeError::ClassifierConfigDigestMissing)
+        ));
+        assert!(matches!(
+            ShadowRuntime::from_core(pool.clone(), Some("")),
+            Err(ShadowRuntimeError::ClassifierConfigDigestMissing)
+        ));
+        assert!(matches!(
+            ShadowRuntime::from_core(pool.clone(), Some("sha256:not-the-live-digest")),
+            Err(ShadowRuntimeError::ClassifierConfigDigestMismatch { .. })
+        ));
+
+        let digest = core_config_digest().expect("digest embedded classifier");
+        ShadowRuntime::from_core(pool, Some(&digest))
+            .expect("matching effective config digest permits startup");
+    }
 
     #[test]
     fn attachment_capability_gap_is_fail_closed() {

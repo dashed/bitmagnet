@@ -15,6 +15,7 @@ import (
 type Params struct {
 	fx.In
 	WorkflowSource lazy.Lazy[classifier.Source]
+	Config         classifier.Config
 }
 
 type Result struct {
@@ -44,6 +45,23 @@ func New(p Params) (Result, error) {
 						return srcErr
 					}
 					return write(ctx.App.Writer, src, ctx.String("format"))
+				},
+			},
+			{
+				Name:  "digest",
+				Usage: "Show the effective classifier configuration digest",
+				Action: func(ctx *cli.Context) error {
+					src, srcErr := p.WorkflowSource.Get()
+					if srcErr != nil {
+						return srcErr
+					}
+					digest, digestErr := classifier.EffectiveConfigDigest(src, p.Config.Workflow)
+					if digestErr != nil {
+						return digestErr
+					}
+					_, writeErr := fmt.Fprintln(ctx.App.Writer, digest)
+
+					return writeErr
 				},
 			},
 			{

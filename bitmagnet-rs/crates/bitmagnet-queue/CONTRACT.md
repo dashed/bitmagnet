@@ -45,11 +45,25 @@ from the oldest retained row or from an explicit `(ran_at,id)` position requires
 an explicit bootstrap choice; once created, the durable row remains authoritative
 and later process configuration cannot reset it.
 
-The runtime is not production-deployable until queue writes are constrained by
-reviewed RLS or security-definer operations. Broad `INSERT`/`UPDATE` grants on
-`queue_jobs` would let a faulty shadow process mutate live `process_torrent`
-rows despite the queue-name checks in Rust. Production negative controls must
-reject live-queue writes as well as live-table writes.
+Migration 29 supplies the row-scoped write boundary as `SECURITY DEFINER`
+capabilities. They hardcode `process_torrent_shadow` for enqueue/claim/settle
+and the single `(process_torrent,process_torrent_shadow)` cursor identity,
+qualify every database object, run with `search_path=pg_catalog,pg_temp`, and
+revoke `PUBLIC` execution. The runtime role needs read-only table grants plus
+explicit `EXECUTE` on these functions; it must receive no direct write grant on
+`queue_jobs` or `queue_mirror_cursors`. Before granting runtime execution,
+deployment automation must transfer all seven functions away from the Goose
+executor to a dedicated non-login, non-superuser owner with only the table
+rights needed by the fixed function bodies. This prevents a future function
+bug from executing with the migration superuser's authority. Deployment
+remains gated until ownership and the minimal runtime grants are catalog-proven
+and the negative controls pass in-cluster.
+
+The capabilities protect live data, not shadow telemetry from a compromised
+shadow credential. Within the fixed scratch boundary, that credential can
+advance or rewind the cursor, enqueue arbitrary scratch payloads, and settle
+other scratch jobs. Those are accepted shadow-integrity risks for this dark
+pilot and must never be described as tenant isolation.
 
 Rust deliberately uses PostgreSQL `clock_timestamp()` for eligibility,
 deadline, settlement, and retry scheduling instead of binding the application
@@ -62,7 +76,9 @@ The migration-backed PostgreSQL gate covers frozen dequeue ordering,
 `SKIP LOCKED` concurrency, retry and deadline settlement, JSONB-preserving
 scratch insertion, handler panic recovery, delay, cursor advancement, and
 depth-cap behavior. The gate also verifies durable restart/resume behavior and
-that a stale replica observes the committed cursor.
+that a stale replica observes the committed cursor. Its permission negative
+controls prove a minimally granted role can use the shadow capabilities but
+cannot directly mutate either queue or any cursor identity.
 
 Still outstanding before Go queue retirement: the general producer API,
 bounded multi-worker orchestration for queues that require concurrency greater

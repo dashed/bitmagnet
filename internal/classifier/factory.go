@@ -7,6 +7,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb"
 	"go.uber.org/fx"
+	"go.uber.org/zap"
 )
 
 type Params struct {
@@ -15,6 +16,7 @@ type Params struct {
 	TmdbConfig tmdb.Config
 	Search     lazy.Lazy[search.Search]
 	TmdbClient lazy.Lazy[tmdb.Client]
+	Logger     *zap.SugaredLogger `optional:"true"`
 }
 
 type Result struct {
@@ -77,6 +79,13 @@ func New(params Params) Result {
 			}
 			r, err := c.Compile(src)
 			if err != nil {
+				return nil, err
+			}
+			if err := logEffectiveConfigDigest(
+				params.Logger,
+				src,
+				params.Config.Workflow,
+			); err != nil {
 				return nil, err
 			}
 

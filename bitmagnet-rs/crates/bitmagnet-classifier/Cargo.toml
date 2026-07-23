@@ -17,6 +17,8 @@ cel = { version = "0.14.0", features = ["json", "structs", "regex"] }
 serde_yaml = "0.9"
 serde = { workspace = true }
 serde_json = { workspace = true }
+hex = { workspace = true }
+sha2 = "0.10"
 regex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

@@ -582,7 +582,17 @@ extension, flag, and default-workflow overrides, while this Rust milestone
 embeds `classifier.core.yml`. Operators must prove the effective Go classifier
 configuration digest equals the embedded Rust source/defaults, or add a shared
 effective-source loader. Until then, a nonzero sample would not be a trustworthy
-parity measurement.
+parity measurement. The authoritative Go value is the
+`effective_config_digest` field on the live processor's
+`classifier runner initialized` structured log: it is emitted from the exact
+cached `Source` instance after successful compilation. The separate
+`bitmagnet classifier digest` command is only a preflight/cross-check because it
+re-reads environment, XDG, and working-directory configuration. The v1 digest
+rejects floating-point values and escapes U+2028/U+2029 as `\u2028`/`\u2029`.
+It also does not authorize future core/overlay support: Go preserves
+`content_type_list: [unknown]` as enum zero while Rust currently drops it, so
+that behavior and the parity corpus must be aligned before accepting such a
+configuration.
 
 🔑 **Limitation (deleted info-hashes).** The pure comparator represents an
 absent live row as the first-class `live_absent` outcome and can compare it with
@@ -649,12 +659,20 @@ flags.
    the mirror may insert only `queue='process_torrent_shadow'`, the consumer may
    settle only that queue, and neither may insert or update
    `queue='process_torrent'`. `queue_mirror_cursors` writes must likewise be
-   scoped to the configured mirror identity. Broad `INSERT`/`UPDATE` grants on
-   `queue_jobs` do **not** satisfy this contract even when the application code
-   uses the scratch queue correctly. Use reviewed RLS or security-definer queue
-   operations, then prove negative controls against both live-table and
-   live-queue mutation. Until that boundary exists, the runtime may land and run
-   in disposable PostgreSQL tests but is **not production-deployable**.
+   scoped to the configured mirror identity. Migration 29 implements that
+   boundary with `SECURITY DEFINER` functions whose queue names and cursor
+   identity are hardcoded, whose objects are schema-qualified, whose
+   `search_path` is restricted to `pg_catalog,pg_temp`, and whose `PUBLIC`
+   execution privilege is revoked. The deployment role receives read-only
+   table grants and explicit `EXECUTE` on those functions, with no direct write
+   grant on `queue_jobs` or `queue_mirror_cursors`. Before any runtime grant,
+   deployment automation must transfer the functions from the Goose executor
+   to a dedicated `NOLOGIN`, non-superuser owner holding only the exact table
+   privileges required by the fixed bodies. The PostgreSQL gate proves both
+   positive function-mediated behavior and negative direct live/scratch queue
+   and arbitrary-cursor writes. Production deployment remains blocked until
+   function ownership/configuration, the same minimal grants, and the negative
+   controls are verified in-cluster.
 
 ### 5.5 The operating rule + cutover (`04 §3.3`, `06 R4`)
 

@@ -4,7 +4,10 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+use serde_json::Number as JsonNumber;
 use serde_yaml::Value as Yaml;
+use sha2::{Digest, Sha256};
 
 use crate::model::ContentType;
 
@@ -12,6 +15,9 @@ use crate::model::ContentType;
 /// (`classifier.core.yml`, kept in sync with the Go embed).
 pub(crate) const CORE_YAML: &str =
     include_str!("../../../../internal/classifier/classifier.core.yml");
+
+const EFFECTIVE_CONFIG_DIGEST_VERSION: u8 = 1;
+const CORE_DEFAULT_WORKFLOW: &str = "default";
 
 /// A flag's declared type (`FlagType`). Only the two shapes `classifier.core.yml`
 /// declares are modelled; string/int/string_list land with user config support.
@@ -43,8 +49,107 @@ pub struct Source {
 pub enum SourceError {
     #[error("parse classifier source: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("serialize effective classifier configuration: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("classifier source: {0}")]
     Shape(String),
+}
+
+/// Digest the exact embedded classifier configuration that [`Source::load_core`]
+/// parses and the default workflow that the shadow runtime supports.
+pub fn core_config_digest() -> Result<String, SourceError> {
+    effective_config_digest(CORE_YAML, CORE_DEFAULT_WORKFLOW)
+}
+
+fn effective_config_digest(yaml: &str, default_workflow: &str) -> Result<String, SourceError> {
+    let root: Yaml = serde_yaml::from_str(yaml)?;
+    let map = root
+        .as_mapping()
+        .ok_or_else(|| SourceError::Shape("root is not a mapping".into()))?;
+    let empty = Yaml::Mapping(Default::default());
+    let document = EffectiveConfigDocument {
+        version: EFFECTIVE_CONFIG_DIGEST_VERSION,
+        default_workflow,
+        source: EffectiveConfigSource {
+            workflows: canonical_yaml(map.get("workflows").unwrap_or(&empty))?,
+            flag_definitions: canonical_yaml(map.get("flag_definitions").unwrap_or(&empty))?,
+            flags: canonical_yaml(map.get("flags").unwrap_or(&empty))?,
+            keywords: canonical_yaml(map.get("keywords").unwrap_or(&empty))?,
+            extensions: canonical_yaml(map.get("extensions").unwrap_or(&empty))?,
+        },
+    };
+    // Go's encoding/json always escapes the JSONP line/paragraph separators,
+    // even with HTML escaping disabled. Make that explicit in v1 so equal
+    // Unicode strings hash identically in both implementations.
+    let encoded = serde_json::to_string(&document)?
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    let sum = Sha256::digest(encoded.as_bytes());
+
+    Ok(format!("sha256:{}", hex::encode(sum)))
+}
+
+#[derive(Serialize)]
+struct EffectiveConfigDocument<'a> {
+    version: u8,
+    default_workflow: &'a str,
+    source: EffectiveConfigSource,
+}
+
+#[derive(Serialize)]
+struct EffectiveConfigSource {
+    workflows: CanonicalJson,
+    flag_definitions: CanonicalJson,
+    flags: CanonicalJson,
+    keywords: CanonicalJson,
+    extensions: CanonicalJson,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CanonicalJson {
+    Null,
+    Bool(bool),
+    Number(JsonNumber),
+    String(String),
+    Array(Vec<CanonicalJson>),
+    Object(BTreeMap<String, CanonicalJson>),
+}
+
+fn canonical_yaml(value: &Yaml) -> Result<CanonicalJson, SourceError> {
+    match value {
+        Yaml::Null => Ok(CanonicalJson::Null),
+        Yaml::Bool(value) => Ok(CanonicalJson::Bool(*value)),
+        Yaml::Number(value) => {
+            let number = if let Some(value) = value.as_i64() {
+                JsonNumber::from(value)
+            } else if let Some(value) = value.as_u64() {
+                JsonNumber::from(value)
+            } else {
+                return Err(SourceError::Shape(
+                    "effective config digest v1 does not support floating-point values".into(),
+                ));
+            };
+            Ok(CanonicalJson::Number(number))
+        }
+        Yaml::String(value) => Ok(CanonicalJson::String(value.clone())),
+        Yaml::Sequence(values) => values
+            .iter()
+            .map(canonical_yaml)
+            .collect::<Result<Vec<_>, _>>()
+            .map(CanonicalJson::Array),
+        Yaml::Mapping(values) => values
+            .iter()
+            .map(|(key, value)| {
+                let key = key.as_str().ok_or_else(|| {
+                    SourceError::Shape("effective config mapping key is not a string".into())
+                })?;
+                Ok((key.to_string(), canonical_yaml(value)?))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map(CanonicalJson::Object),
+        Yaml::Tagged(tagged) => canonical_yaml(&tagged.value),
+    }
 }
 
 impl Source {
@@ -170,4 +275,69 @@ fn parse_string_lists(v: Option<&Yaml>) -> BTreeMap<String, Vec<String>> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod config_digest_tests {
+    use super::{effective_config_digest, CORE_DEFAULT_WORKFLOW, CORE_YAML};
+
+    #[test]
+    fn behavior_mutations_change_effective_config_digest() {
+        let baseline =
+            effective_config_digest(CORE_YAML, CORE_DEFAULT_WORKFLOW).expect("baseline digest");
+
+        for (needle, replacement) in [
+            ("set_content_type: audiobook", "set_content_type: comic"),
+            ("tmdb_enabled: true", "tmdb_enabled: false"),
+            ("- m4a", "- m4x"),
+        ] {
+            assert!(
+                CORE_YAML.contains(needle),
+                "missing mutation needle {needle}"
+            );
+            let mutated = CORE_YAML.replacen(needle, replacement, 1);
+            let digest =
+                effective_config_digest(&mutated, CORE_DEFAULT_WORKFLOW).expect("mutated digest");
+            assert_ne!(digest, baseline, "mutation {needle} did not change digest");
+        }
+    }
+
+    #[test]
+    fn default_workflow_changes_effective_config_digest() {
+        let baseline =
+            effective_config_digest(CORE_YAML, CORE_DEFAULT_WORKFLOW).expect("baseline digest");
+        let mutated = effective_config_digest(CORE_YAML, "audio").expect("mutated digest");
+        assert_ne!(mutated, baseline);
+    }
+
+    #[test]
+    fn unicode_edge_vector_matches_go() {
+        let yaml = r#"
+workflows:
+  edge:
+    value: "before\u2028between\u2029after"
+    items: [null, true, -7, "<&>"]
+flag_definitions: {}
+flags: {}
+keywords: {}
+extensions: {}
+"#;
+        assert_eq!(
+            effective_config_digest(yaml, "edge").expect("edge digest"),
+            "sha256:61562ac973ee6a59d1e49d5dbdc555002f23b3a9c24358de5c423aef7edfb7bf"
+        );
+    }
+
+    #[test]
+    fn digest_rejects_floating_point_values() {
+        let yaml = r#"
+workflows:
+  edge:
+    value: 1.5
+"#;
+        let error = effective_config_digest(yaml, "edge").expect_err("float must be rejected");
+        assert!(error
+            .to_string()
+            .contains("does not support floating-point"));
+    }
 }

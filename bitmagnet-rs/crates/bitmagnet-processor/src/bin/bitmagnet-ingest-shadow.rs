@@ -44,6 +44,13 @@ enum Command {
     },
     /// Consume the scratch queue, compare against settled live rows, and discard.
     Consume {
+        /// Digest printed by `bitmagnet classifier digest` in the live Go
+        /// processor environment.
+        #[arg(
+            long,
+            env = "BITMAGNET_INGEST_SHADOW_EXPECTED_CLASSIFIER_CONFIG_DIGEST"
+        )]
+        expected_classifier_config_digest: Option<String>,
         #[arg(long, default_value_t = 30)]
         check_interval_seconds: u64,
         #[arg(long, default_value_t = 600)]
@@ -90,6 +97,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Command::Consume {
+            expected_classifier_config_digest,
             check_interval_seconds,
             job_timeout_seconds,
         } => {
@@ -97,7 +105,10 @@ async fn main() -> Result<()> {
             config.check_interval = Duration::from_secs(check_interval_seconds);
             config.job_timeout = Duration::from_secs(job_timeout_seconds);
             let consumer = Consumer::new(QueueStore::new(pool.clone()), config);
-            let runtime = Arc::new(ShadowRuntime::from_core(pool)?);
+            let runtime = Arc::new(ShadowRuntime::from_core(
+                pool,
+                expected_classifier_config_digest.as_deref(),
+            )?);
             let metrics = ShadowMetrics::register().context("registering shadow metrics")?;
             consumer
                 .run_until(
@@ -185,12 +196,19 @@ fn validate_args(args: &Args) -> Result<()> {
             anyhow::ensure!(*idle_seconds > 0, "idle-seconds must be positive");
         }
         Command::Consume {
+            expected_classifier_config_digest,
             check_interval_seconds,
             job_timeout_seconds,
         } => {
             anyhow::ensure!(
                 args.postgres_max_connections >= 2,
                 "consume requires at least two PostgreSQL connections: one held by the queue transaction and one for shadow reads"
+            );
+            anyhow::ensure!(
+                expected_classifier_config_digest
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "consume requires --expected-classifier-config-digest (or BITMAGNET_INGEST_SHADOW_EXPECTED_CLASSIFIER_CONFIG_DIGEST)"
             );
             anyhow::ensure!(
                 *check_interval_seconds > 0,
