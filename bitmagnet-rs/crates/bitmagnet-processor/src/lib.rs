@@ -15,8 +15,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod persist;
+mod shadow;
 
-pub use persist::{persist_write_set, BlockingManager, BoxError, TorrentContentPersistence};
+pub use persist::{
+    persist_write_set, BlockingManager, BoxError, PersistError, TorrentContentPersistence,
+};
+pub use shadow::{
+    read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
+};
 
 /// A torrent after the processor's read/hydration step.
 ///

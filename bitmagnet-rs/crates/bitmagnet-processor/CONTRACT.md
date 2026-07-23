@@ -54,5 +54,24 @@ This is not yet the complete runtime persistence milestone:
 - the runtime loader still needs to carry the volatile persistence metadata and
   construct the weighted FTS vector;
 - the concrete stable-bloom blocking manager is not yet ported; and
-- queue retry wiring, post-commit Tantivy dual-write, shadow comparison, and the
-  SELECT-only negative control remain outstanding.
+- queue retry wiring, post-commit Tantivy dual-write, the poll-mirror, and the
+  full write-set comparator remain outstanding.
+
+## Milestone 3: live snapshot and permission fail-safe
+
+`read_live_snapshot` now reads the stable comparison image with non-locking
+`SELECT`s over exactly `content`, `torrent_contents`, `torrent_tags`, and
+`torrents`. It canonicalizes languages, episodes, content rows, and tags, and
+represents a Go-deleted torrent as the first-class `live_absent` outcome.
+
+The goose-26 PostgreSQL gate creates the frozen shadow role with SELECT on those
+four live tables and SELECT/INSERT/UPDATE on `queue_jobs`. It proves the role can
+read the snapshot, insert and settle a scratch job, and cannot update a live
+torrent: PostgreSQL rejects the negative control with `insufficient_privilege`
+(`42501`). It also proves the role cannot read the undeclared
+`content_attributes` table.
+
+Attached-content identifiers remain intentionally empty in the snapshot. The
+identifiers live in `content_attributes`, but §5.4 grants the shadow role no
+access to that table. Expanding that frozen permission boundary requires an
+explicit contract decision; the reader does not silently widen it.
