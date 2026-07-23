@@ -594,8 +594,7 @@ mod tests {
             "nectarine",
         ];
         let name = present.join(" ");
-        let (index, reader, fields) =
-            index_docs(&[doc_named(1, &name, &["disc/track.flac"], 5)]);
+        let (index, reader, fields) = index_docs(&[doc_named(1, &name, &["disc/track.flac"], 5)]);
 
         // Two absent 2-char words bracket the gram-rich ones; neither substring
         // occurs in the doc, so an un-capped query would drop it.
