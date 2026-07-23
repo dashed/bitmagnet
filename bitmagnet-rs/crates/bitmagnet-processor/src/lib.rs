@@ -1,11 +1,14 @@
 //! Phase-3 Lane P — processor orchestration + write-shadow.
 //!
-//! This milestone implements the pure boundary at the centre of the processor:
+//! This crate implements the pure boundary at the centre of the processor:
 //! consume a `process_torrent` payload plus already-loaded torrents, run Lane
 //! C's classifier, and materialize the canonical write-set that Go constructs
-//! before opening its persistence transaction. PostgreSQL persistence, queue
-//! retries, attached-content enrichment, and the dark shadow runtime remain
-//! later milestones. Contract: `docs/dev/rust-rewrite/phase3-contracts.md` §5.
+//! before opening its persistence transaction. The supported unattached-content
+//! path can be persisted in one PostgreSQL transaction, and the shadow path can
+//! read a stable live-row comparison image under the frozen restricted role.
+//! Queue retries, attached-content enrichment, post-commit Tantivy dual-write,
+//! and the dark shadow runtime remain later milestones. Contract:
+//! `docs/dev/rust-rewrite/phase3-contracts.md` §5.
 
 use std::collections::{BTreeMap, BTreeSet};
 
