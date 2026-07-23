@@ -954,9 +954,13 @@ version = "0.1.0"
 dependencies = [
  "bitmagnet-classifier",
  "bitmagnet-queue",
+ "futures",
+ "hex",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

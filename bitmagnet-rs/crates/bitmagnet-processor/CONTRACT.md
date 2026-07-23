@@ -31,3 +31,28 @@ The frozen core classifier uses no `add_tag` actions, and the flags-off corpus
 never attaches content, so these limitations do not weaken the 330/330 first
 milestone gate. They are explicit blockers for claiming the DB/shadow milestones
 complete.
+
+## Milestone 2: supported-path PostgreSQL transaction kernel
+
+`persist_write_set` now reproduces the Go transaction order for the currently
+supported unattached-content path: blocker call before the transaction, stale
+`torrent_contents` deletes, 100-row classified-content upserts, 100-row
+`torrent_tags` inserts with `ON CONFLICT DO NOTHING`, and whole-torrent deletes.
+It requires the source-derived `seeders`/`leechers`/`published_at`/`tsv` image
+explicitly because those fields are intentionally excluded from the stable M1
+comparison projection. It also converts the normalized episode string back to
+Go's JSONB map shape and validates Go's tag-name hook.
+
+The live-PostgreSQL gate runs against goose 26 and proves upsert/delete/tag
+semantics, blocker-before-delete ordering, exact microsecond timestamps, and
+full rollback when a late tag write fails.
+
+This is not yet the complete runtime persistence milestone:
+
+- attached `content` remains rejected until Lane C exposes the structured
+  content row and its associations;
+- the runtime loader still needs to carry the volatile persistence metadata and
+  construct the weighted FTS vector;
+- the concrete stable-bloom blocking manager is not yet ported; and
+- queue retry wiring, post-commit Tantivy dual-write, shadow comparison, and the
+  SELECT-only negative control remain outstanding.

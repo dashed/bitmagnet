@@ -10,9 +10,15 @@ description = "Phase-3 Lane P — processor orchestration + write-shadow for the
 [dependencies]
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 bitmagnet-queue = { path = "../bitmagnet-queue" }
+futures.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

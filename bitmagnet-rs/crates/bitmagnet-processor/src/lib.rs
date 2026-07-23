@@ -14,6 +14,10 @@ use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod persist;
+
+pub use persist::{persist_write_set, BlockingManager, BoxError, TorrentContentPersistence};
+
 /// A torrent after the processor's read/hydration step.
 ///
 /// `classifier_input` is the effective classifier image: its hint has already
