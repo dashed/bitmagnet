@@ -71,7 +71,11 @@ pub(crate) fn parse_video_content(
                 video_3d: attrs.video_3d,
                 video_modifier: attrs.video_modifier,
                 release_group: attrs.release_group,
-                content_attached: false,
+                // `parse_video_content` produces a `ContentAttributes`, which in
+                // Go does not carry the attached `*model.Content` at all; it is
+                // merged into the threaded result, and `Merge` never touches
+                // `Content`.
+                content: None,
             };
             (Some(cls), None)
         }

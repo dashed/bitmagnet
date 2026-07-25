@@ -55,9 +55,14 @@ impl Driver for ClassifierDriver {
 
     fn run(&self, input: &Value) -> Result<Value> {
         let parsed: ClassifierInput = serde_json::from_value(input.clone())?;
-        Ok(self
-            .classifier
-            .run("default", &Classifier::flags_off(), &parsed))
+        // The `Driver` trait is synchronous; `Classifier::run` is async since
+        // the B′-0 dependency seam. With the flags-off `NullContentResolver`
+        // there is no I/O, so the future resolves on its first poll.
+        Ok(futures::executor::block_on(self.classifier.run(
+            "default",
+            &Classifier::flags_off(),
+            &parsed,
+        )))
     }
 }
 
@@ -119,6 +124,9 @@ fn classifier_matches_the_full_corpus() {
     // of the 330 golden fixtures exactly (contract §2.5).
     let fixtures = load_corpus();
     let report = run(&fixtures, &ClassifierDriver::new(), Options::default());
+    // Surfaced under `--nocapture` so a gate run leaves an auditable count in
+    // the log rather than only a green tick.
+    eprintln!("classifier_pair gate: {report}");
 
     assert_eq!(
         report.ran, EXPECTED_FIXTURES,

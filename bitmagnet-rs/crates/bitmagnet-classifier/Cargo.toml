@@ -18,6 +18,15 @@ serde_yaml = "0.9"
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+# The B′-0 dependency seam. `async-trait` boxes the `ContentResolver` futures so
+# the trait stays `dyn`-safe (a recording/replaying tape is swapped in for the
+# live PG/TMDB backends without a generic parameter); `futures` supplies the
+# `BoxFuture` the recursive action executor needs and the `block_on` the
+# still-synchronous callers bridge with.
+async-trait = { workspace = true }
+futures = { workspace = true }
+# `model.Content` — what the four `attach_*` actions attach.
+bitmagnet-model = { path = "../bitmagnet-model" }
 sha2 = "0.10"
 regex = { workspace = true }
 thiserror = { workspace = true }

@@ -807,9 +807,12 @@ name = "bitmagnet-classifier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "bitmagnet-model",
  "bitmagnet-proto",
  "bitmagnet-release",
  "cel",
+ "futures",
  "hex",
  "regex",
  "serde",
@@ -837,6 +840,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-content-search"
+version = "0.1.0"
+
+[[package]]
 name = "bitmagnet-db"
 version = "0.1.0"
 dependencies = [
@@ -855,6 +862,7 @@ dependencies = [
  "anyhow",
  "bitmagnet-classifier",
  "bitmagnet-search",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -886,6 +894,7 @@ dependencies = [
 name = "bitmagnet-fts"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 
@@ -923,6 +932,7 @@ name = "bitmagnet-model"
 version = "0.1.0"
 dependencies = [
  "bitmagnet-common",
+ "bitmagnet-fts",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -1086,6 +1096,14 @@ dependencies = [
  "tonic-prost",
  "tracing",
 ]
+
+[[package]]
+name = "bitmagnet-textmatch"
+version = "0.1.0"
+
+[[package]]
+name = "bitmagnet-tmdb"
+version = "0.1.0"
 
 [[package]]
 name = "bitmagnet-torznab"

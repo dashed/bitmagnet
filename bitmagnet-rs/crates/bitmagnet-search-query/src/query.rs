@@ -330,6 +330,19 @@ impl SearchQuery {
                             "content_vote_count",
                             row.try_get("content_vote_count")?,
                         )?,
+                        // The search projection selects only the columns the
+                        // result mapper reads; the remaining `model.Content`
+                        // columns (release_date, adult, timestamps, tsv) and the
+                        // collection/attribute associations are deliberately not
+                        // hydrated here, exactly as before the B′-0 seam widened
+                        // the struct.
+                        release_date: None,
+                        adult: None,
+                        created_at: None,
+                        updated_at: None,
+                        tsv: Default::default(),
+                        collections: Vec::new(),
+                        attributes: Vec::new(),
                     })
                 }
                 _ => None,

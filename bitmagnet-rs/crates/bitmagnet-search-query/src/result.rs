@@ -372,7 +372,9 @@ mod tests {
             source: "tmdb".to_owned(),
             id: "123".to_owned(),
             title: title.to_owned(),
+            release_date: None,
             release_year: Some(2024),
+            adult: None,
             original_language: Some("ja".to_owned()),
             original_title: Some("Original".to_owned()),
             overview: None,
@@ -380,6 +382,11 @@ mod tests {
             popularity: Some(1.5),
             vote_average: Some(8.0),
             vote_count: Some(100),
+            created_at: None,
+            updated_at: None,
+            tsv: Default::default(),
+            collections: Vec::new(),
+            attributes: Vec::new(),
         }
     }
 

@@ -48,7 +48,12 @@ fn classifier_replay_agreement() {
     for fixture in &fixtures {
         let parsed: ClassifierInput =
             serde_json::from_value(fixture.input.clone()).expect("parse replay input");
-        let got = canonical(&classifier.run("default", &flags, &parsed));
+        // `Classifier::run` is async since the B′-0 dependency seam; the
+        // flags-off `NullContentResolver` does no I/O, so `block_on` completes
+        // on the first poll and the replay stays a tight synchronous loop.
+        let got = canonical(&futures::executor::block_on(
+            classifier.run("default", &flags, &parsed),
+        ));
         let want = canonical(&fixture.expected);
         if got == want {
             matched += 1;

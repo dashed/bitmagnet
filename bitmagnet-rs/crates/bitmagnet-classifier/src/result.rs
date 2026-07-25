@@ -2,6 +2,7 @@
 //! `corpus_test.go normalizeClassifierResult` (the frozen corpus `expected`
 //! schema, contract §2.1/§2.3).
 
+use bitmagnet_model::Content;
 use bitmagnet_release::{
     Episodes, Video3D, VideoCodec, VideoModifier, VideoResolution, VideoSource,
 };
@@ -27,12 +28,54 @@ pub struct Classification {
     pub video_3d: Option<Video3D>,
     pub video_modifier: Option<VideoModifier>,
     pub release_group: Option<String>,
-    /// Whether `AttachContent` ran (a `*model.Content` is set). Always false on
-    /// the flags-off corpus path.
-    pub content_attached: bool,
+    /// The attached content row — Go `classification.Result.Content`
+    /// (`result.go:7`), a `*model.Content` that is nil until one of the four
+    /// `attach_*` actions succeeds.
+    ///
+    /// Note this sits on `Result`, **not** on `ContentAttributes`, which is why
+    /// [`Classification::merge`] (the port of `ContentAttributes.Merge`) leaves
+    /// it alone.
+    ///
+    /// Always `None` on the flags-off path: with the
+    /// [`crate::NullContentResolver`] every lookup misses and the `attach_*`
+    /// actions all raise `unmatched`.
+    pub content: Option<Content>,
 }
 
 impl Classification {
+    /// Whether `AttachContent` ran — the corpus `contentAttached` field.
+    #[must_use]
+    pub fn content_attached(&self) -> bool {
+        self.content.is_some()
+    }
+
+    /// Port of Go `classification.Result.AttachContent` (`result.go:18-29`):
+    /// attach the row, adopt its content type, and fold in its original
+    /// language when the result has no languages yet (or is multi-language).
+    ///
+    /// Unused in this lane — with a null resolver no `attach_*` action ever
+    /// reaches it — but it is the single place lane B′-4's four real attach
+    /// actions converge on, so the semantics are pinned here rather than
+    /// re-derived four times.
+    ///
+    /// ⚠️ Go appends into a `model.Languages` **set** (a map), so the resulting
+    /// display order is that set's order, not append order. The flags-off gates
+    /// cannot exercise this, so lane B′-4 must confirm the ordering against a
+    /// flags-ON oracle before relying on it.
+    pub fn attach_content(&mut self, content: Content) {
+        self.content_type = ContentType::parse(content.content_type.as_str());
+
+        if let Some(language) = content.original_language.as_deref() {
+            if (self.languages.is_empty() || self.language_multi)
+                && !self.languages.iter().any(|l| l == language)
+            {
+                self.languages.push(language.to_owned());
+            }
+        }
+
+        self.content = Some(content);
+    }
+
     /// `ContentAttributes.Merge` — fill any unset field from `other`
     /// (`result.go:46`). Only the video-path attributes participate; the CEL
     /// `result` fields (content_type/base_title) are handled by the actions.
@@ -105,7 +148,7 @@ pub(crate) fn to_expected_json(result: &Classification, outcome: &Outcome) -> Va
         "video3d": opt_str(attrs.video_3d.map(Video3D::as_str)),
         "videoModifier": opt_str(attrs.video_modifier.map(VideoModifier::as_str)),
         "releaseGroup": attrs.release_group.clone().map_or(Value::Null, Value::String),
-        "contentAttached": attrs.content_attached,
+        "contentAttached": attrs.content_attached(),
         "outcome": outcome.tag(),
     });
 

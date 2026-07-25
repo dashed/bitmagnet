@@ -19,6 +19,12 @@ members = [
     "crates/bitmagnet-release",
     "crates/bitmagnet-classifier",
     "crates/bitmagnet-processor",
+    # B′-0 seam placeholders. Registered up-front (with stub `lib.rs`es) so the
+    # later enrichment-parity lanes can fill them in without ever touching this
+    # manifest — only the seam lane owns it.
+    "crates/bitmagnet-textmatch",
+    "crates/bitmagnet-tmdb",
+    "crates/bitmagnet-content-search",
 ]
 
 [workspace.package]
@@ -109,6 +115,21 @@ duckdb = { version = "1.3", features = ["bundled", "parquet"] }
 
 # Async stream combinators (client-streaming gRPC, DB row streams).
 futures = "0.3"
+# `async fn` in object-safe traits. Native RPITIT (stable since 1.75) is not
+# `dyn`-safe, and the B′-0 `ContentResolver` seam is consumed as a
+# `dyn ContentResolver` so a recording/replaying tape can be swapped in for the
+# live PG/TMDB implementation without a generic parameter infecting every
+# `Classifier` call site.
+async-trait = "0.1"
+
+# HTTP client for the TMDB API (B′ enrichment lanes). Promoted from
+# `bitmagnet-graphql`'s local dependency table so the TMDB client crate and the
+# GraphQL crate cannot drift on version or TLS backend. `default-features =
+# false` + `rustls-tls` keeps OpenSSL off the build.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 # UDS / TCP listener wrappers for the gRPC transport.
 tokio-stream = { version = "0.1", features = ["net"] }
 # Hex for info-hash <-> text at the export/Parquet boundary.

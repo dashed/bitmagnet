@@ -9,12 +9,14 @@
 use std::collections::HashMap;
 
 use cel::{Program, Value};
+use futures::future::LocalBoxFuture;
 use serde_yaml::Value as Yaml;
 
 use crate::env::Env;
 use crate::errors::FlowError;
 use crate::model::{ClassifierInput, ContentType};
 use crate::parsers::{parse_date, parse_video_content};
+use crate::resolver::ContentResolver;
 use crate::result::Classification;
 
 /// A compiled action node.
@@ -45,12 +47,20 @@ pub(crate) enum Action {
     RunWorkflow(Vec<String>),
     ParseDate,
     ParseVideoContent,
-    /// The four `attach_*` actions. Under the flags-off corpus every one of them
-    /// resolves to `unmatched` (contract §2.2): the local-by-id branch's
-    /// `LocalSearch.ContentByID` is mocked to `ErrUnmatched`, and the other
-    /// three are behind `flags` gates that are false, so their `if_else` runs
-    /// the `unmatched` else-branch and they are never entered. TMDB (decision
-    /// #3) lands as a later milestone.
+    /// The four `attach_*` actions, still fused into one variant. Under the
+    /// flags-off corpus every one of them resolves to `unmatched` (contract
+    /// §2.2): the local-by-id branch's `LocalSearch.ContentByID` is mocked to
+    /// `ErrUnmatched`, and the other three are behind `flags` gates that are
+    /// false, so their `if_else` runs the `unmatched` else-branch and they are
+    /// never entered.
+    ///
+    /// 🔜 Lane B′-4 splits this into `AttachLocalContentById`,
+    /// `AttachLocalContentBySearch`, `AttachTmdbContentById` and
+    /// `AttachTmdbContentBySearch`, each reading [`ExecCtx::resolver`]. B′-0
+    /// deliberately leaves the fusion in place so that the async/`Content`
+    /// refactor is provably behaviour-preserving: with the null resolver this
+    /// variant short-circuits exactly as before, keeping the 330 goldens and the
+    /// 119,991-name replay bit-identical.
     AttachUnmatched,
 }
 
@@ -305,96 +315,120 @@ fn string_list(value: &Yaml, path: &[String], kind: &str) -> Result<Vec<String>,
 // Execution
 // ---------------------------------------------------------------------------
 
-/// Run-invariant execution context (everything but the threaded result).
+/// Run-invariant execution context (everything but the threaded result) —
+/// Go's `executionContext`, which likewise carries the injected `dependencies`
+/// (`dependencies.go`) alongside the CEL bindings.
 pub(crate) struct ExecCtx<'a> {
     pub env: &'a Env,
     pub torrent_val: &'a Value,
     pub flags_val: &'a Value,
     pub input: &'a ClassifierInput,
     pub workflows: &'a HashMap<String, Action>,
+    /// The B′-0 dependency seam. Held as a trait object so the same compiled
+    /// workflows run against the live PG/TMDB backends or a recorded tape.
+    ///
+    /// Unread in this lane: [`Action::AttachUnmatched`] still short-circuits
+    /// before consulting it. Lane B′-4 splits that variant into the four real
+    /// attach actions, and they read it from here.
+    #[allow(dead_code)]
+    pub resolver: &'a dyn ContentResolver,
 }
 
 /// Run an action, threading `result`. Mirrors the Go action runtime; on error
 /// the caller decides (only the top-level workflow observes the zeroed result,
 /// which is why the normalizer uses `Classification::default` on any error).
-pub(crate) fn run_action(
-    action: &Action,
-    ctx: &ExecCtx<'_>,
+///
+/// Async because the four `attach_*` actions are I/O (a PostgreSQL query or a
+/// TMDB HTTP call) once lane B′-4 wires them to [`ExecCtx::resolver`]. The
+/// executor is mutually recursive, so each level returns a boxed future rather
+/// than being a plain `async fn` (which would need an infinitely-sized state
+/// machine).
+///
+/// The box is [`LocalBoxFuture`], not `BoxFuture`: `cel::Value` is not `Sync`,
+/// so a `&ExecCtx` cannot be held across an await point in a `Send` future.
+/// That is not a limitation in practice — the classifier is driven per-torrent
+/// from a single task, and a caller that needs `Send` can drive it on a
+/// current-thread runtime.
+pub(crate) fn run_action<'a>(
+    action: &'a Action,
+    ctx: &'a ExecCtx<'a>,
     result: Classification,
-) -> Result<Classification, FlowError> {
-    match action {
-        Action::List(actions) => {
-            let mut r = result;
-            for a in actions {
-                r = run_action(a, ctx, r)?;
-            }
-            Ok(r)
-        }
-        Action::SetContentType(ct) => {
-            let mut r = result;
-            r.content_type = Some(*ct);
-            Ok(r)
-        }
-        Action::Delete(path) => Err(FlowError::runtime(path, FlowError::Delete)),
-        Action::Unmatched(path) => Err(FlowError::runtime(path, FlowError::Unmatched)),
-        Action::AddTag(_) => Ok(result),
-        Action::FindMatch { actions, path } => {
-            for a in actions {
-                match run_action(a, ctx, result.clone()) {
-                    Ok(res) => return Ok(res),
-                    Err(e) if e.is_unmatched() => continue,
-                    Err(e) => return Err(FlowError::runtime(path, e)),
+) -> LocalBoxFuture<'a, Result<Classification, FlowError>> {
+    Box::pin(async move {
+        match action {
+            Action::List(actions) => {
+                let mut r = result;
+                for a in actions {
+                    r = run_action(a, ctx, r).await?;
                 }
+                Ok(r)
             }
-            Ok(result)
-        }
-        Action::IfElse {
-            condition,
-            if_action,
-            else_action,
-        } => {
-            if eval_condition(condition, ctx, &result)? {
-                if let Some(a) = if_action {
-                    return run_action(a, ctx, result);
+            Action::SetContentType(ct) => {
+                let mut r = result;
+                r.content_type = Some(*ct);
+                Ok(r)
+            }
+            Action::Delete(path) => Err(FlowError::runtime(path, FlowError::Delete)),
+            Action::Unmatched(path) => Err(FlowError::runtime(path, FlowError::Unmatched)),
+            Action::AddTag(_) => Ok(result),
+            Action::FindMatch { actions, path } => {
+                for a in actions {
+                    match run_action(a, ctx, result.clone()).await {
+                        Ok(res) => return Ok(res),
+                        Err(e) if e.is_unmatched() => continue,
+                        Err(e) => return Err(FlowError::runtime(path, e)),
+                    }
                 }
-            } else if let Some(a) = else_action {
-                return run_action(a, ctx, result);
+                Ok(result)
             }
-            Ok(result)
+            Action::IfElse {
+                condition,
+                if_action,
+                else_action,
+            } => {
+                if eval_condition(condition, ctx, &result)? {
+                    if let Some(a) = if_action {
+                        return run_action(a, ctx, result).await;
+                    }
+                } else if let Some(a) = else_action {
+                    return run_action(a, ctx, result).await;
+                }
+                Ok(result)
+            }
+            Action::RunWorkflow(names) => {
+                let mut r = result;
+                for name in names {
+                    let wf = ctx
+                        .workflows
+                        .get(name)
+                        .ok_or_else(|| FlowError::Cel(format!("workflow not found: {name}")))?;
+                    r = run_action(wf, ctx, r).await?;
+                }
+                Ok(r)
+            }
+            Action::ParseDate => {
+                let mut r = result;
+                let parsed = parse_date(&ctx.input.name);
+                if parsed.is_nil() {
+                    return Err(FlowError::Unmatched);
+                }
+                r.date = parsed;
+                Ok(r)
+            }
+            Action::ParseVideoContent => {
+                let (attrs, err) = parse_video_content(ctx.input, &result);
+                let mut r = result;
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                if let Some(attrs) = attrs {
+                    r.merge(attrs);
+                }
+                Ok(r)
+            }
+            Action::AttachUnmatched => Err(FlowError::Unmatched),
         }
-        Action::RunWorkflow(names) => {
-            let mut r = result;
-            for name in names {
-                let wf = ctx
-                    .workflows
-                    .get(name)
-                    .ok_or_else(|| FlowError::Cel(format!("workflow not found: {name}")))?;
-                r = run_action(wf, ctx, r)?;
-            }
-            Ok(r)
-        }
-        Action::ParseDate => {
-            let mut r = result;
-            let parsed = parse_date(&ctx.input.name);
-            if parsed.is_nil() {
-                return Err(FlowError::Unmatched);
-            }
-            r.date = parsed;
-            Ok(r)
-        }
-        Action::ParseVideoContent => {
-            let (attrs, err) = parse_video_content(ctx.input, &result);
-            let mut r = result;
-            if let Some(e) = err {
-                return Err(e);
-            }
-            if let Some(attrs) = attrs {
-                r.merge(attrs);
-            }
-            Ok(r)
-        }
-        Action::AttachUnmatched => Err(FlowError::Unmatched),
-    }
+    })
 }
 
 fn eval_condition(

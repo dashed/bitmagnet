@@ -8,7 +8,9 @@ use serde_json::json;
 fn classify(input: serde_json::Value) -> serde_json::Value {
     let classifier = Classifier::from_core().expect("compile classifier.core.yml");
     let parsed: ClassifierInput = serde_json::from_value(input).expect("parse input");
-    classifier.run("default", &Classifier::flags_off(), &parsed)
+    // `run` is async for the `attach_*` I/O, but with the default
+    // `NullContentResolver` the future never yields — no runtime needed.
+    futures::executor::block_on(classifier.run("default", &Classifier::flags_off(), &parsed))
 }
 
 #[test]

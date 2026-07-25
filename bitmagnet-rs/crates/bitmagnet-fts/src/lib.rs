@@ -7,8 +7,10 @@
 //! shares ONE tokenizer instead of copying it.
 
 mod tokenizer;
+mod tsvector;
 
 pub use self::tokenizer::tokenize_flat;
+pub use self::tsvector::{Tsvector, TsvectorWeight, MAX_LEXEME_BYTES};
 
 /// Port of Go `fts.AppQueryToTsquery`: turn a user-facing app query into the
 /// Postgres `tsquery` string Postgres would match against. Pure and

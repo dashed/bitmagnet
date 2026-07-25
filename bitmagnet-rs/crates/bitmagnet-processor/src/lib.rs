@@ -180,9 +180,18 @@ impl Materializer {
                 continue;
             };
 
-            let raw = self
-                .classifier
-                .run(workflow, &flags, &torrent.classifier_input);
+            // `Classifier::run` became async with the B′-0 dependency seam, but
+            // `materialize` is called from a synchronous path. The default
+            // `NullContentResolver` performs no I/O, so the future completes on
+            // its first poll and `block_on` neither parks nor needs a runtime.
+            // 🔜 When lane B′-4 wires a real resolver in, this call actually
+            // does I/O and `materialize` must itself become async — this
+            // `block_on` is the marker for that change, not a permanent bridge.
+            let raw = futures::executor::block_on(self.classifier.run(
+                workflow,
+                &flags,
+                &torrent.classifier_input,
+            ));
             let result: ClassifierResult = serde_json::from_value(raw)?;
             match result.outcome.as_str() {
                 "deleted" => write_set.delete_info_hashes.push(info_hash),

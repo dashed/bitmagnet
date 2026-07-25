@@ -16,3 +16,6 @@ anyhow = { workspace = true }
 [dev-dependencies]
 bitmagnet-search = { path = "../bitmagnet-search" }
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
+# `Classifier::run` is async since the B′-0 dependency seam; the classifier
+# gates drive it with `block_on` (no I/O under the null resolver).
+futures = { workspace = true }

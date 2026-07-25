@@ -250,7 +250,7 @@ fn torrent_file_extensions(input: &ClassifierInput, status: Option<FilesStatus>)
 pub(crate) fn build_cel_classification(c: &Classification) -> CelClassification {
     CelClassification {
         content_type: c.content_type.map_or(0, ContentType::proto_i32),
-        has_attached_content: c.content_attached,
+        has_attached_content: c.content_attached(),
         has_base_title: c.base_title.is_some(),
         // core.yml reads none of the fields below; emitted for shape parity.
         languages: c.languages.clone(),
@@ -268,7 +268,18 @@ pub(crate) fn build_cel_classification(c: &Classification) -> CelClassification 
             .map(|c| c.as_str().to_string())
             .unwrap_or_default(),
         release_group: c.release_group.clone().unwrap_or_default(),
-        content_id: String::new(),
-        content_source: String::new(),
+        // `protobuf.NewClassification` reads these off the attached content, so
+        // they are the attached row's primary-key parts, not blanks. Before the
+        // B′-0 seam there was no way to attach content and they were hardcoded
+        // to `""`; that stays the emitted value on the flags-off path (proto3's
+        // default for an unset optional string, which is what cel-go field
+        // selection returns), but it is now a *consequence* of nothing being
+        // attached rather than a stub.
+        content_id: c.content.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
+        content_source: c
+            .content
+            .as_ref()
+            .map(|x| x.source.clone())
+            .unwrap_or_default(),
     }
 }

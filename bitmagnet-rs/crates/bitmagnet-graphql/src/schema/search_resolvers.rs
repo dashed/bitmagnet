@@ -2048,6 +2048,15 @@ mod tests {
                 popularity: Some(10.0),
                 vote_average: Some(8.0),
                 vote_count: Some(100),
+                // Not projected by the search query, so not exercised by the
+                // GraphQL mapper (see `bitmagnet-search-query`'s row decoder).
+                release_date: None,
+                adult: None,
+                created_at: None,
+                updated_at: None,
+                tsv: Default::default(),
+                collections: Vec::new(),
+                attributes: Vec::new(),
             }),
             title: "Movie (2024)".into(),
             dht_seen_count: 7,

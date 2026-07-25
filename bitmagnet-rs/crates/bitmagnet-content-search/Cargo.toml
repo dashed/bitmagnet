@@ -1,0 +1,13 @@
+[package]
+name = "bitmagnet-content-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "B′ enrichment parity — local (PostgreSQL) content lookup backing the classifier's attach_local_* actions. Placeholder registered by the B′-0 seam lane."
+
+[dependencies]
+
+[lints]
+workspace = true

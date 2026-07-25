@@ -12,8 +12,19 @@
 //! via Lane R's parser (title/year/episode/language/video attributes). The Rust
 //! classifier matches all 330 flags-off golden fixtures exactly (see the
 //! `bitmagnet-diff` `classifier_pair` gate). The four `attach_*` actions resolve
-//! to `unmatched` on the flags-off corpus path (contract §2.2); the TMDB client
-//! (decision #3) lands as a later milestone.
+//! to `unmatched` on the flags-off corpus path (contract §2.2).
+//!
+//! # The dependency seam (B′-0)
+//!
+//! Production Go runs this classifier with `local_search_enabled` /
+//! `apis_enabled` / `tmdb_enabled` all **true**, so the `attach_*` actions do
+//! real I/O against PostgreSQL and the TMDB API. [`ContentResolver`] is the
+//! injection point for that I/O: it is passed to [`Classifier::compile`],
+//! carried on the executor's context, and consumed by the attach actions. This
+//! lane lands the seam and nothing else — [`NullContentResolver`] is the
+//! default, so every attach still misses and the flags-off parity evidence is
+//! unchanged. See [`resolver`] for why `content_by_search` must return an
+//! *ordered candidate list*.
 
 mod cel_value;
 mod engine;
@@ -21,16 +32,19 @@ mod env;
 mod errors;
 mod model;
 mod parsers;
+pub mod resolver;
 mod result;
 mod source;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use cel::to_value;
 use serde_json::Value as Json;
 
 pub use errors::FlowError;
 pub use model::{ClassifierInput, InputFile, InputHint};
+pub use resolver::{ContentResolver, ContentResultItem, NullContentResolver, ResolveError};
 pub use result::{Classification, Outcome};
 pub use source::{core_config_digest, FlagType, FlagValue, Source, SourceError};
 
@@ -43,13 +57,17 @@ use result::to_expected_json;
 /// Runtime flag overrides passed to [`Classifier::run`] (`classifier.Flags`).
 pub type Flags = BTreeMap<String, FlagValue>;
 
-/// A compiled classifier: the CEL env, the compiled workflows, and the
-/// flag definitions + compiled defaults.
+/// A compiled classifier: the CEL env, the compiled workflows, the flag
+/// definitions + compiled defaults, and the injected [`ContentResolver`].
 pub struct Classifier {
     env: Env,
     workflows: std::collections::HashMap<String, Action>,
     flag_definitions: BTreeMap<String, FlagType>,
     default_flags: BTreeMap<String, FlagValue>,
+    /// Go's `classifier.dependencies` (`LocalSearch` + `tmdb.Client`), collapsed
+    /// into one trait object. `Arc` because a compiled classifier is shared
+    /// across the processor's worker tasks.
+    resolver: Arc<dyn ContentResolver>,
 }
 
 /// Any failure building a [`Classifier`].
@@ -64,13 +82,29 @@ pub enum ClassifierError {
 }
 
 impl Classifier {
-    /// Compile the embedded `classifier.core.yml`.
+    /// Compile the embedded `classifier.core.yml` with the flags-off
+    /// [`NullContentResolver`].
+    ///
+    /// This is the parity-gate entry point: every lookup misses, so no content
+    /// is ever attached.
     pub fn from_core() -> Result<Classifier, ClassifierError> {
-        Classifier::compile(Source::load_core()?)
+        Classifier::compile(Source::load_core()?, Arc::new(NullContentResolver))
     }
 
-    /// Compile a parsed source.
-    pub fn compile(source: Source) -> Result<Classifier, ClassifierError> {
+    /// Compile the embedded `classifier.core.yml` against a specific
+    /// [`ContentResolver`] — the live PG/TMDB backends, or a recording/replaying
+    /// tape.
+    pub fn from_core_with(
+        resolver: Arc<dyn ContentResolver>,
+    ) -> Result<Classifier, ClassifierError> {
+        Classifier::compile(Source::load_core()?, resolver)
+    }
+
+    /// Compile a parsed source against a [`ContentResolver`].
+    pub fn compile(
+        source: Source,
+        resolver: Arc<dyn ContentResolver>,
+    ) -> Result<Classifier, ClassifierError> {
         let env = Env::build(&source)?;
         let workflows = compile_workflows(
             &source
@@ -84,6 +118,7 @@ impl Classifier {
             workflows,
             flag_definitions: source.flag_definitions,
             default_flags: source.flags,
+            resolver,
         })
     }
 
@@ -99,8 +134,13 @@ impl Classifier {
     }
 
     /// Run a workflow over an input and normalize to the corpus `expected` JSON.
+    ///
+    /// Async because the `attach_*` actions become I/O against
+    /// [`Self::resolver`]. With the [`NullContentResolver`] the returned future
+    /// never yields, so a caller that is still synchronous can drive it to
+    /// completion with `futures::executor::block_on` without a runtime.
     #[must_use]
-    pub fn run(&self, workflow: &str, flags: &Flags, input: &ClassifierInput) -> Json {
+    pub async fn run(&self, workflow: &str, flags: &Flags, input: &ClassifierInput) -> Json {
         // Merge runtime flags over the compiled defaults, resolving one value
         // per defined flag (`runner.Run`).
         let mut merged: BTreeMap<String, FlagValue> = BTreeMap::new();
@@ -144,9 +184,10 @@ impl Classifier {
             flags_val: &flags_val,
             input,
             workflows: &self.workflows,
+            resolver: self.resolver.as_ref(),
         };
 
-        let (final_result, outcome) = match run_action(wf, &ctx, result) {
+        let (final_result, outcome) = match run_action(wf, &ctx, result).await {
             Ok(r) => (r, Outcome::Classified),
             Err(e) if e.is_delete() => (Classification::default(), Outcome::Deleted(e.to_string())),
             Err(e) if e.is_unmatched() => {

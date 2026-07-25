@@ -1,0 +1,13 @@
+[package]
+name = "bitmagnet-textmatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "B′ enrichment parity — fuzzy title matching (Go `levenshteinFindBestMatch`). Placeholder registered by the B′-0 seam lane."
+
+[dependencies]
+
+[lints]
+workspace = true

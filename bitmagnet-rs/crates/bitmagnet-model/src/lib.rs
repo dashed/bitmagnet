@@ -25,7 +25,7 @@ pub use blob::{
     deserialize_files, deserialize_files_bounded, serialize_files, BlobError, BlobFile,
     DecodedFiles,
 };
-pub use content::{Content, TorrentContent};
+pub use content::{Content, ContentAttribute, ContentCollection, ContentRef, Date, TorrentContent};
 pub use enums::{file_extension_from_path, ContentType, FileType, FilesStatus, ParseEnumError};
 pub use info_hash::{InfoHash, InfoHashError, INFO_HASH_LEN};
 pub use torrent::{Torrent, TorrentFileSummary};
