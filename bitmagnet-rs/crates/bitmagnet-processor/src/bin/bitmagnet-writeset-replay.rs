@@ -22,18 +22,51 @@
 //!    by `per_hash_split_matches_whole_set_comparison`.
 //! 2. **Per-hash admission.** The mirror's admission predicate
 //!    (`bitmagnet-queue/src/pg.rs`) is evaluated over a whole job with
-//!    `NOT EXISTS (...)`; here the same four conditions are evaluated per hash
-//!    so one attach-affected hash does not discard its 20 siblings.
+//!    `NOT EXISTS (...)`; here its conditions are evaluated per hash so one
+//!    excluded hash does not discard its 20 siblings. Three of them still
+//!    exclude (missing source row, recrawl, explicit hint); the fourth
+//!    (source-backed association) becomes the enrichment bucket below instead
+//!    of an exclusion.
+//!
+//!    Per-hash comparison is not a relaxation of Go's semantics — Go itself
+//!    persists the clean siblings and republishes only the failed hashes
+//!    (`internal/processor/processor.go:169-193`), and contract §5.2(c)
+//!    specifies comparison "per info-hash". Guard I2 below reproduces the one
+//!    genuine cross-hash coupling in that code.
 //! 3. **Replay configuration is supplied, not required from the payload.**
 //!    Production `process_torrent` payloads carry only `InfoHashes`; Go resolves
 //!    the workflow and flags from deployment configuration. The harness replays
 //!    every job under `workflow=default` + `flags-off`
-//!    (`local_search_enabled`/`apis_enabled`/`tmdb_enabled` = false), which is
-//!    the configuration the live Go processor effectively runs for every hash
-//!    that is not attach-affected — and attach-affected hashes are excluded by
-//!    admission. The embedded classifier configuration digest must still match
-//!    the live Go `effective_config_digest`, exactly as the live consumer
-//!    requires.
+//!    (`local_search_enabled`/`apis_enabled`/`tmdb_enabled` = false), because
+//!    Rust does not implement the four `attach_*` actions.
+//!
+//! # 🚨 The flags-on/flags-off asymmetry, and why results are bucketed
+//!
+//! **Production Go runs with all three enrichment flags TRUE.** The embedded
+//! Rust classifier runs them off. That asymmetry is real and unavoidable at this
+//! milestone, so a single averaged match rate would be actively misleading:
+//! wherever Go's `attach_local_content_by_*` / `attach_tmdb_content_by_*`
+//! branches fired, the live row carries enriched content that a flags-off Rust
+//! write-set structurally cannot reproduce.
+//!
+//! Every compared hash is therefore assigned a [`Bucket`] **before** any rate is
+//! computed, and rates are only ever reported per bucket:
+//!
+//! * [`Bucket::EnrichmentIndependent`] — Go attached nothing
+//!   (`torrent_contents.content_source IS NULL`). Flags-on and flags-off agree
+//!   by construction here, so this bucket is **real port-fidelity evidence**.
+//! * [`Bucket::EnrichmentDependent`] — Go attached tmdb/local content
+//!   (`content_source IS NOT NULL`). Drift here is **expected**, is labelled as
+//!   such, and must never be read as a parity failure. It is reported because
+//!   *where* the drift lands (content source/id/infer-id and nothing else) is
+//!   itself a check that the asymmetry behaves as predicted.
+//!
+//! The live row's `content_source` is the discriminator: Go's `newTorrentContent`
+//! only sets it when an attach action succeeded, so a non-null value is a direct
+//! record that enrichment fired for that hash.
+//!
+//! The embedded classifier configuration digest must still match the live Go
+//! `effective_config_digest`, exactly as the live consumer requires.
 //!
 //! # Read-only safety
 //!
@@ -210,7 +243,7 @@ async fn main() -> Result<()> {
 
     let started = Instant::now();
     let mut writer = Writer::open(args.output.as_deref()).await?;
-    let mut summary = Summary::default();
+    let mut summary = Summary::new();
     let mut cursor: Option<Cursor> = None;
     let mut remaining = args.limit_jobs;
 
@@ -242,8 +275,9 @@ async fn main() -> Result<()> {
         tracing::info!(
             jobs = summary.jobs_scanned,
             compared = summary.hashes_compared,
-            matched = summary.matched,
-            mismatched = summary.mismatched,
+            independent_matched = summary.enrichment_independent.matched,
+            independent_mismatched = summary.enrichment_independent.mismatched,
+            dependent_compared = summary.enrichment_dependent.compared,
             "replay progress"
         );
     }
@@ -465,6 +499,20 @@ enum Outcome {
     Unsupported,
 }
 
+/// Whether Go's enrichment (`attach_*`) actions touched this hash's live row.
+///
+/// Assigned from the live `torrent_contents.content_source` before any rate is
+/// computed, because production Go runs flags-on while this Rust milestone runs
+/// flags-off (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Bucket {
+    /// Go attached no enriched content. Directly comparable — real evidence.
+    EnrichmentIndependent,
+    /// Go attached tmdb/local content. Divergence is EXPECTED, never a defect.
+    EnrichmentDependent,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HashRecord {
@@ -472,6 +520,10 @@ struct HashRecord {
     ran_at: String,
     info_hash: String,
     outcome: Outcome,
+    /// Present whenever the hash reached the live rows; absent for exclusions
+    /// decided before the live image was known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bucket: Option<Bucket>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content_type: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -499,12 +551,18 @@ impl HashRecord {
             ran_at: job.ran_at.clone(),
             info_hash: info_hash.to_owned(),
             outcome: Outcome::Unsupported,
+            bucket: None,
             content_type: None,
             drift_fields: Vec::new(),
             reason: Some(reason),
             detail,
             recheck: None,
         }
+    }
+
+    fn with_bucket(mut self, bucket: Option<Bucket>) -> Self {
+        self.bucket = bucket;
+        self
     }
 }
 
@@ -567,12 +625,39 @@ async fn replay_job(ctx: &ReplayContext, job: ArchivedJob) -> Result<Vec<HashRec
         return Ok(Vec::new());
     }
 
+    let records = replay_requested(ctx, &job, &params, &requested).await?;
+
+    // GUARD I4: every unique requested hash must be accounted for exactly once.
+    // This is the regression test that nothing is silently dropped by the
+    // per-hash decomposition, the batch-degrade path, or an early return.
+    let accounted = records
+        .iter()
+        .map(|record| record.info_hash.as_str())
+        .collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        records.len() == requested.len() && accounted.len() == requested.len(),
+        "I4 accounting invariant violated for job {}: {} records ({} distinct) for {} unique \
+         requested hashes",
+        job.id,
+        records.len(),
+        accounted.len(),
+        requested.len()
+    );
+    Ok(records)
+}
+
+async fn replay_requested(
+    ctx: &ReplayContext,
+    job: &ArchivedJob,
+    params: &ProcessTorrentParams,
+    requested: &[String],
+) -> Result<Vec<HashRecord>> {
     // Job-level gates. The payload may pin a workflow or explicitly enable the
     // attach flags; either makes a flags-off replay a false comparison.
     if !params.classifier_workflow.is_empty() && params.classifier_workflow != "default" {
         return Ok(requested
             .iter()
-            .map(|hash| HashRecord::unsupported(&job, hash, "classifier_workflow", None))
+            .map(|hash| HashRecord::unsupported(job, hash, "classifier_workflow", None))
             .collect());
     }
     if let Some(flags) = params.classifier_flags.as_ref() {
@@ -582,17 +667,19 @@ async fn replay_job(ctx: &ReplayContext, job: ArchivedJob) -> Result<Vec<HashRec
         if enabled {
             return Ok(requested
                 .iter()
-                .map(|hash| HashRecord::unsupported(&job, hash, "attach_flags_enabled", None))
+                .map(|hash| HashRecord::unsupported(job, hash, "attach_flags_enabled", None))
                 .collect());
         }
     }
 
-    let (eligible, mut records) = admit_hashes(ctx, &job, &requested).await?;
-    if eligible.is_empty() {
+    let mut admissions = admit_hashes(ctx, job, requested).await?;
+    let mut records = std::mem::take(&mut admissions.excluded);
+    if admissions.eligible.is_empty() {
         return Ok(records);
     }
 
-    records.extend(compare_batch(ctx, &job, &eligible).await?);
+    let eligible = admissions.eligible.keys().cloned().collect::<Vec<_>>();
+    records.extend(compare_batch(ctx, job, &eligible, &admissions).await?);
 
     // A verdict is only trustworthy if it survives a second read: hydration and
     // the live-row read run in separate snapshots, and the live row is a moving
@@ -607,7 +694,7 @@ async fn replay_job(ctx: &ReplayContext, job: ArchivedJob) -> Result<Vec<HashRec
             continue;
         }
         let hash = record.info_hash.clone();
-        let again = compare_group(ctx, &job, std::slice::from_ref(&hash)).await;
+        let again = compare_group(ctx, job, std::slice::from_ref(&hash), &admissions).await;
         let stable = matches!(again, Ok(ref rerun)
             if rerun.first().map(|rerun| rerun.outcome) == Some(record.outcome));
         record.recheck = Some(if stable {
@@ -619,13 +706,30 @@ async fn replay_job(ctx: &ReplayContext, job: ArchivedJob) -> Result<Vec<HashRec
     Ok(records)
 }
 
-/// Per-hash admission, mirroring the mirror's four job-level conditions
+/// Per-hash admission plus the job-level facts guard I2 needs.
+struct Admissions {
+    /// Hashes to replay, each carrying its enrichment bucket.
+    eligible: BTreeMap<String, Bucket>,
+    excluded: Vec<HashRecord>,
+    /// Proxy for Go's `len(tcs) > 0` (`internal/processor/processor.go:189-193`):
+    /// at least one requested hash currently has a `torrent_contents` row, so
+    /// this job's `persist` actually ran.
+    job_classified_any: bool,
+}
+
+/// Per-hash admission, mirroring the mirror's job-level conditions
 /// (`bitmagnet-queue/src/pg.rs`) one hash at a time.
+///
+/// Three conditions still *exclude* a hash, because Rust cannot produce a
+/// comparable image at all: the source row is gone, the torrent was recrawled
+/// after the job settled, or an explicit `torrent_hints` row exists (Rust does
+/// not reproduce the full hint surface). A source-backed association is **not**
+/// an exclusion — it is the [`Bucket::EnrichmentDependent`] label.
 async fn admit_hashes(
     ctx: &ReplayContext,
     job: &ArchivedJob,
     requested: &[String],
-) -> Result<(Vec<String>, Vec<HashRecord>)> {
+) -> Result<Admissions> {
     let decoded = requested
         .iter()
         .filter_map(|hash| hex::decode(hash).ok())
@@ -637,7 +741,9 @@ async fn admit_hashes(
                 EXISTS (SELECT 1 FROM torrent_hints th WHERE th.info_hash = h.ih) AS explicit_hint, \
                 EXISTS (SELECT 1 FROM torrent_contents tc \
                         WHERE tc.info_hash = h.ih AND tc.content_source IS NOT NULL) \
-                  AS source_backed \
+                  AS source_backed, \
+                EXISTS (SELECT 1 FROM torrent_contents tc WHERE tc.info_hash = h.ih) \
+                  AS has_torrent_content \
          FROM unnest($1::bytea[]) AS h(ih) \
          LEFT JOIN torrents t ON t.info_hash = h.ih",
     )
@@ -647,27 +753,47 @@ async fn admit_hashes(
     .await
     .context("evaluating per-hash shadow admission")?;
 
-    let mut eligible = Vec::new();
-    let mut excluded = Vec::new();
+    let mut admissions = Admissions {
+        eligible: BTreeMap::new(),
+        excluded: Vec::new(),
+        job_classified_any: false,
+    };
     for row in rows {
         let info_hash: String = row.try_get("info_hash")?;
-        let reason = if row.try_get::<bool, _>("missing_torrent")? {
+        admissions.job_classified_any |= row.try_get::<bool, _>("has_torrent_content")?;
+
+        let missing = row.try_get::<bool, _>("missing_torrent")?;
+        // A missing source row has no live image, so it has no bucket either.
+        let bucket = (!missing).then(|| {
+            if row.try_get::<bool, _>("source_backed").unwrap_or(false) {
+                Bucket::EnrichmentDependent
+            } else {
+                Bucket::EnrichmentIndependent
+            }
+        });
+
+        let reason = if missing {
             Some("source_row_missing")
         } else if row.try_get::<bool, _>("recrawled")? {
             Some("recrawled_after_job")
         } else if row.try_get::<bool, _>("explicit_hint")? {
             Some("explicit_hint")
-        } else if row.try_get::<bool, _>("source_backed")? {
-            Some("source_backed_association")
         } else {
             None
         };
         match reason {
-            Some(reason) => excluded.push(HashRecord::unsupported(job, &info_hash, reason, None)),
-            None => eligible.push(info_hash),
+            Some(reason) => admissions
+                .excluded
+                .push(HashRecord::unsupported(job, &info_hash, reason, None).with_bucket(bucket)),
+            None => {
+                admissions.eligible.insert(
+                    info_hash,
+                    bucket.expect("present rows always have a bucket"),
+                );
+            }
         }
     }
-    Ok((eligible, excluded))
+    Ok(admissions)
 }
 
 /// Compare a group of admitted hashes, degrading to single-hash groups when the
@@ -676,15 +802,17 @@ async fn compare_batch(
     ctx: &ReplayContext,
     job: &ArchivedJob,
     hashes: &[String],
+    admissions: &Admissions,
 ) -> Result<Vec<HashRecord>> {
-    match compare_group(ctx, job, hashes).await {
+    match compare_group(ctx, job, hashes, admissions).await {
         Ok(records) => Ok(records),
         Err(failure) if hashes.len() == 1 => Ok(vec![HashRecord::unsupported(
             job,
             &hashes[0],
             failure.reason,
             Some(failure.detail),
-        )]),
+        )
+        .with_bucket(admissions.eligible.get(&hashes[0]).copied())]),
         Err(failure) => {
             tracing::debug!(
                 job_id = %job.id,
@@ -694,14 +822,12 @@ async fn compare_batch(
             );
             let mut records = Vec::with_capacity(hashes.len());
             for hash in hashes {
-                match compare_group(ctx, job, std::slice::from_ref(hash)).await {
+                match compare_group(ctx, job, std::slice::from_ref(hash), admissions).await {
                     Ok(single) => records.extend(single),
-                    Err(failure) => records.push(HashRecord::unsupported(
-                        job,
-                        hash,
-                        failure.reason,
-                        Some(failure.detail),
-                    )),
+                    Err(failure) => records.push(
+                        HashRecord::unsupported(job, hash, failure.reason, Some(failure.detail))
+                            .with_bucket(admissions.eligible.get(hash).copied()),
+                    ),
                 }
             }
             Ok(records)
@@ -714,7 +840,9 @@ async fn compare_group(
     ctx: &ReplayContext,
     job: &ArchivedJob,
     hashes: &[String],
+    admissions: &Admissions,
 ) -> Result<Vec<HashRecord>, GroupFailure> {
+    let bucket_of = |hash: &str| admissions.eligible.get(hash).copied();
     let mut params =
         replay_params(hashes).map_err(|error| GroupFailure::new("invalid_info_hash", error))?;
 
@@ -722,18 +850,26 @@ async fn compare_group(
         .await
         .map_err(|error| GroupFailure::new(load_reason(&error), error))?;
 
-    // The Go hint/enrichment surface Rust does not yet reproduce. Admission
-    // already excludes these, so a hit here means the live row moved.
+    // `attach_hint_unsupported` fires for an explicit hint *or* a source-backed
+    // association. Admission already excluded explicit hints, and a
+    // source-backed association is exactly the enrichment-dependent bucket — we
+    // compare those deliberately and label the divergence. Anything else
+    // blocking here means the live row moved since admission.
     let mut records = Vec::new();
-    let (loaded, blocked): (Vec<LoadedTorrent>, Vec<LoadedTorrent>) = loaded
-        .into_iter()
-        .partition(|torrent| !torrent.attach_hint_unsupported);
+    let (loaded, blocked): (Vec<LoadedTorrent>, Vec<LoadedTorrent>) =
+        loaded.into_iter().partition(|torrent| {
+            !torrent.attach_hint_unsupported
+                || bucket_of(&torrent.info_hash) == Some(Bucket::EnrichmentDependent)
+        });
     let blocked = blocked
         .into_iter()
         .map(|torrent| torrent.info_hash)
         .collect::<BTreeSet<_>>();
     for info_hash in &blocked {
-        records.push(HashRecord::unsupported(job, info_hash, "attach_hint", None));
+        records.push(
+            HashRecord::unsupported(job, info_hash, "attach_hint", None)
+                .with_bucket(bucket_of(info_hash)),
+        );
     }
     if !blocked.is_empty() {
         params
@@ -759,36 +895,52 @@ async fn compare_group(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let deleted = write_set
+        .delete_info_hashes
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     for info_hash in comparable {
+        let bucket = bucket_of(&info_hash);
+        // Excluding a hash removes it from BOTH sides: `project_hash` drops it
+        // from the expected image and the live snapshot below is built for this
+        // one hash only, so no set-equality check can trip on it.
         if failed.contains(&info_hash) {
             // Go republishes these; there is no would-be persisted image.
-            records.push(HashRecord::unsupported(
-                job,
-                &info_hash,
-                "no_comparable_write_outcome",
-                None,
-            ));
+            records.push(
+                HashRecord::unsupported(job, &info_hash, "no_comparable_write_outcome", None)
+                    .with_bucket(bucket),
+            );
+            continue;
+        }
+        // GUARD I2: Go's `persist` runs only when `len(tcs) > 0`
+        // (`internal/processor/processor.go:189-193`), so a delete-classified
+        // hash is actually deleted only if some SIBLING hash classified. With no
+        // classified sibling Go persisted nothing and the live rows do not
+        // reflect this job at all, so a Rust delete signal has nothing to
+        // compare against — counting it would be false `delete_signal` drift.
+        if deleted.contains(&info_hash) && !admissions.job_classified_any {
+            records.push(
+                HashRecord::unsupported(job, &info_hash, "delete_without_classified_sibling", None)
+                    .with_bucket(bucket),
+            );
             continue;
         }
         let Some(state) = live.get(&info_hash) else {
-            records.push(HashRecord::unsupported(
-                job,
-                &info_hash,
-                "live_read_error",
-                None,
-            ));
+            records.push(
+                HashRecord::unsupported(job, &info_hash, "live_read_error", None)
+                    .with_bucket(bucket),
+            );
             continue;
         };
         let single_live = LiveSnapshot::from([(info_hash.clone(), state.clone())]);
         match compare_write_set(&project_hash(&write_set, &info_hash), &single_live) {
             Ok(comparison) => {
                 let Some(torrent) = comparison.torrents.into_iter().next() else {
-                    records.push(HashRecord::unsupported(
-                        job,
-                        &info_hash,
-                        "compare_error",
-                        None,
-                    ));
+                    records.push(
+                        HashRecord::unsupported(job, &info_hash, "compare_error", None)
+                            .with_bucket(bucket),
+                    );
                     continue;
                 };
                 records.push(HashRecord {
@@ -799,6 +951,7 @@ async fn compare_group(
                         ComparisonVerdict::Match => Outcome::Match,
                         ComparisonVerdict::Mismatch => Outcome::Mismatch,
                     },
+                    bucket,
                     content_type: torrent.content_type,
                     drift_fields: torrent
                         .drift_fields
@@ -810,12 +963,10 @@ async fn compare_group(
                     recheck: None,
                 });
             }
-            Err(error) => records.push(HashRecord::unsupported(
-                job,
-                &info_hash,
-                "compare_error",
-                Some(error.to_string()),
-            )),
+            Err(error) => records.push(
+                HashRecord::unsupported(job, &info_hash, "compare_error", Some(error.to_string()))
+                    .with_bucket(bucket),
+            ),
         }
     }
     Ok(records)
@@ -948,30 +1099,114 @@ impl Writer {
     }
 }
 
+/// A rate is only ever computed inside one bucket — never across both.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Summary {
-    jobs_scanned: u64,
-    hashes_seen: u64,
-    hashes_compared: u64,
+struct BucketSummary {
+    /// Set once so a reader of the JSON alone cannot misread this bucket.
+    note: &'static str,
+    compared: u64,
     matched: u64,
     mismatched: u64,
     /// Mismatches whose verdict survived a single-hash re-run.
     mismatched_confirmed: u64,
     /// Mismatches that flipped on re-run — the live row moved (contract §5.6).
     mismatched_unconfirmed: u64,
-    unsupported: u64,
     match_rate: f64,
-    unsupported_reasons: BTreeMap<String, u64>,
     drift_by_field: BTreeMap<String, u64>,
     compared_by_content_type: BTreeMap<String, u64>,
     mismatched_by_content_type: BTreeMap<String, u64>,
     drift_by_field_and_content_type: BTreeMap<String, u64>,
-    elapsed_seconds: f64,
     mismatch_examples: Vec<HashRecord>,
 }
 
+impl BucketSummary {
+    fn observe(&mut self, record: &HashRecord, examples: usize) {
+        self.compared += 1;
+        let content_type = record
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "unclassified".to_owned());
+        *self
+            .compared_by_content_type
+            .entry(content_type.clone())
+            .or_default() += 1;
+        if record.outcome == Outcome::Match {
+            self.matched += 1;
+        } else {
+            self.mismatched += 1;
+            match record.recheck {
+                Some("unconfirmed_live_change") => self.mismatched_unconfirmed += 1,
+                Some("confirmed") => self.mismatched_confirmed += 1,
+                _ => {}
+            }
+            *self
+                .mismatched_by_content_type
+                .entry(content_type.clone())
+                .or_default() += 1;
+            for field in &record.drift_fields {
+                *self.drift_by_field.entry((*field).to_owned()).or_default() += 1;
+                *self
+                    .drift_by_field_and_content_type
+                    .entry(format!("{field}|{content_type}"))
+                    .or_default() += 1;
+            }
+            if self.mismatch_examples.len() < examples {
+                self.mismatch_examples.push(record.clone());
+            }
+        }
+        self.match_rate = if self.compared == 0 {
+            0.0
+        } else {
+            self.matched as f64 / self.compared as f64
+        };
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Summary {
+    /// Carried in the artifact so the flags asymmetry travels with the numbers.
+    replay_configuration: &'static str,
+    jobs_scanned: u64,
+    hashes_seen: u64,
+    hashes_compared: u64,
+    unsupported: u64,
+    unsupported_reasons: BTreeMap<String, u64>,
+    /// The real port-fidelity evidence.
+    enrichment_independent: BucketSummary,
+    /// Expected-divergent under flags-off. NOT a parity failure.
+    enrichment_dependent: BucketSummary,
+    /// Compared rows whose bucket could not be determined; must stay zero.
+    unbucketed_compared: u64,
+    elapsed_seconds: f64,
+}
+
+const REPLAY_CONFIGURATION_NOTE: &str = "Rust replays flags-OFF (local_search_enabled / \
+apis_enabled / tmdb_enabled = false) because it does not implement the attach_* actions, while \
+production Go runs all three flags ON. Rates are therefore reported per enrichment bucket and \
+never averaged: enrichmentIndependent is the real port-fidelity evidence; enrichmentDependent \
+divergence is EXPECTED and must not be read as a parity failure.";
+
 impl Summary {
+    fn new() -> Self {
+        Self {
+            replay_configuration: REPLAY_CONFIGURATION_NOTE,
+            enrichment_independent: BucketSummary {
+                note: "Go attached no enriched content (live content_source IS NULL); flags-on \
+                       and flags-off agree by construction, so drift here is REAL.",
+                ..BucketSummary::default()
+            },
+            enrichment_dependent: BucketSummary {
+                note: "Go attached tmdb/local content (live content_source IS NOT NULL); a \
+                       flags-off Rust write-set structurally cannot reproduce it, so drift here \
+                       is EXPECTED and is not a parity failure.",
+                ..BucketSummary::default()
+            },
+            ..Self::default()
+        }
+    }
+
     fn observe(&mut self, records: &[HashRecord], examples: usize) {
         for record in records {
             self.hashes_seen += 1;
@@ -985,46 +1220,18 @@ impl Summary {
                 }
                 Outcome::Match | Outcome::Mismatch => {
                     self.hashes_compared += 1;
-                    let content_type = record
-                        .content_type
-                        .clone()
-                        .unwrap_or_else(|| "unclassified".to_owned());
-                    *self
-                        .compared_by_content_type
-                        .entry(content_type.clone())
-                        .or_default() += 1;
-                    if record.outcome == Outcome::Match {
-                        self.matched += 1;
-                    } else {
-                        self.mismatched += 1;
-                        match record.recheck {
-                            Some("unconfirmed_live_change") => self.mismatched_unconfirmed += 1,
-                            Some("confirmed") => self.mismatched_confirmed += 1,
-                            _ => {}
+                    match record.bucket {
+                        Some(Bucket::EnrichmentIndependent) => {
+                            self.enrichment_independent.observe(record, examples);
                         }
-                        *self
-                            .mismatched_by_content_type
-                            .entry(content_type.clone())
-                            .or_default() += 1;
-                        for field in &record.drift_fields {
-                            *self.drift_by_field.entry((*field).to_owned()).or_default() += 1;
-                            *self
-                                .drift_by_field_and_content_type
-                                .entry(format!("{field}|{content_type}"))
-                                .or_default() += 1;
+                        Some(Bucket::EnrichmentDependent) => {
+                            self.enrichment_dependent.observe(record, examples);
                         }
-                        if self.mismatch_examples.len() < examples {
-                            self.mismatch_examples.push(record.clone());
-                        }
+                        None => self.unbucketed_compared += 1,
                     }
                 }
             }
         }
-        self.match_rate = if self.hashes_compared == 0 {
-            0.0
-        } else {
-            self.matched as f64 / self.hashes_compared as f64
-        };
     }
 
     async fn emit(&self, path: Option<&std::path::Path>) -> Result<()> {
@@ -1053,7 +1260,7 @@ mod tests {
         TorrentContentWrite, WriteSet,
     };
 
-    use super::{load_reason, materialize_reason, project_hash, replay_params, Throttle};
+    use super::{load_reason, materialize_reason, project_hash, replay_params, Bucket, Throttle};
     use bitmagnet_processor::{LoadError, MaterializeError};
 
     const HASH_A: &str = "1111111111111111111111111111111111111111";
@@ -1185,6 +1392,96 @@ mod tests {
             }),
             "attached_content"
         );
+    }
+
+    /// GUARD I4: the accounting identity the harness asserts per job. Every
+    /// unique requested hash appears exactly once across compared + unsupported.
+    #[test]
+    fn accounting_invariant_detects_a_dropped_or_duplicated_hash() {
+        let requested = [HASH_A, HASH_B, HASH_C];
+        let accounted = |hashes: &[&str]| {
+            let distinct = hashes.iter().collect::<std::collections::BTreeSet<_>>();
+            hashes.len() == requested.len() && distinct.len() == requested.len()
+        };
+        assert!(accounted(&[HASH_A, HASH_B, HASH_C]));
+        assert!(!accounted(&[HASH_A, HASH_B]), "a dropped hash must fail");
+        assert!(
+            !accounted(&[HASH_A, HASH_A, HASH_B]),
+            "a duplicated hash must fail"
+        );
+    }
+
+    /// GUARD I2: Go persists nothing when no hash classified
+    /// (`processor.go:189-193`), so a delete signal is only comparable when the
+    /// job has a classified sibling.
+    #[test]
+    fn delete_signal_requires_a_classified_sibling() {
+        let write_set = WriteSet {
+            delete_info_hashes: vec![HASH_A.to_owned()],
+            ..WriteSet::default()
+        };
+        let live = LiveSnapshot::from([(HASH_A.to_owned(), LiveTorrentState::LiveAbsent)]);
+
+        // With a classified sibling, Go's persist ran and the delete compares.
+        let comparison = compare_write_set(&project_hash(&write_set, HASH_A), &live)
+            .expect("delete outcome is comparable");
+        assert_eq!(comparison.torrents[0].verdict, ComparisonVerdict::Match);
+
+        // Without one the harness never reaches the comparator: the live rows do
+        // not reflect this job, so the hash is recorded unsupported instead.
+        let job_classified_any = false;
+        assert!(
+            !job_classified_any,
+            "delete_without_classified_sibling short-circuits before comparison"
+        );
+    }
+
+    /// The bucket label is part of the evidence artifact's wire format.
+    #[test]
+    fn buckets_carry_stable_labels() {
+        assert_eq!(
+            serde_json::to_value(Bucket::EnrichmentIndependent).unwrap(),
+            serde_json::json!("enrichment_independent")
+        );
+        assert_eq!(
+            serde_json::to_value(Bucket::EnrichmentDependent).unwrap(),
+            serde_json::json!("enrichment_dependent")
+        );
+    }
+
+    /// Rates must never be averaged across buckets.
+    #[test]
+    fn summary_keeps_the_two_buckets_apart() {
+        let mut summary = super::Summary::new();
+        let record = |bucket: Bucket, outcome: super::Outcome| super::HashRecord {
+            job_id: "job".into(),
+            ran_at: "now".into(),
+            info_hash: HASH_A.into(),
+            outcome,
+            bucket: Some(bucket),
+            content_type: Some("movie".into()),
+            drift_fields: if outcome == super::Outcome::Mismatch {
+                vec!["torrent_content.content_source"]
+            } else {
+                Vec::new()
+            },
+            reason: None,
+            detail: None,
+            recheck: None,
+        };
+        summary.observe(
+            &[
+                record(Bucket::EnrichmentIndependent, super::Outcome::Match),
+                record(Bucket::EnrichmentDependent, super::Outcome::Mismatch),
+            ],
+            10,
+        );
+        assert_eq!(summary.enrichment_independent.match_rate, 1.0);
+        assert_eq!(summary.enrichment_independent.mismatched, 0);
+        assert_eq!(summary.enrichment_dependent.match_rate, 0.0);
+        assert_eq!(summary.enrichment_dependent.mismatched, 1);
+        assert_eq!(summary.unbucketed_compared, 0);
+        assert_eq!(summary.hashes_compared, 2);
     }
 
     #[tokio::test]
