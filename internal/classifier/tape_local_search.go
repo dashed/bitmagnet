@@ -29,12 +29,45 @@ const (
 	tapeErrorKindContextDeadline = "context_deadline_exceeded"
 )
 
+// TapeScopeLimits states what a green replay against a classifier tape does not
+// prove. It is written verbatim into every tape's PROVENANCE.md, because an
+// oracle that does not carry its own limits invites a pass to be read as
+// broader evidence than it is.
+const TapeScopeLimits = `**The desync guarantee stops at the ` + "`searchString`" + ` boundary.**
+
+` + "`local.content_by_search`" + ` records the search string the classifier hands to the
+query builder, not the tsquery that string is compiled into. The tsquery is
+built inside the query builder and is not exposed at this seam. So an
+implementation that derives a *different* tsquery from the same base title does
+**not** desync: replay matches on the search string, hands back Go's recorded
+candidates, and the divergence is invisible. This is the one class of bug the
+request half of the tape was built to catch and cannot.
+
+That is not hypothetical. Rust's word-character predicate (` + "`char::is_alphanumeric`" + `)
+disagrees with Go's ` + "`unicode.IsLetter || unicode.IsDigit`" + ` at 12,322 code points --
+see ` + "`bitmagnet-rs/crates/bitmagnet-fts/src/lib.rs`" + ` and
+` + "`bitmagnet-rs/crates/bitmagnet-search/src/query.rs`" + `, both of which document the
+gap as harmless. In the search path it silently narrows the query, turning an
+` + "`&`" + ` into an adjacency ` + "`<->`" + `, so Rust returns a strict subset of Go's rows with
+no error at all.
+
+Tsquery construction is therefore **out of scope for this tape** and has to be
+proven separately, by an all-scalar test over the two word-character predicates.
+A green replay here must not be read as covering it.
+
+Extending the seam down to the tsquery would be a query-builder change and a
+separate decision; it has deliberately not been made.`
+
 // localContentBySearchRequest is the question ContentBySearch asks.
 //
 // SearchString is the string actually handed to the query builder, not just the
 // base title it was derived from: a port that quotes or normalises differently
 // is asking a different question even when its answer happens to coincide, and
 // recording only the base title would hide that.
+//
+// It is NOT the tsquery. Two implementations that agree on this string and
+// disagree on the tsquery they compile it into will replay identically and
+// never desync; see [TapeScopeLimits].
 //
 // ReleaseDateRange records the filter the year is expanded into, again so a
 // port that expands it differently desyncs rather than passing by luck. Year

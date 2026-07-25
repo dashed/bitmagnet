@@ -18,9 +18,10 @@ func newTestRecorder(t *testing.T, maxRecords int) *Recorder {
 	t.Helper()
 
 	return NewRecorder(digest, maxRecords, Provenance{
-		Command:  "go test",
-		Host:     "test",
-		Database: "fixture",
+		Command:     "go test",
+		Host:        "test",
+		Database:    "fixture",
+		ScopeLimits: "this tape does not prove anything about frobnication",
 	})
 }
 
@@ -389,6 +390,10 @@ func TestProvenanceDocumentNamesTheRun(t *testing.T) {
 		digest,
 		`"local_search_enabled":true`,
 		"local.content_by_search (ok)",
+		// A tape read in isolation has to carry its own limits, or a pass gets
+		// read as broader evidence than it is.
+		"does NOT prove",
+		"this tape does not prove anything about frobnication",
 	} {
 		if !strings.Contains(string(document), want) {
 			t.Errorf("PROVENANCE.md does not mention %q:\n%s", want, document)

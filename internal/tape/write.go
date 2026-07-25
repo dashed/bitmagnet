@@ -152,6 +152,15 @@ func (r *Recorder) provenanceDocument(manifest Manifest, records []Record) strin
 		fmt.Fprintf(&doc, "- %s\n", line)
 	}
 
+	if r.provenance.ScopeLimits != "" {
+		doc.WriteString("\n## What a green replay against this tape does NOT prove\n\n")
+		doc.WriteString(r.provenance.ScopeLimits)
+
+		if !strings.HasSuffix(r.provenance.ScopeLimits, "\n") {
+			doc.WriteByte('\n')
+		}
+	}
+
 	if r.provenance.Notes != "" {
 		doc.WriteString("\n## Notes\n\n")
 		doc.WriteString(r.provenance.Notes)

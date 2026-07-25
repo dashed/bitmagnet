@@ -39,6 +39,37 @@ answers happen to coincide.
 The `api_key` is set once on the TMDB HTTP client and never passes through the
 recorded parameter map, so a tape carries no credential.
 
+## 🚨 What a green replay against this tape does NOT prove
+
+**The desync guarantee stops at the `searchString` boundary.**
+
+`local.content_by_search` records the search string the classifier hands to the
+query builder, not the tsquery that string is compiled into. The tsquery is
+built inside the query builder and is not exposed at this seam. So an
+implementation that derives a *different* tsquery from the same base title does
+**not** desync: replay matches on the search string, hands back Go's recorded
+candidates, and the divergence is invisible. This is the one class of bug the
+request half of the tape was built to catch and cannot.
+
+That is not hypothetical. Rust's word-character predicate
+(`char::is_alphanumeric`) disagrees with Go's `unicode.IsLetter ||
+unicode.IsDigit` at 12,322 code points -- see
+`bitmagnet-rs/crates/bitmagnet-fts/src/lib.rs` and
+`bitmagnet-rs/crates/bitmagnet-search/src/query.rs`, both of which currently
+document the gap as harmless. In the search path it silently narrows the query,
+turning an `&` into an adjacency `<->`, so Rust returns a strict subset of Go's
+rows with no error at all.
+
+Tsquery construction is therefore **out of scope for this tape** and has to be
+proven separately, by an all-scalar test over the two word-character predicates.
+A green replay here must not be read as covering it.
+
+Extending the seam down to the tsquery would be a query-builder change and a
+separate decision; it has deliberately not been made. The text above is also
+written into every recorded tape's `PROVENANCE.md`, from
+`classifier.TapeScopeLimits`, so a tape read in isolation still carries its own
+limits.
+
 ## Empty is not missing
 
 - An observation with `"outcome":"ok"` and an empty result is a genuine empty

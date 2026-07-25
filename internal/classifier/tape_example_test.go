@@ -55,9 +55,10 @@ func TestTapeExampleGolden(t *testing.T) {
 	}}
 
 	recorder := tape.NewRecorder(digest, 0, tape.Provenance{
-		Command:  "go test ./internal/classifier -run TestTapeExampleGolden -update-tape-example",
-		Host:     "fixture",
-		Database: "none (fixtures, not a database)",
+		Command:     "go test ./internal/classifier -run TestTapeExampleGolden -update-tape-example",
+		Host:        "fixture",
+		Database:    "none (fixtures, not a database)",
+		ScopeLimits: TapeScopeLimits,
 		Notes: "Generated from fixtures so the format can be committed and reviewed. " +
 			"A real tape is recorded by running the classifier with CLASSIFIER_TAPE_DIR set; " +
 			"see the README next to this directory.",

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -220,6 +221,39 @@ func loadTape(t *testing.T, dir string) *tape.Replay {
 	}
 
 	return replay
+}
+
+// TestProductionRecorderIsOffByDefaultAndCarriesItsLimits pins the two
+// properties of the production wiring that are easiest to lose in a refactor:
+// recording stays off unless a tape directory is configured, and every tape it
+// does produce states what a green replay against it does not prove.
+func TestProductionRecorderIsOffByDefaultAndCarriesItsLimits(t *testing.T) {
+	if recorder := newTapeRecorder(Params{}, testDigest); recorder != nil {
+		t.Fatal("recording is on with no tape directory configured")
+	}
+
+	recorder := newTapeRecorder(Params{Config: Config{TapeDir: "unused"}}, testDigest)
+	if recorder == nil {
+		t.Fatal("a configured tape directory did not enable recording")
+	}
+
+	document, err := os.ReadFile(filepath.Join(writeTapeTo(t, recorder), tape.ProvenanceFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The tsquery boundary is the one class of divergence this tape cannot
+	// catch, so it has to travel with the tape rather than live in a report.
+	for _, want := range []string{
+		"does NOT prove",
+		"stops at the `searchString` boundary",
+		"out of scope for this tape",
+		"char::is_alphanumeric",
+	} {
+		if !strings.Contains(string(document), want) {
+			t.Errorf("PROVENANCE.md does not state %q:\n%s", want, document)
+		}
+	}
 }
 
 // TestTapeRecordsTiedCandidateWindow is the core claim: the tape holds the

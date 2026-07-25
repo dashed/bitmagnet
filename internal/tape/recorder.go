@@ -24,6 +24,13 @@ type Provenance struct {
 	// Database identifies the content database the local searches were served
 	// from, precisely enough to tell two snapshots apart.
 	Database string
+	// ScopeLimits states what a green replay against this tape does NOT prove.
+	// It is written into PROVENANCE.md verbatim.
+	//
+	// An oracle that does not carry its own limits invites the reader to treat a
+	// pass as broader evidence than it is, and the limits belong in the artifact
+	// rather than in a report nobody re-reads.
+	ScopeLimits string
 	// Notes is free-form context.
 	Notes string
 }

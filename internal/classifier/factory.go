@@ -163,7 +163,8 @@ func newTapeRecorder(params Params, digest string) *tape.Recorder {
 			params.PostgresConfig.Port,
 			params.PostgresConfig.Name,
 		),
-		Notes: "Recorded live from the running classifier.",
+		ScopeLimits: TapeScopeLimits,
+		Notes:       "Recorded live from the running classifier.",
 	})
 
 	if params.Logger != nil {
