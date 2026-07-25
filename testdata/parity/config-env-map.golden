@@ -10,6 +10,8 @@ CLASSIFIER_DELETE_XXX	classifier.delete_xxx
 CLASSIFIER_EXTENSIONS	classifier.extensions
 CLASSIFIER_FLAGS	classifier.flags
 CLASSIFIER_KEYWORDS	classifier.keywords
+CLASSIFIER_TAPE_DIR	classifier.tape_dir
+CLASSIFIER_TAPE_MAX_RECORDS	classifier.tape_max_records
 CLASSIFIER_WORKFLOW	classifier.workflow
 DHT_CRAWLER_BOOTSTRAP_NODES	dht_crawler.bootstrap_nodes
 DHT_CRAWLER_RESCRAPE_THRESHOLD	dht_crawler.rescrape_threshold

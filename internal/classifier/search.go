@@ -10,17 +10,39 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 )
 
+// Query shape constants, shared with the tape so a recorded request cannot
+// drift away from the query that produced it.
+const (
+	contentBySearchLimit = 10
+	contentByIDLimit     = 1
+	// contentBySearchOrderBy names the ordering imposed on the candidate window:
+	// relevance first, then the canonical identity as a tiebreak.
+	contentBySearchOrderBy = "queryStringRank,identity"
+	// contentByIDAlternativeOrderBy names the ordering imposed on the LIMIT 1
+	// pick when matching an alternative (non-unique) identifier.
+	contentByIDAlternativeOrderBy = "identity"
+
+	canonicalIdentifierSource = "tmdb"
+	identifierCanonical       = "canonical"
+	identifierAlternative     = "alternative"
+)
+
 type LocalSearch interface {
 	ContentByID(context.Context, model.ContentRef) (model.Content, error)
 	ContentBySearch(context.Context, model.ContentType, string, model.Year) (model.Content, error)
 }
 
 type localSearch struct {
-	search.Search
+	contentSearch
 }
 
 func (l localSearch) ContentByID(ctx context.Context, ref model.ContentRef) (model.Content, error) {
-	result, err := l.Content(ctx, contentByIDOptions(ref)...)
+	result, err := l.observeContent(
+		ctx,
+		tapeKindLocalContentByID,
+		newLocalContentByIDRequest(ref),
+		contentByIDOptions(ref),
+	)
 	if err != nil {
 		return model.Content{}, err
 	}
@@ -39,9 +61,9 @@ func contentByIDOptions(ref model.ContentRef) []query.Option {
 		),
 		search.ContentDefaultPreload(),
 		search.ContentDefaultHydrate(),
-		query.Limit(1),
+		query.Limit(contentByIDLimit),
 	}
-	if ref.Source == "tmdb" {
+	if ref.Source == canonicalIdentifierSource {
 		options = append(options, query.Where(
 			search.ContentCanonicalIdentifierCriteria(model.ContentRef{
 				Source: ref.Source,
@@ -69,9 +91,16 @@ func (l localSearch) ContentBySearch(
 	baseTitle string,
 	year model.Year,
 ) (model.Content, error) {
-	result, searchErr := l.Content(
+	// The tape is taken here, on the raw candidate window, and not on this
+	// method's return value: the levenshtein selection below collapses the
+	// window to a single winner and hides the tie that made the choice
+	// arbitrary. Recording the winner would record the outcome of a coin flip
+	// as though it were a fact about the database.
+	result, searchErr := l.observeContent(
 		ctx,
-		contentBySearchOptions(ct, baseTitle, year)...,
+		tapeKindLocalContentBySearch,
+		newLocalContentBySearchRequest(ct, baseTitle, contentSearchString(baseTitle), year),
+		contentBySearchOptions(ct, baseTitle, year),
 	)
 	if searchErr != nil {
 		return model.Content{}, searchErr
@@ -96,17 +125,21 @@ func (l localSearch) ContentBySearch(
 	return bestMatch.Content, nil
 }
 
+func contentSearchString(baseTitle string) string {
+	return fmt.Sprintf("\"%s\"", baseTitle)
+}
+
 func contentBySearchOptions(ct model.ContentType, baseTitle string, year model.Year) []query.Option {
 	options := []query.Option{
 		query.Where(search.ContentTypeCriteria(ct)),
-		query.SearchString(fmt.Sprintf("\"%s\"", baseTitle)),
+		query.SearchString(contentSearchString(baseTitle)),
 		// Relevance first, then the canonical identity as a tiebreak: ts_rank_cd
 		// usually ties every candidate for these phrase queries, and the winner below
 		// is whichever candidate the levenshtein search reaches first, so without a
 		// total order both the LIMIT 10 window and the match picked from it depend on
 		// the query plan.
 		search.ContentOrderByQueryStringRankThenIdentity(),
-		query.Limit(10),
+		query.Limit(contentBySearchLimit),
 		search.ContentDefaultPreload(),
 		search.ContentDefaultHydrate(),
 	}

@@ -52,10 +52,10 @@ func logEffectiveConfigDigest(
 	logger *zap.SugaredLogger,
 	source Source,
 	defaultWorkflow string,
-) error {
+) (string, error) {
 	digest, err := EffectiveConfigDigest(source, defaultWorkflow)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if logger != nil {
 		logger.Infow(
@@ -65,7 +65,7 @@ func logEffectiveConfigDigest(
 		)
 	}
 
-	return nil
+	return digest, nil
 }
 
 func validateEffectiveConfigDigestValue(value reflect.Value) error {
