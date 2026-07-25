@@ -172,6 +172,11 @@ struct Args {
     /// is a moving target).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     recheck_mismatches: bool,
+    /// Re-run enrichment-dependent mismatches too. They are expected and
+    /// deterministic, so this is off by default; it exists to audit that
+    /// assumption on a small sample.
+    #[arg(long, default_value_t = false)]
+    recheck_expected_divergent: bool,
     /// Also re-run matches. A stability probe: it measures how often a verdict
     /// changes between two reads, and it exercises the same recheck path when a
     /// sample happens to contain no mismatch.
@@ -238,6 +243,7 @@ async fn main() -> Result<()> {
         materializer: Materializer::from_core().context("compiling the embedded classifier")?,
         recheck_mismatches: args.recheck_mismatches,
         recheck_matches: args.recheck_matches,
+        recheck_expected_divergent: args.recheck_expected_divergent,
         throttle: Throttle::new(args.max_jobs_per_second),
     });
 
@@ -387,6 +393,7 @@ struct ReplayContext {
     materializer: Materializer,
     recheck_mismatches: bool,
     recheck_matches: bool,
+    recheck_expected_divergent: bool,
     throttle: Throttle,
 }
 
@@ -690,7 +697,13 @@ async fn replay_requested(
             Outcome::Match => ctx.recheck_matches,
             Outcome::Unsupported => false,
         };
-        if !recheck {
+        // An enrichment-dependent mismatch is expected and deterministic
+        // (Go attached content, flags-off Rust cannot), so re-reading it buys no
+        // information. At archive scale that is ~10% of all hashes paying for a
+        // second full pipeline, so it is skipped unless explicitly requested.
+        let expected_divergent = record.bucket == Some(Bucket::EnrichmentDependent)
+            && record.outcome == Outcome::Mismatch;
+        if !recheck || (expected_divergent && !ctx.recheck_expected_divergent) {
             continue;
         }
         let hash = record.info_hash.clone();
