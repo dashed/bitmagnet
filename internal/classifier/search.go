@@ -20,6 +20,19 @@ type localSearch struct {
 }
 
 func (l localSearch) ContentByID(ctx context.Context, ref model.ContentRef) (model.Content, error) {
+	result, err := l.Content(ctx, contentByIDOptions(ref)...)
+	if err != nil {
+		return model.Content{}, err
+	}
+
+	if len(result.Items) == 0 {
+		return model.Content{}, classification.ErrUnmatched
+	}
+
+	return result.Items[0].Content, nil
+}
+
+func contentByIDOptions(ref model.ContentRef) []query.Option {
 	options := []query.Option{
 		query.Where(
 			search.ContentTypeCriteria(ref.Type),
@@ -36,24 +49,18 @@ func (l localSearch) ContentByID(ctx context.Context, ref model.ContentRef) (mod
 			}),
 		))
 	} else {
+		// Unlike the canonical identifier, an alternative identifier is not unique:
+		// several content rows can carry the same attribute value, so order by the
+		// canonical identity to make the LIMIT 1 pick reproducible.
 		options = append(options, query.Where(
 			search.ContentAlternativeIdentifierCriteria(model.ContentRef{
 				Source: ref.Source,
 				ID:     ref.ID,
 			}),
-		))
+		), search.ContentOrderByIdentity())
 	}
 
-	result, err := l.Content(ctx, options...)
-	if err != nil {
-		return model.Content{}, err
-	}
-
-	if len(result.Items) == 0 {
-		return model.Content{}, classification.ErrUnmatched
-	}
-
-	return result.Items[0].Content, nil
+	return options
 }
 
 func (l localSearch) ContentBySearch(
@@ -62,24 +69,9 @@ func (l localSearch) ContentBySearch(
 	baseTitle string,
 	year model.Year,
 ) (model.Content, error) {
-	options := []query.Option{
-		query.Where(search.ContentTypeCriteria(ct)),
-		query.SearchString(fmt.Sprintf("\"%s\"", baseTitle)),
-		query.OrderByQueryStringRank(),
-		query.Limit(10),
-		search.ContentDefaultPreload(),
-		search.ContentDefaultHydrate(),
-	}
-	if !year.IsNil() {
-		options = append(
-			options,
-			query.Where(search.ContentReleaseDateCriteria(model.NewDateRangeFromYear(year))),
-		)
-	}
-
 	result, searchErr := l.Content(
 		ctx,
-		options...,
+		contentBySearchOptions(ct, baseTitle, year)...,
 	)
 	if searchErr != nil {
 		return model.Content{}, searchErr
@@ -102,4 +94,28 @@ func (l localSearch) ContentBySearch(
 	}
 
 	return bestMatch.Content, nil
+}
+
+func contentBySearchOptions(ct model.ContentType, baseTitle string, year model.Year) []query.Option {
+	options := []query.Option{
+		query.Where(search.ContentTypeCriteria(ct)),
+		query.SearchString(fmt.Sprintf("\"%s\"", baseTitle)),
+		// Relevance first, then the canonical identity as a tiebreak: ts_rank_cd
+		// usually ties every candidate for these phrase queries, and the winner below
+		// is whichever candidate the levenshtein search reaches first, so without a
+		// total order both the LIMIT 10 window and the match picked from it depend on
+		// the query plan.
+		search.ContentOrderByQueryStringRankThenIdentity(),
+		query.Limit(10),
+		search.ContentDefaultPreload(),
+		search.ContentDefaultHydrate(),
+	}
+	if !year.IsNil() {
+		options = append(
+			options,
+			query.Where(search.ContentReleaseDateCriteria(model.NewDateRangeFromYear(year))),
+		)
+	}
+
+	return options
 }
