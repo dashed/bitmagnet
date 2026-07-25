@@ -32,7 +32,7 @@ pub use load::{load_torrents, LoadError};
 pub use persist::{
     persist_write_set, BlockingManager, BoxError, PersistError, TorrentContentPersistence,
 };
-pub use runtime::{ShadowMetrics, ShadowRuntime, ShadowRuntimeError};
+pub use runtime::{MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError};
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
 };

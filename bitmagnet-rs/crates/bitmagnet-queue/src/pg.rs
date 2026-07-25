@@ -1,5 +1,6 @@
 //! PostgreSQL queue consumer and processed-row shadow mirror.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -335,6 +336,95 @@ impl Default for MirrorConfig {
     }
 }
 
+/// The closed set of reasons a processed source job is refused by the mirror's
+/// supported-subset predicate.
+///
+/// The variants are ordered exactly as the predicate's conjuncts are written in
+/// SQL, so [`MirrorEligibility::ineligible_reason`] reports the *first* failing
+/// conjunct and every scanned candidate is attributed to at most one reason.
+/// The set is fixed and small: it bounds the `reason` label cardinality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirrorIneligibleReason {
+    /// The payload is not the flags-off `ClassifierWorkflow: default` shape.
+    PayloadShape,
+    /// The payload carries no `InfoHashes` array entries.
+    NoInfoHashes,
+    /// A requested info hash has no `torrents` row.
+    TorrentMissing,
+    /// A requested torrent was updated after the source job settled, so the
+    /// live image is no longer the image the source job wrote.
+    TorrentUpdatedAfterRanAt,
+    /// A requested torrent carries a hint the shadow cannot reproduce.
+    HasHint,
+    /// A requested torrent has content with a non-null `content_source`.
+    HasContentSource,
+}
+
+impl MirrorIneligibleReason {
+    /// Every reason, so the metric children can be materialized at startup
+    /// instead of only appearing once a reason is first observed.
+    pub const ALL: [Self; 6] = [
+        Self::PayloadShape,
+        Self::NoInfoHashes,
+        Self::TorrentMissing,
+        Self::TorrentUpdatedAfterRanAt,
+        Self::HasHint,
+        Self::HasContentSource,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PayloadShape => "payload_shape",
+            Self::NoInfoHashes => "no_infohashes",
+            Self::TorrentMissing => "torrent_missing",
+            Self::TorrentUpdatedAfterRanAt => "torrent_updated_after_ran_at",
+            Self::HasHint => "has_hint",
+            Self::HasContentSource => "has_content_source",
+        }
+    }
+}
+
+/// The mirror's supported-subset predicate, decomposed into the individual
+/// conjuncts the SQL evaluates.
+///
+/// This is observability only. `ineligible_reason().is_none()` is exactly the
+/// single `shadow_eligible` boolean the query used to return: the SQL now
+/// returns the same conjuncts separately so a refusal can be attributed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MirrorEligibility {
+    payload_shape_ok: bool,
+    has_infohashes: bool,
+    torrent_missing: bool,
+    torrent_updated_after_ran_at: bool,
+    has_hint: bool,
+    has_content_source: bool,
+}
+
+impl MirrorEligibility {
+    const fn ineligible_reason(self) -> Option<MirrorIneligibleReason> {
+        if !self.payload_shape_ok {
+            return Some(MirrorIneligibleReason::PayloadShape);
+        }
+        if !self.has_infohashes {
+            return Some(MirrorIneligibleReason::NoInfoHashes);
+        }
+        if self.torrent_missing {
+            return Some(MirrorIneligibleReason::TorrentMissing);
+        }
+        if self.torrent_updated_after_ran_at {
+            return Some(MirrorIneligibleReason::TorrentUpdatedAfterRanAt);
+        }
+        if self.has_hint {
+            return Some(MirrorIneligibleReason::HasHint);
+        }
+        if self.has_content_source {
+            return Some(MirrorIneligibleReason::HasContentSource);
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorReport {
     pub cursor: Option<MirrorCursor>,
@@ -342,6 +432,26 @@ pub struct MirrorReport {
     pub inserted: u32,
     pub active_depth: u32,
     pub capped: bool,
+    /// Scanned candidates that passed both eligibility and the deterministic
+    /// sample gate. `sampled - inserted` is the scratch-dedupe rate.
+    pub sampled: u32,
+    /// Scanned candidates refused by the supported-subset predicate, attributed
+    /// to the first failing conjunct. Sums to `scanned - eligible`.
+    pub ineligible: BTreeMap<MirrorIneligibleReason, u32>,
+}
+
+impl MirrorReport {
+    const fn empty(cursor: Option<MirrorCursor>, active_depth: u32, capped: bool) -> Self {
+        Self {
+            cursor,
+            scanned: 0,
+            inserted: 0,
+            active_depth,
+            capped,
+            sampled: 0,
+            ineligible: BTreeMap::new(),
+        }
+    }
 }
 
 struct MirrorCandidate {
@@ -349,7 +459,7 @@ struct MirrorCandidate {
     payload: String,
     max_retries: u32,
     priority: i32,
-    eligible: bool,
+    eligibility: MirrorEligibility,
 }
 
 impl QueueStore {
@@ -403,19 +513,22 @@ impl QueueStore {
         let mut active = to_u32("active_depth", active)?;
         if active >= config.active_depth_cap {
             tx.commit().await?;
-            return Ok(MirrorReport {
-                cursor,
-                scanned: 0,
-                inserted: 0,
-                active_depth: active,
-                capped: true,
-            });
+            return Ok(MirrorReport::empty(cursor, active, true));
         }
 
         let cursor_ran_at = cursor
             .as_ref()
             .map_or("-infinity", |value| value.ran_at.as_str());
         let cursor_id = cursor.as_ref().map_or("", |value| value.id.as_str());
+        // The supported-subset predicate is returned as its individual
+        // conjuncts rather than one `shadow_eligible` boolean, so a refused
+        // candidate can be attributed to a reason. The logic is unchanged:
+        // eligible is still the conjunction of the same terms, and
+        // `NOT EXISTS(rows WHERE a OR b OR c OR d)` is exactly
+        // `NOT a AND NOT b AND NOT c AND NOT d` where each term is
+        // `EXISTS(rows WHERE …)`, computed here in one lateral pass as
+        // `coalesce(bool_or(…), false)` (a `WHERE` only passes TRUE, and
+        // `bool_or` over no TRUE row yields NULL or no rows).
         let rows = sqlx::query(
             "SELECT source_job.id, source_job.payload::text AS payload, \
                     source_job.max_retries::bigint AS max_retries, source_job.priority, \
@@ -424,37 +537,44 @@ impl QueueStore {
                       '{\"ClassifierWorkflow\":\"default\",\
                       \"ClassifierFlags\":{\"local_search_enabled\":false,\
                       \"apis_enabled\":false,\"tmdb_enabled\":false}}'::jsonb \
-                    AND jsonb_array_length(\
+                      AS shadow_payload_shape_ok, \
+                    jsonb_array_length(\
                       CASE WHEN jsonb_typeof(source_job.payload->'InfoHashes') = 'array' \
                            THEN source_job.payload->'InfoHashes' ELSE '[]'::jsonb END\
-                    ) > 0 \
-                    AND NOT EXISTS (\
-                      SELECT 1 \
-                      FROM jsonb_array_elements(\
-                        CASE WHEN jsonb_typeof(source_job.payload->'InfoHashes') = 'array' \
-                             THEN source_job.payload->'InfoHashes' ELSE '[]'::jsonb END\
-                      ) AS requested(value) \
-                      LEFT JOIN torrents AS source_torrent \
-                        ON source_torrent.info_hash = CASE \
-                          WHEN jsonb_typeof(requested.value) = 'string' \
-                           AND (requested.value #>> '{}') ~ '^[0-9A-Fa-f]{40}$' \
-                          THEN decode(requested.value #>> '{}', 'hex') \
-                          ELSE NULL \
-                        END \
-                      WHERE source_torrent.info_hash IS NULL \
-                         OR source_torrent.updated_at > source_job.ran_at \
-                         OR EXISTS (\
-                           SELECT 1 FROM torrent_hints AS source_hint \
-                           WHERE source_hint.info_hash = source_torrent.info_hash\
-                         ) \
-                         OR EXISTS (\
-                           SELECT 1 FROM torrent_contents AS source_content \
-                           WHERE source_content.info_hash = source_torrent.info_hash \
-                             AND source_content.content_source IS NOT NULL\
-                         )\
-                    ) \
-                      AS shadow_eligible \
+                    ) > 0 AS shadow_has_infohashes, \
+                    coalesce(requested_torrent.torrent_missing, false) \
+                      AS shadow_torrent_missing, \
+                    coalesce(requested_torrent.torrent_updated_after_ran_at, false) \
+                      AS shadow_torrent_updated_after_ran_at, \
+                    coalesce(requested_torrent.has_hint, false) AS shadow_has_hint, \
+                    coalesce(requested_torrent.has_content_source, false) \
+                      AS shadow_has_content_source \
              FROM queue_jobs AS source_job \
+             LEFT JOIN LATERAL (\
+               SELECT bool_or(source_torrent.info_hash IS NULL) AS torrent_missing, \
+                      bool_or(source_torrent.updated_at > source_job.ran_at) \
+                        AS torrent_updated_after_ran_at, \
+                      bool_or(EXISTS (\
+                        SELECT 1 FROM torrent_hints AS source_hint \
+                        WHERE source_hint.info_hash = source_torrent.info_hash\
+                      )) AS has_hint, \
+                      bool_or(EXISTS (\
+                        SELECT 1 FROM torrent_contents AS source_content \
+                        WHERE source_content.info_hash = source_torrent.info_hash \
+                          AND source_content.content_source IS NOT NULL\
+                      )) AS has_content_source \
+               FROM jsonb_array_elements(\
+                 CASE WHEN jsonb_typeof(source_job.payload->'InfoHashes') = 'array' \
+                      THEN source_job.payload->'InfoHashes' ELSE '[]'::jsonb END\
+               ) AS requested(value) \
+               LEFT JOIN torrents AS source_torrent \
+                 ON source_torrent.info_hash = CASE \
+                   WHEN jsonb_typeof(requested.value) = 'string' \
+                    AND (requested.value #>> '{}') ~ '^[0-9A-Fa-f]{40}$' \
+                   THEN decode(requested.value #>> '{}', 'hex') \
+                   ELSE NULL \
+                 END \
+             ) AS requested_torrent ON TRUE \
              WHERE source_job.queue = $1 AND source_job.status = 'processed' \
                AND source_job.ran_at IS NOT NULL \
                AND (source_job.ran_at, source_job.id) > ($2::timestamptz, $3) \
@@ -478,24 +598,29 @@ impl QueueStore {
                     payload: row.try_get("payload")?,
                     max_retries: to_u32("max_retries", row.try_get("max_retries")?)?,
                     priority: row.try_get("priority")?,
-                    eligible: row.try_get("shadow_eligible")?,
+                    eligibility: MirrorEligibility {
+                        payload_shape_ok: row.try_get("shadow_payload_shape_ok")?,
+                        has_infohashes: row.try_get("shadow_has_infohashes")?,
+                        torrent_missing: row.try_get("shadow_torrent_missing")?,
+                        torrent_updated_after_ran_at: row
+                            .try_get("shadow_torrent_updated_after_ran_at")?,
+                        has_hint: row.try_get("shadow_has_hint")?,
+                        has_content_source: row.try_get("shadow_has_content_source")?,
+                    },
                 })
             })
             .collect::<Result<Vec<_>, QueuePgError>>()?;
 
-        let mut report = MirrorReport {
-            cursor,
-            scanned: 0,
-            inserted: 0,
-            active_depth: active,
-            capped: false,
-        };
+        let mut report = MirrorReport::empty(cursor, active, false);
         for candidate in candidates {
-            if candidate.eligible && sampled(&candidate.cursor.id, config.sample_basis_points) {
+            if let Some(reason) = candidate.eligibility.ineligible_reason() {
+                *report.ineligible.entry(reason).or_default() += 1;
+            } else if sampled(&candidate.cursor.id, config.sample_basis_points) {
                 if active >= config.active_depth_cap {
                     report.capped = true;
                     break;
                 }
+                report.sampled += 1;
                 let scratch_fingerprint = fingerprint(&config.shadow_queue, &candidate.payload);
                 let inserted: bool = sqlx::query_scalar(
                     "SELECT public.ingest_shadow_enqueue_job(\
@@ -572,7 +697,126 @@ fn validate_mirror(config: &MirrorConfig) -> Result<(), QueuePgError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sampled, validate_mirror, MirrorConfig};
+    use std::collections::BTreeSet;
+
+    use super::{
+        sampled, validate_mirror, MirrorConfig, MirrorEligibility, MirrorIneligibleReason,
+    };
+
+    const ELIGIBLE: MirrorEligibility = MirrorEligibility {
+        payload_shape_ok: true,
+        has_infohashes: true,
+        torrent_missing: false,
+        torrent_updated_after_ran_at: false,
+        has_hint: false,
+        has_content_source: false,
+    };
+
+    #[test]
+    fn reason_labels_are_a_bounded_distinct_set() {
+        let labels = MirrorIneligibleReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(labels.len(), MirrorIneligibleReason::ALL.len());
+    }
+
+    #[test]
+    fn decomposed_predicate_matches_the_original_conjunction() {
+        // The original single `shadow_eligible` boolean was
+        // `shape AND infohashes AND NOT (missing OR updated OR hint OR source)`.
+        // Attributing a reason must not change which candidates are admitted,
+        // so assert the equivalence over the whole 64-value truth table.
+        for bits in 0_u8..64 {
+            let eligibility = MirrorEligibility {
+                payload_shape_ok: bits & 1 != 0,
+                has_infohashes: bits & 2 != 0,
+                torrent_missing: bits & 4 != 0,
+                torrent_updated_after_ran_at: bits & 8 != 0,
+                has_hint: bits & 16 != 0,
+                has_content_source: bits & 32 != 0,
+            };
+            let original = eligibility.payload_shape_ok
+                && eligibility.has_infohashes
+                && !(eligibility.torrent_missing
+                    || eligibility.torrent_updated_after_ran_at
+                    || eligibility.has_hint
+                    || eligibility.has_content_source);
+            assert_eq!(
+                eligibility.ineligible_reason().is_none(),
+                original,
+                "eligibility decomposition drifted for {eligibility:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reason_is_reachable_and_reported_first_failure_first() {
+        assert_eq!(ELIGIBLE.ineligible_reason(), None);
+
+        let cases = [
+            (
+                MirrorEligibility {
+                    payload_shape_ok: false,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::PayloadShape,
+            ),
+            (
+                MirrorEligibility {
+                    has_infohashes: false,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::NoInfoHashes,
+            ),
+            (
+                MirrorEligibility {
+                    torrent_missing: true,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::TorrentMissing,
+            ),
+            (
+                MirrorEligibility {
+                    torrent_updated_after_ran_at: true,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::TorrentUpdatedAfterRanAt,
+            ),
+            (
+                MirrorEligibility {
+                    has_hint: true,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::HasHint,
+            ),
+            (
+                MirrorEligibility {
+                    has_content_source: true,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::HasContentSource,
+            ),
+        ];
+        for (eligibility, expected) in cases {
+            assert_eq!(eligibility.ineligible_reason(), Some(expected));
+        }
+
+        // A candidate failing several conjuncts is attributed exactly once, to
+        // the first, so the reason counters never double-count a scan.
+        let all_failing = MirrorEligibility {
+            payload_shape_ok: false,
+            has_infohashes: false,
+            torrent_missing: true,
+            torrent_updated_after_ran_at: true,
+            has_hint: true,
+            has_content_source: true,
+        };
+        assert_eq!(
+            all_failing.ineligible_reason(),
+            Some(MirrorIneligibleReason::PayloadShape)
+        );
+    }
 
     #[test]
     fn sampling_extremes_are_exact() {

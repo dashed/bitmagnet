@@ -32,5 +32,6 @@ pub use message::{
 };
 pub use pg::{
     ConsumeOutcome, Consumer, ConsumerConfig, DequeuedJob, MirrorBootstrap, MirrorConfig,
-    MirrorCursor, MirrorReport, QueuePgError, QueueStore, PROCESS_TORRENT_SHADOW,
+    MirrorCursor, MirrorIneligibleReason, MirrorReport, QueuePgError, QueueStore,
+    PROCESS_TORRENT_SHADOW,
 };
