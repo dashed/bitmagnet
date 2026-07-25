@@ -825,6 +825,11 @@ func (b optionBuilder) shouldTryCteStrategy() bool {
 	// A text search ordered primarily by relevance is served well by the default
 	// strategy. Only the leading column decides this: trailing columns are tiebreaks
 	// within equal ranks and don't change the shape of the scan.
+	//
+	// Widening the old "exactly one ordering column" test to "the leading column" is
+	// one-directional - it can only return false for orderings that already returned
+	// false, since a single relevance-desc column is still the leading column. No
+	// query that previously took the CTE strategy has been moved off it.
 	return b.tsquery != "" && (b.orderBy[0].Column.Name != QueryStringRankField ||
 		!b.orderBy[0].Desc)
 }

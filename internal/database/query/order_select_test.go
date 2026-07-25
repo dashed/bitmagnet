@@ -78,8 +78,18 @@ func TestApplySelectAliasesColumnsFollowingQueryStringRank(t *testing.T) {
 
 // The CTE strategy is only worth racing when the ordering is NOT primarily by
 // relevance. A tiebreak appended after the relevance column doesn't change the shape
-// of the scan, so it must not switch strategy - the CTE strategy is known to fail
-// against a freshly migrated schema (see internal/parity/searchquery_gen_test.go).
+// of the scan, so it must not switch strategy.
+//
+// The condition is one-directional: every ordering that avoided the CTE strategy
+// before still avoids it, and no ordering that used it has been moved off it - only
+// the new "relevance first, then tiebreak" shape is affected. The cases below pin
+// that.
+//
+// (The CTE strategy itself is fine in production. Test harnesses that open gorm
+// directly hit `relation "cte" does not exist` because they don't register
+// db.Use(exclause.New()) the way the app does at internal/database/gorm.go:51 - the
+// WITH clause is then never rendered. That's a harness gap, not a defect in the
+// strategy, and it isn't the reason for this rule.)
 func TestShouldTryCteStrategyIgnoresTrailingTiebreakColumns(t *testing.T) {
 	t.Parallel()
 
