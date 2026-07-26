@@ -269,15 +269,20 @@ enum PendingOp {
     FollowedBy,
 }
 
-/// Word-character test for the app-query lexer, approximating Go
-/// `lexer.IsWordChar` (`unicode.IsLetter || unicode.IsDigit`). `is_alphanumeric`
-/// agrees on every letter and decimal digit (Latin, CJK, Cyrillic, Arabic, and
-/// e.g. Arabic-Indic digits); it is marginally broader on a few exotic numeric
-/// categories (`Nl`/`No`, e.g. `Ⅷ`, `½`), which would only ever flip a `&` to a
-/// `<->` for such a character wedged between letters with no separator — the
-/// final lexemes are re-derived by [`tokenize_flat`] regardless.
+/// Word-character test for the app-query lexer: Go `lexer.IsWordChar`
+/// (`unicode.IsLetter || unicode.IsDigit`), read from the Go-generated
+/// [`crate::tokenizer::is_go_word_char`] table.
+///
+/// 🚨 Do NOT "simplify" this to `char::is_alphanumeric()`. That predicate is
+/// 12,322 code points wider than Go's — it accepts `² ³ ¹ ¼ ½ ¾ ①②③` and the
+/// rest of `No`/`Nl`/`Other_Alphabetic`, which Go treats as separators. The
+/// consequence is not cosmetic: a wider word-char class merges what Go sees as
+/// two operands into one run, which changes the tsquery **operator** from `&`
+/// to `<->`. `<->` (adjacency) is strictly narrower than `&` (conjunction), so
+/// Rust silently returns a SUBSET of Go's results. Re-deriving the lexemes
+/// downstream does not undo an operator change.
 fn is_query_word_char(c: char) -> bool {
-    c.is_alphanumeric()
+    crate::tokenizer::is_go_word_char(c)
 }
 
 /// Lex `raw` into [`QToken`]s. Faithful to Go's lexer: operator chars first,
@@ -1294,6 +1299,48 @@ mod tests {
             .map(|i| format!("t{i}"))
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    /// `lex_tsquery`'s bare-lexeme run uses `char::is_alphanumeric()`, which is
+    /// 12,322 code points WIDER than Go's word-char class. That was previously
+    /// argued safe from the subset relation and never measured; this measures
+    /// it exhaustively.
+    ///
+    /// The argument only holds if no character in the divergence set can ever
+    /// appear inside a lexeme of a tsquery we parse. Tsqueries reaching
+    /// `parse_tsquery` are built from [`crate::tokenizer::tokenize_flat`]
+    /// output, so the check is: run the tokenizer over every one of the
+    /// 1,112,064 Unicode scalar values and confirm no emitted lexeme contains a
+    /// character Rust calls alphanumeric but Go does not. If one ever did, the
+    /// lexer would swallow it into the preceding lexeme instead of ending the
+    /// term, and the parsed AST would silently differ.
+    #[test]
+    fn tsquery_lexeme_alphabet_never_hits_the_divergence_set() {
+        let divergent = |c: char| c.is_alphanumeric() && !crate::tokenizer::is_go_word_char(c);
+        // Non-empty premise check: the divergence set is not vacuous.
+        assert!(divergent('²') && divergent('①'));
+
+        let mut offenders = Vec::new();
+        for cp in 0..=0x10FFFF_u32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            // Wrap in ASCII so a lexeme boundary exists on both sides; the
+            // tokenizer is the only thing that decides where it actually falls.
+            for lexeme in crate::tokenizer::tokenize_flat(&format!("a{c}b")) {
+                if let Some(bad) = lexeme.chars().find(|&ch| divergent(ch)) {
+                    offenders.push((c, bad, lexeme.clone()));
+                    break;
+                }
+            }
+            if offenders.len() > 8 {
+                break;
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "tokenize_flat emits characters lex_tsquery would mis-classify: {offenders:?}"
+        );
     }
 
     #[test]

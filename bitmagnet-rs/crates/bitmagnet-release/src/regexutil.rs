@@ -1,19 +1,38 @@
 //! Regex-fragment helpers mirroring `internal/regex/util.go` and the subset of
 //! `hedhyw/rex`'s `Chars` builders the keyword compiler relies on.
 //!
-//! ASCII-parity note (the #1 Lane R trap): Go's `regexp` treats `\d` as ASCII
-//! `[0-9]`, but the Rust `regex` crate treats `\d` as Unicode. So every digit
-//! class here is emitted as `[0-9]`, never `\d`, while `\p{L}` (identical in
-//! both engines) stays. See `docs/dev/rust-rewrite/phase3-contracts.md §3/§2.4`.
+//! Unicode-parity note (the #1 Lane R trap): NONE of Go's regex shorthands mean
+//! what the Rust `regex` crate means by them.
+//!
+//! * Go's `\d`/`\w`/`\s` are ASCII, Rust's are Unicode — so every digit class
+//!   here is emitted as `[0-9]`, never `\d`.
+//! * Go's `\p{L}` is 4,924 code points NARROWER than Rust's, because `regex`
+//!   1.13 ships newer Unicode tables than Go 1.23.6 — so `\p{L}` is spliced out
+//!   for [`goclass::LETTER_CLASS_BODY`], the class Go's RE2 actually applies.
+//!
+//! See `docs/dev/rust-rewrite/phase3-contracts.md §3/§2.4`.
 
-/// `regex.AnyWordChar()` — Go emits `[\p{L}\d]`; we emit the ASCII-digit form.
-pub(crate) fn any_word_char() -> &'static str {
-    "[\\p{L}0-9]"
-}
+use std::sync::LazyLock;
+
+use crate::goclass;
+
+/// `regex.AnyWordChar()` — Go emits `[\p{L}\d]`; we emit the ASCII-digit form
+/// with the Go-pinned letter class spliced in.
+static ANY_WORD_CHAR: LazyLock<String> =
+    LazyLock::new(|| format!("[{}0-9]", goclass::LETTER_CLASS_BODY));
 
 /// `regex.AnyNonWordChar()` — Go emits `[^\p{L}\d]`.
+static ANY_NON_WORD_CHAR: LazyLock<String> =
+    LazyLock::new(|| format!("[^{}0-9]", goclass::LETTER_CLASS_BODY));
+
+/// `regex.AnyWordChar()` — see [`ANY_WORD_CHAR`].
+pub(crate) fn any_word_char() -> &'static str {
+    &ANY_WORD_CHAR
+}
+
+/// `regex.AnyNonWordChar()` — see [`ANY_NON_WORD_CHAR`].
 pub(crate) fn any_non_word_char() -> &'static str {
-    "[^\\p{L}0-9]"
+    &ANY_NON_WORD_CHAR
 }
 
 /// `rex.Chars.Digits()` — Go emits `\d` (ASCII); we emit `[0-9]`.

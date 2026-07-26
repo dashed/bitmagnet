@@ -48,15 +48,21 @@ enum PendingOp {
     FollowedBy,
 }
 
-/// Word-character test for the app-query lexer, approximating Go
-/// `lexer.IsWordChar` (`unicode.IsLetter || unicode.IsDigit`). `is_alphanumeric`
-/// agrees on every letter and decimal digit (Latin, CJK, Cyrillic, Arabic, and
-/// e.g. Arabic-Indic digits); it is marginally broader on a few exotic numeric
-/// categories (`Nl`/`No`, e.g. `Ⅷ`, `½`), which would only ever flip a `&` to a
-/// `<->` for such a character wedged between letters with no separator — the
-/// final lexemes are re-derived by [`tokenize_flat`] regardless.
+/// Word-character test for the app-query lexer: Go `lexer.IsWordChar`
+/// (`unicode.IsLetter || unicode.IsDigit`), read from the Go-generated
+/// [`tokenizer::is_go_word_char`] table.
+///
+/// 🚨 Do NOT "simplify" this to `char::is_alphanumeric()`. That predicate is
+/// 12,322 code points wider than Go's — it accepts `² ³ ¹ ¼ ½ ¾ ①②③` and the
+/// rest of `No`/`Nl`/`Other_Alphabetic`, which Go treats as separators. The
+/// consequence is not cosmetic: a wider word-char class merges what Go sees as
+/// two operands into one run, which changes the tsquery **operator** from `&`
+/// to `<->`. `<->` (adjacency) is strictly narrower than `&` (conjunction), so
+/// Rust silently returns a SUBSET of Go's results. Re-deriving the lexemes in
+/// [`tokenize_flat`] does not undo an operator change — that is the reasoning
+/// the comment this replaced got wrong, and why the divergence shipped.
 fn is_query_word_char(c: char) -> bool {
-    c.is_alphanumeric()
+    tokenizer::is_go_word_char(c)
 }
 
 /// Lex `raw` into [`QToken`]s. Faithful to Go's lexer: operator chars first,

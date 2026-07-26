@@ -61,7 +61,12 @@ const MAX_ASCII: u32 = 0x7F;
 const NON_BREAKING_CUTOFF: u32 = 0x1FFF;
 
 /// Is `c` a word char per Go's `lexer.IsWordChar` (`IsLetter || IsDigit`)?
-fn is_word_char(c: char) -> bool {
+///
+/// The Go-generated table is the only correct source: `char::is_alphanumeric()`
+/// is 12,322 code points wider (`² ³ ¼ ½ ①②③`, …) and `is_alphabetic()` is
+/// 11,317 wider than `unicode.IsLetter`. Shared with the app-query lexer, which
+/// must classify identically or it emits the wrong tsquery operator.
+pub(crate) fn is_go_word_char(c: char) -> bool {
     let cp = c as u32;
     let ranges = tables::WORD_CHAR_RANGES;
     // Index of the first range whose `lo` is greater than `cp`; the candidate
@@ -171,7 +176,7 @@ fn tokenize_spans(input: &str) -> Vec<TokenSpan> {
     for (cs, raw_ch) in input.char_indices() {
         let ce = cs + raw_ch.len_utf8();
 
-        if !is_word_char(raw_ch) {
+        if !is_go_word_char(raw_ch) {
             acc.break_word();
             continue;
         }
@@ -293,7 +298,9 @@ pub fn analyzer() -> TextAnalyzer {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_word_char, tokenize_flat, BitmagnetTokenizer, Token, TokenStream, Tokenizer};
+    use super::{
+        is_go_word_char, tokenize_flat, BitmagnetTokenizer, Token, TokenStream, Tokenizer,
+    };
 
     fn flat(input: &str) -> Vec<String> {
         tokenize_flat(input)
@@ -331,16 +338,16 @@ mod tests {
         // Roman numerals are category Nl — letters to Rust's `is_alphabetic`,
         // but NOT word chars in Go. This is the key divergence the embedded
         // table protects against.
-        assert!(!is_word_char('Ⅷ'));
+        assert!(!is_go_word_char('Ⅷ'));
         assert!('Ⅷ'.is_alphabetic()); // sanity: Rust std would wrongly accept it
         assert_eq!(flat("Ⅷ Ⅻ ⅸ"), Vec::<String>::new());
         // Combining marks (Mn) and connector punctuation are not word chars.
         assert_eq!(flat("e\u{0301}"), ["e"]); // e + combining acute
         assert_eq!(flat("snake_case"), ["snake", "case"]);
         // Letters and ASCII digits are word chars.
-        assert!(is_word_char('a'));
-        assert!(is_word_char('9'));
-        assert!(is_word_char('中'));
+        assert!(is_go_word_char('a'));
+        assert!(is_go_word_char('9'));
+        assert!(is_go_word_char('中'));
     }
 
     #[test]

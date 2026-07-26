@@ -24,6 +24,7 @@
 
 mod content_type;
 mod episodes;
+pub mod goclass;
 mod keywords;
 mod language;
 mod lexer;

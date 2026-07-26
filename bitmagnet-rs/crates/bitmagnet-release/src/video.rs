@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::keywords::{capture_alternation, regex_pattern_from_keywords, rex_tokens_from_keywords};
-use crate::regexutil::any_non_word_char;
+use crate::regexutil::{any_non_word_char, any_word_char};
 
 /// Video resolution. Canonical `as_str` values match Go's enum `String()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,8 +291,11 @@ pub(crate) fn codec_pattern() -> String {
     let refs: Vec<&str> = kws.iter().map(String::as_str).collect();
     let tokens = rex_tokens_from_keywords(&refs).expect("codec keywords compile");
     let nw = any_non_word_char();
+    // `[\p{L}0-9]` via `any_word_char` so the letter class is the Go-pinned
+    // one; a literal `\p{L}` here would be 4,924 code points too wide.
+    let w = any_word_char();
     format!(
-        "(?:^|{nw}+){cap}(?:$|(?:\\x2D([\\p{{L}}0-9]+))|{nw}+)",
+        "(?:^|{nw}+){cap}(?:$|(?:\\x2D({w}+))|{nw}+)",
         cap = capture_alternation(&tokens),
     )
 }
