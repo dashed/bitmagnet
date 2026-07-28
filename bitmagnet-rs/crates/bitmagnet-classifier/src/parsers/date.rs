@@ -339,6 +339,29 @@ mod tests {
         assert!(parse_date("").is_nil());
     }
 
+    /// The audit's headline date defect, spelled out so a regression is legible
+    /// without decoding the fixture: a divergent char gluing the title to the
+    /// year made the wider Rust predicate merge what Go splits into two words,
+    /// and the whole date vanished (which then fed `tv_show` inference through
+    /// `Date::is_valid`). The go-oracle probes cover these shapes exhaustively;
+    /// keep a legible handful inline.
+    #[test]
+    fn divergent_chars_no_longer_swallow_dates() {
+        for input in [
+            "Show²2019-12-31",
+            "2019-12-31½Show",
+            "Show①2019-12-31",
+            "2019-12-31¾Show",
+        ] {
+            assert_eq!(parse_date(input), ymd(2019, 12, 31), "input = {input:?}");
+        }
+        // Agreement in both directions: shapes Go rejects must stay rejected
+        // (Go's date grammar does not assemble `2020 01 02` from separator
+        // splits, so neither may the port).
+        assert!(parse_date("2020²01²02").is_nil());
+        assert!(parse_date("2020½01½02").is_nil());
+    }
+
     /// Behavioural parity for the Go-pinned word-char predicate, against
     /// results captured from the production Go binary.
     ///

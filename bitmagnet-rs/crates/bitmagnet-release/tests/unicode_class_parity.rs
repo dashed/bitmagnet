@@ -5,7 +5,7 @@
 //! literal `\p{L}` in the Rust `regex` crate is 4,924 code points wider than
 //! Go's, so a title carrying a code point Go 1.23.6 does not yet know as a
 //! letter split differently. `goclass::pin_letter_class` removes that; this
-//! test is the behavioural proof, over the same 348-probe oracle the fts crate
+//! test is the behavioural proof, over the same 728-probe oracle the fts crate
 //! uses.
 
 use std::collections::BTreeMap;

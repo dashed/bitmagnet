@@ -3,13 +3,21 @@
 //!
 //! `testdata/parity/unicode/go-oracle.jsonl` is the output of
 //! `fts.AppQueryToTsquery` / `fts.TokenizeFlat` (plus the classifier/release
-//! parsers other crates check) over 348 probe strings. The probes are built
+//! parsers other crates check) over 728 probe strings. The probes are built
 //! from the code points where Rust's Unicode predicates are wider than Go's,
-//! wedged between operands where the difference actually changes behaviour:
-//! a wider word-char class merges two operands into one run, which flips the
-//! tsquery operator from `&` to `<->`. `<->` is strictly narrower, so the old
-//! `is_alphanumeric()` implementation silently returned a SUBSET of Go's
-//! results — `Test²Case` produced `test <-> case` instead of `test & case`.
+//! wedged between operands where the difference actually changes behaviour,
+//! in BOTH query shapes:
+//!
+//! * **Unquoted** (the app-query path): a wider word-char class merges two
+//!   operands into one run, which flips the tsquery operator from `&` to
+//!   `<->`. `<->` is strictly narrower, so the old `is_alphanumeric()`
+//!   implementation silently returned a SUBSET of Go's results — `Test²Case`
+//!   produced `test <-> case` instead of `test & case`.
+//! * **Quoted** (the classifier path — `ContentBySearch` issues
+//!   `fmt.Sprintf("\"%s\"", baseTitle)`): the phrase lexes as ONE quoted token
+//!   before any word run, so the operator is Go-correctly `<->` and what must
+//!   match is the LEXEME BOUNDARIES inside the phrase — `"Test²Case"` must be
+//!   `test <-> case`, exactly what Go produces.
 
 use std::collections::BTreeMap;
 
@@ -57,18 +65,53 @@ fn tokenize_flat_matches_go_on_every_probe() {
     let mut failures = Vec::new();
     for case in load() {
         let input = case["input"].as_str().expect("input").to_string();
+        // Go marshals a nil slice as `null`; that is the empty lexeme list
+        // (e.g. `"½"` tokenizes to nothing).
         let want: Vec<String> = case["lexemes"]
             .as_array()
-            .expect("lexemes")
-            .iter()
-            .map(|v| v.as_str().expect("lexeme").to_string())
-            .collect();
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().expect("lexeme").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         let got = bitmagnet_fts::tokenize_flat(&input);
         if got != want {
             failures.push(format!("{input:?}: want {want:?}, got {got:?}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The classifier-path shape, spelled out so a regression is legible without
+/// decoding the fixture. Quoted input is ONE operand, so `<->` (phrase
+/// adjacency) is the CORRECT operator here — what Go checks is that the lexeme
+/// boundaries inside the phrase fall where Go's word-char class puts them.
+/// The same string unquoted must produce `&` (see
+/// [`named_audit_cases_produce_the_conjunction_operator`]); that contrast is
+/// the two-manifestation proof.
+#[test]
+fn quoted_classifier_path_preserves_go_lexeme_boundaries() {
+    for (input, want) in [
+        (r#""Test²Case""#, "test <-> case"),
+        (r#""8½Women""#, "8 <-> women"),
+        (r#""Alien³Resurrection""#, "alien <-> resurrection"),
+        (r#""第①話""#, "Di <-> Hua"),
+        // A quoted operand next to unquoted ones: the quoted token keeps its
+        // internal `<->` while the separate operands join with `&`.
+        (
+            r#"Alien "8½Women" Resurrection"#,
+            "alien & 8 <-> women & resurrection",
+        ),
+        // A phrase whose content tokenizes to nothing contributes no operand.
+        (r#""½""#, ""),
+    ] {
+        assert_eq!(
+            bitmagnet_fts::app_query_to_tsquery(input),
+            want,
+            "input = {input:?}"
+        );
+    }
 }
 
 /// The four cases the audit named, spelled out so a regression is legible

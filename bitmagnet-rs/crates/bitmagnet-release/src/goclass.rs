@@ -28,6 +28,19 @@ fn in_ranges(ranges: &[(u32, u32)], cp: u32) -> bool {
 /// Use this, never `char::is_alphanumeric()` (12,322 code points wider) and
 /// never `is_alphabetic() || is_numeric()` (the same 12,322 — the two Rust
 /// spellings are equivalent).
+///
+/// 🚨 BYTE-WISE CALLERS, NOT CHAR-WISE: Go's `fileSearchStrings`
+/// (`internal/model/torrents.go`) calls `IsWordChar(rune(path[i]))` on a single
+/// BYTE of the path, so a multi-byte UTF-8 character straddling the
+/// prefix/suffix boundary is classified byte by byte — the walk can stop in the
+/// middle of a character. Measured against production Go: of the 256 possible
+/// byte values, exactly 127 are accepted as word chars — ASCII `[0-9A-Za-z]`
+/// plus `{0xAA, 0xB5, 0xBA}` (ª µ º), `0xC0..=0xF4` except `0xD7`, and
+/// `0xF5..=0xFF` except `0xF7` (the Latin-1 letters as single-byte runes; every
+/// other UTF-8 continuation byte is non-word). When that function is ported,
+/// iterate BYTES and map each through this table as `char::from(byte)` —
+/// iterating `char`s is "more correct" and breaks parity: parity means
+/// reproducing Go's byte-splitting bug exactly.
 #[must_use]
 pub fn is_word_char(c: char) -> bool {
     in_ranges(WORD_CHAR_RANGES, c as u32)
