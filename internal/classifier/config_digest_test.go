@@ -89,10 +89,10 @@ func TestLogEffectiveConfigDigestFields(t *testing.T) {
 	}
 	core, logs := observer.New(zap.InfoLevel)
 	logger := zap.New(core).Sugar()
-	if err := logEffectiveConfigDigest(nil, source, "default"); err != nil {
+	if _, err := logEffectiveConfigDigest(nil, source, "default"); err != nil {
 		t.Fatalf("nil logger: %v", err)
 	}
-	if err := logEffectiveConfigDigest(logger, source, "default"); err != nil {
+	if _, err := logEffectiveConfigDigest(logger, source, "default"); err != nil {
 		t.Fatal(err)
 	}
 	digest, err := EffectiveConfigDigest(source, "default")

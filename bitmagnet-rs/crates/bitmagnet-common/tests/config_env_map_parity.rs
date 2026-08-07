@@ -1,6 +1,19 @@
 use bitmagnet_common::{config, strcase};
 
+/// A copy of the Go-side golden at `testdata/parity/config-env-map.golden`,
+/// which is generated from Go's config surface by `TestConfigEnvMapGolden`.
+///
+/// The two files are meant to be byte-identical: this one is the ground truth
+/// Rust's key derivation is checked against, so letting it lag means the port
+/// stops being validated against keys Go has and Rust has not seen. When a Go
+/// config field is added, copy the file across and bump `EXPECTED_KEYS` below in
+/// the same commit.
 const GOLDEN: &str = include_str!("fixtures/config-env-map.golden");
+
+/// Line count of `GOLDEN`, asserted so a truncated or partially-copied fixture
+/// is caught rather than silently shrinking the test's coverage. It is expected
+/// to change whenever the Go config surface does; see [`GOLDEN`].
+const EXPECTED_KEYS: usize = 124;
 
 #[test]
 fn go_config_env_map_golden_is_preserved() {
@@ -16,7 +29,12 @@ fn go_config_env_map_golden_is_preserved() {
     );
 
     let lines = body.split('\n').collect::<Vec<_>>();
-    assert_eq!(lines.len(), 122, "golden key count changed");
+    assert_eq!(
+        lines.len(),
+        EXPECTED_KEYS,
+        "golden key count changed: if you re-synced this fixture from \
+         testdata/parity/config-env-map.golden, bump EXPECTED_KEYS to match"
+    );
     for adjacent in lines.windows(2) {
         assert!(
             adjacent[0] < adjacent[1],
