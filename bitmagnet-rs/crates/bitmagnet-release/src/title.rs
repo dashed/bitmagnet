@@ -1,10 +1,13 @@
 //! Port of `internal/classifier/parsers/video.go` — title/year/episode
 //! extraction and the top-level `ParseVideoContent` orchestration.
 //!
-//! The title regexes are hardcoded (byte-identical to Go's `rex` output after
-//! the ASCII adaptation — `\d`/`\w`/`\s` → explicit ASCII classes, `\p{L}` and
-//! `[[:upper:]]` kept). Each is guarded by a byte-equality test against the Go
-//! oracle in `testdata/parity/release/patterns.jsonl`.
+//! The title regexes are hardcoded as *templates* that mirror Go's `rex` output
+//! after the ASCII adaptation (`\d`/`\w`/`\s` → explicit ASCII classes,
+//! `[[:upper:]]` kept). [`goclass::pin_letter_class`] then splices out every
+//! `\p{L}` for the class Go's RE2 actually applies — `regex` 1.13's `\p{L}` is
+//! 4,924 code points wider — and it is the PINNED result, not the template,
+//! that is byte-equality tested against the Go oracle in
+//! `testdata/parity/release/patterns.jsonl`.
 //!
 //! 🔑 Episode-group offset: `titleEpisodesRegex` puts the title in group 1, so
 //! `EpisodesToken`'s groups shift to 2.., and Go passes `match[2:]` to
@@ -20,6 +23,7 @@ use regex::{Captures, Regex};
 
 use crate::content_type::ContentType;
 use crate::episodes::{episodes_match_to_episodes, Episodes};
+use crate::goclass;
 use crate::keywords::regex_pattern_from_keywords;
 use crate::language::infer_languages;
 use crate::video::{
@@ -28,26 +32,40 @@ use crate::video::{
     VideoResolution, VideoSource,
 };
 
-const TITLE_PATTERN: &str =
+const TITLE_PATTERN_TEMPLATE: &str =
     r#"^(?:((?:(?:[\p{L}0-9]+(?:\x2D[\p{L}0-9]+)*)|[^\p{L}0-9]+)+(?:[^\p{L}0-9]+|$)))"#;
 
-const TITLE_YEAR_PATTERN: &str = r#"^(?:(?:((?:(?:[\p{L}0-9]+(?:\x2D[\p{L}0-9]+)*)|[^\p{L}0-9]+)+(?:[^\p{L}0-9]+|$)))(?:(?:[^0-9A-Za-z_]*)((?:18|19|20)[0-9]{2})(?:[^0-9A-Za-z_]|$)))"#;
+const TITLE_YEAR_PATTERN_TEMPLATE: &str = r#"^(?:(?:((?:(?:[\p{L}0-9]+(?:\x2D[\p{L}0-9]+)*)|[^\p{L}0-9]+)+(?:[^\p{L}0-9]+|$)))(?:(?:[^0-9A-Za-z_]*)((?:18|19|20)[0-9]{2})(?:[^0-9A-Za-z_]|$)))"#;
 
-const TITLE_EPISODES_PATTERN: &str = r#"^(?:(?:((?:(?:[\p{L}0-9]+(?:\x2D[\p{L}0-9]+)*)|[^\p{L}0-9]+)+(?:[^\p{L}0-9]+|$)))((?:(?:(?:(?:(?:[Ss][Ee][Aa][Ss][Oo][Nn]))|(?:(?:[Ss])))[\t\n\f\r ]?(([0-9]{1,2})(?:(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?(?:[sS]?[\t\n\f\r ]?)?([0-9]{1,2}))|(?:[\t\n\f\r ]?,[\t\n\f\r ]?(?:[sS]?[\t\n\f\r ]?)?([0-9]{1,2})[\t\n\f\r ]?)+)?)[\t\n\f\r ]?)(?:(?:(?:(?:[Ee][Pp][Ii][Ss][Oo][Dd][Ee]))|(?:(?:[Ee][Pp]))|(?:(?:[Ee])))[\t\n\f\r ]?(([0-9]{1,2})(?:(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?(?:[eE]?[\t\n\f\r ]?)?([0-9]{1,2}))|(?:[\t\n\f\r ]?,[\t\n\f\r ]?(?:[eE]?[\t\n\f\r ]?)?([0-9]{1,2})[\t\n\f\r ]?)+)?))?)|(?:(?:([0-9]{1,2})[xX]([0-9]{1,2}))(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?([0-9]{1,2}))?)))"#;
+const TITLE_EPISODES_PATTERN_TEMPLATE: &str = r#"^(?:(?:((?:(?:[\p{L}0-9]+(?:\x2D[\p{L}0-9]+)*)|[^\p{L}0-9]+)+(?:[^\p{L}0-9]+|$)))((?:(?:(?:(?:(?:[Ss][Ee][Aa][Ss][Oo][Nn]))|(?:(?:[Ss])))[\t\n\f\r ]?(([0-9]{1,2})(?:(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?(?:[sS]?[\t\n\f\r ]?)?([0-9]{1,2}))|(?:[\t\n\f\r ]?,[\t\n\f\r ]?(?:[sS]?[\t\n\f\r ]?)?([0-9]{1,2})[\t\n\f\r ]?)+)?)[\t\n\f\r ]?)(?:(?:(?:(?:[Ee][Pp][Ii][Ss][Oo][Dd][Ee]))|(?:(?:[Ee][Pp]))|(?:(?:[Ee])))[\t\n\f\r ]?(([0-9]{1,2})(?:(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?(?:[eE]?[\t\n\f\r ]?)?([0-9]{1,2}))|(?:[\t\n\f\r ]?,[\t\n\f\r ]?(?:[eE]?[\t\n\f\r ]?)?([0-9]{1,2})[\t\n\f\r ]?)+)?))?)|(?:(?:([0-9]{1,2})[xX]([0-9]{1,2}))(?:[\t\n\f\r ]?\x2D[\t\n\f\r ]?([0-9]{1,2}))?)))"#;
 
-const TITLE_PART_PATTERN: &str = r#"[ \._]?((?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*))[ \._]?"#;
+const TITLE_PART_PATTERN_TEMPLATE: &str = r#"[ \._]?((?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*))[ \._]?"#;
 
-const TRIM_TITLE_PATTERN: &str = r#"^(?:(?:\[[^\]]+\])|(?:\x{3010}[^\x{3011}]+\x{3011}))?[^\p{L}0-9]*((?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*)(?:.(?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*))*)[^\p{L}0-9]*$"#;
+const TRIM_TITLE_PATTERN_TEMPLATE: &str = r#"^(?:(?:\[[^\]]+\])|(?:\x{3010}[^\x{3011}]+\x{3011}))?[^\p{L}0-9]*((?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*)(?:.(?:[\('"]*(?:(?:[[:upper:]]\.){2,}|(?:[\p{L}0-9]+(?:['\x2D]+[\p{L}0-9]+)*))[,;:\?!\x2D\)'"]*))*)[^\p{L}0-9]*$"#;
 
-static TITLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(TITLE_PATTERN).expect("title re"));
+/// The five templates above with every `\p{L}` replaced by the Go-pinned
+/// letter class. These — not the templates — are what gets compiled, and what
+/// `title_patterns_match_go` byte-compares against the Go oracle.
+static TITLE_PATTERN: LazyLock<String> =
+    LazyLock::new(|| goclass::pin_letter_class(TITLE_PATTERN_TEMPLATE));
+static TITLE_YEAR_PATTERN: LazyLock<String> =
+    LazyLock::new(|| goclass::pin_letter_class(TITLE_YEAR_PATTERN_TEMPLATE));
+static TITLE_EPISODES_PATTERN: LazyLock<String> =
+    LazyLock::new(|| goclass::pin_letter_class(TITLE_EPISODES_PATTERN_TEMPLATE));
+static TITLE_PART_PATTERN: LazyLock<String> =
+    LazyLock::new(|| goclass::pin_letter_class(TITLE_PART_PATTERN_TEMPLATE));
+static TRIM_TITLE_PATTERN: LazyLock<String> =
+    LazyLock::new(|| goclass::pin_letter_class(TRIM_TITLE_PATTERN_TEMPLATE));
+
+static TITLE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(&TITLE_PATTERN).expect("title re"));
 static TITLE_YEAR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(TITLE_YEAR_PATTERN).expect("title_year re"));
+    LazyLock::new(|| Regex::new(&TITLE_YEAR_PATTERN).expect("title_year re"));
 static TITLE_EPISODES_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(TITLE_EPISODES_PATTERN).expect("title_episodes re"));
+    LazyLock::new(|| Regex::new(&TITLE_EPISODES_PATTERN).expect("title_episodes re"));
 static TITLE_PART_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(TITLE_PART_PATTERN).expect("title_part re"));
+    LazyLock::new(|| Regex::new(&TITLE_PART_PATTERN).expect("title_part re"));
 static TRIM_TITLE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(TRIM_TITLE_PATTERN).expect("trim_title re"));
+    LazyLock::new(|| Regex::new(&TRIM_TITLE_PATTERN).expect("trim_title re"));
 
 static MULTI_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&regex_pattern_from_keywords(&["multi", "dual"]).expect("multi keywords"))
@@ -214,14 +232,28 @@ mod tests {
     #[test]
     fn title_patterns_match_go() {
         let go = load_go_patterns();
-        assert_eq!(TITLE_PATTERN, adapt_go_pattern(&go["title"]));
-        assert_eq!(TITLE_YEAR_PATTERN, adapt_go_pattern(&go["title_year"]));
+        assert_eq!(*TITLE_PATTERN, adapt_go_pattern(&go["title"]));
+        assert_eq!(*TITLE_YEAR_PATTERN, adapt_go_pattern(&go["title_year"]));
         assert_eq!(
-            TITLE_EPISODES_PATTERN,
+            *TITLE_EPISODES_PATTERN,
             adapt_go_pattern(&go["title_episodes"])
         );
-        assert_eq!(TITLE_PART_PATTERN, adapt_go_pattern(&go["title_part"]));
-        assert_eq!(TRIM_TITLE_PATTERN, adapt_go_pattern(&go["trim_title"]));
+        assert_eq!(*TITLE_PART_PATTERN, adapt_go_pattern(&go["title_part"]));
+        assert_eq!(*TRIM_TITLE_PATTERN, adapt_go_pattern(&go["trim_title"]));
+        // The templates are NOT what ships: assert the pinning actually
+        // happened, so this test can never pass on a literal `\p{L}` again.
+        for pinned in [
+            &*TITLE_PATTERN,
+            &*TITLE_YEAR_PATTERN,
+            &*TITLE_EPISODES_PATTERN,
+            &*TITLE_PART_PATTERN,
+            &*TRIM_TITLE_PATTERN,
+        ] {
+            assert!(
+                !pinned.contains(r"\p{L}"),
+                "pattern still carries a literal \\p{{L}}"
+            );
+        }
         // All compile.
         LazyLock::force(&TITLE_RE);
         LazyLock::force(&TITLE_YEAR_RE);

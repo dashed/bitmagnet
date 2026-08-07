@@ -57,7 +57,12 @@ const MAX_ASCII: u32 = 0x7F;
 const NON_BREAKING_CUTOFF: u32 = 0x1FFF;
 
 /// Is `c` a word char per Go's `lexer.IsWordChar` (`IsLetter || IsDigit`)?
-fn is_word_char(c: char) -> bool {
+///
+/// The Go-generated table is the only correct source: `char::is_alphanumeric()`
+/// is 12,322 code points wider (`² ³ ¼ ½ ①②③`, …) and `is_alphabetic()` is
+/// 11,317 wider than `unicode.IsLetter`. Shared with the app-query lexer, which
+/// must classify identically or it emits the wrong tsquery operator.
+pub(crate) fn is_go_word_char(c: char) -> bool {
     let cp = c as u32;
     let ranges = tables::WORD_CHAR_RANGES;
     // Index of the first range whose `lo` is greater than `cp`; the candidate
@@ -168,7 +173,7 @@ fn tokenize_spans(input: &str) -> Vec<TokenSpan> {
     for (cs, raw_ch) in input.char_indices() {
         let ce = cs + raw_ch.len_utf8();
 
-        if !is_word_char(raw_ch) {
+        if !is_go_word_char(raw_ch) {
             acc.break_word();
             continue;
         }

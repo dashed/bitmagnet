@@ -2,8 +2,13 @@
 //! classifier-owned (it lives under `internal/classifier/parsers`), so Lane C
 //! ports it directly rather than depending on Lane R.
 //!
-//! The word/non-word char predicate matches Lane R's `lexer::is_word_char`
-//! (`is_alphabetic() || is_numeric()`) so the two parsers agree on tokenization.
+//! The word/non-word char predicate is Lane R's `goclass::is_word_char`, so the
+//! two parsers agree on tokenization AND both agree with Go. Rust's
+//! `is_alphabetic() || is_numeric()` is 12,322 code points wider than Go's
+//! `unicode.IsLetter || unicode.IsDigit` — it accepts `² ³ ¹ ¼ ½ ¾ ①②③` and the
+//! rest of `No`/`Nl`/`Other_Alphabetic`, which Go treats as separators. This
+//! runs on every torrent name at classify time and feeds `tv_show` inference
+//! through `Date::is_valid`, so it is the highest-volume of the divergences.
 
 use crate::model::Date;
 
@@ -37,7 +42,7 @@ impl Lexer {
 }
 
 fn is_word_char(c: char) -> bool {
-    c.is_alphabetic() || c.is_numeric()
+    bitmagnet_release::goclass::is_word_char(c)
 }
 
 /// `ParseDate` — scan the string for the first valid embedded date.
@@ -332,5 +337,74 @@ mod tests {
         assert!(parse_date("Synthetic Story.m4b").is_nil());
         assert!(parse_date("Some Album Discography FLAC").is_nil());
         assert!(parse_date("").is_nil());
+    }
+
+    /// The audit's headline date defect, spelled out so a regression is legible
+    /// without decoding the fixture: a divergent char gluing the title to the
+    /// year made the wider Rust predicate merge what Go splits into two words,
+    /// and the whole date vanished (which then fed `tv_show` inference through
+    /// `Date::is_valid`). The go-oracle probes cover these shapes exhaustively;
+    /// keep a legible handful inline.
+    #[test]
+    fn divergent_chars_no_longer_swallow_dates() {
+        for input in [
+            "Show²2019-12-31",
+            "2019-12-31½Show",
+            "Show①2019-12-31",
+            "2019-12-31¾Show",
+        ] {
+            assert_eq!(parse_date(input), ymd(2019, 12, 31), "input = {input:?}");
+        }
+        // Agreement in both directions: shapes Go rejects must stay rejected
+        // (Go's date grammar does not assemble `2020 01 02` from separator
+        // splits, so neither may the port).
+        assert!(parse_date("2020²01²02").is_nil());
+        assert!(parse_date("2020½01½02").is_nil());
+    }
+
+    /// Behavioural parity for the Go-pinned word-char predicate, against
+    /// results captured from the production Go binary.
+    ///
+    /// The date lexer splits on word/non-word boundaries, so a predicate that
+    /// is wider than Go's merges what Go sees as `<digits><sep><digits>` into a
+    /// single word run and the date stops parsing. `² ³ ¼ ½ ①` and the other
+    /// 12,322 code points Rust calls alphanumeric are exactly that case. This
+    /// runs on every torrent name at classify time and feeds `tv_show`
+    /// inference through `Date::is_valid`.
+    #[test]
+    fn parse_date_matches_go_on_every_probe() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../testdata/parity/unicode/go-oracle.jsonl"
+        );
+        let raw = std::fs::read_to_string(path).expect("read go-oracle.jsonl");
+        let mut failures = Vec::new();
+        let mut n = 0usize;
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            n += 1;
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid oracle json");
+            let input = v["input"].as_str().expect("input");
+            let want = ymd(
+                u16::try_from(v["date_year"].as_u64().expect("year")).expect("u16"),
+                u8::try_from(v["date_month"].as_u64().expect("month")).expect("u8"),
+                u8::try_from(v["date_day"].as_u64().expect("day")).expect("u8"),
+            );
+            let got = parse_date(input);
+            if got != want {
+                failures.push(format!("{input:?}: want {want:?}, got {got:?}"));
+            }
+            assert_eq!(
+                got.is_valid(),
+                v["date_valid"].as_bool().expect("date_valid"),
+                "IsValid disagrees for {input:?}"
+            );
+        }
+        assert!(n > 300, "oracle looks truncated");
+        assert!(
+            failures.is_empty(),
+            "{} of {n} probes diverge from Go:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }

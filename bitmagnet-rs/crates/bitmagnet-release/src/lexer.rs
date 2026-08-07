@@ -57,6 +57,9 @@ impl Lexer {
 /// letter or a Unicode digit. Go uses `unicode.IsLetter || unicode.IsDigit`.
 /// NOTE: this classifies the *keyword DSL source*, not the match-time regex
 /// (whose word-char class is `[\p{L}0-9]`, ASCII-digit; see `regexutil`).
+///
+/// Delegates to [`goclass::is_word_char`]: Rust's `is_alphabetic() ||
+/// is_numeric()` accepts 12,322 code points Go rejects (`² ³ ¼ ½ ①②③`, …).
 pub(crate) fn is_word_char(c: char) -> bool {
-    c.is_alphabetic() || c.is_numeric()
+    crate::goclass::is_word_char(c)
 }
