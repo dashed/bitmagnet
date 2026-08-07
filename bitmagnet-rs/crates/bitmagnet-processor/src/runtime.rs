@@ -4,8 +4,11 @@ use std::collections::BTreeSet;
 
 use bitmagnet_classifier::{core_config_digest, SourceError};
 use bitmagnet_common::metrics::registry;
-use bitmagnet_queue::{DequeuedJob, ProcessTorrentParams, ProtocolId, PROCESS_TORRENT_SHADOW};
-use prometheus::{IntCounterVec, Opts};
+use bitmagnet_queue::{
+    DequeuedJob, MirrorIneligibleReason, MirrorReport, ProcessTorrentParams, ProtocolId,
+    PROCESS_TORRENT_SHADOW,
+};
+use prometheus::{IntCounter, IntCounterVec, Opts};
 use sqlx::PgPool;
 
 use super::{
@@ -236,6 +239,93 @@ impl ShadowMetrics {
 
     pub fn observe_unsupported(&self, reason: &str) {
         self.unsupported.with_label_values(&[reason]).inc();
+    }
+}
+
+/// Bounded-cardinality Prometheus counters for the mirror's admission funnel.
+///
+/// The mirror is the pilot's first stage: it scans archived source jobs and
+/// admits a sampled, eligible subset into the scratch queue. Without these
+/// counters a mirror that scans steadily while admitting nothing is invisible
+/// to Prometheus, because ineligible candidates are dropped in SQL and never
+/// reach the consumer's `bitmagnet_ingest_shadow_unsupported_total`.
+///
+/// Every series here is created eagerly at startup, including one child per
+/// [`MirrorIneligibleReason`]: a labelled child only materializes on its first
+/// `with_label_values` call, and a starvation alert must be able to read a
+/// present-and-zero series from the first scrape rather than waiting for an
+/// absent series to appear.
+#[derive(Clone)]
+pub struct MirrorMetrics {
+    pages: IntCounter,
+    scanned: IntCounter,
+    sampled: IntCounter,
+    inserted: IntCounter,
+    capped: IntCounter,
+    ineligible: IntCounterVec,
+}
+
+impl MirrorMetrics {
+    pub fn register() -> Result<Self, prometheus::Error> {
+        let pages = IntCounter::new(
+            "bitmagnet_ingest_shadow_mirror_pages_total",
+            "Mirror page scans completed against the archived source queue.",
+        )?;
+        let scanned = IntCounter::new(
+            "bitmagnet_ingest_shadow_mirror_scanned_total",
+            "Archived source jobs examined by the mirror.",
+        )?;
+        let sampled = IntCounter::new(
+            "bitmagnet_ingest_shadow_mirror_sampled_total",
+            "Eligible source jobs that passed the deterministic sample gate.",
+        )?;
+        let inserted = IntCounter::new(
+            "bitmagnet_ingest_shadow_mirror_inserted_total",
+            "Sampled source jobs admitted into the scratch shadow queue.",
+        )?;
+        let capped = IntCounter::new(
+            "bitmagnet_ingest_shadow_mirror_capped_total",
+            "Mirror pages that stopped early on the scratch active-depth cap.",
+        )?;
+        let ineligible = IntCounterVec::new(
+            Opts::new(
+                "bitmagnet_ingest_shadow_mirror_ineligible_total",
+                "Scanned source jobs refused by the mirror's supported-subset predicate.",
+            ),
+            &["reason"],
+        )?;
+        registry().register(Box::new(pages.clone()))?;
+        registry().register(Box::new(scanned.clone()))?;
+        registry().register(Box::new(sampled.clone()))?;
+        registry().register(Box::new(inserted.clone()))?;
+        registry().register(Box::new(capped.clone()))?;
+        registry().register(Box::new(ineligible.clone()))?;
+        for reason in MirrorIneligibleReason::ALL {
+            ineligible.with_label_values(&[reason.as_str()]);
+        }
+        Ok(Self {
+            pages,
+            scanned,
+            sampled,
+            inserted,
+            capped,
+            ineligible,
+        })
+    }
+
+    pub fn observe(&self, report: &MirrorReport) {
+        self.pages.inc();
+        self.scanned.inc_by(u64::from(report.scanned));
+        self.sampled.inc_by(u64::from(report.sampled));
+        self.inserted.inc_by(u64::from(report.inserted));
+        if report.capped {
+            self.capped.inc();
+        }
+        for (reason, count) in &report.ineligible {
+            self.ineligible
+                .with_label_values(&[reason.as_str()])
+                .inc_by(u64::from(*count));
+        }
     }
 }
 

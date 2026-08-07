@@ -4,13 +4,15 @@
 //! disposable goose-29 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
-    fingerprint, ConsumeOutcome, MirrorConfig, QueueStore, PROCESS_TORRENT, PROCESS_TORRENT_SHADOW,
+    fingerprint, ConsumeOutcome, MirrorConfig, MirrorIneligibleReason, QueueStore, PROCESS_TORRENT,
+    PROCESS_TORRENT_SHADOW,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
@@ -568,6 +570,26 @@ async fn queue_runtime_matches_go_contract() {
     assert_eq!(first_page.scanned, 5);
     assert_eq!(first_page.inserted, 1);
     assert!(first_page.capped);
+    // The admission funnel is attributable: every scanned candidate is either
+    // sampled or charged to exactly one supported-subset conjunct. Without this
+    // breakdown a mirror that scans steadily while admitting nothing is
+    // indistinguishable from a mirror with nothing to do.
+    assert_eq!(first_page.sampled, 1);
+    assert_eq!(
+        first_page.ineligible,
+        BTreeMap::from([
+            (MirrorIneligibleReason::PayloadShape, 1),
+            (MirrorIneligibleReason::TorrentMissing, 1),
+            (MirrorIneligibleReason::HasHint, 1),
+            (MirrorIneligibleReason::HasContentSource, 1),
+        ]),
+        "each refusal is attributed to its first failing conjunct"
+    );
+    assert_eq!(
+        first_page.sampled + first_page.ineligible.values().sum::<u32>(),
+        first_page.scanned,
+        "scanned candidates are fully partitioned into sampled and ineligible"
+    );
     let scratch = sqlx::query(
         "SELECT fingerprint, payload::text AS payload, \
                 payload = (SELECT payload FROM queue_jobs WHERE id = 'source-a') AS same_payload, \
@@ -637,6 +659,8 @@ async fn queue_runtime_matches_go_contract() {
         .expect("resume durable mirror");
     assert_eq!(second_page.scanned, 1);
     assert_eq!(second_page.inserted, 1);
+    assert_eq!(second_page.sampled, 1);
+    assert!(second_page.ineligible.is_empty());
     assert_eq!(
         second_page.cursor.as_ref().expect("second cursor").id,
         "source-b"

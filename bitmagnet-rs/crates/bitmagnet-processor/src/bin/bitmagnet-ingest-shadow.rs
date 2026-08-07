@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use bitmagnet_processor::{ShadowMetrics, ShadowRuntime};
+use bitmagnet_processor::{MirrorMetrics, ShadowMetrics, ShadowRuntime};
 use bitmagnet_queue::{Consumer, ConsumerConfig, MirrorConfig, QueueStore};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
@@ -89,10 +89,12 @@ async fn main() -> Result<()> {
                 archival_duration: Duration::from_secs(archival_seconds),
                 ..MirrorConfig::default()
             };
+            let metrics = MirrorMetrics::register().context("registering mirror metrics")?;
             run_mirror(
                 QueueStore::new(pool.clone()),
                 config,
                 Duration::from_secs(idle_seconds),
+                &metrics,
             )
             .await?;
         }
@@ -223,14 +225,22 @@ fn validate_args(args: &Args) -> Result<()> {
     Ok(())
 }
 
-async fn run_mirror(store: QueueStore, config: MirrorConfig, idle: Duration) -> Result<()> {
+async fn run_mirror(
+    store: QueueStore,
+    config: MirrorConfig,
+    idle: Duration,
+    metrics: &MirrorMetrics,
+) -> Result<()> {
     loop {
         tokio::select! {
             result = store.mirror_processed_page(&config) => {
                 let report = result.context("mirroring processed queue rows")?;
+                metrics.observe(&report);
                 tracing::info!(
                     scanned = report.scanned,
+                    sampled = report.sampled,
                     inserted = report.inserted,
+                    ineligible = ?report.ineligible,
                     active_depth = report.active_depth,
                     capped = report.capped,
                     "ingest shadow mirror page"
