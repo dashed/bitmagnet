@@ -183,14 +183,20 @@ pub(crate) async fn load_torrents_in(
         let allow_content_reuse = params.classify_mode != CLASSIFY_MODE_REMATCH;
         let attach_hint_unsupported = explicit.is_some()
             || (allow_content_reuse && existing.iter().any(CurrentContent::is_source_backed));
-        let hint = effective_hint(explicit, &existing, allow_content_reuse);
+        let files_status: String = row.try_get("files_status")?;
+        let hint = effective_hint(
+            explicit,
+            &existing,
+            allow_content_reuse,
+            has_stored_file_list(&files_status),
+        );
         loaded.push(LoadedTorrent {
             info_hash: info_hash.clone(),
             classifier_input: ClassifierInput {
                 id: info_hash,
                 name: row.try_get("name")?,
                 size,
-                files_status: row.try_get("files_status")?,
+                files_status: files_status.clone(),
                 extension: row.try_get("extension")?,
                 files_count,
                 files,
@@ -230,10 +236,18 @@ impl CurrentContent {
     }
 }
 
+/// Mirrors Go's `model.FilesStatus.HasStoredFileList`. A `no_info` /
+/// `over_threshold` torrent has no stored file list BY NATURE, so classifier
+/// rules over `torrent.files` cannot fire for it at all.
+fn has_stored_file_list(files_status: &str) -> bool {
+    files_status != "no_info" && files_status != "over_threshold"
+}
+
 fn effective_hint(
     explicit: Option<CurrentHint>,
     existing: &[CurrentContent],
     allow_content_reuse: bool,
+    has_stored_file_list: bool,
 ) -> Option<InputHint> {
     let explicit = explicit.and_then(|hint| {
         (!hint.content_type.is_empty()).then_some(InputHint {
@@ -248,7 +262,7 @@ fn effective_hint(
     {
         return explicit;
     }
-    if allow_content_reuse {
+    let resolved = if allow_content_reuse {
         existing
             .iter()
             .filter(|content| {
@@ -260,7 +274,23 @@ fn effective_hint(
             .or(explicit)
     } else {
         explicit
+    };
+    if resolved.is_some() || has_stored_file_list {
+        return resolved;
     }
+    // Mirrors the Go processor: the reuse above is source-backed only, so a
+    // rule-derived content type (`xxx`, `comic`, ...) was never carried over. With
+    // no stored file list the rules cannot re-derive it, so clearing it is data
+    // loss rather than a fresh verdict. Type only — never source/ID — and
+    // deliberately NOT gated on classify mode, matching Go.
+    existing.iter().find_map(|content| {
+        let content_type = content.content_type.clone()?;
+        content.content_source.is_none().then_some(InputHint {
+            content_type,
+            content_source: String::new(),
+            content_id: String::new(),
+        })
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -314,7 +344,7 @@ fn enforce_job_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_hint, CurrentContent, CurrentHint};
+    use super::{effective_hint, has_stored_file_list, CurrentContent, CurrentHint};
 
     #[test]
     fn reusable_hint_requires_type_and_source() {
@@ -364,7 +394,7 @@ mod tests {
             content_source: Some("imdb".into()),
             content_id: Some("tt0133093".into()),
         };
-        let hint = effective_hint(Some(explicit_source), &existing, true).unwrap();
+        let hint = effective_hint(Some(explicit_source), &existing, true, true).unwrap();
         assert_eq!(hint.content_source, "imdb");
 
         let type_only = CurrentHint {
@@ -372,7 +402,7 @@ mod tests {
             content_source: None,
             content_id: None,
         };
-        let hint = effective_hint(Some(type_only), &existing, true).unwrap();
+        let hint = effective_hint(Some(type_only), &existing, true, true).unwrap();
         assert_eq!(hint.content_source, "tmdb");
         assert_eq!(hint.content_id, "603");
 
@@ -381,7 +411,7 @@ mod tests {
             content_source: None,
             content_id: None,
         };
-        let hint = effective_hint(Some(mismatched_type), &existing, true).unwrap();
+        let hint = effective_hint(Some(mismatched_type), &existing, true, true).unwrap();
         assert_eq!(hint.content_type, "tv_show");
         assert!(hint.content_source.is_empty());
     }
@@ -400,9 +430,72 @@ mod tests {
             content_id: None,
         };
 
-        let hint = effective_hint(Some(explicit), &existing, false).expect("explicit hint");
+        let hint = effective_hint(Some(explicit), &existing, false, true).expect("explicit hint");
         assert_eq!(hint.content_type, "tv_show");
         assert!(hint.content_source.is_empty());
-        assert!(effective_hint(None, &existing, false).is_none());
+        assert!(effective_hint(None, &existing, false, true).is_none());
+    }
+
+    /// The `xxx` data-loss regression: a source-less (rule-derived) content type
+    /// on a torrent with no stored file list must survive a reprocess, because
+    /// the rules that would re-derive it cannot fire without files.
+    fn source_less_xxx() -> Vec<CurrentContent> {
+        vec![CurrentContent {
+            id: "tc".into(),
+            content_type: Some("xxx".into()),
+            content_source: None,
+            content_id: None,
+        }]
+    }
+
+    #[test]
+    fn source_less_type_is_preserved_when_no_stored_file_list() {
+        let existing = source_less_xxx();
+        for allow_content_reuse in [true, false] {
+            let hint = effective_hint(None, &existing, allow_content_reuse, false)
+                .expect("source-less xxx must be preserved when files are unavailable");
+            assert_eq!(hint.content_type, "xxx");
+            // Type only — never resurrect a content match.
+            assert!(hint.content_source.is_empty());
+            assert!(hint.content_id.is_empty());
+        }
+    }
+
+    #[test]
+    fn source_less_type_is_not_preserved_when_files_are_available() {
+        // Files present ⇒ the rules CAN evaluate, so a not-xxx verdict is a
+        // legitimate reclassification and must still be allowed through.
+        let existing = source_less_xxx();
+        assert!(effective_hint(None, &existing, true, true).is_none());
+        assert!(effective_hint(None, &existing, false, true).is_none());
+    }
+
+    #[test]
+    fn source_backed_reuse_still_wins_over_the_preservation_fallback() {
+        let existing = vec![
+            CurrentContent {
+                id: "a".into(),
+                content_type: Some("movie".into()),
+                content_source: Some("tmdb".into()),
+                content_id: Some("603".into()),
+            },
+            CurrentContent {
+                id: "b".into(),
+                content_type: Some("xxx".into()),
+                content_source: None,
+                content_id: None,
+            },
+        ];
+        let hint = effective_hint(None, &existing, true, false).expect("sourced reuse");
+        assert_eq!(hint.content_type, "movie");
+        assert_eq!(hint.content_source, "tmdb");
+    }
+
+    #[test]
+    fn has_stored_file_list_matches_go_enum() {
+        assert!(!has_stored_file_list("no_info"));
+        assert!(!has_stored_file_list("over_threshold"));
+        assert!(has_stored_file_list("single"));
+        assert!(has_stored_file_list("multi"));
     }
 }

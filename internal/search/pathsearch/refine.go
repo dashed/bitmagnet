@@ -217,7 +217,7 @@ func filesForRefine(t model.Torrent) (files []model.TorrentFile, ok bool) {
 	// extension/size filter (they have no file rows to satisfy one). This is NOT a
 	// CAVEAT-B fail-loud: those statuses legitimately carry no files, so there is
 	// nothing "unobtainable" to fall back for.
-	if t.FilesStatus == model.FilesStatusNoInfo || t.FilesStatus == model.FilesStatusOverThreshold {
+	if !t.FilesStatus.HasStoredFileList() {
 		return nil, true
 	}
 

@@ -129,3 +129,59 @@ func TestIndexBatchIndexesBlobHydratedFiles(t *testing.T) {
 	assert.Equal(t, []string{"movie/feature.mkv", "movie/subtitle.srt"}, f.indexed[0].GetFilePaths())
 	assert.Equal(t, []string{"mkv", "srt"}, f.indexed[0].GetFileExtensions())
 }
+
+// Regression: reprocessing a torrent with no stored file list must not clear a
+// rule-derived content type. See preservedRuleDerivedContentType — this is the
+// `xxx` data-loss bug (~1.4M torrents prod-wide at ~21.5% of `xxx`).
+func TestPreservedRuleDerivedContentType(t *testing.T) {
+	t.Parallel()
+
+	ruleDerivedXXX := []model.TorrentContent{{
+		ContentType: model.NewNullContentType(model.ContentTypeXxx),
+	}}
+	sourcedMovie := []model.TorrentContent{{
+		ContentType:   model.NewNullContentType(model.ContentTypeMovie),
+		ContentSource: model.NewNullString("tmdb"),
+		ContentID:     model.NewNullString("603"),
+	}}
+
+	for _, tc := range []struct {
+		name        string
+		filesStatus model.FilesStatus
+		contents    []model.TorrentContent
+		wantType    model.ContentType
+		wantOK      bool
+	}{
+		// The two statuses that carry no file list by nature.
+		{"no_info preserves rule-derived type", model.FilesStatusNoInfo, ruleDerivedXXX, model.ContentTypeXxx, true},
+		{"over_threshold preserves rule-derived type", model.FilesStatusOverThreshold, ruleDerivedXXX, model.ContentTypeXxx, true},
+		// Files present: the rules CAN evaluate, so a not-xxx verdict is a
+		// legitimate reclassification and must still be allowed through.
+		{"single does not preserve", model.FilesStatusSingle, ruleDerivedXXX, "", false},
+		{"multi does not preserve", model.FilesStatusMulti, ruleDerivedXXX, "", false},
+		// Sourced content is already handled by the reuse path in run(); this
+		// fallback must not claim it.
+		{"sourced content is not claimed", model.FilesStatusNoInfo, sourcedMovie, "", false},
+		{"no existing contents", model.FilesStatusNoInfo, nil, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			contentType, ok := preservedRuleDerivedContentType(model.Torrent{
+				FilesStatus: tc.filesStatus,
+				Contents:    tc.contents,
+			})
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantType, contentType)
+		})
+	}
+}
+
+func TestFilesStatusHasStoredFileList(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, model.FilesStatusNoInfo.HasStoredFileList())
+	assert.False(t, model.FilesStatusOverThreshold.HasStoredFileList())
+	assert.True(t, model.FilesStatusSingle.HasStoredFileList())
+	assert.True(t, model.FilesStatusMulti.HasStoredFileList())
+}
