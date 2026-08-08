@@ -9,9 +9,10 @@ sibling document, this one is correct.
 ## One-line status
 
 Phases 0–3 are landed and deployed. The read path is in production. The remaining
-blocker for cutover is **B′ — flags-ON classifier parity** — and the concrete gap
-there is that the observation tape can *record* on the Go side but there is no
-Rust-side *replay* yet.
+blocker for cutover is **B′ — flags-ON classifier parity**. The oracle now works
+end to end — Go records the tape, Rust reads it — so the concrete gap has moved:
+nothing *consumes* the replay yet. Wiring the classifier's `ContentResolver` seam
+through it is the next step.
 
 ## What is deployed right now
 
