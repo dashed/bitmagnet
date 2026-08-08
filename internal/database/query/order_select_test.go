@@ -2,6 +2,7 @@ package query
 
 import (
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
@@ -128,4 +129,32 @@ func TestShouldTryCteStrategyIgnoresTrailingTiebreakColumns(t *testing.T) {
 			require.Equal(t, tt.want, builder.shouldTryCteStrategy())
 		})
 	}
+}
+
+// The hedge in doItems fires only for free-text searches; hasTSQuery is that gate.
+func TestHasTSQueryGatesTheSeqScanHedge(t *testing.T) {
+	t.Parallel()
+
+	var noQuery OptionBuilder = optionBuilder{}
+	require.False(t, noQuery.hasTSQuery(), "no free-text query must not arm the hedge")
+
+	withQuery := optionBuilder{}.QueryString("oppenhiemer")
+	require.True(t, withQuery.hasTSQuery(), "a free-text query must arm the hedge")
+
+	// A query string that lexes to nothing leaves no tsquery, so there is no
+	// seq-scan trap to hedge against.
+	empty := optionBuilder{}.QueryString("")
+	require.False(t, empty.hasTSQuery(), "an empty tsquery must not arm the hedge")
+}
+
+// The hedge only helps if it starts well after a healthy query would have
+// answered (~2ms at the database) and well before the pathological branch has
+// cost real time. Guard the constant against being edited to something useless.
+func TestSeqScanHedgeDelayIsWithinAUsefulBand(t *testing.T) {
+	t.Parallel()
+
+	require.Greater(t, seqScanHedgeDelay, 50*time.Millisecond,
+		"too short: dense-term searches would needlessly spawn a second query")
+	require.Less(t, seqScanHedgeDelay, 5*time.Second,
+		"too long: the sparse-term tail this exists to bound would dominate")
 }

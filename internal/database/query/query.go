@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/exclause"
@@ -19,6 +20,18 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// seqScanHedgeDelay is how long the default items strategy gets to answer a
+// free-text search before doItems races it with an index-forced variant. See the
+// hedge in doItems for why neither plan is right on its own.
+//
+// Sized from measurement: a healthy free-text query answers at the database in
+// ~2ms, so 250ms is ~100x headroom and dense terms never spawn the hedge. Raising
+// it is safer under load; lowering it shortens the sparse-term tail. It is a
+// package constant because this codebase has no config path into the query
+// package -- the same precedent as query.WithAggregationBudget(5_000) and
+// pathsearch.DefaultMaxDecodeCandidates.
+const seqScanHedgeDelay = 250 * time.Millisecond
 
 type ResultItem struct {
 	QueryStringRank float64
@@ -192,47 +205,87 @@ func (gq *genericQuery[T]) doItems() {
 			}
 			doneChan <- err
 		}
-		// start the default strategy
-		go func() {
-			runDefaultStrategy := func(daoQ *dao.Query) ([]T, error) {
-				sq, sqErr := gq.newSubQueryFrom(raceCtx, daoQ, true)
-				if sqErr != nil {
-					return nil, sqErr
-				}
-
-				if postErr := gq.builder.applyPost(sq.UnderlyingDB()); postErr != nil {
-					return nil, postErr
-				}
-
-				var items []T
-				if txErr := sq.UnderlyingDB().Find(&items).Error; txErr != nil {
-					return nil, txErr
-				}
-
-				return items, nil
+		runDefaultStrategy := func(daoQ *dao.Query) ([]T, error) {
+			sq, sqErr := gq.newSubQueryFrom(raceCtx, daoQ, true)
+			if sqErr != nil {
+				return nil, sqErr
 			}
 
-			// Free-text searches take this strategy as `WHERE tsv @@ ? LIMIT n` with
-			// no ORDER BY. Postgres estimates a CONSTANT ~0.21% selectivity for any
-			// tsquery (identical for a common word and a typo — it is not a per-lexeme
-			// statistic), so against a small LIMIT a seq scan looks like it will exit
-			// after ~0.02% of the table. For a common term that holds and it is fast;
-			// for a rare or misspelled term there are almost no matches, so it scans
-			// all 49M rows — measured at 30.1s vs 4.7ms on the existing GIN index, a
-			// ~6,400x difference. Latency ends up INVERSE to result count.
-			//
-			// Discourage the seq scan for exactly this shape. enable_seqscan=off is a
-			// cost penalty, not a prohibition, so a query with no usable index still
-			// gets a seq scan. SET LOCAL confines it to this transaction, so no pooled
-			// connection is left mutated. Fixing the estimate is not an option: the
-			// selectivity is a constant, and a rare typo can never enter the MCELEM
-			// list. random_page_cost and a tsv-only GIN index were both measured and
-			// do NOT change the plan.
-			if gq.builder.hasTSQuery() {
+			if postErr := gq.builder.applyPost(sq.UnderlyingDB()); postErr != nil {
+				return nil, postErr
+			}
+
+			var items []T
+			if txErr := sq.UnderlyingDB().Find(&items).Error; txErr != nil {
+				return nil, txErr
+			}
+
+			return items, nil
+		}
+
+		// start the default strategy
+		go func() {
+			items, err := runDefaultStrategy(gq.daoQ)
+			done(items, err)
+		}()
+
+		// Hedge for the free-text seq-scan trap.
+		//
+		// A free-text search runs the default strategy as `WHERE tsv @@ ? LIMIT n`
+		// with no ORDER BY. Postgres estimates a CONSTANT ~0.21% selectivity for any
+		// tsquery -- identical for a common word and for a typo, so it is a fixed
+		// default and not a per-lexeme statistic -- and against a small LIMIT that
+		// makes a seq scan look like it will exit after ~0.02% of the table.
+		//
+		// Neither plan is right for both ends of the distribution (measured on prod,
+		// 49.1M rows):
+		//
+		//	term                     seq scan     enable_seqscan=off
+		//	oppenhiemer (3 rows)     30,123 ms    4.6 ms
+		//	1080p (6,335,882 rows)      1.8 ms    997 ms
+		//
+		// The seq scan wins hugely when matches are dense (it stops after ~174 rows);
+		// the index wins hugely when they are sparse (a seq scan must read all 49.1M
+		// to prove only 3 match). Cardinality is exactly what the planner cannot know
+		// here, so picking either plan up front is wrong half the time.
+		//
+		// So: let the default strategy start, and only if it has not answered within
+		// seqScanHedgeDelay -- i.e. it is already in the pathological branch -- race
+		// it with an index-forced variant. Dense terms answer in ~2ms and never spawn
+		// the hedge at all; sparse terms cost the delay plus a few ms instead of 30s.
+		// The extra query lands only on searches that were already slow.
+		//
+		// The hedge reports SUCCESS ONLY. done() resolves the race on the first send
+		// including an error send, so reporting a hedge failure would let it cancel a
+		// healthy in-flight primary. Failing silently just forfeits the hedge, which
+		// is the same as not having raced -- mirroring the CTE strategy, which also
+		// returns without calling done() when it has nothing to contribute.
+		if gq.builder.hasTSQuery() {
+			go func() {
+				select {
+				case <-time.After(seqScanHedgeDelay):
+				case <-raceCtx.Done():
+					return
+				}
+
 				var items []T
 
-				txErr := gq.daoQ.Transaction(func(tx *dao.Query) error {
+				// Bind the whole transaction to raceCtx, not just the SELECT inside
+				// it, so BEGIN/ROLLBACK are cancellable too. The hedge loses the race
+				// most of the time, and database/sql rolls a context-cancelled Tx back
+				// and returns its connection to the pool; binding only the inner query
+				// would leave BEGIN/ROLLBACK uncancellable.
+				raceDB := gq.factory(raceCtx, gq.daoQ).
+					UnderlyingDB().
+					Session(&gorm.Session{NewDB: true}).
+					WithContext(raceCtx)
+
+				if txErr := gq.daoQ.ReplaceDB(raceDB).Transaction(func(tx *dao.Query) error {
 					txDB := gq.factory(raceCtx, tx).UnderlyingDB().Session(&gorm.Session{NewDB: true})
+					// SET LOCAL confines this to the transaction, so no pooled
+					// connection is left mutated. enable_seqscan=off is a cost
+					// penalty rather than a prohibition, so a query with no usable
+					// index still gets its seq scan.
 					if setErr := txDB.Exec("SET LOCAL enable_seqscan = off").Error; setErr != nil {
 						return setErr
 					}
@@ -241,15 +294,13 @@ func (gq *genericQuery[T]) doItems() {
 					items, runErr = runDefaultStrategy(tx)
 
 					return runErr
-				})
-				done(items, txErr)
+				}); txErr != nil {
+					return
+				}
 
-				return
-			}
-
-			items, err := runDefaultStrategy(gq.daoQ)
-			done(items, err)
-		}()
+				done(items, nil)
+			}()
+		}
 
 		if gq.builder.shouldTryCteStrategy() {
 			// start the CTE strategy
