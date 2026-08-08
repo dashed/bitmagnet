@@ -1098,6 +1098,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-tape"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bitmagnet-textmatch"
 version = "0.1.0"
 dependencies = [

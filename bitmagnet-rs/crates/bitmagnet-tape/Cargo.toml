@@ -1,0 +1,22 @@
+[package]
+name = "bitmagnet-tape"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "B′ enrichment parity — replay Go's classifier attach tape (`internal/tape`)."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# `RawValue` is required, not incidental: a recorded request is compared to a
+# replayed one BY BYTES, so responses and requests must survive the round trip
+# without being re-encoded.
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["raw_value"] }

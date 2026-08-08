@@ -25,6 +25,8 @@ members = [
     "crates/bitmagnet-textmatch",
     "crates/bitmagnet-tmdb",
     "crates/bitmagnet-content-search",
+    # B′ oracle reader: replays the flags-ON tape Go records.
+    "crates/bitmagnet-tape",
 ]
 
 [workspace.package]
