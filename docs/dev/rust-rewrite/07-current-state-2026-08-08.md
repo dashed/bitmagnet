@@ -111,13 +111,32 @@ deterministically without capturing it first.
   delegates straight through, costing a context lookup and a nil check. It is
   therefore safe that it is already deployed.
 
-**What is NOT done — the gap:**
+- **Rust-side tape replay** — `bitmagnet-rs/crates/bitmagnet-tape`. Loads a
+  Go-written tape and answers observations from it, preserving the three
+  properties that make a replay evidence: requests are asserted (not just
+  answers), empty is distinct from missing, and incomplete records are excluded.
+  🔑 Requests are compared BY BYTES, so the crate carries a `GoFormatter` that
+  reproduces Go's canonical JSON. The escaping was determined empirically, not
+  assumed: Go and serde_json agree on everything — including `\b` and `\f` —
+  except **U+2028/U+2029**, which Go escapes unconditionally. That single
+  divergence is the crate's whole reason for not calling `serde_json::to_string`.
+  Pinned by `testdata/parity/tape-canonical/escapes.json`, generated FROM Go.
 
-1. **No Rust-side tape replay.** `internal/tape` is Go-only; there is no consumer
-   in `bitmagnet-rs/crates/bitmagnet-classifier`. Go can record a flags-ON tape;
-   Rust cannot yet replay one. **This is the next concrete step.**
+**What is NOT done — the remaining gap:**
+
+1. **Nothing consumes the replay yet.** `bitmagnet-tape` can answer observations,
+   but `bitmagnet-classifier` does not yet route its `ContentResolver` seam
+   through it. That wiring is the next concrete step, and it is what turns the
+   oracle into an actual parity run.
 2. The four remaining lanes of the seven-lane carve.
 3. No flags-ON parity gate exists, so there is no pass/fail criterion yet.
+4. 🚨 **Tsquery construction is out of scope for the tape and must be proven
+   separately.** The seam records the search string, not the tsquery it compiles
+   into, so two implementations that agree on the string and disagree on the
+   tsquery replay identically and never desync. Rust's `char::is_alphanumeric`
+   disagrees with Go's `unicode.IsLetter || unicode.IsDigit` at 12,322 code
+   points — an all-scalar test over the two predicates is the only thing that
+   covers it.
 
 **Suggested next milestone.** T9 "pre-attach" — compare classifier state *before*
 the enrichment attach actions fire. It is the largest slice reachable without a
