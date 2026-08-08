@@ -91,10 +91,32 @@ impl<E: Engine + 'static> FileSearchServer<E> {
     }
 }
 
+/// Convert an engine error into a gRPC `Status`, logging it on the way out.
+///
+/// Every engine error reaches the client through here, so this is the one place
+/// that can guarantee an error is recorded exactly once.
+///
+/// 🚨 It did not log at all until 2026-08-08, and that cost three days: DuckDB
+/// began failing every query with "Out of Memory Error: failed to pin block
+/// (2.7 GiB/2.7 GiB used)", the message went out over gRPC and was discarded by
+/// the caller, and the pod stayed Ready with 0 restarts the whole time. `kubectl
+/// logs` was empty, so there was nothing to find even when looking straight at it.
+///
+/// Deadline-exceeded is logged at WARN, not ERROR: it is ordinary backpressure
+/// (the caller's budget expired), and treating it as an error would bury real
+/// faults in noise. Everything else is a genuine engine fault — ERROR.
 fn status_from_engine_error(e: anyhow::Error) -> Status {
     match e.downcast_ref::<EngineError>() {
-        Some(EngineError::QueryDeadlineExceeded) => Status::deadline_exceeded(e.to_string()),
-        None => Status::internal(e.to_string()),
+        Some(EngineError::QueryDeadlineExceeded) => {
+            tracing::warn!(error = %e, "filesearch query exceeded its deadline");
+            Status::deadline_exceeded(e.to_string())
+        }
+        None => {
+            // `{:#}` renders the full anyhow chain; the root cause (e.g. the DuckDB
+            // buffer-manager message) is what actually identifies the fault.
+            tracing::error!(error = format!("{e:#}"), "filesearch query failed");
+            Status::internal(e.to_string())
+        }
     }
 }
 
