@@ -1,5 +1,12 @@
 # 00 — Rust Rewrite: Overview & Recommendation
 
+> ⚠️ **Stale in places.** See
+> [`07-current-state-2026-08-08.md`](07-current-state-2026-08-08.md) for the
+> authoritative current state — Phases 0–3 are landed and deployed, the live
+> ingest-shadow pilot is dead and replaced by offline write-set replay, and the
+> remaining cutover blocker is B′ flags-ON classifier parity. Where this document
+> disagrees with that one, that one is correct.
+
 **Status:** strategy / decision-support only. No code, no commitment. This is the
 top of a five-document set that investigates what a full Rust rewrite of
 bitmagnet would take, whether it is worth it, and how it would be sequenced if
