@@ -95,7 +95,17 @@ type genericQuery[T interface{}] struct {
 }
 
 func (gq *genericQuery[_]) newSubQuery(ctx context.Context, withOrder bool) (SubQuery, error) {
-	sq := gq.factory(ctx, gq.daoQ)
+	return gq.newSubQueryFrom(ctx, gq.daoQ, withOrder)
+}
+
+// newSubQueryFrom builds the subquery against an explicit dao.Query, so a caller
+// can rebind it to a transaction (see the seq-scan guard in doItems).
+func (gq *genericQuery[_]) newSubQueryFrom(
+	ctx context.Context,
+	daoQ *dao.Query,
+	withOrder bool,
+) (SubQuery, error) {
+	sq := gq.factory(ctx, daoQ)
 	if selectErr := gq.builder.applySelect(sq.UnderlyingDB(), withOrder); selectErr != nil {
 		return sq, selectErr
 	}
@@ -184,24 +194,61 @@ func (gq *genericQuery[T]) doItems() {
 		}
 		// start the default strategy
 		go func() {
-			sq, sqErr := gq.newSubQuery(raceCtx, true)
-			if sqErr != nil {
-				done(nil, sqErr)
+			runDefaultStrategy := func(daoQ *dao.Query) ([]T, error) {
+				sq, sqErr := gq.newSubQueryFrom(raceCtx, daoQ, true)
+				if sqErr != nil {
+					return nil, sqErr
+				}
+
+				if postErr := gq.builder.applyPost(sq.UnderlyingDB()); postErr != nil {
+					return nil, postErr
+				}
+
+				var items []T
+				if txErr := sq.UnderlyingDB().Find(&items).Error; txErr != nil {
+					return nil, txErr
+				}
+
+				return items, nil
+			}
+
+			// Free-text searches take this strategy as `WHERE tsv @@ ? LIMIT n` with
+			// no ORDER BY. Postgres estimates a CONSTANT ~0.21% selectivity for any
+			// tsquery (identical for a common word and a typo — it is not a per-lexeme
+			// statistic), so against a small LIMIT a seq scan looks like it will exit
+			// after ~0.02% of the table. For a common term that holds and it is fast;
+			// for a rare or misspelled term there are almost no matches, so it scans
+			// all 49M rows — measured at 30.1s vs 4.7ms on the existing GIN index, a
+			// ~6,400x difference. Latency ends up INVERSE to result count.
+			//
+			// Discourage the seq scan for exactly this shape. enable_seqscan=off is a
+			// cost penalty, not a prohibition, so a query with no usable index still
+			// gets a seq scan. SET LOCAL confines it to this transaction, so no pooled
+			// connection is left mutated. Fixing the estimate is not an option: the
+			// selectivity is a constant, and a rare typo can never enter the MCELEM
+			// list. random_page_cost and a tsv-only GIN index were both measured and
+			// do NOT change the plan.
+			if gq.builder.hasTSQuery() {
+				var items []T
+
+				txErr := gq.daoQ.Transaction(func(tx *dao.Query) error {
+					txDB := gq.factory(raceCtx, tx).UnderlyingDB().Session(&gorm.Session{NewDB: true})
+					if setErr := txDB.Exec("SET LOCAL enable_seqscan = off").Error; setErr != nil {
+						return setErr
+					}
+
+					var runErr error
+					items, runErr = runDefaultStrategy(tx)
+
+					return runErr
+				})
+				done(items, txErr)
+
 				return
 			}
 
-			if postErr := gq.builder.applyPost(sq.UnderlyingDB()); postErr != nil {
-				done(nil, postErr)
-				return
-			}
-
-			var items []T
-			if txErr := sq.UnderlyingDB().Find(&items).Error; txErr != nil {
-				done(nil, txErr)
-				return
-			}
-
-			done(items, nil)
+			items, err := runDefaultStrategy(gq.daoQ)
+			done(items, err)
 		}()
 
 		if gq.builder.shouldTryCteStrategy() {
@@ -393,6 +440,7 @@ type OptionBuilder interface {
 	hasNextPage(nItems int) bool
 	withCurrentFacet(string) OptionBuilder
 	shouldTryCteStrategy() bool
+	hasTSQuery() bool
 	createContext(context.Context) context.Context
 }
 
@@ -548,6 +596,10 @@ func (b optionBuilder) WithHasNextPage(bl bool) OptionBuilder {
 
 func (b optionBuilder) withTotalCount() bool {
 	return b.totalCount
+}
+
+func (b optionBuilder) hasTSQuery() bool {
+	return b.tsquery != ""
 }
 
 func (b optionBuilder) hasZeroLimit() bool {
