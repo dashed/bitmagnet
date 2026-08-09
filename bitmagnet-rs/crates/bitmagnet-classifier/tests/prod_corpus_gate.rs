@@ -41,22 +41,58 @@
 //! by id — reproducing the whole chain reproduces the decision logic, not merely
 //! the call shapes.
 //!
-//! The 2 misses are a **Miss, not a Desync** — Rust asked an EXTRA question
-//! rather than a wrong one — and that distinction is why they are recorded here
-//! instead of blocking. `b78a66755eb9c4c0deaf88eae082e2e53683e4f9` ("Sunny
-//! (2011) DC BluRay 1080p 5.1CH x264 SmallAndHD") recorded **zero**
-//! observations, yet Rust asked for a `local.content_by_search` at position 0.
+//! ## The 2 misses are a RECORDING artifact, not a port divergence
 //!
-//! Its corpus input was checked against production and is faithful — the DB
-//! agrees on the name, on `files_count=1`/`torrent_files=1` (so this is NOT the
-//! `files_data` caveat above), on a single 2.2 GB `.mkv`, and on a hint of
-//! `movie` with no source or id. The record's flags are all ON. So under
-//! `classifier.core.yml:92` (`!result.hasAttachedContent && result.hasBaseTitle`)
-//! Go reached that gate with no base title, or short-circuited before it, where
-//! Rust parsed one. `Result.Content` is only ever set by `AttachContent`, so a
-//! pre-seeded attachment is ruled out as the explanation. Narrowing it to the
-//! exact step is the next lane's work; until then these two are a known,
-//! bounded 0.7%.
+//! Both recorded **zero** observations while Rust asked for a
+//! `local.content_by_search` at position 0:
+//!
+//! * `b78a66755eb9…` — "Sunny (2011) DC BluRay 1080p 5.1CH x264 SmallAndHD"
+//! * `f2b4c073a129…` — "Mr.D.S07E10.1080p.WEBRip.x264-aAF[rarbg]"
+//!
+//! This was checked by **running Go's own classifier on the exact corpus
+//! input**, with a recording `LocalSearch` in place of the mock. Go asks
+//! `ContentBySearch(movie, "Sunny", 2011)` and `ContentBySearch(tv_show,
+//! "Mr D", 0)` — byte-for-byte the questions Rust asks. Go does so with or
+//! without the hint applied. So on this input the two implementations agree
+//! exactly, and the port is not what diverges.
+//!
+//! What is ruled out, and how:
+//!
+//! * *A base-title divergence* (the original hypothesis). Go's
+//!   `ParseVideoContent` returns `BaseTitle` "Sunny" / "Mr D" for these names.
+//! * *A file-list export artifact.* `files_count` and `torrent_files` agree with
+//!   the corpus, and the names alone drive the title.
+//! * *A pre-seeded attachment.* `runner.go` DOES pre-attach existing content
+//!   before the workflow (`cl.AttachContent` when the hint has a content
+//!   SOURCE and a matching `torrent_contents` row exists), which would make
+//!   `!result.hasAttachedContent` false and skip the search — and injecting that
+//!   pre-seed reproduces the zero-observation behaviour exactly. But both hint
+//!   rows were created in **January 2025** and never updated, with a NULL
+//!   source, so the pre-seed cannot have fired at recording time.
+//!
+//! 🚨 What that leaves is a property of the TAPE FORMAT: a record is marked
+//! `incomplete` only if its session is still open when the tape is written
+//! (`recorder.go` — `Incomplete` is membership in `r.open`). A classification
+//! that *began and then finished without reaching the enrichment step* —
+//! cancelled at SIGTERM, or ended by an error outcome — closes its session and
+//! is written as a COMPLETE record with zero observations. The tape does not
+//! record the classification's outcome, so that case is indistinguishable from
+//! "the workflow legitimately asked nothing".
+//!
+//! Corroboration that Rust's question is the RIGHT one: both torrents carry
+//! attached content that is exactly what it finds — `tmdb/77117` "Sunny" (2011)
+//! and `tmdb/42382` "Mr. D". Some other classification of the same torrent asked
+//! Rust's question and attached the answer.
+//!
+//! ## 🚨 How much of this measurement is positive evidence
+//!
+//! Only **72 of the 284 subjects made any observation at all**; the other 212
+//! recorded nothing and "match" by both sides asking nothing. Per the paragraph
+//! above, a zero-observation record is weak evidence — it can also mean the
+//! recorded classification ended early. So the load-bearing part of this gate is
+//! the **72 subjects / 120 observations that actually exercised a seam**, where
+//! every request matched byte for byte. The 212 trivial agreements should not be
+//! read as 212 independent confirmations.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -258,9 +294,12 @@ async fn prod_corpus_baseline() {
         "every recorded observation should be consumed"
     );
 
-    // The two known misses are documented in this module's docs, and are a
-    // base-title divergence unrelated to the seams. Pinned, not asserted as a
-    // pass — this is the number the next lane drives to zero.
+    // The two known misses are a RECORDING artifact, not a port divergence:
+    // running Go's own classifier on their corpus input produces exactly the
+    // request Rust makes. See this module's docs. Pinned rather than fixed,
+    // because the fix belongs in the tape format (record the outcome, so a
+    // classification that ended early is distinguishable from one that
+    // legitimately asked nothing), not in the port.
     assert!(
         report.missed <= 2,
         "a third miss is new: {:?}",
