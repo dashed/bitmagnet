@@ -32,6 +32,9 @@ futures = { workspace = true }
 # `model.Content` — what the four `attach_*` actions attach.
 bitmagnet-model = { path = "../bitmagnet-model" }
 sha2 = "0.10"
+# Tape replay of TMDB: Go records the HTTP body base64-encoded alongside its
+# sha256, and both are verified before the body is decoded.
+base64 = "0.22"
 regex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

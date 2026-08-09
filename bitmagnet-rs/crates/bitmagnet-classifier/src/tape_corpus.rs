@@ -16,16 +16,21 @@
 //! whole sequence byte for byte has reproduced the decision logic, whatever it
 //! then does with the result.
 //!
-//! # 🚨 Current baseline: this gate does not pass, by construction
+//! # Where this stands
 //!
-//! Rust's four `attach_*` actions are stubs — `engine.rs` maps all of them to
-//! `Action::AttachUnmatched` — so the classifier never consults the resolver and
-//! every subject reports [`Verdict::Unconsumed`] with zero observations used.
-//! **That is the expected result today**, and it is the number this gate exists
-//! to drive to zero as the enrichment lanes land. A harness that reported
-//! "passing" in this state would be measuring nothing.
+//! All four `attach_*` actions are implemented against both seams, and against
+//! the production corpus the gate reports **284 subjects, 0 desyncs, 120/120
+//! observations consumed** — Rust asks exactly Go's questions, local and TMDB
+//! alike, in order, with none left over.
 //!
-//! Run it, record the baseline, and watch `unconsumed` fall.
+//! The two verdicts that are NOT `Match` there are
+//! [`Verdict::Miss`](Verdict::Miss)es on a base-title divergence unrelated to
+//! either seam. See `tests/prod_corpus_gate.rs`, which documents them.
+//!
+//! Its assertions deliberately pin the current numbers rather than asserting a
+//! pass, so a lane that changes behaviour has to move them visibly. That has
+//! caught the right thing twice: implementing the local attach actions, and
+//! wiring TMDB replay, each turned the assertions red.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

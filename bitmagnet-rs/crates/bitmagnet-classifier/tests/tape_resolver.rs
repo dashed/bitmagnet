@@ -8,7 +8,9 @@
 
 use std::path::PathBuf;
 
-use bitmagnet_classifier::resolver::{tape::TapeContentResolver, ContentResolver, ResolveError};
+use bitmagnet_classifier::resolver::{
+    tape::TapeContentResolver, tmdb, ContentResolver, ResolveError,
+};
 use bitmagnet_model::ContentType;
 use bitmagnet_tape::Replay;
 
@@ -130,25 +132,136 @@ async fn the_year_expands_to_gos_release_date_range() {
         .expect("year 1950 must expand to the recorded range");
 }
 
-/// TMDB is not wired, and says so specifically. It must NOT be reported as a
-/// miss (which would read as a gap in the recording) or as an empty answer
-/// (which would read as `ErrUnmatched`).
+/// The TMDB seam, replayed end to end: search, then details-by-id keyed on the
+/// search's winner. Succeeding proves Rust rebuilt Go's HTTP requests byte for
+/// byte — path, query-parameter set, and the rendering of each value.
 #[tokio::test]
-async fn tmdb_methods_report_unsupported_rather_than_faking_an_answer() {
+async fn tmdb_search_then_details_replays_the_recorded_chain() {
     let replay = replay();
     let resolver = TapeContentResolver::new(&replay, "empty-then-tmdb", 0);
 
-    let err = resolver
-        .tmdb_search_movie(&Default::default())
+    // Position 0 is the local search that finds nothing, which is what sends
+    // the workflow to TMDB in the first place.
+    let empty = resolver
+        .content_by_search(ContentType::Movie, "Cinderella", Some(1950))
         .await
-        .expect_err("tmdb replay is not wired");
+        .expect("the tape answers");
+    assert!(
+        empty.is_empty(),
+        "this fixture's local search finds nothing"
+    );
+
+    let search = resolver
+        .tmdb_search_movie(&tmdb::SearchMovieRequest {
+            query: "Cinderella".to_owned(),
+            include_adult: true,
+            year: Some(1950),
+            ..Default::default()
+        })
+        .await
+        .expect("the recorded /search/movie request must match byte for byte");
+
+    let winner = search.results.first().expect("the recording has results");
+    assert_eq!(winner.id, 11224);
+
+    let details = resolver
+        .tmdb_movie_details(&tmdb::MovieDetailsRequest {
+            id: winner.id,
+            ..Default::default()
+        })
+        .await
+        .expect("the recorded /movie/11224 request must match")
+        .expect("it is a 200, not a 404");
+
+    assert_eq!(details.id, 11224);
+    assert_eq!(
+        resolver.remaining(),
+        0,
+        "all three observations should be consumed"
+    );
+}
+
+/// The decoded body has to become a `model.Content` the way Go's transformer
+/// does — otherwise the seam replays perfectly and still attaches the wrong
+/// thing.
+#[tokio::test]
+async fn a_replayed_movie_becomes_the_content_go_would_have_built() {
+    let replay = replay();
+    let resolver = TapeContentResolver::new(&replay, "empty-then-tmdb", 0);
+
+    let _ = resolver
+        .content_by_search(ContentType::Movie, "Cinderella", Some(1950))
+        .await;
+    let _ = resolver
+        .tmdb_search_movie(&tmdb::SearchMovieRequest {
+            query: "Cinderella".to_owned(),
+            include_adult: true,
+            year: Some(1950),
+            ..Default::default()
+        })
+        .await;
+
+    let content = resolver
+        .tmdb_movie_details(&tmdb::MovieDetailsRequest {
+            id: 11224,
+            ..Default::default()
+        })
+        .await
+        .expect("replays")
+        .expect("200")
+        .into_content()
+        .expect("transforms");
+
+    assert_eq!(content.source, "tmdb");
+    assert_eq!(content.id, "11224");
+    assert_eq!(content.content_type, ContentType::Movie);
+    assert!(!content.title.is_empty());
+}
+
+/// A recorded 401 must come back as an ERROR, not as an empty answer. Go latches
+/// unauthorized as a process-lifetime failure; reading it as `ErrUnmatched`
+/// would let `find_match` quietly try the next branch instead.
+#[tokio::test]
+async fn a_recorded_unauthorized_is_an_error_not_a_miss() {
+    let replay = replay();
+    let resolver = TapeContentResolver::new(&replay, "tmdb-failure", 0);
+
+    let err = resolver
+        .tmdb_search_movie(&tmdb::SearchMovieRequest {
+            query: "Cinderella".to_owned(),
+            include_adult: true,
+            ..Default::default()
+        })
+        .await
+        .expect_err("a recorded 401 is a failure");
 
     assert!(
-        matches!(err, ResolveError::Unsupported(_)),
-        "expected Unsupported, got: {err}"
+        matches!(err, ResolveError::Tmdb(_)),
+        "expected a TMDB error, got: {err}"
     );
     assert!(
-        err.to_string().contains("HTTP level"),
-        "the error must explain WHY it is unwired: {err}"
+        err.to_string().contains("401"),
+        "the sentinel must survive replay by KIND, not by message text: {err}"
+    );
+}
+
+/// Asking TMDB a question the recording does not hold is a miss, and must stay
+/// distinguishable from "the API answered with nothing".
+#[tokio::test]
+async fn an_unrecorded_tmdb_question_is_a_miss() {
+    let replay = replay();
+    let resolver = TapeContentResolver::new(&replay, "tmdb-failure", 0);
+
+    let err = resolver
+        .tmdb_movie_details(&tmdb::MovieDetailsRequest {
+            id: 999_999,
+            ..Default::default()
+        })
+        .await
+        .expect_err("the tape holds a /search/movie here, not /movie/999999");
+
+    assert!(
+        matches!(err, ResolveError::Tmdb(_) | ResolveError::TapeMiss(_)),
+        "expected a tape disagreement, got: {err}"
     );
 }

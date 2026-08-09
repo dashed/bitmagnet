@@ -22,21 +22,24 @@
 //!   could in principle be an export artifact rather than a port bug. Anything
 //!   this gate reports as a desync should be checked against that before it is
 //!   called a divergence.
-//! * **TMDB is unwired**, so any subject whose recording includes a
-//!   `tmdb.request` will report unconsumed observations by construction.
 //!
 //! # The measurement, and the two subjects that miss
 //!
 //! ```text
-//! subjects=284 matched=238 desynced=0 missed=2 unconsumed=44 errored=0  observations=72/120
+//! subjects=284 matched=282 desynced=0 missed=2 unconsumed=0 errored=0  observations=120/120
 //! ```
 //!
-//! **Zero desyncs.** Across 284 real classifications Rust never asked a
-//! *different* question than Go — every question it did ask matched Go's byte
-//! for byte, in order. The 72 consumed observations are exactly all 72
-//! `local.content_by_search` calls and none of the 48 `tmdb.request` calls,
-//! which is the expected shape while TMDB replay is unwired: the 44 unconsumed
-//! subjects are the TMDB ones.
+//! **Zero desyncs, and every recorded observation consumed.** Across 284 real
+//! classifications Rust asked exactly the questions Go asked — all 72
+//! `local.content_by_search` *and* all 48 `tmdb.request` calls — each matching
+//! Go's recorded request byte for byte, in the same order, with none left over.
+//!
+//! For the TMDB half that means Rust rebuilt Go's HTTP requests exactly: the same
+//! paths, the same query-parameter sets, the same rendering of years and
+//! `append_to_response`. Because each request's arguments depend on the previous
+//! response — search, Levenshtein-pick a winner, then fetch that winner's details
+//! by id — reproducing the whole chain reproduces the decision logic, not merely
+//! the call shapes.
 //!
 //! The 2 misses are a **Miss, not a Desync** — Rust asked an EXTRA question
 //! rather than a wrong one — and that distinction is why they are recorded here
@@ -64,8 +67,7 @@ use bitmagnet_classifier::{Classifier, ClassifierInput, InputFile, InputHint};
 use bitmagnet_tape::Replay;
 use serde::Deserialize;
 
-const PROD_DIGEST: &str =
-    "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432d403d2acc3c2c809ae";
+const PROD_DIGEST: &str = "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432d403d2acc3c2c809ae";
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -138,11 +140,13 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
                 // A hint row with no content type is not a hint: Go treats
                 // `Hint.IsNil()` (an empty content type) as absent.
                 hint: input.hint.and_then(|hint| {
-                    hint.content_type.filter(|t| !t.is_empty()).map(|content_type| InputHint {
-                        content_type,
-                        content_source: hint.content_source,
-                        content_id: hint.content_id,
-                    })
+                    hint.content_type
+                        .filter(|t| !t.is_empty())
+                        .map(|content_type| InputHint {
+                            content_type,
+                            content_source: hint.content_source,
+                            content_id: hint.content_id,
+                        })
                 }),
             };
 
@@ -212,7 +216,12 @@ async fn prod_corpus_baseline() {
     for failure in report
         .failures
         .iter()
-        .filter(|f| !matches!(f.verdict, bitmagnet_classifier::tape_corpus::Verdict::Unconsumed { .. }))
+        .filter(|f| {
+            !matches!(
+                f.verdict,
+                bitmagnet_classifier::tape_corpus::Verdict::Unconsumed { .. }
+            )
+        })
         .take(8)
     {
         println!(
@@ -221,7 +230,10 @@ async fn prod_corpus_baseline() {
         );
     }
 
-    assert_eq!(report.errored, 0, "no subject should fail for a non-tape reason");
+    assert_eq!(
+        report.errored, 0,
+        "no subject should fail for a non-tape reason"
+    );
 
     // The load-bearing claim. A desync means the port asked a question Go never
     // asked — the one failure mode that says the decision logic itself diverged,
@@ -233,11 +245,25 @@ async fn prod_corpus_baseline() {
         report.failures
     );
 
-    // Not asserted as a pass — TMDB replay is unwired, so the 44 TMDB subjects
-    // legitimately under-consume. Pinned so landing TMDB moves it visibly.
+    // Now that TMDB replay is wired, nothing legitimately under-consumes: every
+    // recorded observation must be asked for. Asking FEWER questions than Go is
+    // as much a divergence as asking the wrong one.
+    assert_eq!(
+        report.unconsumed, 0,
+        "Rust skipped work Go performed: {:?}",
+        report.failures
+    );
+    assert_eq!(
+        report.consumed_observations, report.recorded_observations,
+        "every recorded observation should be consumed"
+    );
+
+    // The two known misses are documented in this module's docs, and are a
+    // base-title divergence unrelated to the seams. Pinned, not asserted as a
+    // pass — this is the number the next lane drives to zero.
     assert!(
         report.missed <= 2,
-        "the two known misses are documented in this module's docs; a third is new: {:?}",
+        "a third miss is new: {:?}",
         report.failures
     );
 }

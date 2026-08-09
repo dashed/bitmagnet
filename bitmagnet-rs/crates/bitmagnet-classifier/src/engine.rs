@@ -16,8 +16,12 @@ use crate::env::Env;
 use crate::errors::FlowError;
 use crate::model::{ClassifierInput, ContentType};
 use crate::parsers::{parse_date, parse_video_content};
-use crate::resolver::ContentResolver;
+use crate::resolver::{tmdb, ContentResolver};
 use crate::result::Classification;
+
+/// Go `model.SourceTmdb` — the one source whose hinted id IS the TMDB id, so no
+/// `/find` lookup is needed.
+const TMDB_SOURCE: &str = "tmdb";
 
 /// A compiled action node.
 pub(crate) enum Action {
@@ -47,24 +51,14 @@ pub(crate) enum Action {
     RunWorkflow(Vec<String>),
     ParseDate,
     ParseVideoContent,
-    /// The four `attach_*` actions, still fused into one variant. Under the
-    /// flags-off corpus every one of them resolves to `unmatched` (contract
-    /// §2.2): the local-by-id branch's `LocalSearch.ContentByID` is mocked to
-    /// `ErrUnmatched`, and the other three are behind `flags` gates that are
-    /// false, so their `if_else` runs the `unmatched` else-branch and they are
-    /// never entered.
+    /// The four `attach_*` actions, each carrying which dependency it consults.
     ///
-    /// 🔜 Lane B′-4 splits this into `AttachLocalContentById`,
-    /// `AttachLocalContentBySearch`, `AttachTmdbContentById` and
-    /// `AttachTmdbContentBySearch`, each reading [`ExecCtx::resolver`]. B′-0
-    /// deliberately leaves the fusion in place so that the async/`Content`
-    /// refactor is provably behaviour-preserving: with the null resolver this
-    /// variant short-circuits exactly as before, keeping the 330 goldens and the
-    /// 119,991-name replay bit-identical.
-    /// The four `attach_*` actions. Kept as distinct variants rather than one
-    /// fused "unmatched" because they consult different dependencies and fail
-    /// for different reasons — collapsing them is what made the enrichment path
-    /// invisible to the parity gate.
+    /// Kept as distinct kinds rather than one fused "unmatched" variant because
+    /// they consult different dependencies and fail for different reasons —
+    /// collapsing them is what made the enrichment path invisible to the parity
+    /// gate. Under the flags-off corpus they all still resolve to `unmatched`
+    /// (contract §2.2), because the gates around them are false and the
+    /// local-by-id branch's lookup misses.
     Attach(AttachKind),
 }
 
@@ -474,9 +468,10 @@ pub(crate) enum AttachKind {
     /// `attach_local_content_by_search` — Go
     /// `action_attach_local_content_by_search.go`.
     LocalContentBySearch,
-    /// `attach_tmdb_content_by_id` — NOT implemented; see [`run_attach`].
+    /// `attach_tmdb_content_by_id` — Go `action_attach_tmdb_content_by_id.go`.
     TmdbContentById,
-    /// `attach_tmdb_content_by_search` — NOT implemented; see [`run_attach`].
+    /// `attach_tmdb_content_by_search` — Go
+    /// `action_attach_tmdb_content_by_search.go`.
     TmdbContentBySearch,
 }
 
@@ -486,13 +481,9 @@ pub(crate) enum AttachKind {
 /// that finds nothing is `ErrUnmatched`, which `find_match` treats as "try the
 /// next branch" rather than as a failure. A genuine backend error propagates.
 ///
-/// 🚨 The TMDB kinds are still unmatched. Rust has no TMDB client
-/// (`bitmagnet-tmdb` is a placeholder), so consulting the resolver for them
-/// would return `Unsupported` and turn what Go treats as a recoverable
-/// `find_match` fallthrough into a hard error — changing control flow on a path
-/// that is not yet implemented. Returning unmatched keeps the surrounding
-/// workflow behaving as it does today; the parity gate reports the shortfall as
-/// unconsumed observations rather than hiding it.
+/// All four kinds are implemented; each consults a different dependency and
+/// fails differently, which is why they stay distinct rather than fusing into
+/// one "attach" action.
 async fn run_attach(
     kind: AttachKind,
     ctx: &ExecCtx<'_>,
@@ -501,7 +492,8 @@ async fn run_attach(
     match kind {
         AttachKind::LocalContentById => attach_local_by_id(ctx, result).await,
         AttachKind::LocalContentBySearch => attach_local_by_search(ctx, result).await,
-        AttachKind::TmdbContentById | AttachKind::TmdbContentBySearch => Err(FlowError::Unmatched),
+        AttachKind::TmdbContentById => attach_tmdb_by_id(ctx, result).await,
+        AttachKind::TmdbContentBySearch => attach_tmdb_by_search(ctx, result).await,
     }
 }
 
@@ -605,6 +597,216 @@ async fn attach_local_by_search(
     let mut result = result;
     result.attach_content(best.content.clone());
     Ok(result)
+}
+
+/// Go `attach_tmdb_content_by_id`: resolve the hinted ref to a TMDB id, then
+/// fetch that title's details.
+///
+/// 🚨 The guard is Go's, and it is **not** the same as
+/// [`attach_local_by_id`]'s. `TorrentHint.ContentRef()` is valid when the hint
+/// has a content TYPE and a content ID; the SOURCE may be absent. A source-less
+/// ref then falls to the external-id branch, where `tmdb.ExternalSource` finds no
+/// mapping for `""` and returns unmatched. Tightening the guard to require a
+/// source would reach the same verdict by a different route — and would skip the
+/// `/find` request Go makes whenever the source is a non-TMDB one.
+async fn attach_tmdb_by_id(
+    ctx: &ExecCtx<'_>,
+    result: Classification,
+) -> Result<Classification, FlowError> {
+    let Some(hint) = ctx.input.hint.as_ref() else {
+        return Err(FlowError::Unmatched);
+    };
+
+    // Go `TorrentHint.ContentRef()`: `!IsNil() && ContentID.Valid`, where
+    // `IsNil()` is an absent content type.
+    if hint.content_type.is_empty() || hint.content_id.is_empty() {
+        return Err(FlowError::Unmatched);
+    }
+
+    // Go: the ref's type is overridden by the classification's when it has one.
+    let ref_type = result
+        .content_type
+        .and_then(to_model_content_type)
+        .or_else(|| hint.content_type.parse().ok());
+
+    let Some(ref_type) = ref_type else {
+        return Err(FlowError::Unmatched);
+    };
+
+    let tmdb_id = if hint.content_source == TMDB_SOURCE {
+        // Go uses strconv.Atoi and treats a parse failure as unmatched.
+        match hint.content_id.parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => return Err(FlowError::Unmatched),
+        }
+    } else {
+        let Some(external_source) = tmdb::external_source(ref_type, &hint.content_source) else {
+            return Err(FlowError::Unmatched);
+        };
+
+        let response = ctx
+            .resolver
+            .tmdb_find_by_external_id(&tmdb::FindByIdRequest {
+                external_source: external_source.to_owned(),
+                external_id: hint.content_id.clone(),
+                language: None,
+            })
+            .await
+            .map_err(|err| FlowError::Cel(err.to_string()))?;
+
+        // Go takes the FIRST entry of the array matching the ref's type; an
+        // empty array is unmatched.
+        let first = match ref_type {
+            bitmagnet_model::ContentType::Movie | bitmagnet_model::ContentType::Xxx => {
+                response.movie_results.first().map(|item| item.id)
+            }
+            bitmagnet_model::ContentType::TvShow => response.tv_results.first().map(|item| item.id),
+            _ => None,
+        };
+
+        match first {
+            Some(id) => id,
+            None => return Err(FlowError::Unmatched),
+        }
+    };
+
+    let content = match ref_type {
+        bitmagnet_model::ContentType::Movie | bitmagnet_model::ContentType::Xxx => {
+            tmdb_movie_by_id(ctx, tmdb_id).await?
+        }
+        bitmagnet_model::ContentType::TvShow => tmdb_tv_show_by_id(ctx, tmdb_id).await?,
+        // Go's switch has no other arms.
+        _ => return Err(FlowError::Unmatched),
+    };
+
+    let mut result = result;
+    result.attach_content(content);
+    Ok(result)
+}
+
+/// Go `attach_tmdb_content_by_search`: search TMDB for the base title, pick a
+/// winner by first-wins Levenshtein, then fetch that title's details.
+///
+/// The same split as [`attach_local_by_search`] applies: the resolver hands back
+/// TMDB's ordered `results` array and the tie-break runs here.
+async fn attach_tmdb_by_search(
+    ctx: &ExecCtx<'_>,
+    result: Classification,
+) -> Result<Classification, FlowError> {
+    let Some(base_title) = result.base_title.as_deref() else {
+        return Err(FlowError::Unmatched);
+    };
+
+    let year = (result.date.year != 0).then_some(result.date.year);
+    let is_tv_show = result.content_type.and_then(to_model_content_type)
+        == Some(bitmagnet_model::ContentType::TvShow);
+
+    let content = if is_tv_show {
+        let response = ctx
+            .resolver
+            .tmdb_search_tv(&tmdb::SearchTvRequest {
+                query: base_title.to_owned(),
+                include_adult: true,
+                first_air_date_year: year,
+                ..Default::default()
+            })
+            .await
+            .map_err(|err| FlowError::Cel(err.to_string()))?;
+
+        let best = bitmagnet_textmatch::find_best_match(base_title, &response.results, |item| {
+            vec![item.name.clone(), item.original_name.clone()]
+        });
+
+        let Some(best) = best else {
+            return Err(FlowError::Unmatched);
+        };
+
+        tmdb_tv_show_by_id(ctx, best.id).await?
+    } else {
+        // Go's `default` arm: anything that is not a tv_show, including an
+        // unknown content type. A title with parsed episodes is a series even
+        // when the type says otherwise, and Go refuses to call it a movie.
+        if !result.episodes.is_empty() {
+            return Err(FlowError::Unmatched);
+        }
+
+        let response = ctx
+            .resolver
+            .tmdb_search_movie(&tmdb::SearchMovieRequest {
+                query: base_title.to_owned(),
+                include_adult: true,
+                year,
+                ..Default::default()
+            })
+            .await
+            .map_err(|err| FlowError::Cel(err.to_string()))?;
+
+        let best = bitmagnet_textmatch::find_best_match(base_title, &response.results, |item| {
+            vec![item.title.clone(), item.original_title.clone()]
+        });
+
+        let Some(best) = best else {
+            return Err(FlowError::Unmatched);
+        };
+
+        tmdb_movie_by_id(ctx, best.id).await?
+    };
+
+    let mut result = result;
+    result.attach_content(content);
+    Ok(result)
+}
+
+/// Go `tmdbGetMovieByTMDBID`: `GET /movie/{id}`, with 404 mapped to unmatched.
+async fn tmdb_movie_by_id(
+    ctx: &ExecCtx<'_>,
+    id: i64,
+) -> Result<bitmagnet_model::Content, FlowError> {
+    let details = ctx
+        .resolver
+        .tmdb_movie_details(&tmdb::MovieDetailsRequest {
+            id,
+            ..Default::default()
+        })
+        .await
+        .map_err(|err| FlowError::Cel(err.to_string()))?;
+
+    // Go: `errors.Is(err, tmdb.ErrNotFound)` becomes ErrUnmatched, so
+    // `find_match` moves on. Any other failure stays an error.
+    let Some(details) = details else {
+        return Err(FlowError::Unmatched);
+    };
+
+    // A date the transform rejects is an error outcome in Go, not a miss.
+    details
+        .into_content()
+        .map_err(|err| FlowError::Cel(err.to_string()))
+}
+
+/// Go `tmdbGetTVShowByTMDBID`: `GET /tv/{id}?append_to_response=external_ids`.
+async fn tmdb_tv_show_by_id(
+    ctx: &ExecCtx<'_>,
+    id: i64,
+) -> Result<bitmagnet_model::Content, FlowError> {
+    let details = ctx
+        .resolver
+        .tmdb_tv_details(&tmdb::TvDetailsRequest {
+            series_id: id,
+            // Go always asks for this, and the transform reads imdb/tvdb ids out
+            // of it. Omitting it would be a different request AND lose the ids.
+            append_to_response: vec!["external_ids".to_owned()],
+            ..Default::default()
+        })
+        .await
+        .map_err(|err| FlowError::Cel(err.to_string()))?;
+
+    let Some(details) = details else {
+        return Err(FlowError::Unmatched);
+    };
+
+    details
+        .into_content()
+        .map_err(|err| FlowError::Cel(err.to_string()))
 }
 
 /// Bridge the classifier's own [`ContentType`] to the model crate's.

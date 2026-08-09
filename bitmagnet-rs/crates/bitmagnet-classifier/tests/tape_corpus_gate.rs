@@ -1,10 +1,12 @@
 //! The B′ desync gate, run against the Go-recorded golden tape.
 //!
-//! 🚨 This gate does NOT fully pass yet, and the assertions pin the current
-//! baseline rather than a pass — so a lane that changes behaviour moves the
-//! numbers visibly instead of quietly satisfying a test written around a stub.
-//! (It already worked once: implementing the local attach actions turned these
-//! assertions red, which is exactly what was wanted.)
+//! 🚨 This gate does NOT fully pass, and the assertions pin the current baseline
+//! rather than a pass — so a lane that changes behaviour moves the numbers
+//! visibly instead of quietly satisfying a test written around a stub. It has
+//! now earned its keep twice: implementing the local attach actions turned these
+//! assertions red (0/5 → 3/5 observations consumed), and wiring TMDB replay
+//! turned them red again (3/5 → 5/5). The one remaining non-match is a defect in
+//! the FIXTURE, not the port — see [`baseline`].
 //!
 //! # These fixtures are a smoke test, not a parity measurement
 //!
@@ -84,42 +86,48 @@ async fn gate_runs_over_every_recorded_subject() {
     );
 }
 
-/// The current baseline, with the LOCAL attach actions implemented and TMDB not.
+/// The current baseline, with all four attach actions — local AND TMDB —
+/// implemented.
 ///
 /// Each verdict here is understood, not merely observed:
 ///
 /// * `tied-window` — **match**. Its one recorded observation is a local search,
 ///   Rust asks exactly it, and the record is fully consumed.
 /// * `no-observations` — **match**, trivially: nothing recorded, nothing asked.
-/// * `empty-then-tmdb` — **unconsumed 2 of 3**. The local search matches; the two
-///   TMDB observations go unasked because TMDB replay is unwired. This is the
-///   shortfall the gate exists to report, and it closes when TMDB lands.
+/// * `empty-then-tmdb` — **match**, and this is the one that moved when TMDB
+///   replay landed. Its local search returns empty, so the workflow falls through
+///   to TMDB and now makes both recorded calls (search, then details-by-id)
+///   instead of stopping. It was `Unconsumed { remaining: 2 }` before.
 /// * `tmdb-failure` — **desync, and NOT a port bug.** That fixture's record holds
 ///   only a `tmdb.request`, because it was recorded by exercising the TMDB seam
 ///   directly rather than by running the whole workflow. Its flags omit
 ///   `local_search_enabled`, which `core.yml` DEFAULTS TO TRUE, so a full
 ///   workflow legitimately attempts a local search first and finds a
 ///   `tmdb.request` at that position. The gate is correctly reporting that this
-///   fixture is not a workflow recording.
+///   fixture is not a workflow recording — wiring TMDB does not and should not
+///   change that.
 #[tokio::test]
 async fn baseline() {
     let report = run_gate().await;
 
     assert_eq!(
-        report.consumed_observations, 3,
-        "the local attach actions consult the resolver"
+        report.consumed_observations, 5,
+        "every recorded observation is now asked for"
     );
-    assert_eq!(report.matched, 2, "tied-window and no-observations match");
     assert_eq!(
-        report.unconsumed, 1,
-        "empty-then-tmdb still owes its TMDB calls"
+        report.matched, 3,
+        "tied-window, no-observations, and now empty-then-tmdb"
+    );
+    assert_eq!(
+        report.unconsumed, 0,
+        "TMDB replay closed the only under-consuming subject"
     );
     assert_eq!(report.desynced, 1, "tmdb-failure — see this test's docs");
     assert_eq!(report.errored, 0);
 
     assert!(
         !report.passed(),
-        "not a pass while TMDB is unwired and a fixture desyncs"
+        "still not a pass: the tmdb-failure fixture is not a workflow recording"
     );
 }
 
@@ -139,27 +147,42 @@ async fn a_local_search_subject_matches_exactly() {
     );
 }
 
-/// The per-subject detail has to name what was skipped, or the report is not
-/// actionable when the numbers start moving.
+/// The multi-seam subject: a local search that finds nothing, then the TMDB
+/// fallback. It exercises the full chain in one classification — empty local
+/// answer, TMDB search, then details-by-id keyed on the search's winner — so it
+/// is the fixture that proves the seams compose rather than merely each working
+/// alone.
 #[tokio::test]
-async fn failures_report_how_much_was_skipped() {
+async fn the_local_then_tmdb_fallback_chain_is_fully_replayed() {
     let report = run_gate().await;
 
-    let empty_then_tmdb = report
+    assert!(
+        !report
+            .failures
+            .iter()
+            .any(|failure| failure.subject == "empty-then-tmdb"),
+        "empty-then-tmdb must now consume all three observations: {:?}",
+        report.failures
+    );
+}
+
+/// The per-subject detail still has to name what diverged, or the report is not
+/// actionable when the numbers move. `tmdb-failure` is the standing example.
+#[tokio::test]
+async fn failures_report_what_diverged() {
+    let report = run_gate().await;
+
+    let tmdb_failure = report
         .failures
         .iter()
-        .find(|failure| failure.subject == "empty-then-tmdb")
-        .expect("the three-observation subject is reported");
+        .find(|failure| failure.subject == "tmdb-failure")
+        .expect("the non-workflow fixture is reported");
 
-    assert_eq!(empty_then_tmdb.recorded, 3);
-    assert_eq!(
-        empty_then_tmdb.consumed, 1,
-        "the local search is asked; the two TMDB calls are not"
-    );
-    assert_eq!(
-        empty_then_tmdb.verdict,
-        Verdict::Unconsumed { remaining: 2 },
-        "it should say exactly how many observations went unasked"
+    assert_eq!(tmdb_failure.recorded, 1);
+    assert!(
+        matches!(tmdb_failure.verdict, Verdict::Desync { .. }),
+        "it should say the question differed, not merely that something failed: {:?}",
+        tmdb_failure.verdict
     );
 }
 

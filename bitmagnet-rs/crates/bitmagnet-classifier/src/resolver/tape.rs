@@ -24,16 +24,27 @@
 //! `local.content_by_id` and `local.content_by_search` observations, which is
 //! where the load-bearing nondeterminism lives (the ordered candidate list).
 //!
-//! 🚨 The **TMDB** methods deliberately fail with [`ResolveError::Unsupported`].
-//! The tape records TMDB at the *HTTP* level (`tmdb.request` carrying method,
-//! path and query parameters), not at trait-method level, so replaying them
-//! requires Rust to rebuild Go's exact request URLs and to decode base64 HTTP
-//! bodies into the response DTOs. Rust has no TMDB client yet —
-//! `bitmagnet-tmdb` is still a placeholder — and guessing the request shape
-//! would produce desyncs that read as port bugs rather than as missing code.
-//! Failing loudly is the honest behaviour until that lane lands.
+//! The **TMDB** seam is wired too, at the level Go records it: `tmdb.request`
+//! carries `{method, path, queryParams}`, so replaying it means rebuilding Go's
+//! exact request — not its trait-method arguments — and decoding a base64 HTTP
+//! body into the response DTO. Both halves are ported from
+//! `internal/tmdb/client.go` (URL construction) and
+//! `internal/tmdb/requester_recorder.go` (the record shape).
+//!
+//! 🚨 Two details there are load-bearing:
+//!
+//! * `queryParams` is a Go **map**, and `encoding/json` **sorts map keys**. The
+//!   request is compared byte for byte, so it is built in a [`BTreeMap`] — a
+//!   `HashMap` would desync nondeterministically.
+//! * The recorded `bodySha256` is **verified** before decoding, exactly as Go's
+//!   `replayRequest` does. A tape whose body no longer hashes to its digest is
+//!   corrupt, and silently decoding it would launder that into a parity result.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
+
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 use async_trait::async_trait;
 use bitmagnet_fts::Tsvector;
@@ -46,6 +57,17 @@ use super::{ContentResolver, ContentResultItem, ResolveError};
 /// Observation kinds, matching Go's `tape_local_search.go`.
 const KIND_CONTENT_BY_SEARCH: &str = "local.content_by_search";
 const KIND_CONTENT_BY_ID: &str = "local.content_by_id";
+/// Go `tmdb.TapeKindRequest`.
+const KIND_TMDB_REQUEST: &str = "tmdb.request";
+
+/// Go's recorded TMDB error kinds (`internal/tmdb/requester_recorder.go`).
+///
+/// They are kept apart because the classifier's control flow depends on which
+/// one it got: `not_found` becomes `ErrUnmatched` and `find_match` falls through
+/// to the next branch, while everything else is fatal to the classification.
+/// Flattening them would change control flow.
+const TMDB_ERR_UNAUTHORIZED: &str = "unauthorized";
+const TMDB_ERR_NOT_FOUND: &str = "not_found";
 
 /// Query-shape constants shared with the recording. Go keeps these in
 /// `internal/classifier/search.go` precisely so a recorded request cannot drift
@@ -286,7 +308,16 @@ impl TapeContentResolver {
     }
 
     /// Consumes one observation, translating tape failures into [`ResolveError`].
-    fn next_raw(&self, kind: &str, request: &impl Serialize) -> Result<RawAnswer, ResolveError> {
+    ///
+    /// `seam` only selects which [`ResolveError`] variant a non-miss tape failure
+    /// (a desync, a corrupt record) is reported under, so the error names the
+    /// dependency the caller was actually talking to.
+    fn next_raw(
+        &self,
+        seam: Seam,
+        kind: &str,
+        request: &impl Serialize,
+    ) -> Result<RawAnswer, ResolveError> {
         let mut session = self.session.lock().expect("tape session mutex poisoned");
 
         match session.next(kind, request) {
@@ -299,9 +330,193 @@ impl TapeContentResolver {
             // a miss is "the recording never saw this", a desync is "you asked
             // something else". Both surface verbatim so the distinction survives.
             Err(err @ TapeError::Miss { .. }) => Err(ResolveError::TapeMiss(err.to_string())),
-            Err(err) => Err(ResolveError::LocalSearch(err.to_string())),
+            Err(err) => Err(seam.error(err.to_string())),
         }
     }
+
+    /// Replays one `tmdb.request` — Go `tmdb.replayRequest`.
+    ///
+    /// Returns the raw response body, or [`None`] for a recorded 404, which Go's
+    /// callers turn into `ErrUnmatched`.
+    fn tmdb_next(&self, request: &TmdbRequest) -> Result<Option<Vec<u8>>, ResolveError> {
+        match self.next_raw(Seam::Tmdb, KIND_TMDB_REQUEST, request)? {
+            RawAnswer::Failure { kind, message } => match kind.as_str() {
+                // Go returns the package sentinels themselves here, because
+                // callers reach them with errors.Is and a look-alike would not
+                // match. The Rust equivalent is this distinction in the return
+                // type, which is why not_found is Ok(None) and not an error.
+                TMDB_ERR_NOT_FOUND => Ok(None),
+                TMDB_ERR_UNAUTHORIZED => Err(ResolveError::Tmdb("401 Unauthorized".to_owned())),
+                _ => Err(ResolveError::Tmdb(message)),
+            },
+            RawAnswer::Response(raw) => {
+                let response: TmdbResponse = serde_json::from_str(&raw).map_err(|err| {
+                    ResolveError::Tmdb(format!("decode taped tmdb.request response: {err}"))
+                })?;
+
+                let body = base64::engine::general_purpose::STANDARD
+                    .decode(&response.body_base64)
+                    .map_err(|err| {
+                        ResolveError::Tmdb(format!("decode taped tmdb.request body: {err}"))
+                    })?;
+
+                // Go verifies this before decoding, and so must we: a body that
+                // no longer matches its digest is a corrupt tape, and decoding it
+                // anyway would launder corruption into a parity verdict.
+                let digest = format!("sha256:{:x}", Sha256::digest(&body));
+                if digest != response.body_sha256 {
+                    return Err(ResolveError::Tmdb(format!(
+                        "taped tmdb.request response body digest is {digest}, but the recorded \
+                         digest is {}",
+                        response.body_sha256
+                    )));
+                }
+
+                Ok(Some(body))
+            }
+        }
+    }
+}
+
+/// Which dependency a tape lookup was for. See [`TapeContentResolver::next_raw`].
+#[derive(Debug, Clone, Copy)]
+enum Seam {
+    Local,
+    Tmdb,
+}
+
+impl Seam {
+    fn error(self, message: String) -> ResolveError {
+        match self {
+            Self::Local => ResolveError::LocalSearch(message),
+            Self::Tmdb => ResolveError::Tmdb(message),
+        }
+    }
+}
+
+/// Go's `tmdb.tapeRequest` (`internal/tmdb/requester_recorder.go`).
+///
+/// 🚨 `query_params` is a [`BTreeMap`] on purpose: Go records it as a `map` and
+/// `encoding/json` sorts map keys, while the request is compared byte for byte.
+/// Field order is likewise Go's declaration order.
+#[derive(Debug, Serialize)]
+struct TmdbRequest {
+    method: &'static str,
+    path: String,
+    #[serde(rename = "queryParams")]
+    query_params: BTreeMap<String, String>,
+}
+
+/// Go's `tmdb.tapeResponse`.
+#[derive(Debug, Deserialize)]
+struct TmdbResponse {
+    #[serde(rename = "bodyBase64", default)]
+    body_base64: String,
+    #[serde(rename = "bodySha256", default)]
+    body_sha256: String,
+}
+
+/// Query parameters, built the way `internal/tmdb/client.go` builds them.
+///
+/// Every `insert` here mirrors one `if` in that file. A parameter Go omits must
+/// be omitted, not sent empty: the recorded request carries only what Go sent, so
+/// an extra key is a desync.
+struct QueryParams(BTreeMap<String, String>);
+
+impl QueryParams {
+    fn new() -> Self {
+        // Go always builds a non-nil map, so an absent parameter set and an
+        // empty one encode identically.
+        Self(BTreeMap::new())
+    }
+
+    fn set(&mut self, key: &str, value: impl Into<String>) {
+        self.0.insert(key.to_owned(), value.into());
+    }
+
+    /// Go `model.NullString` — present iff `Valid`.
+    fn set_opt(&mut self, key: &str, value: Option<&String>) {
+        if let Some(value) = value {
+            self.set(key, value.clone());
+        }
+    }
+
+    /// Go `model.Year` — `IsNil()` is the zero value, so 0 is omitted just as
+    /// `None` is. Rendered with `Year.String()`, i.e. plain decimal.
+    fn set_year(&mut self, key: &str, year: Option<u16>) {
+        if let Some(year) = year.filter(|y| *y != 0) {
+            self.set(key, year.to_string());
+        }
+    }
+
+    /// Go `strings.Join(request.AppendToResponse, ",")`, omitted when empty.
+    fn set_append_to_response(&mut self, values: &[String]) {
+        if !values.is_empty() {
+            self.set("append_to_response", values.join(","));
+        }
+    }
+
+    fn get(self, path: String) -> TmdbRequest {
+        TmdbRequest {
+            method: "GET",
+            path,
+            query_params: self.0,
+        }
+    }
+}
+
+/// Go `client.SearchMovie`. Insertion order is irrelevant (the map sorts); the
+/// SET of keys is what has to match.
+fn search_movie_request(request: &super::tmdb::SearchMovieRequest) -> TmdbRequest {
+    let mut params = QueryParams::new();
+    params.set("query", request.query.clone());
+    if request.include_adult {
+        params.set("include_adult", "true");
+    }
+    params.set_opt("language", request.language.as_ref());
+    params.set_year("primary_release_year", request.primary_release_year);
+    params.set_year("year", request.year);
+    params.set_opt("region", request.region.as_ref());
+    params.get("/search/movie".to_owned())
+}
+
+/// Go `client.SearchTv`.
+///
+/// 🚨 `SearchTvRequest` carries a `year`, but `client.SearchTv` never sends it.
+/// Sending it would be an extra query parameter, i.e. a desync.
+fn search_tv_request(request: &super::tmdb::SearchTvRequest) -> TmdbRequest {
+    let mut params = QueryParams::new();
+    params.set("query", request.query.clone());
+    params.set_year("first_air_date_year", request.first_air_date_year);
+    if request.include_adult {
+        params.set("include_adult", "true");
+    }
+    params.set_opt("language", request.language.as_ref());
+    params.get("/search/tv".to_owned())
+}
+
+/// Go `client.MovieDetails`.
+fn movie_details_request(request: &super::tmdb::MovieDetailsRequest) -> TmdbRequest {
+    let mut params = QueryParams::new();
+    params.set_append_to_response(&request.append_to_response);
+    params.set_opt("language", request.language.as_ref());
+    params.get(format!("/movie/{}", request.id))
+}
+
+/// Go `client.TvDetails`.
+fn tv_details_request(request: &super::tmdb::TvDetailsRequest) -> TmdbRequest {
+    let mut params = QueryParams::new();
+    params.set_append_to_response(&request.append_to_response);
+    params.set_opt("language", request.language.as_ref());
+    params.get(format!("/tv/{}", request.series_id))
+}
+
+/// Go `client.FindByID`.
+fn find_by_id_request(request: &super::tmdb::FindByIdRequest) -> TmdbRequest {
+    let mut params = QueryParams::new();
+    params.set("external_source", request.external_source.clone());
+    params.set_opt("language", request.language.as_ref());
+    params.get(format!("/find/{}", request.external_id))
 }
 
 enum RawAnswer {
@@ -352,7 +567,7 @@ impl ContentResolver for TapeContentResolver {
             limit: CONTENT_BY_ID_LIMIT,
         };
 
-        match self.next_raw(KIND_CONTENT_BY_ID, &request)? {
+        match self.next_raw(Seam::Local, KIND_CONTENT_BY_ID, &request)? {
             RawAnswer::Failure { kind, message } => {
                 Err(rebuild_local_search_error(&kind, &message))
             }
@@ -389,7 +604,7 @@ impl ContentResolver for TapeContentResolver {
             limit: CONTENT_BY_SEARCH_LIMIT,
         };
 
-        match self.next_raw(KIND_CONTENT_BY_SEARCH, &request)? {
+        match self.next_raw(Seam::Local, KIND_CONTENT_BY_SEARCH, &request)? {
             RawAnswer::Failure { kind, message } => {
                 Err(rebuild_local_search_error(&kind, &message))
             }
@@ -424,47 +639,203 @@ impl ContentResolver for TapeContentResolver {
         }
     }
 
+    /// Go `client.FindByID` → `GET /find/{external_id}`.
     async fn tmdb_find_by_external_id(
         &self,
-        _request: &super::tmdb::FindByIdRequest,
+        request: &super::tmdb::FindByIdRequest,
     ) -> Result<super::tmdb::FindByIdResponse, ResolveError> {
-        Err(tmdb_unsupported("find_by_external_id"))
+        let taped = self.tmdb_next(&find_by_id_request(request))?;
+
+        // Go's FindByID has no 404 special case — the error propagates — so a
+        // recorded not_found is a genuine failure of this call, not an absence.
+        decode_tmdb(taped, "find")?.ok_or_else(|| ResolveError::Tmdb("404 Not Found".to_owned()))
     }
 
+    /// Go `client.MovieDetails` → `GET /movie/{id}`.
     async fn tmdb_movie_details(
         &self,
-        _request: &super::tmdb::MovieDetailsRequest,
+        request: &super::tmdb::MovieDetailsRequest,
     ) -> Result<Option<super::tmdb::MovieDetailsResponse>, ResolveError> {
-        Err(tmdb_unsupported("movie_details"))
+        let taped = self.tmdb_next(&movie_details_request(request))?;
+
+        // A recorded 404 is Go's ErrNotFound, which `tmdbGetMovieByTMDBID` maps
+        // to ErrUnmatched — hence Ok(None) rather than an error.
+        decode_tmdb(taped, "movie details")
     }
 
+    /// Go `client.TvDetails` → `GET /tv/{series_id}`.
     async fn tmdb_tv_details(
         &self,
-        _request: &super::tmdb::TvDetailsRequest,
+        request: &super::tmdb::TvDetailsRequest,
     ) -> Result<Option<super::tmdb::TvDetailsResponse>, ResolveError> {
-        Err(tmdb_unsupported("tv_details"))
+        let taped = self.tmdb_next(&tv_details_request(request))?;
+
+        decode_tmdb(taped, "tv details")
     }
 
+    /// Go `client.SearchMovie` → `GET /search/movie`.
     async fn tmdb_search_movie(
         &self,
-        _request: &super::tmdb::SearchMovieRequest,
+        request: &super::tmdb::SearchMovieRequest,
     ) -> Result<super::tmdb::SearchMovieResponse, ResolveError> {
-        Err(tmdb_unsupported("search_movie"))
+        let taped = self.tmdb_next(&search_movie_request(request))?;
+
+        decode_tmdb(taped, "search movie")?
+            .ok_or_else(|| ResolveError::Tmdb("404 Not Found".to_owned()))
     }
 
+    /// Go `client.SearchTv` → `GET /search/tv`.
     async fn tmdb_search_tv(
         &self,
-        _request: &super::tmdb::SearchTvRequest,
+        request: &super::tmdb::SearchTvRequest,
     ) -> Result<super::tmdb::SearchTvResponse, ResolveError> {
-        Err(tmdb_unsupported("search_tv"))
+        let taped = self.tmdb_next(&search_tv_request(request))?;
+
+        decode_tmdb(taped, "search tv")?
+            .ok_or_else(|| ResolveError::Tmdb("404 Not Found".to_owned()))
     }
 }
 
-fn tmdb_unsupported(method: &str) -> ResolveError {
-    ResolveError::Unsupported(format!(
-        "tape replay of tmdb.{method} is not wired: the tape records TMDB at the HTTP level \
-         (method/path/queryParams), so replaying it needs Rust to rebuild Go's request URLs and \
-         decode base64 bodies into the response DTOs. bitmagnet-tmdb is still a placeholder; \
-         guessing the request shape would desync and read as a port bug"
-    ))
+/// Decodes a replayed TMDB body into its DTO, preserving the 404 → [`None`]
+/// distinction the caller depends on.
+///
+/// Go hands the raw bytes to `json.Unmarshal` and leaves absent fields at their
+/// zero value; the DTOs carry `#[serde(default)]` throughout for the same reason,
+/// so this is a plain decode.
+fn decode_tmdb<T: serde::de::DeserializeOwned>(
+    body: Option<Vec<u8>>,
+    what: &str,
+) -> Result<Option<T>, ResolveError> {
+    body.map(|body| {
+        serde_json::from_slice(&body)
+            .map_err(|err| ResolveError::Tmdb(format!("decode taped {what} response: {err}")))
+    })
+    .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::tmdb;
+
+    /// The fixtures below are **verbatim `request` objects from the production
+    /// tape** (`testdata/parity/classifier-attach/prod-20260809`), i.e. requests
+    /// Go actually made and recorded. Go compares the replayed request to the
+    /// recorded one BYTE FOR BYTE, so matching these strings exactly is the whole
+    /// contract — a reordered key or an extra parameter is a desync that reads as
+    /// a port bug.
+    fn encoded(request: &TmdbRequest) -> String {
+        serde_json::to_string(request).expect("request serialises")
+    }
+
+    #[test]
+    fn search_tv_matches_the_recorded_request() {
+        let request = search_tv_request(&tmdb::SearchTvRequest {
+            query: "UFC Fight Night Kape vs Horiguchi 20 05".to_owned(),
+            include_adult: true,
+            first_air_date_year: Some(2026),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/search/tv","queryParams":{"first_air_date_year":"2026","include_adult":"true","query":"UFC Fight Night Kape vs Horiguchi 20 05"}}"#
+        );
+    }
+
+    /// Go always appends `external_ids` for TV details, and the transform reads
+    /// the imdb/tvdb ids out of it.
+    #[test]
+    fn tv_details_matches_the_recorded_request() {
+        let request = tv_details_request(&tmdb::TvDetailsRequest {
+            series_id: 12271,
+            append_to_response: vec!["external_ids".to_owned()],
+            ..Default::default()
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/tv/12271","queryParams":{"append_to_response":"external_ids"}}"#
+        );
+    }
+
+    /// Movie details carries NO query parameters — and the empty map must encode
+    /// as `{}`, never as `null`. Go always builds a non-nil map for exactly this
+    /// reason.
+    #[test]
+    fn movie_details_matches_the_recorded_request() {
+        let request = movie_details_request(&tmdb::MovieDetailsRequest {
+            id: 1_673_194,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/movie/1673194","queryParams":{}}"#
+        );
+    }
+
+    /// Query parameters are a Go map, so `encoding/json` sorts the keys. A
+    /// `HashMap` here would pass or fail at random.
+    #[test]
+    fn query_params_are_key_sorted() {
+        let request = search_movie_request(&tmdb::SearchMovieRequest {
+            query: "Cinderella".to_owned(),
+            include_adult: true,
+            year: Some(1950),
+            region: Some("US".to_owned()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/search/movie","queryParams":{"include_adult":"true","query":"Cinderella","region":"US","year":"1950"}}"#
+        );
+    }
+
+    /// Go's `model.Year` zero value is nil and `client.SearchMovie` skips a nil
+    /// year, so a zero must be omitted rather than sent as `"0"`.
+    #[test]
+    fn a_zero_year_is_omitted_like_gos_nil() {
+        let request = search_movie_request(&tmdb::SearchMovieRequest {
+            query: "Cinderella".to_owned(),
+            year: Some(0),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/search/movie","queryParams":{"query":"Cinderella"}}"#
+        );
+    }
+
+    /// `client.SearchTv` never sends the `year` field its request struct carries.
+    #[test]
+    fn search_tv_never_sends_year() {
+        let request = search_tv_request(&tmdb::SearchTvRequest {
+            query: "Cinderella".to_owned(),
+            year: Some(1950),
+            ..Default::default()
+        });
+
+        assert!(
+            !encoded(&request).contains("\"year\""),
+            "client.SearchTv sends first_air_date_year only: {}",
+            encoded(&request)
+        );
+    }
+
+    #[test]
+    fn find_by_id_builds_the_external_source_query() {
+        let request = find_by_id_request(&tmdb::FindByIdRequest {
+            external_source: "imdb_id".to_owned(),
+            external_id: "tt0042332".to_owned(),
+            language: None,
+        });
+
+        assert_eq!(
+            encoded(&request),
+            r#"{"method":"GET","path":"/find/tt0042332","queryParams":{"external_source":"imdb_id"}}"#
+        );
+    }
 }
