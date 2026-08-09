@@ -1,21 +1,26 @@
 //! The B′ desync gate, run against the Go-recorded golden tape.
 //!
-//! 🚨 This gate does NOT pass today, and that is the point. Rust's four
-//! `attach_*` actions are stubs (`engine.rs` maps them all to
-//! `Action::AttachUnmatched`), so the classifier never consults the resolver and
-//! every subject that recorded observations reports `unconsumed`.
+//! 🚨 This gate does NOT fully pass yet, and the assertions pin the current
+//! baseline rather than a pass — so a lane that changes behaviour moves the
+//! numbers visibly instead of quietly satisfying a test written around a stub.
+//! (It already worked once: implementing the local attach actions turned these
+//! assertions red, which is exactly what was wanted.)
 //!
-//! These tests therefore pin the **baseline**, not a pass. When an enrichment
-//! lane lands, `unconsumed` falls and `matched` rises, and the assertions here
-//! are what will notice. A test that asserted `passed()` today would either fail
-//! permanently or, worse, be written to accept the stub and then never notice
-//! the real thing.
+//! # These fixtures are a smoke test, not a parity measurement
+//!
+//! The golden's four subjects were built to exercise the TAPE — an empty answer,
+//! a populated window, a recorded failure, an empty record — not to be a
+//! classifier corpus. Running one workflow over all of them therefore produces
+//! honest-but-uninteresting verdicts for some, notably `tmdb-failure` (see
+//! [`baseline`]). A real measurement needs a corpus of real torrents recorded
+//! through the full workflow. What these tests prove is that the harness,
+//! resolver and attach actions are wired correctly end to end.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bitmagnet_classifier::tape_corpus::{self, Verdict};
-use bitmagnet_classifier::{Classifier, ClassifierInput};
+use bitmagnet_classifier::{Classifier, ClassifierInput, InputHint};
 use bitmagnet_tape::Replay;
 
 const GOLDEN_DIGEST: &str =
@@ -33,15 +38,25 @@ fn replay() -> Replay {
 fn input_for(subject: &str) -> Option<ClassifierInput> {
     Some(ClassifierInput {
         id: subject.to_owned(),
-        name: format!("{subject} (2020)"),
+        // Parses to base title "Cinderella" + year 1950, which is exactly the
+        // question the golden recorded. Anything else would desync on purpose.
+        name: "Cinderella (1950)".to_owned(),
         size: 1,
-        // `no_info` keeps the file-list rules from firing, so the only thing the
-        // gate can observe is the enrichment path it exists to measure.
+        // `no_info` keeps the file-extension rules from firing, so the content
+        // type comes from the hint and the only thing left to observe is the
+        // enrichment path this gate exists to measure.
         files_status: "no_info".to_owned(),
         extension: None,
         files_count: None,
         files: Vec::new(),
-        hint: None,
+        // The hint supplies the content type the attach actions guard on.
+        // Without it the classification never reaches them and the gate would
+        // measure nothing — which is exactly the trap this test fell into first.
+        hint: Some(InputHint {
+            content_type: "movie".to_owned(),
+            content_source: String::new(),
+            content_id: String::new(),
+        }),
     })
 }
 
@@ -69,37 +84,58 @@ async fn gate_runs_over_every_recorded_subject() {
     );
 }
 
-/// The baseline: with `attach_*` stubbed, Rust consults nothing.
+/// The current baseline, with the LOCAL attach actions implemented and TMDB not.
 ///
-/// Every subject that recorded observations is `unconsumed`; the one that
-/// recorded none matches trivially, because "asked nothing, and nothing was
-/// recorded" is agreement.
+/// Each verdict here is understood, not merely observed:
+///
+/// * `tied-window` — **match**. Its one recorded observation is a local search,
+///   Rust asks exactly it, and the record is fully consumed.
+/// * `no-observations` — **match**, trivially: nothing recorded, nothing asked.
+/// * `empty-then-tmdb` — **unconsumed 2 of 3**. The local search matches; the two
+///   TMDB observations go unasked because TMDB replay is unwired. This is the
+///   shortfall the gate exists to report, and it closes when TMDB lands.
+/// * `tmdb-failure` — **desync, and NOT a port bug.** That fixture's record holds
+///   only a `tmdb.request`, because it was recorded by exercising the TMDB seam
+///   directly rather than by running the whole workflow. Its flags omit
+///   `local_search_enabled`, which `core.yml` DEFAULTS TO TRUE, so a full
+///   workflow legitimately attempts a local search first and finds a
+///   `tmdb.request` at that position. The gate is correctly reporting that this
+///   fixture is not a workflow recording.
 #[tokio::test]
-async fn baseline_is_unconsumed_because_attach_is_stubbed() {
+async fn baseline() {
     let report = run_gate().await;
 
     assert_eq!(
-        report.consumed_observations, 0,
-        "attach_* is stubbed, so the resolver is never consulted"
+        report.consumed_observations, 3,
+        "the local attach actions consult the resolver"
     );
+    assert_eq!(report.matched, 2, "tied-window and no-observations match");
     assert_eq!(
-        report.desynced, 0,
-        "nothing should DESYNC: Rust asks no questions, it does not ask wrong ones"
+        report.unconsumed, 1,
+        "empty-then-tmdb still owes its TMDB calls"
     );
-
-    // `no-observations` recorded nothing, so asking nothing agrees with it.
-    assert_eq!(
-        report.matched, 1,
-        "only the zero-observation subject matches"
-    );
-    assert_eq!(
-        report.unconsumed, 3,
-        "the three subjects with observations are all unconsumed"
-    );
+    assert_eq!(report.desynced, 1, "tmdb-failure — see this test's docs");
+    assert_eq!(report.errored, 0);
 
     assert!(
         !report.passed(),
-        "the gate must NOT report a pass while the enrichment path is stubbed"
+        "not a pass while TMDB is unwired and a fixture desyncs"
+    );
+}
+
+/// The one that proves the whole chain: a subject whose recorded observation is
+/// a local search is asked for byte-identically and fully consumed.
+#[tokio::test]
+async fn a_local_search_subject_matches_exactly() {
+    let report = run_gate().await;
+
+    assert!(
+        !report
+            .failures
+            .iter()
+            .any(|failure| failure.subject == "tied-window"),
+        "tied-window must not appear among the failures: {:?}",
+        report.failures
     );
 }
 
@@ -116,10 +152,13 @@ async fn failures_report_how_much_was_skipped() {
         .expect("the three-observation subject is reported");
 
     assert_eq!(empty_then_tmdb.recorded, 3);
-    assert_eq!(empty_then_tmdb.consumed, 0);
+    assert_eq!(
+        empty_then_tmdb.consumed, 1,
+        "the local search is asked; the two TMDB calls are not"
+    );
     assert_eq!(
         empty_then_tmdb.verdict,
-        Verdict::Unconsumed { remaining: 3 },
+        Verdict::Unconsumed { remaining: 2 },
         "it should say exactly how many observations went unasked"
     );
 }

@@ -61,7 +61,11 @@ pub(crate) enum Action {
     /// refactor is provably behaviour-preserving: with the null resolver this
     /// variant short-circuits exactly as before, keeping the 330 goldens and the
     /// 119,991-name replay bit-identical.
-    AttachUnmatched,
+    /// The four `attach_*` actions. Kept as distinct variants rather than one
+    /// fused "unmatched" because they consult different dependencies and fail
+    /// for different reasons — collapsing them is what made the enrichment path
+    /// invisible to the parity gate.
+    Attach(AttachKind),
 }
 
 /// A compiled condition node.
@@ -138,10 +142,12 @@ fn compile_dispatch(
             "unmatched" => Ok(Action::Unmatched(path)),
             "parse_date" => Ok(Action::ParseDate),
             "parse_video_content" => Ok(Action::ParseVideoContent),
-            "attach_local_content_by_id"
-            | "attach_local_content_by_search"
-            | "attach_tmdb_content_by_id"
-            | "attach_tmdb_content_by_search" => Ok(Action::AttachUnmatched),
+            "attach_local_content_by_id" => Ok(Action::Attach(AttachKind::LocalContentById)),
+            "attach_local_content_by_search" => {
+                Ok(Action::Attach(AttachKind::LocalContentBySearch))
+            }
+            "attach_tmdb_content_by_id" => Ok(Action::Attach(AttachKind::TmdbContentById)),
+            "attach_tmdb_content_by_search" => Ok(Action::Attach(AttachKind::TmdbContentBySearch)),
             other => Err(err_at(
                 &path,
                 format!("no action matched literal '{other}'"),
@@ -327,10 +333,8 @@ pub(crate) struct ExecCtx<'a> {
     /// The B′-0 dependency seam. Held as a trait object so the same compiled
     /// workflows run against the live PG/TMDB backends or a recorded tape.
     ///
-    /// Unread in this lane: [`Action::AttachUnmatched`] still short-circuits
-    /// before consulting it. Lane B′-4 splits that variant into the four real
-    /// attach actions, and they read it from here.
-    #[allow(dead_code)]
+    /// Read by [`Action::Attach`]. The local actions are implemented; the TMDB
+    /// ones still resolve to unmatched (see [`AttachKind`]).
     pub resolver: &'a dyn ContentResolver,
 }
 
@@ -426,7 +430,7 @@ pub(crate) fn run_action<'a>(
                 }
                 Ok(r)
             }
-            Action::AttachUnmatched => Err(FlowError::Unmatched),
+            Action::Attach(kind) => run_attach(*kind, ctx, result).await,
         }
     })
 }
@@ -459,4 +463,156 @@ fn eval_condition(
                 .eval_bool(program, ctx.torrent_val, result, ctx.flags_val)
         }
     }
+}
+
+/// Which dependency an `attach_*` action consults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachKind {
+    /// `attach_local_content_by_id` — Go
+    /// `action_attach_local_content_by_id.go`.
+    LocalContentById,
+    /// `attach_local_content_by_search` — Go
+    /// `action_attach_local_content_by_search.go`.
+    LocalContentBySearch,
+    /// `attach_tmdb_content_by_id` — NOT implemented; see [`run_attach`].
+    TmdbContentById,
+    /// `attach_tmdb_content_by_search` — NOT implemented; see [`run_attach`].
+    TmdbContentBySearch,
+}
+
+/// Run one `attach_*` action against [`ExecCtx::resolver`].
+///
+/// Go's actions guard, call their dependency, and attach on success; a lookup
+/// that finds nothing is `ErrUnmatched`, which `find_match` treats as "try the
+/// next branch" rather than as a failure. A genuine backend error propagates.
+///
+/// 🚨 The TMDB kinds are still unmatched. Rust has no TMDB client
+/// (`bitmagnet-tmdb` is a placeholder), so consulting the resolver for them
+/// would return `Unsupported` and turn what Go treats as a recoverable
+/// `find_match` fallthrough into a hard error — changing control flow on a path
+/// that is not yet implemented. Returning unmatched keeps the surrounding
+/// workflow behaving as it does today; the parity gate reports the shortfall as
+/// unconsumed observations rather than hiding it.
+async fn run_attach(
+    kind: AttachKind,
+    ctx: &ExecCtx<'_>,
+    result: Classification,
+) -> Result<Classification, FlowError> {
+    match kind {
+        AttachKind::LocalContentById => attach_local_by_id(ctx, result).await,
+        AttachKind::LocalContentBySearch => attach_local_by_search(ctx, result).await,
+        AttachKind::TmdbContentById | AttachKind::TmdbContentBySearch => Err(FlowError::Unmatched),
+    }
+}
+
+/// Go `attach_local_content_by_id`: look the hinted content ref up by primary
+/// key.
+///
+/// The guard is Go's exactly — a nil hint, or a hint without a content SOURCE,
+/// is unmatched before any lookup. The hint's content type and id are only
+/// meaningful alongside a source, so a source-less hint is not a lookup with
+/// missing arguments; it is not a lookup at all.
+async fn attach_local_by_id(
+    ctx: &ExecCtx<'_>,
+    result: Classification,
+) -> Result<Classification, FlowError> {
+    let Some(hint) = ctx.input.hint.as_ref() else {
+        return Err(FlowError::Unmatched);
+    };
+
+    // Go: `Hint.IsNil() || !Hint.ContentSource.Valid`. Here both are plain
+    // strings whose empty value is Go's nil, so emptiness is the same guard.
+    if hint.content_type.is_empty() || hint.content_source.is_empty() {
+        return Err(FlowError::Unmatched);
+    }
+
+    // An unparseable hint type is a malformed input, not a miss — but Go would
+    // never have built such a hint, and treating it as unmatched keeps a bad
+    // input from failing an otherwise-fine classification.
+    let Ok(content_type) = hint.content_type.parse::<bitmagnet_model::ContentType>() else {
+        return Err(FlowError::Unmatched);
+    };
+
+    match ctx
+        .resolver
+        .content_by_id(content_type, &hint.content_source, &hint.content_id)
+        .await
+    {
+        // Go's ErrUnmatched: the row does not exist. A recoverable miss.
+        Ok(None) => Err(FlowError::Unmatched),
+        Ok(Some(content)) => {
+            let mut result = result;
+            result.attach_content(content);
+            Ok(result)
+        }
+        // A backend failure is NOT a miss: it must surface as an error outcome
+        // rather than letting `find_match` quietly try the next branch.
+        Err(err) => Err(FlowError::Cel(err.to_string())),
+    }
+}
+
+/// Go `attach_local_content_by_search`: full-text search, then a first-wins
+/// Levenshtein pick over the candidate window.
+///
+/// 🚨 The split matters. The resolver returns the ORDERED candidate list and the
+/// tie-break runs here, because `ts_rank` ties make the window's order a
+/// database observation rather than a computable fact. Doing the selection
+/// behind the seam would bake Go's coin-flip into the unobservable side of the
+/// boundary and leave nothing to compare.
+async fn attach_local_by_search(
+    ctx: &ExecCtx<'_>,
+    result: Classification,
+) -> Result<Classification, FlowError> {
+    // Go guards on both: without a content type there is nothing to search, and
+    // without a base title there is nothing to search FOR.
+    let (Some(content_type), Some(base_title)) =
+        (result.content_type, result.base_title.as_deref())
+    else {
+        return Err(FlowError::Unmatched);
+    };
+
+    // Go's `model.Year` zero value is nil; the resolver takes an Option.
+    let year = (result.date.year != 0).then_some(result.date.year);
+
+    let Some(content_type) = to_model_content_type(content_type) else {
+        return Err(FlowError::Unmatched);
+    };
+
+    let candidates = match ctx
+        .resolver
+        .content_by_search(content_type, base_title, year)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(err) => return Err(FlowError::Cel(err.to_string())),
+    };
+
+    // Go scores each candidate against its title AND its original title, taking
+    // the item's best of the two.
+    let best = bitmagnet_textmatch::find_best_match(base_title, &candidates, |item| {
+        let mut titles = vec![item.content.title.clone()];
+        if let Some(original) = item.content.original_title.as_ref() {
+            titles.push(original.clone());
+        }
+        titles
+    });
+
+    // Nothing within the distance threshold is Go's ErrUnmatched.
+    let Some(best) = best else {
+        return Err(FlowError::Unmatched);
+    };
+
+    let mut result = result;
+    result.attach_content(best.content.clone());
+    Ok(result)
+}
+
+/// Bridge the classifier's own [`ContentType`] to the model crate's.
+///
+/// The two crates each own an enum for the same closed vocabulary, and the
+/// string form is what they agree on — it is also what the tape and Go's JSON
+/// carry, so routing through it keeps a single spelling authoritative instead of
+/// adding a second hand-maintained mapping that could silently drift.
+fn to_model_content_type(content_type: ContentType) -> Option<bitmagnet_model::ContentType> {
+    content_type.as_str().parse().ok()
 }

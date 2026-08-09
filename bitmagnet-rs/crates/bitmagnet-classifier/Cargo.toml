@@ -9,6 +9,8 @@ description = "Phase-3 Lane C — content classifier for the bitmagnet Rust rewr
 
 [dependencies]
 bitmagnet-fts = { path = "../bitmagnet-fts" }
+# B′-1: Go's levenshteinFindBestMatch, the tie-break over the candidate window.
+bitmagnet-textmatch = { path = "../bitmagnet-textmatch" }
 bitmagnet-tape = { path = "../bitmagnet-tape" }
 # CEL engine (cel-rust). `structs` enables custom struct defs, `json` enables
 # Value<->JSON conversion, `regex` powers the built-in `matches()`. Version

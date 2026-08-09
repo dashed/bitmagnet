@@ -813,6 +813,7 @@ dependencies = [
  "bitmagnet-proto",
  "bitmagnet-release",
  "bitmagnet-tape",
+ "bitmagnet-textmatch",
  "cel",
  "futures",
  "hex",
