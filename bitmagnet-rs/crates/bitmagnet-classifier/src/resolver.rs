@@ -46,6 +46,7 @@
 //! [`ResolveError`], which the classifier propagates as an `error` outcome
 //! rather than an `unmatched` one, exactly as Go does.
 
+pub mod tape;
 pub mod tmdb;
 
 use async_trait::async_trait;
@@ -64,6 +65,12 @@ pub enum ResolveError {
     /// distinct so a tape gap can never be silently misread as a miss.
     #[error("no recorded response for {0}")]
     TapeMiss(String),
+    /// A resolver cannot serve this call at all — as distinct from the backend
+    /// answering "nothing" or failing. Kept separate so an unimplemented path
+    /// can never be mistaken for a miss (a real gap in a recording) or for
+    /// `ErrUnmatched` (a real negative answer).
+    #[error("unsupported resolver call: {0}")]
+    Unsupported(String),
 }
 
 /// One ordered candidate from [`ContentResolver::content_by_search`] — Go

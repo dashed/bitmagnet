@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Phase-3 Lane C — content classifier for the bitmagnet Rust rewrite."
 
 [dependencies]
+bitmagnet-fts = { path = "../bitmagnet-fts" }
+bitmagnet-tape = { path = "../bitmagnet-tape" }
 # CEL engine (cel-rust). `structs` enables custom struct defs, `json` enables
 # Value<->JSON conversion, `regex` powers the built-in `matches()`. Version
 # pinned locally rather than in the workspace table to keep Lane C's dependency
@@ -41,3 +43,7 @@ bitmagnet-release = { path = "../bitmagnet-release" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The ContentResolver trait is async, so its tests need a runtime.
+tokio = { workspace = true }

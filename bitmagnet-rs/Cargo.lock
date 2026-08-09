@@ -808,9 +808,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitmagnet-fts",
  "bitmagnet-model",
  "bitmagnet-proto",
  "bitmagnet-release",
+ "bitmagnet-tape",
  "cel",
  "futures",
  "hex",
@@ -820,6 +822,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
