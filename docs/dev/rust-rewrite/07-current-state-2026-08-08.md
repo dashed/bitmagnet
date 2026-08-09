@@ -10,9 +10,10 @@ sibling document, this one is correct.
 
 Phases 0–3 are landed and deployed. The read path is in production. The remaining
 blocker for cutover is **B′ — flags-ON classifier parity**. The oracle now works
-end to end — Go records the tape, Rust reads it — so the concrete gap has moved:
-nothing *consumes* the replay yet. Wiring the classifier's `ContentResolver` seam
-through it is the next step.
+end to end for the LOCAL seams — Go records, Rust reads, and the classifier's
+`ContentResolver` consults it. The gap has moved again: TMDB replay is unwired
+(the tape records it at the HTTP level and Rust has no TMDB client), and no
+harness yet drives the resolver over a corpus.
 
 ## What is deployed right now
 
@@ -123,13 +124,31 @@ deterministically without capturing it first.
   divergence is the crate's whole reason for not calling `serde_json::to_string`.
   Pinned by `testdata/parity/tape-canonical/escapes.json`, generated FROM Go.
 
+- **The seam is wired** — `bitmagnet-classifier::resolver::tape::TapeContentResolver`
+  implements `ContentResolver` against a tape, so a classification can run with
+  flags ON and no live PostgreSQL or TMDB. `content_by_id` and `content_by_search`
+  are complete, including the exact request derivation (quoted search string,
+  year → `[Jan 1 y, Jan 1 y+1]` range, canonical-vs-alternative identifier
+  dispatch). One resolver is bound to one subject; a harness asserts
+  `remaining() == 0`, since consuming FEWER observations than Go recorded is as
+  much a divergence as a miss.
+  🔑 Go's tape JSON is NOT decodable by `bitmagnet_model::Content`: Go's
+  `model.Date` and null wrappers carry no JSON tags, so they serialise as
+  `{"Year":…}` / `{"Bool":…,"Valid":…}` while the Rust model uses plain
+  `Option<T>`. The Go encoding is modelled locally in the adapter and translated
+  at the boundary rather than reshaping a shared type.
+
 **What is NOT done — the remaining gap:**
 
-1. **Nothing consumes the replay yet.** `bitmagnet-tape` can answer observations,
-   but `bitmagnet-classifier` does not yet route its `ContentResolver` seam
-   through it. That wiring is the next concrete step, and it is what turns the
-   oracle into an actual parity run.
-2. The four remaining lanes of the seven-lane carve.
+1. 🚨 **TMDB replay is not wired**, and returns `ResolveError::Unsupported`. The
+   tape records TMDB at the HTTP level (method/path/queryParams/base64 body), so
+   replaying it needs Rust to rebuild Go's request URLs and decode those bodies
+   into the response DTOs — and `bitmagnet-tmdb` is still a placeholder. This is
+   the next concrete step, and it is the TMDB-client lane's work.
+2. **No harness drives the resolver over a corpus yet.** The pieces exist; what is
+   missing is the runner that, per subject, builds a resolver, classifies, and
+   diffs the result against Go's recorded outcome.
+3. The four remaining lanes of the seven-lane carve.
 3. No flags-ON parity gate exists, so there is no pass/fail criterion yet.
 4. 🚨 **Tsquery construction is out of scope for the tape and must be proven
    separately.** The seam records the search string, not the tsquery it compiles
