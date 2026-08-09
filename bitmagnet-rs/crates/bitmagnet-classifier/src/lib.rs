@@ -35,6 +35,7 @@ mod parsers;
 pub mod resolver;
 mod result;
 mod source;
+pub mod tape_corpus;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

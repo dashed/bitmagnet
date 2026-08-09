@@ -257,17 +257,17 @@ fn date_range_from_year(year: u16) -> DateRange {
 }
 
 /// A [`ContentResolver`] that answers from a recorded tape. See the module docs.
-pub struct TapeContentResolver<'a> {
-    session: Mutex<Session<'a>>,
+pub struct TapeContentResolver {
+    session: Mutex<Session>,
 }
 
-impl<'a> TapeContentResolver<'a> {
+impl TapeContentResolver {
     /// Binds a resolver to one subject's recording.
     ///
     /// A subject the tape has no record for still yields a resolver; its first
     /// lookup reports a miss naming the subject, rather than silently falling
     /// through to a live backend.
-    pub fn new(replay: &'a Replay, subject: &str, attempt: i64) -> Self {
+    pub fn new(replay: &Replay, subject: &str, attempt: i64) -> Self {
         Self {
             session: Mutex::new(replay.begin(subject, attempt)),
         }
@@ -323,7 +323,7 @@ fn rebuild_local_search_error(kind: &str, message: &str) -> ResolveError {
 }
 
 #[async_trait]
-impl ContentResolver for TapeContentResolver<'_> {
+impl ContentResolver for TapeContentResolver {
     async fn content_by_id(
         &self,
         content_type: ContentType,

@@ -125,12 +125,18 @@ impl Replay {
     /// subject. Returning no session instead would silently drop the replay back
     /// onto the live dependency, which is precisely the failure this crate
     /// exists to prevent.
-    pub fn begin(&self, subject: impl Into<String>, attempt: i64) -> Session<'_> {
+    pub fn begin(&self, subject: impl Into<String>, attempt: i64) -> Session {
         let subject = subject.into();
+
+        // The session OWNS its observations. It costs one clone of a handful of
+        // records per classification — negligible against the classification
+        // itself — and in exchange the resolver that wraps it can be `'static`,
+        // which is what `Arc<dyn ContentResolver>` requires.
         let recorded = self
             .records
             .get(&(subject.clone(), attempt))
-            .map_or(&[][..], |record| record.observations.as_slice());
+            .map(|record| record.observations.clone())
+            .unwrap_or_default();
 
         Session {
             subject,
@@ -197,14 +203,14 @@ pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, TapeError> {
 /// re-aligning the stream and turning one wrong question into a cascade of
 /// misleading answers.
 #[derive(Debug)]
-pub struct Session<'a> {
+pub struct Session {
     subject: String,
     attempt: i64,
-    recorded: &'a [Observation],
+    recorded: Vec<Observation>,
     cursor: usize,
 }
 
-impl<'a> Session<'a> {
+impl Session {
     pub fn subject(&self) -> &str {
         &self.subject
     }
@@ -230,7 +236,7 @@ impl<'a> Session<'a> {
         &mut self,
         kind: &str,
         request: &T,
-    ) -> Result<Answer<'a>, TapeError> {
+    ) -> Result<Answer<'_>, TapeError> {
         let request_json = canonical::marshal(request).map_err(|source| TapeError::Decode {
             context: "encode replay request".into(),
             source,
