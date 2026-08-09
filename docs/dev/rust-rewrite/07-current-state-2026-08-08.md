@@ -12,9 +12,9 @@ Phases 0–3 are landed and deployed. The read path is in production. The remain
 blocker for cutover is **B′ — flags-ON classifier parity**. The oracle now works
 end to end for the LOCAL seams — Go records, Rust reads, and the classifier's
 `ContentResolver` consults it. The oracle, the seam and the
-measurement now all exist; what is missing is the thing being measured — Rust's
-four `attach_*` actions are still stubs, so the gate's baseline is 0 of 5
-observations consumed.
+measurement now all exist; the local `attach_*` actions are
+implemented and the gate moved from 0 to 3 of 5 observations consumed. What
+remains is TMDB replay and a corpus of real torrents to measure against.
 
 ## What is deployed right now
 
