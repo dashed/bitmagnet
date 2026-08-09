@@ -69,6 +69,79 @@ type Record struct {
 	Flags        map[string]any `json:"flags"`
 	Observations []Observation  `json:"observations"`
 	Incomplete   bool           `json:"incomplete,omitempty"`
+	// Outcome is how the classification ended. Nil means either that the record
+	// was still open when the tape was written (see Incomplete) or that the tape
+	// predates outcome recording -- in both cases the outcome is UNKNOWN, which
+	// is not the same as "it finished normally".
+	Outcome *RecordOutcome `json:"outcome,omitempty"`
+}
+
+// RecordOutcomeKind is how a classification ended.
+type RecordOutcomeKind string
+
+const (
+	// RecordCompleted: the workflow ran to the end and returned a result.
+	RecordCompleted RecordOutcomeKind = "completed"
+	// RecordUnmatched: the workflow ended with ErrUnmatched.
+	RecordUnmatched RecordOutcomeKind = "unmatched"
+	// RecordDeleted: the workflow ended with ErrDeleteTorrent.
+	RecordDeleted RecordOutcomeKind = "deleted"
+	// RecordCanceled: the context was cancelled or timed out -- e.g. the
+	// process was shutting down. NOT reproducible, so the observation list is a
+	// prefix that happens to stop wherever the cancellation landed.
+	RecordCanceled RecordOutcomeKind = "canceled"
+	// RecordFailed: anything else went wrong.
+	RecordFailed RecordOutcomeKind = "error"
+)
+
+// RecordOutcome is how a classification ended.
+//
+// 🚨 Why the tape needs this at all. Without it, a record holding an EMPTY
+// observation list is ambiguous between two opposite claims:
+//
+//   - the workflow ran to completion and legitimately consulted nothing, so a
+//     replay that consults nothing agrees and one that consults something has
+//     diverged; and
+//   - the classification never got that far -- cancelled at shutdown, or stopped
+//     by an error -- so the list is a PREFIX and proves nothing either way.
+//
+// Reading the second as the first manufactures a divergence out of a recording
+// artifact, which is exactly what happened to two subjects of the 2026-08-09
+// production corpus: the gate reported them as misses, and running Go's own
+// classifier over their input showed Go asks precisely what the replay asked.
+//
+// [Record.Incomplete] does not cover this. It is set only while a session is
+// still OPEN when the tape is written, and a classification that ends early
+// closes its session on the way out -- so it is written as a complete record
+// with nothing in it.
+type RecordOutcome struct {
+	Kind RecordOutcomeKind `json:"kind"`
+	// Error is the message for the failing kinds, kept for diagnosis only.
+	// Consumers must key on Kind: the text is not part of the contract.
+	Error string `json:"error,omitempty"`
+}
+
+// Authoritative reports whether this record's observation list can be read as a
+// COMPLETE account of what the classification asked.
+//
+// It is true only for the endings a replay of the same input reaches too:
+// running to completion, or stopping at `unmatched` / `delete`, which are the
+// workflow's own deterministic vocabulary. A cancellation is not reproducible,
+// an error may not be, and an unknown outcome is not a claim at all -- for those
+// the list is a prefix, and "the replay asked more" says nothing about parity.
+func (r Record) Authoritative() bool {
+	if r.Incomplete || r.Outcome == nil {
+		return false
+	}
+
+	switch r.Outcome.Kind {
+	case RecordCompleted, RecordUnmatched, RecordDeleted:
+		return true
+	case RecordCanceled, RecordFailed:
+		return false
+	default:
+		return false
+	}
 }
 
 // Manifest is the tape header, written alongside the records.
@@ -86,6 +159,18 @@ type Manifest struct {
 	// IncompleteRecordCount is how many of those records were still being
 	// classified when the tape was written. They are excluded from replay.
 	IncompleteRecordCount int `json:"incompleteRecordCount"`
+	// AuthoritativeRecordCount is how many records are a COMPLETE account of
+	// what their classification asked -- see [Record.Authoritative]. The rest
+	// hold a prefix, so for them "the replay asked more" is not evidence of a
+	// divergence.
+	//
+	// It is in the manifest because it is the honest size of the oracle, and a
+	// reader who only sees RecordCount will overstate it.
+	AuthoritativeRecordCount int `json:"authoritativeRecordCount"`
+	// RecordOutcomeCounts breaks the records down by how they ended, so a tape
+	// with an unexpected number of cancellations is visible without reading
+	// every line.
+	RecordOutcomeCounts map[string]int `json:"recordOutcomeCounts,omitempty"`
 	// Truncated is set when the recording hit its observation cap and stopped
 	// recording. A truncated tape is not a complete oracle and a replay of the
 	// full population against it will report misses.

@@ -23,10 +23,11 @@
 //!   this gate reports as a desync should be checked against that before it is
 //!   called a divergence.
 //!
-//! # The measurement, and the two subjects that miss
+//! # The measurement
 //!
 //! ```text
-//! subjects=284 matched=282 desynced=0 missed=2 unconsumed=0 errored=0  observations=120/120
+//! subjects=284 matched=282 desynced=0 missed=0 unconsumed=0 errored=0
+//! not_authoritative=2  observations=120/120
 //! ```
 //!
 //! **Zero desyncs, and every recorded observation consumed.** Across 284 real
@@ -41,7 +42,7 @@
 //! by id — reproducing the whole chain reproduces the decision logic, not merely
 //! the call shapes.
 //!
-//! ## The 2 misses are a RECORDING artifact, not a port divergence
+//! ## The 2 non-matching subjects are a RECORDING artifact, not a port divergence
 //!
 //! Both recorded **zero** observations while Rust asked for a
 //! `local.content_by_search` at position 0:
@@ -70,14 +71,24 @@
 //!   rows were created in **January 2025** and never updated, with a NULL
 //!   source, so the pre-seed cannot have fired at recording time.
 //!
-//! 🚨 What that leaves is a property of the TAPE FORMAT: a record is marked
+//! 🚨 What that left was a property of the TAPE FORMAT: a record is marked
 //! `incomplete` only if its session is still open when the tape is written
 //! (`recorder.go` — `Incomplete` is membership in `r.open`). A classification
 //! that *began and then finished without reaching the enrichment step* —
 //! cancelled at SIGTERM, or ended by an error outcome — closes its session and
-//! is written as a COMPLETE record with zero observations. The tape does not
-//! record the classification's outcome, so that case is indistinguishable from
-//! "the workflow legitimately asked nothing".
+//! is written as a COMPLETE record with zero observations, indistinguishable
+//! from "the workflow legitimately asked nothing".
+//!
+//! **That gap is now fixed**: `tape.RecordOutcome` records how each
+//! classification ended, and [`bitmagnet_tape::Record::authoritative`] reports
+//! whether its observation list can be read as a complete account. These two
+//! subjects therefore land in `not_authoritative` rather than being counted as
+//! divergences.
+//!
+//! 🚨 But THIS corpus predates the fix, so every record's outcome is `unknown`
+//! and *nothing in it is authoritative*. The reclassification above is correct
+//! but blunt: it applies to the whole tape, not just these two. Re-recording is
+//! what turns the distinction into a real measurement.
 //!
 //! Corroboration that Rust's question is the RIGHT one: both torrents carry
 //! attached content that is exactly what it finds — `tmdb/77117` "Sunny" (2011)
@@ -87,12 +98,16 @@
 //! ## 🚨 How much of this measurement is positive evidence
 //!
 //! Only **72 of the 284 subjects made any observation at all**; the other 212
-//! recorded nothing and "match" by both sides asking nothing. Per the paragraph
-//! above, a zero-observation record is weak evidence — it can also mean the
-//! recorded classification ended early. So the load-bearing part of this gate is
-//! the **72 subjects / 120 observations that actually exercised a seam**, where
-//! every request matched byte for byte. The 212 trivial agreements should not be
-//! read as 212 independent confirmations.
+//! recorded nothing and "match" by both sides asking nothing. Per the section
+//! above, a zero-observation record on an outcome-less tape is weak evidence —
+//! it can also mean the recorded classification ended early. So the load-bearing
+//! part of this gate is the **72 subjects / 120 observations that actually
+//! exercised a seam**, where every request matched byte for byte. The 212
+//! trivial agreements should not be read as 212 independent confirmations.
+//!
+//! A `Match` is deliberately NOT downgraded for a non-authoritative record:
+//! agreement over a prefix is still agreement, it just proves less. The separate
+//! `not_authoritative` count is what keeps that honest.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -238,13 +253,15 @@ async fn prod_corpus_baseline() {
 
     // Printed so the artifact is visible in CI output, not just asserted on.
     println!(
-        "PROD CORPUS GATE  subjects={} matched={} desynced={} missed={} unconsumed={} errored={} observations={}/{}",
+        "PROD CORPUS GATE  subjects={} matched={} desynced={} missed={} unconsumed={} \
+errored={} not_authoritative={} observations={}/{}",
         report.subjects,
         report.matched,
         report.desynced,
         report.missed,
         report.unconsumed,
         report.errored,
+        report.not_authoritative,
         report.consumed_observations,
         report.recorded_observations,
     );
@@ -294,15 +311,25 @@ async fn prod_corpus_baseline() {
         "every recorded observation should be consumed"
     );
 
-    // The two known misses are a RECORDING artifact, not a port divergence:
+    // No misses. The two that used to appear here were a RECORDING artifact --
     // running Go's own classifier on their corpus input produces exactly the
-    // request Rust makes. See this module's docs. Pinned rather than fixed,
-    // because the fix belongs in the tape format (record the outcome, so a
-    // classification that ended early is distinguishable from one that
-    // legitimately asked nothing), not in the port.
-    assert!(
-        report.missed <= 2,
-        "a third miss is new: {:?}",
+    // request Rust makes -- and the tape now carries an outcome, so a record
+    // that cannot support a verdict is reported as such instead of being
+    // counted as a divergence.
+    assert_eq!(
+        report.missed, 0,
+        "a miss against an authoritative record is a real divergence: {:?}",
+        report.failures
+    );
+
+    // 🚨 This corpus was recorded BEFORE outcomes existed, so every record's
+    // ending is "unknown" and nothing in it is authoritative. That is why the
+    // two subjects above land here rather than in `missed`, and it is the honest
+    // reading: their observation lists cannot be shown to be complete. Re-record
+    // to turn this into a real number.
+    assert_eq!(
+        report.not_authoritative, 2,
+        "expected exactly the two subjects whose recordings are not oracles: {:?}",
         report.failures
     );
 }

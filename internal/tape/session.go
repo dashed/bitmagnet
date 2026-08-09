@@ -53,22 +53,26 @@ type Session struct {
 	cursor   int
 }
 
-// End marks the classification finished, so a tape written from now on records
-// its observation list as complete. Ending twice, or ending a replay session,
-// is harmless.
-func (s *Session) End() {
+// End marks the classification finished with the given outcome, so a tape
+// written from now on records its observation list as complete AND says how the
+// classification ended. Ending twice, or ending a replay session, is harmless.
+//
+// The outcome is not optional: an observation list without one cannot be told
+// apart from a prefix left by an early exit. See [Outcome].
+func (s *Session) End(outcome RecordOutcome) {
 	if s == nil {
 		return
 	}
 
-	s.recorder.endSession(s.subject, s.attempt)
+	s.recorder.endSession(s.subject, s.attempt, outcome)
 }
 
 // EndSession ends the session carried by ctx, if there is one. It is the form
-// callers want at the end of a classification: `defer tape.EndSession(ctx)`
-// costs a context lookup and a nil check when recording is off.
-func EndSession(ctx context.Context) {
-	SessionFrom(ctx).End()
+// callers want at the end of a classification:
+// `defer func() { tape.EndSession(ctx, outcomeFor(err)) }()`. It costs a context
+// lookup and a nil check when recording is off.
+func EndSession(ctx context.Context, outcome RecordOutcome) {
+	SessionFrom(ctx).End(outcome)
 }
 
 // Subject reports the identity this session's observations are keyed to.

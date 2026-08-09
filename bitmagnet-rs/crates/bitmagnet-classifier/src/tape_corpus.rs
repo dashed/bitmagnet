@@ -24,8 +24,10 @@
 //! alike, in order, with none left over.
 //!
 //! The two verdicts that are NOT `Match` there are
-//! [`Verdict::Miss`](Verdict::Miss)es on a base-title divergence unrelated to
-//! either seam. See `tests/prod_corpus_gate.rs`, which documents them.
+//! [`Verdict::NotAuthoritative`]: their recordings ended before reaching the
+//! enrichment step, so their observation lists are prefixes and cannot support a
+//! verdict either way. Running Go's own classifier over their input produces
+//! exactly the request the replay makes. See `tests/prod_corpus_gate.rs`.
 //!
 //! Its assertions deliberately pin the current numbers rather than asserting a
 //! pass, so a lane that changes behaviour has to move them visibly. That has
@@ -61,6 +63,18 @@ pub enum Verdict {
     /// The classification failed for a reason that is not a tape disagreement,
     /// e.g. TMDB replay being unwired.
     Error { detail: String },
+    /// The RECORDING is not an oracle for this subject, so the disagreement it
+    /// would otherwise report is not evidence.
+    ///
+    /// A record whose classification ended early — cancelled at shutdown, or
+    /// stopped by an error — holds a prefix of what it would have asked. A
+    /// replay that runs further is doing the right thing, and counting that as a
+    /// miss fabricates a divergence. See `bitmagnet_tape::RecordOutcome`.
+    NotAuthoritative {
+        /// The recorded ending, or `"unknown"` for a tape without outcomes.
+        outcome: String,
+        detail: String,
+    },
 }
 
 /// One subject's outcome.
@@ -88,6 +102,10 @@ pub struct CorpusReport {
     pub missed: usize,
     pub unconsumed: usize,
     pub errored: usize,
+    /// Subjects whose recording is a prefix, so no verdict about them is
+    /// evidence either way. Counted separately rather than folded into
+    /// `matched` or `missed`: both would be a claim the tape cannot support.
+    pub not_authoritative: usize,
     pub recorded_observations: usize,
     pub consumed_observations: usize,
     /// Per-verdict counts, for a one-line summary.
@@ -154,6 +172,11 @@ where
                 record.workflow.clone(),
                 flags_from_record(&record.flags),
                 record.observations.len(),
+                record.authoritative(),
+                record.outcome.as_ref().map_or_else(
+                    || "unknown".to_owned(),
+                    |o| format!("{:?}", o.kind).to_lowercase(),
+                ),
             )
         })
         .collect();
@@ -161,7 +184,7 @@ where
 
     let mut reports = Vec::with_capacity(subjects.len());
 
-    for (subject, attempt, workflow, flags, recorded) in subjects {
+    for (subject, attempt, workflow, flags, recorded, authoritative, outcome) in subjects {
         let Some(input) = input_for(&subject) else {
             continue;
         };
@@ -169,11 +192,12 @@ where
         let resolver = Arc::new(TapeContentResolver::new(replay, &subject, attempt));
         let classifier = classifier_for(Arc::clone(&resolver))?;
 
-        let outcome = classifier.run(&workflow, &flags, &input).await;
+        let result = classifier.run(&workflow, &flags, &input).await;
 
         let remaining = resolver.remaining();
         let consumed = recorded.saturating_sub(remaining);
-        let verdict = verdict_for(&outcome, remaining);
+        let verdict =
+            downgrade_if_not_an_oracle(verdict_for(&result, remaining), authoritative, &outcome);
 
         reports.push(SubjectReport {
             subject,
@@ -202,6 +226,37 @@ fn flags_from_record(recorded: &serde_json::Map<String, serde_json::Value>) -> F
                 .map(|flag| (name.clone(), FlagValue::Bool(flag)))
         })
         .collect()
+}
+
+/// Reclassifies a verdict when the RECORDING, not the port, is what cannot be
+/// trusted.
+///
+/// A record whose classification ended early holds a prefix of the questions it
+/// would have asked, so "the replay asked more" (a [`Verdict::Miss`]) or "the
+/// replay asked fewer" ([`Verdict::Unconsumed`]) says nothing about parity. Both
+/// become [`Verdict::NotAuthoritative`].
+///
+/// 🚨 A [`Verdict::Desync`] is deliberately NOT downgraded. A prefix is still a
+/// prefix of the real sequence, so a *different* question inside it is a genuine
+/// divergence no matter how the recording ended. Neither is a [`Verdict::Match`]:
+/// agreement over a prefix is still agreement, it just proves less, and the
+/// separate `not_authoritative` count is what keeps that honest.
+fn downgrade_if_not_an_oracle(verdict: Verdict, authoritative: bool, outcome: &str) -> Verdict {
+    if authoritative {
+        return verdict;
+    }
+
+    match verdict {
+        Verdict::Miss { detail } => Verdict::NotAuthoritative {
+            outcome: outcome.to_owned(),
+            detail,
+        },
+        Verdict::Unconsumed { remaining } => Verdict::NotAuthoritative {
+            outcome: outcome.to_owned(),
+            detail: format!("{remaining} recorded observation(s) went unasked"),
+        },
+        other => other,
+    }
 }
 
 /// Derives a verdict from the classification outcome and what the tape has left.
@@ -265,6 +320,7 @@ fn classify_error(detail: &str) -> Verdict {
 fn summarise(reports: Vec<SubjectReport>, failure_sample: usize) -> CorpusReport {
     let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
     let (mut matched, mut desynced, mut missed, mut unconsumed, mut errored) = (0, 0, 0, 0, 0);
+    let mut not_authoritative = 0;
     let (mut recorded_observations, mut consumed_observations) = (0, 0);
 
     for report in &reports {
@@ -292,6 +348,10 @@ fn summarise(reports: Vec<SubjectReport>, failure_sample: usize) -> CorpusReport
                 errored += 1;
                 "error"
             }
+            Verdict::NotAuthoritative { .. } => {
+                not_authoritative += 1;
+                "not_authoritative"
+            }
         };
 
         *by_verdict.entry(key.to_owned()).or_default() += 1;
@@ -312,6 +372,7 @@ fn summarise(reports: Vec<SubjectReport>, failure_sample: usize) -> CorpusReport
         missed,
         unconsumed,
         errored,
+        not_authoritative,
         recorded_observations,
         consumed_observations,
         by_verdict,

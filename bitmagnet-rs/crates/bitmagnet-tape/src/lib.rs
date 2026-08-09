@@ -47,7 +47,7 @@ mod replay;
 
 pub use canonical::marshal;
 pub use format::{
-    Desync, Manifest, Observation, ObservationError, Record, TapeError, MANIFEST_FILE_NAME,
-    OUTCOME_ERROR, OUTCOME_OK, SCHEMA, TAPE_FILE_NAME,
+    Desync, Manifest, Observation, ObservationError, Record, RecordOutcome, RecordOutcomeKind,
+    TapeError, MANIFEST_FILE_NAME, OUTCOME_ERROR, OUTCOME_OK, SCHEMA, TAPE_FILE_NAME,
 };
 pub use replay::{decode_records, Answer, Replay, Session};

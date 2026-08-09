@@ -1,6 +1,7 @@
 package tape
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,7 +58,7 @@ func TestNoSessionWithoutRecorder(t *testing.T) {
 // observation list, and it must not degrade into a null on the way to disk.
 func TestEmptyRecordSurvives(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", map[string]any{"a": true})).End()
+	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", map[string]any{"a": true})).End(RecordOutcome{Kind: RecordCompleted})
 
 	replay, dir := writeAndLoad(t, recorder, digest)
 
@@ -84,7 +85,7 @@ func TestRecordedEmptyResponseIsAnAnswer(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
 	session.Observe("k", map[string]string{"q": "x"}, map[string][]string{"items": {}})
-	session.End()
+	session.End(RecordOutcome{Kind: RecordCompleted})
 
 	replay, _ := writeAndLoad(t, recorder, digest)
 	replaySession := SessionFrom(replay.Begin(context.Background(), "s", 0))
@@ -107,7 +108,7 @@ func TestDesyncOnDifferentRequest(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
 	session.Observe("k", map[string]any{"query": "cinderella", "year": 1950}, map[string]any{"ok": true})
-	session.End()
+	session.End(RecordOutcome{Kind: RecordCompleted})
 
 	replay, _ := writeAndLoad(t, recorder, digest)
 
@@ -138,7 +139,7 @@ func TestDesyncOnDifferentRequest(t *testing.T) {
 
 func TestDigestDriftFailsClosed(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	SessionFrom(recorder.Begin(context.Background(), "s", "default", nil)).End()
+	SessionFrom(recorder.Begin(context.Background(), "s", "default", nil)).End(RecordOutcome{Kind: RecordCompleted})
 
 	dir := t.TempDir()
 	if err := recorder.Write(dir, time.Unix(0, 0).UTC()); err != nil {
@@ -187,7 +188,7 @@ func TestTruncationIsRecorded(t *testing.T) {
 			t.Fatalf("subject %s was refused a session before the cap", subject)
 		}
 
-		EndSession(ctx)
+		EndSession(ctx, RecordOutcome{Kind: RecordCompleted})
 	}
 
 	if !recorder.Truncated() {
@@ -217,7 +218,7 @@ func TestUnfinishedRecordIsExcluded(t *testing.T) {
 
 	finished := SessionFrom(recorder.Begin(context.Background(), "finished", "default", nil))
 	finished.Observe("k", map[string]any{"q": 1}, map[string]any{})
-	finished.End()
+	finished.End(RecordOutcome{Kind: RecordCompleted})
 
 	// Begun, observed once, and deliberately not ended: still in flight.
 	unfinished := SessionFrom(recorder.Begin(context.Background(), "unfinished", "default", nil))
@@ -251,7 +252,7 @@ func TestUnfinishedRecordIsExcluded(t *testing.T) {
 	}
 
 	// Ending it and writing again promotes it to a usable answer.
-	unfinished.End()
+	unfinished.End(RecordOutcome{Kind: RecordCompleted})
 
 	replay, _ = writeAndLoad(t, recorder, digest)
 	if replay.Manifest().IncompleteRecordCount != 0 {
@@ -282,7 +283,7 @@ func TestConcurrentSessionsAreIndependent(t *testing.T) {
 					map[string]any{"step": step})
 			}
 
-			session.End()
+			session.End(RecordOutcome{Kind: RecordCompleted})
 		}
 
 		if concurrent {
@@ -352,7 +353,7 @@ func TestRepeatSubjectGetsDistinctAttempt(t *testing.T) {
 	for range 2 {
 		session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
 		session.Observe("k", map[string]any{"attempt": session.Attempt()}, map[string]any{})
-		session.End()
+		session.End(RecordOutcome{Kind: RecordCompleted})
 	}
 
 	records, err := recorder.Records()
@@ -375,7 +376,7 @@ func TestProvenanceDocumentNamesTheRun(t *testing.T) {
 		"local_search_enabled": true,
 	}))
 	session.Observe("local.content_by_search", map[string]any{}, map[string]any{})
-	session.End()
+	session.End(RecordOutcome{Kind: RecordCompleted})
 
 	_, dir := writeAndLoad(t, recorder, digest)
 
@@ -398,5 +399,126 @@ func TestProvenanceDocumentNamesTheRun(t *testing.T) {
 		if !strings.Contains(string(document), want) {
 			t.Errorf("PROVENANCE.md does not mention %q:\n%s", want, document)
 		}
+	}
+}
+
+// TestRecordOutcomeDisambiguatesAnEmptyObservationList is the regression this
+// field exists for. Two records can both hold zero observations and mean
+// opposite things; without an outcome a reader cannot tell them apart, and the
+// 2026-08-09 production corpus reported two such records as parity misses that
+// were really shutdown casualties.
+func TestRecordOutcomeDisambiguatesAnEmptyObservationList(t *testing.T) {
+	recorder := NewRecorder("sha256:test", 0, Provenance{})
+
+	// Ran to the end and legitimately consulted nothing.
+	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", nil)).
+		End(RecordOutcome{Kind: RecordCompleted})
+	// Began and was cancelled before it consulted anything.
+	SessionFrom(recorder.Begin(context.Background(), "cancelled", "default", nil)).
+		End(RecordOutcome{Kind: RecordCanceled, Error: "context canceled"})
+
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("Records: %v", err)
+	}
+
+	bySubject := map[string]Record{}
+	for _, record := range records {
+		bySubject[record.Subject] = record
+	}
+
+	quiet, cancelled := bySubject["quiet"], bySubject["cancelled"]
+
+	if len(quiet.Observations) != 0 || len(cancelled.Observations) != 0 {
+		t.Fatalf("both records should hold zero observations: %+v", records)
+	}
+
+	if quiet.Incomplete || cancelled.Incomplete {
+		// The heart of it: an early exit CLOSES its session, so Incomplete --
+		// which only tracks still-open sessions -- cannot distinguish them.
+		t.Fatalf("neither record is incomplete; that is why Outcome is needed: %+v", records)
+	}
+
+	if !quiet.Authoritative() {
+		t.Errorf("a completed classification is an authoritative empty answer")
+	}
+
+	if cancelled.Authoritative() {
+		t.Errorf("a cancelled classification's observation list is a prefix, not an answer")
+	}
+}
+
+// A record whose session is still open has no outcome, and must not be read as
+// one that finished.
+func TestAnOpenRecordIsNeverAuthoritative(t *testing.T) {
+	recorder := NewRecorder("sha256:test", 0, Provenance{})
+	_ = recorder.Begin(context.Background(), "in-flight", "default", nil)
+
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("Records: %v", err)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("expected one record, got %d", len(records))
+	}
+
+	if records[0].Outcome != nil {
+		t.Errorf("an unfinished classification has no outcome yet")
+	}
+
+	if !records[0].Incomplete || records[0].Authoritative() {
+		t.Errorf("an open record must be incomplete and non-authoritative: %+v", records[0])
+	}
+}
+
+// A tape written before outcomes existed decodes with a nil Outcome, and that
+// unknown must not be silently upgraded to "finished normally".
+func TestAnAbsentOutcomeIsUnknownNotCompleted(t *testing.T) {
+	var record Record
+	if err := json.Unmarshal([]byte(
+		`{"subject":"old","attempt":0,"workflow":"default","flags":{},"observations":[]}`,
+	), &record); err != nil {
+		t.Fatalf("decode legacy record: %v", err)
+	}
+
+	if record.Outcome != nil {
+		t.Errorf("a legacy record has no outcome")
+	}
+
+	if record.Authoritative() {
+		t.Errorf("an unknown outcome is not a claim that the classification finished")
+	}
+}
+
+// The outcome must survive the round trip a real tape makes, and stay absent
+// from the JSON when there is nothing to say.
+func TestRecordOutcomeRoundTrips(t *testing.T) {
+	encoded, err := EncodeRecords([]Record{{
+		Subject:      "s",
+		Workflow:     "default",
+		Flags:        map[string]any{},
+		Observations: []Observation{},
+		Outcome:      &RecordOutcome{Kind: RecordDeleted},
+	}})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	if !strings.Contains(string(encoded), `"outcome":{"kind":"deleted"}`) {
+		t.Errorf("outcome should encode compactly, got: %s", encoded)
+	}
+
+	decoded, err := DecodeRecords(bytes.NewReader(encoded))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if decoded[0].Outcome == nil || decoded[0].Outcome.Kind != RecordDeleted {
+		t.Errorf("outcome did not survive the round trip: %+v", decoded[0])
+	}
+
+	if !decoded[0].Authoritative() {
+		t.Errorf("a delete is a deterministic ending a replay reaches too")
 	}
 }

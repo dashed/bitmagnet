@@ -108,7 +108,7 @@ func TestTapeExampleGolden(t *testing.T) {
 		t.Fatal("the failure fixture did not fail")
 	}
 
-	tape.EndSession(failureCtx)
+	tape.EndSession(failureCtx, tape.RecordOutcome{Kind: tape.RecordCompleted})
 
 	// A pinned timestamp keeps the example byte-reproducible.
 	generatedAt := time.Date(2026, time.July, 25, 0, 0, 0, 0, time.UTC)

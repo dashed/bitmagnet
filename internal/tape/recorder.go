@@ -171,7 +171,13 @@ func (r *Recorder) appendObservation(subject string, attempt int, observation Ob
 	record.Observations = append(record.Observations, observation)
 }
 
-func (r *Recorder) endSession(subject string, attempt int) {
+// endSession closes a session and stamps how the classification ended.
+//
+// Recording the outcome is what makes an empty observation list readable: see
+// [RecordOutcome]. The stamp lands on the record itself rather than being derived at
+// snapshot time, because by then the classification is gone and only the record
+// remains.
+func (r *Recorder) endSession(subject string, attempt int, outcome RecordOutcome) {
 	if r == nil {
 		return
 	}
@@ -179,7 +185,19 @@ func (r *Recorder) endSession(subject string, attempt int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	delete(r.open, recordKey{subject, attempt})
+	key := recordKey{subject, attempt}
+	delete(r.open, key)
+
+	// A session whose record was never registered -- the cap was already
+	// reached at Begin -- has nothing to stamp.
+	if record, ok := r.index[key]; ok {
+		// First ending wins: a double End must not overwrite the real outcome
+		// with whatever the second caller happened to pass.
+		if record.Outcome == nil {
+			stamped := outcome
+			record.Outcome = &stamped
+		}
+	}
 }
 
 func (r *Recorder) fail(err error) {

@@ -35,6 +35,13 @@ pub struct Manifest {
     /// replay — see [`Record::incomplete`].
     #[serde(default)]
     pub incomplete_record_count: usize,
+    /// Records that are a complete account of what their classification asked —
+    /// see [`Record::authoritative`]. This is the honest size of the oracle; a
+    /// reader who only sees `record_count` will overstate it.
+    ///
+    /// Zero on a tape recorded before outcomes existed, where it is unknowable.
+    #[serde(default)]
+    pub authoritative_record_count: usize,
     /// Set when the recording hit its cap. A truncated tape is not a complete
     /// oracle and a replay of the full population will report misses.
     #[serde(default)]
@@ -61,6 +68,80 @@ pub struct Record {
     /// about that subject into a miss naming it rather than a short answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
+    /// How the classification ended — Go `tape.RecordOutcome`.
+    ///
+    /// `None` means the outcome is **unknown**: either the record was still open
+    /// when the tape was written, or the tape predates outcome recording. That
+    /// is not the same as "it finished normally", and must not be read as such.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<RecordOutcome>,
+}
+
+/// How a classification ended — Go `tape.RecordOutcome`.
+///
+/// 🚨 Without this, a record holding an **empty** observation list is ambiguous
+/// between two opposite claims: that the workflow ran to the end and
+/// legitimately consulted nothing (so a replay consulting something has
+/// diverged), and that the classification never got that far (so the list is a
+/// prefix and proves nothing). Reading the second as the first manufactures a
+/// divergence out of a recording artifact — which is exactly what happened to
+/// two subjects of the 2026-08-09 production corpus.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RecordOutcome {
+    pub kind: RecordOutcomeKind,
+    /// Diagnosis only. Consumers key on [`Self::kind`]; the text is not part of
+    /// the contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The endings a classification can have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordOutcomeKind {
+    /// Ran to the end and returned a result.
+    Completed,
+    /// Ended with Go's `ErrUnmatched`.
+    Unmatched,
+    /// Ended with Go's `ErrDeleteTorrent`.
+    Deleted,
+    /// The context was cancelled or timed out — the process was going away.
+    /// Not reproducible, so the observation list stops wherever it landed.
+    Canceled,
+    /// Anything else went wrong.
+    Error,
+    /// A kind this build does not know. Kept rather than rejected so a newer
+    /// recorder cannot make an older reader fail closed on an unrelated tape —
+    /// but it is deliberately NOT authoritative.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Record {
+    /// Whether this record's observation list can be read as a **complete**
+    /// account of what the classification asked.
+    ///
+    /// True only for the endings a replay of the same input reaches too:
+    /// completion, or stopping at `unmatched` / `delete`, which are the
+    /// workflow's own deterministic vocabulary. A cancellation is not
+    /// reproducible, an error may not be, and an unknown outcome is not a claim
+    /// at all — for those the list is a prefix, so "the replay asked more" says
+    /// nothing about parity.
+    #[must_use]
+    pub fn authoritative(&self) -> bool {
+        if self.incomplete {
+            return false;
+        }
+
+        matches!(
+            self.outcome.as_ref().map(|outcome| outcome.kind),
+            Some(
+                RecordOutcomeKind::Completed
+                    | RecordOutcomeKind::Unmatched
+                    | RecordOutcomeKind::Deleted
+            )
+        )
+    }
 }
 
 /// A single interaction with an impure dependency.
@@ -243,5 +324,109 @@ impl Observation {
             }
             other => Err(format!("observation has an unknown outcome {other:?}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    fn record(json: &str) -> Record {
+        serde_json::from_str(json).expect("record decodes")
+    }
+
+    const BASE: &str =
+        r#""subject":"s","attempt":0,"workflow":"default","flags":{},"observations":[]"#;
+
+    /// The regression the outcome exists for: two records, both with an empty
+    /// observation list, meaning opposite things.
+    #[test]
+    fn an_empty_observation_list_means_different_things() {
+        let completed = record(&format!(r#"{{{BASE},"outcome":{{"kind":"completed"}}}}"#));
+        let cancelled = record(&format!(r#"{{{BASE},"outcome":{{"kind":"canceled"}}}}"#));
+
+        assert!(completed.observations.is_empty() && cancelled.observations.is_empty());
+        assert!(
+            !completed.incomplete && !cancelled.incomplete,
+            "an early exit CLOSES its session, so `incomplete` cannot tell them apart"
+        );
+
+        assert!(
+            completed.authoritative(),
+            "asked nothing, and that is an answer"
+        );
+        assert!(
+            !cancelled.authoritative(),
+            "asked nothing YET; the list is a prefix"
+        );
+    }
+
+    /// `unmatched` and `delete` are the workflow's own deterministic endings, so
+    /// a replay of the same input stops in the same place.
+    #[test]
+    fn the_workflows_own_endings_are_authoritative() {
+        for kind in ["completed", "unmatched", "deleted"] {
+            let decoded = record(&format!(r#"{{{BASE},"outcome":{{"kind":"{kind}"}}}}"#));
+            assert!(decoded.authoritative(), "{kind} should be authoritative");
+        }
+
+        for kind in ["canceled", "error"] {
+            let decoded = record(&format!(r#"{{{BASE},"outcome":{{"kind":"{kind}"}}}}"#));
+            assert!(
+                !decoded.authoritative(),
+                "{kind} should not be authoritative"
+            );
+        }
+    }
+
+    /// A tape written before outcomes existed must not be upgraded to
+    /// "finished normally" by its own silence.
+    #[test]
+    fn an_absent_outcome_is_unknown_not_completed() {
+        let decoded = record(&format!(r#"{{{BASE}}}"#));
+
+        assert!(decoded.outcome.is_none());
+        assert!(
+            !decoded.authoritative(),
+            "an unknown outcome is not a claim that the classification finished"
+        );
+    }
+
+    /// An open record has no outcome and is never authoritative, whatever else
+    /// the tape says.
+    #[test]
+    fn an_incomplete_record_is_never_authoritative() {
+        let decoded = record(&format!(
+            r#"{{{BASE},"incomplete":true,"outcome":{{"kind":"completed"}}}}"#
+        ));
+
+        assert!(!decoded.authoritative());
+    }
+
+    /// A kind from a newer recorder must not fail the decode — but must not be
+    /// trusted either.
+    #[test]
+    fn an_unknown_kind_decodes_without_being_trusted() {
+        let decoded = record(&format!(r#"{{{BASE},"outcome":{{"kind":"teleported"}}}}"#));
+
+        assert_eq!(
+            decoded.outcome.as_ref().map(|o| o.kind),
+            Some(RecordOutcomeKind::Unknown)
+        );
+        assert!(!decoded.authoritative());
+    }
+
+    /// The error text is diagnosis only, but it has to survive so a human can
+    /// read why a record was excluded.
+    #[test]
+    fn the_failure_message_survives_for_diagnosis() {
+        let decoded = record(&format!(
+            r#"{{{BASE},"outcome":{{"kind":"canceled","error":"context canceled"}}}}"#
+        ));
+
+        assert_eq!(
+            decoded.outcome.and_then(|o| o.error).as_deref(),
+            Some("context canceled")
+        );
     }
 }

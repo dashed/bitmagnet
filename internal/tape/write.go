@@ -32,6 +32,8 @@ func (r *Recorder) Write(dir string, generatedAt time.Time) error {
 
 	observationCount := 0
 	incompleteCount := 0
+	authoritativeCount := 0
+	outcomeCounts := make(map[string]int)
 
 	for _, record := range records {
 		observationCount += len(record.Observations)
@@ -39,6 +41,20 @@ func (r *Recorder) Write(dir string, generatedAt time.Time) error {
 		if record.Incomplete {
 			incompleteCount++
 		}
+
+		if record.Authoritative() {
+			authoritativeCount++
+		}
+
+		// An open record has no outcome yet; counting it as "unknown" keeps the
+		// breakdown summing to RecordCount, so a reader can see at a glance that
+		// nothing went unaccounted for.
+		kind := "unknown"
+		if record.Outcome != nil {
+			kind = string(record.Outcome.Kind)
+		}
+
+		outcomeCounts[kind]++
 	}
 
 	manifest := Manifest{
@@ -48,8 +64,10 @@ func (r *Recorder) Write(dir string, generatedAt time.Time) error {
 		Recorder:              r.provenance.Command,
 		RecordCount:           len(records),
 		ObservationCount:      observationCount,
-		IncompleteRecordCount: incompleteCount,
-		Truncated:             r.Truncated(),
+		IncompleteRecordCount:    incompleteCount,
+		AuthoritativeRecordCount: authoritativeCount,
+		RecordOutcomeCounts:      outcomeCounts,
+		Truncated:                r.Truncated(),
 	}
 
 	if err := os.MkdirAll(dir, tapeDirPermissions); err != nil {
@@ -126,7 +144,19 @@ func (r *Recorder) provenanceDocument(manifest Manifest, records []Record) strin
 	fmt.Fprintf(&doc, "- Records: %d\n", manifest.RecordCount)
 	fmt.Fprintf(&doc, "- Observations: %d\n", manifest.ObservationCount)
 	fmt.Fprintf(&doc, "- Incomplete records: %d\n", manifest.IncompleteRecordCount)
+	fmt.Fprintf(&doc, "- Authoritative records: %d\n", manifest.AuthoritativeRecordCount)
 	fmt.Fprintf(&doc, "- Truncated: %t\n", manifest.Truncated)
+
+	for _, kind := range sortedKeys(manifest.RecordOutcomeCounts) {
+		fmt.Fprintf(&doc, "  - ended %s: %d\n", kind, manifest.RecordOutcomeCounts[kind])
+	}
+
+	if manifest.AuthoritativeRecordCount < manifest.RecordCount {
+		doc.WriteString("\n  Only the authoritative records are a COMPLETE account of what their\n")
+		doc.WriteString("  classification asked. The rest ended early -- cancelled, or stopped by an\n")
+		doc.WriteString("  error -- so their observation lists are prefixes, and a replay asking MORE\n")
+		doc.WriteString("  than they hold is not evidence of a divergence.\n")
+	}
 
 	if manifest.IncompleteRecordCount > 0 {
 		doc.WriteString("\n  Those classifications were still running when the tape was written, so\n")
@@ -229,4 +259,17 @@ func summaryLines(counts map[string]int, empty string) []string {
 	}
 
 	return lines
+}
+
+// sortedKeys orders a count map so the provenance document is byte-stable
+// between runs with the same content; Go map iteration is deliberately random.
+func sortedKeys(counts map[string]int) []string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	return keys
 }

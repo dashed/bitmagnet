@@ -18,7 +18,9 @@ ordered candidate list that was actually observed is replayable.
 - Records: 4
 - Observations: 5
 - Incomplete records: 0
+- Authoritative records: 4
 - Truncated: false
+  - ended completed: 4
 
 ## Flag state
 

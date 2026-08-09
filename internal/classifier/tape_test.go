@@ -640,7 +640,7 @@ func TestTapeRecordsTmdbFailureKinds(t *testing.T) {
 				t.Fatalf("record: got %v, want %v", err, testCase.err)
 			}
 
-			tape.EndSession(ctx)
+			tape.EndSession(ctx, tape.RecordOutcome{Kind: tape.RecordCompleted})
 
 			records, err := recorder.Records()
 			if err != nil {
@@ -887,4 +887,89 @@ func tmdbBodies(t *testing.T, id int64, title string) ([]byte, []byte) {
 	}
 
 	return searchBody, detailsBody
+}
+
+// TestTapeRecordsHowTheClassificationEnded is the runner half of the outcome
+// fix. The recorder can only stamp what the runner tells it, and the whole
+// point is that a classification which ended EARLY is distinguishable from one
+// that ran to the end and consulted nothing.
+func TestTapeRecordsHowTheClassificationEnded(t *testing.T) {
+	// "Cinderella (1950)" with no hint and no files reaches no enrichment
+	// action, so it completes having observed nothing -- the case that used to
+	// be indistinguishable from an early exit.
+	torrent := model.Torrent{
+		Name:        "Cinderella (1950)",
+		Size:        1,
+		FilesStatus: model.FilesStatusNoInfo,
+	}
+
+	t.Run("a completed classification says so", func(t *testing.T) {
+		recorder := tape.NewRecorder(testDigest, 0, tape.Provenance{Command: "test"})
+		runner := newTapeRunner(t, localSearchDeps(
+			&stubContentSearch{}, forbiddenRequester{t: t},
+		), recorder)
+
+		if _, err := runner.Run(context.Background(), "default", Flags{
+			"local_search_enabled": false,
+			"apis_enabled":         false,
+			"tmdb_enabled":         false,
+		}, torrent); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+
+		record := onlyRecord(t, recorder)
+		if record.Outcome == nil || record.Outcome.Kind != tape.RecordCompleted {
+			t.Fatalf("want a completed outcome, got %+v", record.Outcome)
+		}
+
+		if !record.Authoritative() {
+			t.Error("a completed classification's observation list is an answer")
+		}
+	})
+
+	t.Run("a cancelled classification is not an oracle", func(t *testing.T) {
+		recorder := tape.NewRecorder(testDigest, 0, tape.Provenance{Command: "test"})
+		runner := newTapeRunner(t, localSearchDeps(
+			&stubContentSearch{}, forbiddenRequester{t: t},
+		), recorder)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, _ = runner.Run(ctx, "default", Flags{
+			"local_search_enabled": true,
+			"apis_enabled":         false,
+			"tmdb_enabled":         false,
+		}, torrent)
+
+		record := onlyRecord(t, recorder)
+
+		// 🚨 This classification returned a clean nil: the workflow never
+		// touched the cancelled context. The record is therefore COMPLETE --
+		// the session closed on the way out -- and holds zero observations,
+		// which is indistinguishable from the subtest above by every field
+		// except the outcome. That is the whole bug in one comparison.
+		if record.Incomplete {
+			t.Fatal("an early exit closes its session, so Incomplete cannot catch it")
+		}
+
+		if record.Authoritative() {
+			t.Errorf("a cancelled classification is a prefix, not an answer: %+v", record.Outcome)
+		}
+	})
+}
+
+func onlyRecord(t *testing.T, recorder *tape.Recorder) tape.Record {
+	t.Helper()
+
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("records: %v", err)
+	}
+
+	if len(records) != 1 {
+		t.Fatalf("want exactly one record, got %d", len(records))
+	}
+
+	return records[0]
 }
