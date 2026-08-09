@@ -44,7 +44,7 @@ use cel::to_value;
 use serde_json::Value as Json;
 
 pub use errors::FlowError;
-pub use model::{ClassifierInput, InputFile, InputHint};
+pub use model::{ClassifierInput, InputContent, InputFile, InputHint};
 pub use resolver::{ContentResolver, ContentResultItem, NullContentResolver, ResolveError};
 pub use result::{Classification, Outcome};
 pub use source::{core_config_digest, FlagType, FlagValue, Source, SourceError};
@@ -52,7 +52,6 @@ pub use source::{core_config_digest, FlagType, FlagValue, Source, SourceError};
 use cel_value::build_cel_torrent;
 use engine::{compile_workflows, run_action, Action, CompileError, ExecCtx};
 use env::{flags_value, Env, EnvError};
-use model::ContentType;
 use result::to_expected_json;
 
 /// Runtime flag overrides passed to [`Classifier::run`] (`classifier.Flags`).
@@ -80,6 +79,64 @@ pub enum ClassifierError {
     Env(#[from] EnvError),
     #[error(transparent)]
     Compile(#[from] CompileError),
+}
+
+/// Go `runner.Run`'s pre-attach (`runner.go:53-68`): reuse an already-known
+/// content row instead of looking it up again.
+///
+/// 🚨 This is T9, and it is not an optimisation — it is a behavioural fork.
+/// Attaching here makes `result.hasAttachedContent` true, and
+/// `classifier.core.yml:92` gates the whole enrichment branch on
+/// `!result.hasAttachedContent`. So a torrent whose content is already attached
+/// performs **no local search and no TMDB call at all**, while one without
+/// performs the full chain. A port that skipped this would re-derive content the
+/// original classification simply reused: a different write set, and a different
+/// set of dependency calls.
+///
+/// The hint that reaches here usually did NOT come from the `torrent_hints` row
+/// as stored. `processor.go:119-134` synthesises it from the first sourced
+/// `torrent_contents` association whenever the stored hint has **no** content
+/// source — so a NULL source in the database is the precondition for this path,
+/// not evidence against it.
+///
+/// Go's guards, all of them:
+/// * the hint must carry a content SOURCE (a bare content type is not enough,
+///   which is what makes this distinct from `attach_local_content_by_id`);
+/// * the association must match the hint on type, source AND id;
+/// * `tc.Content.Source == tc.ContentSource` — the association's content must
+///   actually be hydrated. An unloaded association has a zero-valued `Content`
+///   whose source is empty, and attaching that would blank the result.
+///
+/// First match wins, mirroring Go's `break`.
+fn pre_attach_existing_content(
+    result: &mut Classification,
+    hint: &InputHint,
+    contents: &[InputContent],
+) {
+    if hint.content_source.is_empty() {
+        return;
+    }
+
+    for association in contents {
+        if association.content_type != hint.content_type
+            || association.content_source != hint.content_source
+            || association.content_id != hint.content_id
+        {
+            continue;
+        }
+
+        let Some(content) = association.content.as_ref() else {
+            continue;
+        };
+
+        // Go's hydration check.
+        if content.source != association.content_source {
+            continue;
+        }
+
+        result.attach_content(content.clone());
+        return;
+    }
 }
 
 impl Classifier {
@@ -169,13 +226,16 @@ impl Classifier {
             );
         };
 
-        // Initial result — apply the hint (`runner.Run`: `cl.ApplyHint`). The
-        // corpus hints carry only a content type (no episode/language/video
-        // attributes), and the torrents carry no attachable `Contents`.
+        // Initial result, exactly as `runner.Run` builds it: apply the hint,
+        // then pre-attach an already-known content row. Order is load-bearing —
+        // `AttachContent` overwrites the content type, so a pre-attach must be
+        // able to override what the hint just set.
         let mut result = Classification::default();
         if let Some(hint) = &input.hint {
-            if let Some(ct) = ContentType::parse(&hint.content_type) {
-                result.content_type = Some(ct);
+            // Go guards `if !t.Hint.IsNil()`, i.e. the hint has a content type.
+            if !hint.content_type.is_empty() {
+                result.apply_hint(hint);
+                pre_attach_existing_content(&mut result, hint, &input.contents);
             }
         }
 

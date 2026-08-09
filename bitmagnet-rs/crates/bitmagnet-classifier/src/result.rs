@@ -49,6 +49,67 @@ impl Classification {
         self.content.is_some()
     }
 
+    /// Port of Go `classification.Result.ApplyHint` (`result.go:11-14`), which
+    /// is the content type plus `ContentAttributes.ApplyHint` (`result.go:93`).
+    ///
+    /// Every field is **overwrite-if-the-hint-has-one**, not fill-if-empty:
+    /// a hint is a stored decision about this torrent and outranks whatever the
+    /// name parser would say. That is the opposite of [`Self::merge`], and the
+    /// asymmetry is Go's.
+    ///
+    /// 🚨 Applied BEFORE the workflow runs, so `parse_video_content` can still
+    /// overwrite these later via `merge` — which only fills unset fields, so in
+    /// practice the hint wins. Note it does NOT carry a base title or a date:
+    /// Go's `ApplyHint` leaves both to the parser.
+    ///
+    /// An attribute the hint spells in a way this build does not recognise is
+    /// left unset rather than guessed, matching a Go `Null*` that never
+    /// validated.
+    pub fn apply_hint(&mut self, hint: &crate::model::InputHint) {
+        // `Result.ApplyHint` assigns the content type unconditionally; Go's
+        // caller guards on the hint not being nil, and an unparseable type
+        // cannot occur there because it comes out of an enum column.
+        if let Some(content_type) = ContentType::parse(&hint.content_type) {
+            self.content_type = Some(content_type);
+        }
+
+        if let Some(episodes) = hint.episodes.as_deref().filter(|e| !e.is_empty()) {
+            let parsed = bitmagnet_release::parse_episodes(episodes);
+            // Go tests `len(h.Episodes) > 0`, i.e. the parsed set, not the text.
+            if !parsed.is_empty() {
+                self.episodes = parsed;
+            }
+        }
+
+        if !hint.languages.is_empty() {
+            self.languages = hint.languages.clone();
+        }
+
+        if let Some(value) = parse_attribute(hint.video_resolution.as_deref()) {
+            self.video_resolution = Some(value);
+        }
+
+        if let Some(value) = parse_attribute(hint.video_source.as_deref()) {
+            self.video_source = Some(value);
+        }
+
+        if let Some(value) = parse_attribute(hint.video_codec.as_deref()) {
+            self.video_codec = Some(value);
+        }
+
+        if let Some(value) = parse_attribute(hint.video_3d.as_deref()) {
+            self.video_3d = Some(value);
+        }
+
+        if let Some(value) = parse_attribute(hint.video_modifier.as_deref()) {
+            self.video_modifier = Some(value);
+        }
+
+        if let Some(group) = hint.release_group.as_deref().filter(|g| !g.is_empty()) {
+            self.release_group = Some(group.to_owned());
+        }
+    }
+
     /// Port of Go `classification.Result.AttachContent` (`result.go:18-29`):
     /// attach the row, adopt its content type, and fold in its original
     /// language when the result has no languages yet (or is multi-language).
@@ -158,6 +219,16 @@ pub(crate) fn to_expected_json(result: &Classification, outcome: &Outcome) -> Va
             .insert("error".to_string(), Value::String(err));
     }
     obj
+}
+
+/// Parses an attribute the hint stored, ignoring an absent or unrecognised one.
+///
+/// A value this build cannot parse is dropped rather than guessed: Go stores
+/// these as `Null*` enums that only ever hold a value the writer validated, so
+/// an unparseable string means the two sides disagree about the vocabulary, and
+/// inventing a variant would hide that.
+fn parse_attribute<T: std::str::FromStr>(value: Option<&str>) -> Option<T> {
+    value.filter(|v| !v.is_empty())?.parse().ok()
 }
 
 fn opt_str(v: Option<&str>) -> Value {

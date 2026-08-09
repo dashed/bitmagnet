@@ -499,3 +499,175 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Parsing back from the canonical string form
+// ---------------------------------------------------------------------------
+//
+// These exist for the paths that read an attribute someone already decided —
+// `torrent_hints` rows, and tape/corpus fixtures — rather than inferring it from
+// a release name. Inference is what the `Infer*` functions above do; this is its
+// inverse.
+//
+// 🔑 Each is implemented by scanning `ALL` and comparing `as_str()`, NOT by a
+// second hand-written match. A duplicated table would be free to drift from the
+// one that serialises, and a round-trip that silently stopped round-tripping is
+// precisely the kind of bug these types exist to prevent. The `all_variants_round_trip`
+// tests pin it.
+
+impl VideoResolution {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::V360p,
+        Self::V480p,
+        Self::V540p,
+        Self::V576p,
+        Self::V720p,
+        Self::V1080p,
+        Self::V1440p,
+        Self::V2160p,
+        Self::V4320p,
+    ];
+}
+
+impl std::str::FromStr for VideoResolution {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_str() == value)
+            .ok_or(())
+    }
+}
+
+impl VideoCodec {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::H264,
+        Self::X264,
+        Self::X265,
+        Self::XviD,
+        Self::DivX,
+        Self::Mpeg2,
+        Self::Mpeg4,
+    ];
+}
+
+impl std::str::FromStr for VideoCodec {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_str() == value)
+            .ok_or(())
+    }
+}
+
+impl VideoSource {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Cam,
+        Self::Telesync,
+        Self::Telecine,
+        Self::Workprint,
+        Self::Dvd,
+        Self::Tv,
+        Self::Webdl,
+        Self::Webrip,
+        Self::Bluray,
+    ];
+}
+
+impl std::str::FromStr for VideoSource {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_str() == value)
+            .ok_or(())
+    }
+}
+
+impl VideoModifier {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[
+        Self::Regional,
+        Self::Screener,
+        Self::RawHd,
+        Self::BrDisk,
+        Self::Remux,
+    ];
+}
+
+impl std::str::FromStr for VideoModifier {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_str() == value)
+            .ok_or(())
+    }
+}
+
+impl Video3D {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::V3D, Self::V3DSbs, Self::V3DOu];
+}
+
+impl std::str::FromStr for Video3D {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|variant| variant.as_str() == value)
+            .ok_or(())
+    }
+}
+
+#[cfg(test)]
+mod from_str_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// The round trip has to hold for every variant, or a hint/fixture that
+    /// stores an attribute cannot read it back.
+    #[test]
+    fn all_variants_round_trip() {
+        macro_rules! round_trip {
+            ($ty:ty) => {
+                for variant in <$ty>::ALL {
+                    assert_eq!(
+                        <$ty>::from_str(variant.as_str()),
+                        Ok(*variant),
+                        "{} did not round-trip through {:?}",
+                        stringify!($ty),
+                        variant.as_str()
+                    );
+                }
+            };
+        }
+
+        round_trip!(VideoResolution);
+        round_trip!(VideoCodec);
+        round_trip!(VideoSource);
+        round_trip!(VideoModifier);
+        round_trip!(Video3D);
+    }
+
+    #[test]
+    fn an_unknown_string_does_not_parse() {
+        assert!(VideoResolution::from_str("").is_err());
+        assert!(VideoResolution::from_str("8k").is_err());
+        assert!(VideoCodec::from_str("av1").is_err());
+    }
+}

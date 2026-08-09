@@ -238,7 +238,7 @@ pub struct InputFile {
 }
 
 /// A content hint — mirrors `classifierInputHint`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct InputHint {
     #[serde(rename = "contentType")]
     pub content_type: String,
@@ -246,6 +246,59 @@ pub struct InputHint {
     pub content_source: String,
     #[serde(rename = "contentId", default)]
     pub content_id: String,
+
+    // --- T9 -----------------------------------------------------------------
+    //
+    // Go's `ContentAttributes.ApplyHint` (`classification/result.go:93`) copies
+    // these across too, and a `torrent_hints` row can carry every one of them.
+    // Rust previously read only the content type, so a hinted episode list or
+    // video attribute was silently dropped — invisible under the flags-off
+    // corpus, whose hints carry a content type and nothing else.
+    //
+    // All optional and defaulted, so a fixture written before T9 still parses.
+    /// Canonical form, e.g. `"S07E10"`.
+    #[serde(default)]
+    pub episodes: Option<String>,
+    /// Alpha-2 codes, in `model.Languages` set order.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    #[serde(rename = "videoResolution", default)]
+    pub video_resolution: Option<String>,
+    #[serde(rename = "videoSource", default)]
+    pub video_source: Option<String>,
+    #[serde(rename = "videoCodec", default)]
+    pub video_codec: Option<String>,
+    #[serde(rename = "video3d", default)]
+    pub video_3d: Option<String>,
+    #[serde(rename = "videoModifier", default)]
+    pub video_modifier: Option<String>,
+    #[serde(rename = "releaseGroup", default)]
+    pub release_group: Option<String>,
+}
+
+/// An existing `torrent_contents` association — Go `model.TorrentContent`, as
+/// much of it as the pre-attach reads.
+///
+/// 🚨 This is the T9 input Rust previously had no way to represent. Go's
+/// `runner.Run` attaches an already-known content row **before the workflow
+/// runs**, so `result.hasAttachedContent` is already true and the enrichment
+/// branch never fires. Without these rows a port re-derives content the original
+/// classification simply reused, which is both a different write set and a
+/// different set of dependency calls.
+#[derive(Clone, Debug, Deserialize)]
+pub struct InputContent {
+    #[serde(rename = "contentType", default)]
+    pub content_type: String,
+    #[serde(rename = "contentSource", default)]
+    pub content_source: String,
+    #[serde(rename = "contentId", default)]
+    pub content_id: String,
+    /// The hydrated `content` row. Go guards on
+    /// `tc.Content.Source == tc.ContentSource`, which is how it detects an
+    /// association whose content was never loaded; an absent value here is the
+    /// same condition.
+    #[serde(default)]
+    pub content: Option<bitmagnet_model::Content>,
 }
 
 /// The classifier input — mirrors `classifierInput` (`corpus_test.go`).
@@ -266,6 +319,11 @@ pub struct ClassifierInput {
     pub files: Vec<InputFile>,
     #[serde(default)]
     pub hint: Option<InputHint>,
+    /// Existing content associations, for the T9 pre-attach. See
+    /// [`InputContent`]. Empty for a torrent with nothing attached yet, which is
+    /// every subject of the flags-off corpus.
+    #[serde(default)]
+    pub contents: Vec<InputContent>,
 }
 
 fn file_extension_regex() -> &'static Regex {

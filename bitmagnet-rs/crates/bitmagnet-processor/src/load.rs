@@ -201,6 +201,19 @@ pub(crate) async fn load_torrents_in(
                 files_count,
                 files,
                 hint,
+                // T9: the classifier can now pre-attach an existing content row,
+                // but doing so needs the HYDRATED `content` row and this loader
+                // selects only `torrent_contents` ids -- no join to `content`.
+                // Passing the ids alone would be worse than passing nothing: the
+                // pre-attach guards on the content actually being loaded, so a
+                // half-populated association would be silently skipped and look
+                // like a decision rather than a gap.
+                //
+                // `attach_hint_unsupported` (above) already excludes exactly
+                // these torrents from the write-set comparison, so the processor
+                // path is unchanged and still honest. Hydrating them is the next
+                // step, and is what lets the enrichmentDependent bucket move.
+                contents: Vec::new(),
             },
             existing_content_ids: existing.into_iter().map(|content| content.id).collect(),
             attach_hint_unsupported,
@@ -232,6 +245,9 @@ impl CurrentContent {
             content_type: self.content_type.clone()?,
             content_source: self.content_source.clone()?,
             content_id: self.content_id.clone().unwrap_or_default(),
+            // `torrent_contents` carries no episode/language/video attributes;
+            // those live on `torrent_hints`, which the explicit-hint path reads.
+            ..InputHint::default()
         })
     }
 }
@@ -254,6 +270,10 @@ fn effective_hint(
             content_type: hint.content_type,
             content_source: hint.content_source.unwrap_or_default(),
             content_id: hint.content_id.unwrap_or_default(),
+            // T9 widened InputHint with the rest of what Go's ApplyHint copies.
+            // The loader does not select those columns yet, so they stay unset
+            // here rather than being invented.
+            ..InputHint::default()
         })
     });
     if explicit
@@ -289,6 +309,7 @@ fn effective_hint(
             content_type,
             content_source: String::new(),
             content_id: String::new(),
+            ..InputHint::default()
         })
     })
 }

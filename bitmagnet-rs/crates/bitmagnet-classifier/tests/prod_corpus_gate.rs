@@ -114,7 +114,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bitmagnet_classifier::tape_corpus::{self, CorpusReport};
-use bitmagnet_classifier::{Classifier, ClassifierInput, InputFile, InputHint};
+use bitmagnet_classifier::{Classifier, ClassifierInput, InputContent, InputFile, InputHint};
 use bitmagnet_tape::Replay;
 use serde::Deserialize;
 
@@ -141,6 +141,24 @@ struct ExportedInput {
     files: Vec<ExportedFile>,
     #[serde(default)]
     hint: Option<ExportedHint>,
+    /// T9: existing `torrent_contents` associations, with their `content` row
+    /// hydrated. Absent from a corpus exported before T9, which is why it
+    /// defaults rather than being required.
+    #[serde(default)]
+    contents: Vec<ExportedContent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedContent {
+    #[serde(default)]
+    content_type: String,
+    #[serde(default)]
+    content_source: String,
+    #[serde(default)]
+    content_id: String,
+    #[serde(default)]
+    content: Option<bitmagnet_model::Content>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +208,16 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
                     .collect(),
                 // A hint row with no content type is not a hint: Go treats
                 // `Hint.IsNil()` (an empty content type) as absent.
+                contents: input
+                    .contents
+                    .into_iter()
+                    .map(|content| InputContent {
+                        content_type: content.content_type,
+                        content_source: content.content_source,
+                        content_id: content.content_id,
+                        content: content.content,
+                    })
+                    .collect(),
                 hint: input.hint.and_then(|hint| {
                     hint.content_type
                         .filter(|t| !t.is_empty())
@@ -197,6 +225,7 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
                             content_type,
                             content_source: hint.content_source,
                             content_id: hint.content_id,
+                            ..Default::default()
                         })
                 }),
             };

@@ -51,6 +51,7 @@ fn input_for(subject: &str) -> Option<ClassifierInput> {
         extension: None,
         files_count: None,
         files: Vec::new(),
+        contents: Vec::new(),
         // The hint supplies the content type the attach actions guard on.
         // Without it the classification never reaches them and the gate would
         // measure nothing — which is exactly the trap this test fell into first.
@@ -58,6 +59,7 @@ fn input_for(subject: &str) -> Option<ClassifierInput> {
             content_type: "movie".to_owned(),
             content_source: String::new(),
             content_id: String::new(),
+            ..Default::default()
         }),
     })
 }
