@@ -11,9 +11,10 @@ sibling document, this one is correct.
 Phases 0–3 are landed and deployed. The read path is in production. The remaining
 blocker for cutover is **B′ — flags-ON classifier parity**. The oracle now works
 end to end for the LOCAL seams — Go records, Rust reads, and the classifier's
-`ContentResolver` consults it. The gap has moved again: TMDB replay is unwired
-(the tape records it at the HTTP level and Rust has no TMDB client), and no
-harness yet drives the resolver over a corpus.
+`ContentResolver` consults it. The oracle, the seam and the
+measurement now all exist; what is missing is the thing being measured — Rust's
+four `attach_*` actions are still stubs, so the gate's baseline is 0 of 5
+observations consumed.
 
 ## What is deployed right now
 
