@@ -22,6 +22,8 @@ serde_json.workspace = true
 sqlx.workspace = true
 # T9: the shared `content` row select list + decoder.
 bitmagnet-content-search = { path = "../bitmagnet-content-search" }
+# Go `Languages.Slice()` ordering for the torrent_contents language list.
+bitmagnet-release = { path = "../bitmagnet-release" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

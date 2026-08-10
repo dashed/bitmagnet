@@ -39,7 +39,7 @@ mod testsupport;
 pub use content_type::ContentType;
 pub use episodes::{parse_episodes, Episodes};
 pub use keywords::{regex_pattern_from_keywords, rex_tokens_from_keywords, KeywordError};
-pub use language::{infer_languages, parse_language};
+pub use language::{infer_languages, parse_language, slice_order};
 pub use title::{parse_title_year_episodes_dispatch, parse_video_content, ContentAttributes};
 pub use video::{
     infer_video_3d, infer_video_codec_and_release_group, infer_video_modifier,

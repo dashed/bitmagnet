@@ -980,6 +980,7 @@ dependencies = [
  "bitmagnet-content-search",
  "bitmagnet-model",
  "bitmagnet-queue",
+ "bitmagnet-release",
  "clap",
  "futures",
  "hex",

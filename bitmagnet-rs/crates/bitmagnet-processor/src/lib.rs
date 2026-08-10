@@ -299,6 +299,13 @@ fn content_write(content: &bitmagnet_model::Content) -> ContentWrite {
 }
 
 fn torrent_content_write(torrent: &LoadedTorrent, result: Classification) -> TorrentContentWrite {
+    // 🚨 The `torrent_contents.languages` COLUMN is alpha-2 code order, NOT
+    // `Languages.Slice()` (natsort by name). Those are two different render
+    // paths for the same set and they genuinely disagree: the Go write-set
+    // oracle fixture `language-0001-multi-french-german` pins `["de","fr"]`
+    // where Slice() gives `["fr","de"]` (French, German). Slice() is the
+    // DISPLAY order and belongs to the classifier's normalized result; the
+    // column is sorted here.
     let mut languages = result.languages;
     languages.sort();
     languages.dedup();

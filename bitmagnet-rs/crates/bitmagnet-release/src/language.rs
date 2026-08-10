@@ -121,23 +121,108 @@ pub fn infer_languages(input: &str) -> Vec<String> {
         rest = &rest[next..];
     }
 
-    // Order by Languages.Slice(): natsort on the language NAME.
-    let mut langs: Vec<&LanguageInfo> = found
-        .iter()
-        .filter_map(|a2| LANGUAGES.iter().find(|l| &l.alpha2 == a2))
+    slice_order(found)
+}
+
+/// Go `Languages.Slice()` (`internal/model/language.go:180`) — the set's members
+/// ordered by **natsort on the language NAME**.
+///
+/// 🚨 This is NOT a sort by alpha-2 code, and the two genuinely disagree:
+/// `[de, en]` by code is German/English, which by name is `[en, de]`. Every
+/// serialisation of a language list goes through this order, so sorting by code
+/// anywhere is a bug — one that hid for a long time because it only shows up
+/// once a list has two languages whose code and name orders differ, which in
+/// practice means once `AttachContent` folds a content row's original language
+/// into an inferred list.
+///
+/// Duplicates collapse: Go holds languages in a `map`, so the input is a set.
+///
+/// An unrecognised code is KEPT, not dropped — Go's `Language.Name()` is a map
+/// lookup returning the zero value, so an unknown language sorts under the empty
+/// name (i.e. first) rather than disappearing. Ties are broken by the code:
+/// Go's `sort.Slice` is unstable, so tied names have no defined order there and
+/// any consistent choice is faithful.
+#[must_use]
+pub fn slice_order<I, S>(codes: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let unique: BTreeSet<String> = codes
+        .into_iter()
+        .map(|code| code.as_ref().to_owned())
         .collect();
-    // Derive Ordering from Go's Less predicate (natsort.Compare on the name),
-    // exactly as Go's sort.Slice does.
-    langs.sort_by(|a, b| {
-        if nat_less(&a.name, &b.name) {
+
+    let mut ordered: Vec<(String, String)> = unique
+        .into_iter()
+        .map(|code| {
+            let name = LANGUAGES
+                .iter()
+                .find(|lang| lang.alpha2 == code)
+                .map_or(String::new(), |lang| lang.name.clone());
+            (name, code)
+        })
+        .collect();
+
+    // Go derives the ordering from a Less predicate (natsort.Compare on the
+    // name), exactly as sort.Slice does.
+    ordered.sort_by(|a, b| {
+        if nat_less(&a.0, &b.0) {
             std::cmp::Ordering::Less
-        } else if nat_less(&b.name, &a.name) {
+        } else if nat_less(&b.0, &a.0) {
             std::cmp::Ordering::Greater
         } else {
-            std::cmp::Ordering::Equal
+            a.1.cmp(&b.1)
         }
     });
-    langs.into_iter().map(|l| l.alpha2.clone()).collect()
+
+    ordered.into_iter().map(|(_, code)| code).collect()
+}
+
+#[cfg(test)]
+mod slice_order_tests {
+    use super::*;
+
+    /// The bug this function exists to prevent: code order and name order are
+    /// genuinely different, so sorting by alpha-2 is not a shortcut for
+    /// `Languages.Slice()`.
+    #[test]
+    fn name_order_is_not_code_order() {
+        // de = German, en = English -> by NAME English comes first.
+        assert_eq!(slice_order(["de", "en"]), vec!["en", "de"]);
+        // ...and the input order does not matter, because it is a set.
+        assert_eq!(slice_order(["en", "de"]), vec!["en", "de"]);
+    }
+
+    #[test]
+    fn duplicates_collapse_because_go_holds_a_map() {
+        assert_eq!(slice_order(["en", "en", "ko"]), vec!["en", "ko"]);
+    }
+
+    /// The load-bearing property is that an unrecognised code is KEPT — dropping
+    /// it would silently lose data. Its POSITION is deliberately not asserted:
+    /// the empty name ties under `nat_less`, and Go's `sort.Slice` is unstable,
+    /// so neither side defines an order for it.
+    #[test]
+    fn an_unknown_code_is_kept_not_dropped() {
+        let ordered = slice_order(["en", "zz"]);
+        assert_eq!(ordered.len(), 2);
+        assert!(ordered.contains(&"zz".to_owned()));
+        assert!(ordered.contains(&"en".to_owned()));
+    }
+
+    #[test]
+    fn empty_stays_empty() {
+        assert!(slice_order(Vec::<String>::new()).is_empty());
+    }
+
+    /// `infer_languages` already produced this order; extracting it must not
+    /// have changed what it produces.
+    #[test]
+    fn infer_languages_still_emits_slice_order() {
+        let inferred = infer_languages("Movie.2011.German.English.1080p");
+        assert_eq!(inferred, slice_order(inferred.clone()));
+    }
 }
 
 #[cfg(test)]

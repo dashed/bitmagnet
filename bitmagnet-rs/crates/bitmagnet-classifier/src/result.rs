@@ -119,10 +119,15 @@ impl Classification {
     /// actions converge on, so the semantics are pinned here rather than
     /// re-derived four times.
     ///
-    /// ⚠️ Go appends into a `model.Languages` **set** (a map), so the resulting
-    /// display order is that set's order, not append order. The flags-off gates
-    /// cannot exercise this, so lane B′-4 must confirm the ordering against a
-    /// flags-ON oracle before relying on it.
+    /// 🚨 Go inserts into a `model.Languages` **map**, so the rendered order is
+    /// `Languages.Slice()` — natsort by language NAME — and NOT the order things
+    /// were added. Appending and leaving it is therefore wrong the moment the
+    /// list has more than one member.
+    ///
+    /// The flags-off gates cannot exercise this (nothing ever attaches), and the
+    /// B′ notes flagged it as needing a flags-ON oracle to confirm. The oracle
+    /// confirmed it: it was the sole remaining drift in the write-set gate's
+    /// enrichment-dependent bucket, 31 of 231 subjects.
     pub fn attach_content(&mut self, content: Content) {
         self.content_type = ContentType::parse(content.content_type.as_str());
 
@@ -131,6 +136,8 @@ impl Classification {
                 && !self.languages.iter().any(|l| l == language)
             {
                 self.languages.push(language.to_owned());
+                // Re-derive the set's order; see above.
+                self.languages = bitmagnet_release::slice_order(&self.languages);
             }
         }
 
