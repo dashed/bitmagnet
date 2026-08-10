@@ -5,9 +5,36 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "B′ enrichment parity — TMDB HTTP client + model transformers (Go internal/tmdb). Placeholder registered by the B′-0 seam lane."
+description = "B′ enrichment parity — live TMDB HTTP client (Go internal/tmdb)."
 
 [dependencies]
+# The seam this client serves. The request/response DTOs and `ResolveError` live
+# with the `ContentResolver` trait they are the vocabulary of, so this crate
+# depends on the classifier and nothing depends back — see
+# `bitmagnet-classifier/src/resolver/tmdb.rs`'s module docs.
+bitmagnet-classifier = { path = "../bitmagnet-classifier" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `sync` (Semaphore, OnceCell) + `time` (the retry backoff and rate-limiter
+# sleeps) — the workspace pin is `features = ["full"]`.
+tokio = { workspace = true }
+# The `Transport` seam is consumed generically, but `async fn` in a public trait
+# warns (and is not `dyn`-safe); the classifier boxes its seam for the same
+# reason.
+async-trait = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+# `join_all`, to prove the two-permit semaphore actually bounds concurrency.
+futures = { workspace = true }
+# The conformance test encodes rebuilt requests with the SAME canonical encoder
+# the replay comparison uses, so a passing assertion means the bytes a real
+# replay would compare — not merely a `serde_json` approximation of them.
+bitmagnet-tape = { path = "../bitmagnet-tape" }
+serde_json = { workspace = true, features = ["raw_value"] }
