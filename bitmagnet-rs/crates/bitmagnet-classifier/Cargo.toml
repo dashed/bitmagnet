@@ -52,3 +52,13 @@ workspace = true
 [dev-dependencies]
 # The ContentResolver trait is async, so its tests need a runtime.
 tokio = { workspace = true }
+# The prod-corpus gate replays Go's PRE-ATTACH, which depends on the hint the
+# PROCESSOR synthesises from existing torrent_contents -- not on the stored
+# torrent_hints row. Reusing `load::effective_hint` keeps that logic in one
+# tested place; hand-copying it into the test would be the exact drift this
+# parity work exists to catch.
+#
+# 🔑 This is a dev-dependency CYCLE (bitmagnet-processor depends on this crate).
+# Cargo permits that for dev-dependencies specifically, and it is the reason
+# this is not a normal dependency.
+bitmagnet-processor = { path = "../bitmagnet-processor" }

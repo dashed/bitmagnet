@@ -811,6 +811,7 @@ dependencies = [
  "base64",
  "bitmagnet-fts",
  "bitmagnet-model",
+ "bitmagnet-processor",
  "bitmagnet-proto",
  "bitmagnet-release",
  "bitmagnet-tape",

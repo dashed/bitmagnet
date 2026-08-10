@@ -21,7 +21,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod compare;
-mod load;
+/// The read-only loader that hydrates a classifier input from the database.
+///
+/// Public so a parity harness can reuse the REAL hint synthesis
+/// (`load::effective_hint`) instead of hand-copying it. A second copy of that
+/// logic is exactly the drift this work exists to catch.
+pub mod load;
 mod persist;
 mod runtime;
 mod shadow;

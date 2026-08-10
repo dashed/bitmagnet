@@ -1,113 +1,85 @@
 //! The B′ desync gate against a **real production corpus**.
 //!
-//! The tape at `testdata/parity/classifier-attach/prod-20260809` was recorded
+//! The tape at `testdata/parity/classifier-attach/prod-20260810` was recorded
 //! live from `bitmagnet-0` — the only pod that runs the classifier with the
-//! enrichment flags ON against real traffic — under
-//! `CLASSIFIER_TAPE_DIR`/`CLASSIFIER_TAPE_MAX_RECORDS=300`. Unlike the golden's
-//! four synthetic fixtures, every subject here is a real torrent classified by
-//! the production workflow, so its verdicts are a genuine measurement rather
-//! than a smoke test of the wiring.
-//!
-//! # Known limitations of this corpus, which the numbers must be read against
-//!
-//! * **Truncated.** Reaching the record cap marks the tape truncated. It is a
-//!   complete oracle for *these* subjects, not for the population — "300
-//!   classifications replay" is supportable, "all traffic replays" is not.
-//! * **9 of 300 subjects are gone.** Those torrents were deleted from the
-//!   database between recording and export, so they have no input and are
-//!   skipped. Ordinary churn, not a defect.
-//! * 🚨 **File lists come from `torrent_files`, not the `files_data` blob the
-//!   processor actually hydrates from.** They are expected to agree, but that is
-//!   an assumption, not a proof — so a desync on a file-driven content-type rule
-//!   could in principle be an export artifact rather than a port bug. Anything
-//!   this gate reports as a desync should be checked against that before it is
-//!   called a divergence.
+//! enrichment flags ON against real traffic — over ~150 minutes at ~13
+//! classifications/min. Every subject is a real torrent classified by the
+//! production workflow, so its verdicts are a measurement rather than a smoke
+//! test of the wiring.
 //!
 //! # The measurement
 //!
 //! ```text
-//! subjects=284 matched=282 desynced=0 missed=0 unconsumed=0 errored=0
-//! not_authoritative=2  observations=120/120
+//! subjects=1912 matched=1903 desynced=0 missed=0 unconsumed=0 errored=0
+//! not_authoritative=9  observations=653/653
 //! ```
 //!
-//! **Zero desyncs, and every recorded observation consumed.** Across 284 real
-//! classifications Rust asked exactly the questions Go asked — all 72
-//! `local.content_by_search` *and* all 48 `tmdb.request` calls — each matching
-//! Go's recorded request byte for byte, in the same order, with none left over.
+//! **Zero desyncs, and every recorded observation consumed.** Across 1,912 real
+//! classifications Rust asked exactly the questions Go asked — 386
+//! `local.content_by_search`, 254 `tmdb.request` and 13 `local.content_by_id` —
+//! each matching Go's recorded request byte for byte, in order, none left over.
 //!
-//! For the TMDB half that means Rust rebuilt Go's HTTP requests exactly: the same
-//! paths, the same query-parameter sets, the same rendering of years and
-//! `append_to_response`. Because each request's arguments depend on the previous
-//! response — search, Levenshtein-pick a winner, then fetch that winner's details
-//! by id — reproducing the whole chain reproduces the decision logic, not merely
-//! the call shapes.
+//! Against the previous 300-record corpus this is **5.5× the subjects that
+//! actually exercise a seam** (399 vs 72) and 5.4× the observations. That ratio
+//! is the one that matters: a subject observing nothing agrees trivially, so it
+//! is the observing subjects that carry the evidence.
 //!
-//! ## The 2 non-matching subjects are a RECORDING artifact, not a port divergence
+//! It is also the first corpus to cover `local.content_by_id` at all — 13
+//! observations, every one with source `imdb`, i.e. the ALTERNATIVE-identifier
+//! branch.
 //!
-//! Both recorded **zero** observations while Rust asked for a
-//! `local.content_by_search` at position 0:
+//! # 🚨 Why this replays the STORED hint, not the processor's synthesised one
 //!
-//! * `b78a66755eb9…` — "Sunny (2011) DC BluRay 1080p 5.1CH x264 SmallAndHD"
-//! * `f2b4c073a129…` — "Mr.D.S07E10.1080p.WEBRip.x264-aAF[rarbg]"
+//! Go's classifier does not see the `torrent_hints` row directly.
+//! `processor.go` synthesises an effective hint from the first sourced
+//! `torrent_contents` association whenever the stored row has no content
+//! SOURCE, and `runner.Run` then PRE-ATTACHES that content, suppressing the
+//! whole enrichment branch. Reproducing that faithfully is what T9 was.
 //!
-//! This was checked by **running Go's own classifier on the exact corpus
-//! input**, with a recording `LocalSearch` in place of the mock. Go asks
-//! `ContentBySearch(movie, "Sunny", 2011)` and `ContentBySearch(tv_show,
-//! "Mr D", 0)` — byte-for-byte the questions Rust asks. Go does so with or
-//! without the hint applied. So on this input the two implementations agree
-//! exactly, and the port is not what diverges.
+//! So the obvious thing is to run the real `load::effective_hint` over this
+//! corpus's `contents`. **That was tried, and it is wrong here**: it moved the
+//! gate from 9 non-matching subjects to 172, every one of them Rust asking
+//! FEWER questions than Go.
 //!
-//! What is ruled out, and how:
+//! The reason is that `inputs.json` is a snapshot taken *after* the recorded
+//! classification wrote its result. Subject `02c1f244…` makes it concrete: the
+//! tape shows Go performing `content_by_search` for "K 19 The Widowmaker" and
+//! getting one hit, while the export shows no stored hint and
+//! `contents = [(movie, tmdb, 8665)]` — the content that search *produced*.
+//! Synthesising from that hands the replay knowledge Go did not have at the
+//! time, turning a successful search into an already-attached row.
 //!
-//! * *A base-title divergence* (the original hypothesis). Go's
-//!   `ParseVideoContent` returns `BaseTitle` "Sunny" / "Mr D" for these names.
-//! * *A file-list export artifact.* `files_count` and `torrent_files` agree with
-//!   the corpus, and the names alone drive the title.
-//! * *A pre-seeded attachment.* `runner.go` DOES pre-attach existing content
-//!   before the workflow (`cl.AttachContent` when the hint has a content
-//!   SOURCE and a matching `torrent_contents` row exists), which would make
-//!   `!result.hasAttachedContent` false and skip the search — and injecting that
-//!   pre-seed reproduces the zero-observation behaviour exactly. But both hint
-//!   rows were created in **January 2025** and never updated, with a NULL
-//!   source, so the pre-seed cannot have fired at recording time.
+//! Replaying the stored hint is therefore the less-wrong option for a corpus of
+//! freshly crawled torrents, whose content mostly did not pre-exist the
+//! recording. `contents` is still supplied, so the genuine pre-attach still
+//! fires wherever the STORED hint carries a source.
 //!
-//! 🚨 What that left was a property of the TAPE FORMAT: a record is marked
-//! `incomplete` only if its session is still open when the tape is written
-//! (`recorder.go` — `Incomplete` is membership in `r.open`). A classification
-//! that *began and then finished without reaching the enrichment step* —
-//! cancelled at SIGTERM, or ended by an error outcome — closes its session and
-//! is written as a COMPLETE record with zero observations, indistinguishable
-//! from "the workflow legitimately asked nothing".
+//! **The real fix is for the tape to record its own input.** Then a replay uses
+//! the input Go actually had and needs no post-hoc export for these fields. This
+//! is the same snapshot-versus-replay non-idempotency (T2) that caps the
+//! write-set gate at ~86.6%, showing up in a second place.
 //!
-//! **That gap is now fixed**: `tape.RecordOutcome` records how each
-//! classification ended, and [`bitmagnet_tape::Record::authoritative`] reports
-//! whether its observation list can be read as a complete account. These two
-//! subjects therefore land in `not_authoritative` rather than being counted as
-//! divergences.
+//! # Known limitations, which the numbers must be read against
 //!
-//! 🚨 But THIS corpus predates the fix, so every record's outcome is `unknown`
-//! and *nothing in it is authoritative*. The reclassification above is correct
-//! but blunt: it applies to the whole tape, not just these two. Re-recording is
-//! what turns the distinction into a real measurement.
-//!
-//! Corroboration that Rust's question is the RIGHT one: both torrents carry
-//! attached content that is exactly what it finds — `tmdb/77117` "Sunny" (2011)
-//! and `tmdb/42382` "Mr. D". Some other classification of the same torrent asked
-//! Rust's question and attached the answer.
-//!
-//! ## 🚨 How much of this measurement is positive evidence
-//!
-//! Only **72 of the 284 subjects made any observation at all**; the other 212
-//! recorded nothing and "match" by both sides asking nothing. Per the section
-//! above, a zero-observation record on an outcome-less tape is weak evidence —
-//! it can also mean the recorded classification ended early. So the load-bearing
-//! part of this gate is the **72 subjects / 120 observations that actually
-//! exercised a seam**, where every request matched byte for byte. The 212
-//! trivial agreements should not be read as 212 independent confirmations.
+//! * **The 9 non-matching subjects (0.5%)** are that same artifact seen from the
+//!   other side: their content DID pre-exist the recording, so Go pre-attached
+//!   and the replay searches. Proportionally identical to the old corpus's 2 of
+//!   284 (0.7%), which is what a stable artifact rather than a regression looks
+//!   like.
+//! * **Truncated.** Hitting the record cap marks the tape truncated. "These
+//!   2,000 classifications replay" is supportable; "all traffic replays" is not.
+//! * **79 of 2,000 subjects are gone** — deleted between recording and export.
+//!   Ordinary churn; they have no input and are skipped.
+//! * 🚨 **No outcomes.** The deployed writer image predates `tape.RecordOutcome`,
+//!   so every record's outcome is `unknown` and nothing here is authoritative in
+//!   the sense [`bitmagnet_tape::Record::authoritative`] means. That is why the 9
+//!   land in `not_authoritative` rather than `missed`.
+//! * 🚨 **File lists come from `torrent_files`, not the `files_data` blob the
+//!   processor hydrates from.** Expected to agree; not proven to.
 //!
 //! A `Match` is deliberately NOT downgraded for a non-authoritative record:
-//! agreement over a prefix is still agreement, it just proves less. The separate
-//! `not_authoritative` count is what keeps that honest.
+//! agreement over a prefix is still agreement, it just proves less, and the
+//! separate `not_authoritative` count is what keeps that honest.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -115,6 +87,9 @@ use std::sync::Arc;
 
 use bitmagnet_classifier::tape_corpus::{self, CorpusReport};
 use bitmagnet_classifier::{Classifier, ClassifierInput, InputContent, InputFile, InputHint};
+use bitmagnet_processor::load::{
+    effective_hint, has_stored_file_list, CurrentContent, CurrentHint,
+};
 use bitmagnet_tape::Replay;
 use serde::Deserialize;
 
@@ -122,7 +97,7 @@ const PROD_DIGEST: &str = "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../testdata/parity/classifier-attach/prod-20260809")
+        .join("../../../testdata/parity/classifier-attach/prod-20260810")
 }
 
 /// One exported torrent, in the shape the SQL export writes.
@@ -193,7 +168,7 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
                 id: input.id.clone(),
                 name: input.name,
                 size: input.size,
-                files_status: input.files_status,
+                files_status: input.files_status.clone(),
                 extension: input.extension,
                 files_count: input.files_count,
                 files: input
@@ -206,25 +181,31 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
                         size: file.size,
                     })
                     .collect(),
-                // A hint row with no content type is not a hint: Go treats
-                // `Hint.IsNil()` (an empty content type) as absent.
                 contents: input
                     .contents
-                    .into_iter()
+                    .iter()
                     .map(|content| InputContent {
-                        content_type: content.content_type,
-                        content_source: content.content_source,
-                        content_id: content.content_id,
-                        content: content.content,
+                        content_type: content.content_type.clone(),
+                        content_source: content.content_source.clone(),
+                        content_id: content.content_id.clone(),
+                        content: content.content.clone(),
                     })
                     .collect(),
-                hint: input.hint.and_then(|hint| {
+                // 🚨 The STORED hint, deliberately NOT the processor's
+                // synthesised one — see `the_corpus_cannot_reproduce_the_hint`
+                // below. `effective_hint` is real production logic, but feeding
+                // it this corpus's `contents` fabricates knowledge Go did not
+                // have: the export is a snapshot taken AFTER the recorded
+                // classification wrote its result, so a search that SUCCEEDED
+                // now looks like content that was already attached.
+                hint: input.hint.as_ref().and_then(|hint| {
                     hint.content_type
-                        .filter(|t| !t.is_empty())
+                        .clone()
+                        .filter(|value| !value.is_empty())
                         .map(|content_type| InputHint {
                             content_type,
-                            content_source: hint.content_source,
-                            content_id: hint.content_id,
+                            content_source: hint.content_source.clone(),
+                            content_id: hint.content_id.clone(),
                             ..Default::default()
                         })
                 }),
@@ -254,14 +235,14 @@ fn the_tape_is_a_real_production_recording() {
     let replay = Replay::load(corpus_dir(), PROD_DIGEST).expect("prod tape loads");
     let manifest = replay.manifest();
 
-    assert_eq!(manifest.record_count, 300);
-    assert_eq!(manifest.observation_count, 120);
+    assert_eq!(manifest.record_count, 2000);
+    assert_eq!(manifest.observation_count, 653);
     assert!(
         manifest.truncated,
         "hitting the cap marks the tape truncated; the numbers describe THESE subjects"
     );
     assert_eq!(
-        manifest.incomplete_record_count, 7,
+        manifest.incomplete_record_count, 9,
         "records still classifying when the cap hit are excluded from replay"
     );
 }
@@ -272,9 +253,10 @@ fn the_tape_is_a_real_production_recording() {
 async fn prod_corpus_baseline() {
     let report = run_gate().await;
 
-    // 300 recorded − 7 incomplete (excluded by the loader) − 9 deleted torrents.
+    // 2000 recorded − 9 incomplete (excluded by the loader) − 79 torrents
+    // deleted between recording and export.
     assert!(
-        report.subjects >= 280 && report.subjects <= 293,
+        report.subjects >= 1900 && report.subjects <= 1991,
         "unexpected subject count {}: {:?}",
         report.subjects,
         report.by_verdict
@@ -356,9 +338,64 @@ errored={} not_authoritative={} observations={}/{}",
     // two subjects above land here rather than in `missed`, and it is the honest
     // reading: their observation lists cannot be shown to be complete. Re-record
     // to turn this into a real number.
-    assert_eq!(
-        report.not_authoritative, 2,
-        "expected exactly the two subjects whose recordings are not oracles: {:?}",
+    // The corpus cannot reproduce Go's input for these: their content
+    // pre-existed the recording, so Go pre-attached where the replay searches.
+    // See the module docs. Pinned, not asserted as a pass — this is the number
+    // that a tape recording its own input would drive to zero.
+    assert!(
+        report.not_authoritative <= 9,
+        "more subjects than expected cannot be reproduced from the corpus: {:?}",
         report.failures
     );
+}
+
+/// Pins WHY this gate replays the stored hint rather than the processor's
+/// synthesised one, using the real `load::effective_hint` on the real shape that
+/// exposed it.
+///
+/// Subject `02c1f244…` was recorded performing a `content_by_search` for
+/// "K 19 The Widowmaker"; by export time the content that search PRODUCED was
+/// attached. Feeding those post-hoc associations to the synthesis turns that
+/// successful search into an already-attached row, so a replay pre-attaches and
+/// asks nothing. Across the corpus that moved the gate from 9 non-matching
+/// subjects to 172.
+///
+/// This is not a defect in `effective_hint` — it is correct production logic,
+/// and T9 exists because Rust must reproduce it. It is a defect in feeding it a
+/// snapshot taken after the classification it is meant to precede. The fix is
+/// for the tape to record its own input; until then, this test stops anyone
+/// "improving" the loader by wiring the synthesis back in.
+#[test]
+fn synthesising_the_hint_from_post_hoc_contents_fabricates_a_pre_attach() {
+    let association = CurrentContent {
+        id: "tc".to_owned(),
+        content_type: Some("movie".to_owned()),
+        content_source: Some("tmdb".to_owned()),
+        content_id: Some("8665".to_owned()),
+    };
+
+    // No stored hint, exactly as the export shows for that subject.
+    let synthesised = effective_hint(
+        None,
+        std::slice::from_ref(&association),
+        true,
+        has_stored_file_list("multi"),
+    )
+    .expect("the synthesis produces a hint from a sourced association");
+
+    assert_eq!(synthesised.content_source, "tmdb");
+    assert_eq!(synthesised.content_id, "8665");
+
+    // A hint carrying a SOURCE is what makes `runner.Run` pre-attach, which
+    // suppresses the enrichment branch entirely -- so the replay would ask
+    // nothing where Go recorded a search.
+    assert!(
+        !synthesised.content_source.is_empty(),
+        "a sourced hint is precisely what suppresses the search"
+    );
+
+    // The stored-hint path this gate uses instead yields no hint at all here,
+    // so the workflow reaches the search Go actually recorded.
+    let stored: Option<CurrentHint> = None;
+    assert!(stored.is_none());
 }

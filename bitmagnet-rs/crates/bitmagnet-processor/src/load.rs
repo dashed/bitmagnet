@@ -290,17 +290,22 @@ async fn hydrate_contents(
     Ok(hydrated)
 }
 
-struct CurrentHint {
-    content_type: String,
-    content_source: Option<String>,
-    content_id: Option<String>,
+/// A `torrent_hints` row as stored — Go's explicit hint, before the processor
+/// decides what the classifier actually sees.
+#[derive(Debug, Clone)]
+pub struct CurrentHint {
+    pub content_type: String,
+    pub content_source: Option<String>,
+    pub content_id: Option<String>,
 }
 
-struct CurrentContent {
-    id: String,
-    content_type: Option<String>,
-    content_source: Option<String>,
-    content_id: Option<String>,
+/// A `torrent_contents` association, as much of it as the hint synthesis reads.
+#[derive(Debug, Clone)]
+pub struct CurrentContent {
+    pub id: String,
+    pub content_type: Option<String>,
+    pub content_source: Option<String>,
+    pub content_id: Option<String>,
 }
 
 impl CurrentContent {
@@ -344,11 +349,11 @@ impl CurrentContent {
 /// Mirrors Go's `model.FilesStatus.HasStoredFileList`. A `no_info` /
 /// `over_threshold` torrent has no stored file list BY NATURE, so classifier
 /// rules over `torrent.files` cannot fire for it at all.
-fn has_stored_file_list(files_status: &str) -> bool {
+pub fn has_stored_file_list(files_status: &str) -> bool {
     files_status != "no_info" && files_status != "over_threshold"
 }
 
-fn effective_hint(
+pub fn effective_hint(
     explicit: Option<CurrentHint>,
     existing: &[CurrentContent],
     allow_content_reuse: bool,
