@@ -1,14 +1,18 @@
 //! Local content lookup for the B′ enrichment-parity lanes (Go
 //! `internal/classifier/search.go` `localSearch`).
 //!
-//! Placeholder registered by the B′-0 classifier-dependency-seam lane so the
-//! follow-on lane can land the PostgreSQL implementation of
-//! [`bitmagnet_classifier::ContentResolver`]'s `content_by_id` /
-//! `content_by_search` without editing the workspace manifest.
+//! [`PgContentSearch`] is the live PostgreSQL half of
+//! [`bitmagnet_classifier::ContentResolver`]'s two local seams, `content_by_id`
+//! and `content_by_search`; the recorded half is `TapeContentResolver`. This
+//! module holds what they share: the `content` select list and its decoder.
 //!
-//! 🚨 `content_by_search` must return the **ordered, pre-Levenshtein** candidate
-//! list (Go's `query.Limit(10)` + `OrderByQueryStringRank`), never a single
-//! winner — the tie-break belongs to `bitmagnet-textmatch`.
+//! 🚨 `content_by_search` returns the **ordered, pre-Levenshtein** candidate
+//! list (Go's `query.Limit(10)` + `OrderByQueryStringRankThenIdentity`), never a
+//! single winner — the tie-break belongs to `bitmagnet-textmatch`.
+
+mod pg;
+
+pub use self::pg::PgContentSearch;
 
 use bitmagnet_model::{Content, ContentType, Date};
 use sqlx::postgres::PgRow;

@@ -848,9 +848,11 @@ dependencies = [
 name = "bitmagnet-content-search"
 version = "0.1.0"
 dependencies = [
+ "bitmagnet-classifier",
  "bitmagnet-fts",
  "bitmagnet-model",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

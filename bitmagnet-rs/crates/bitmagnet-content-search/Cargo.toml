@@ -5,12 +5,21 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "B′ enrichment parity — local (PostgreSQL) content lookup backing the classifier's attach_local_* actions. Placeholder registered by the B′-0 seam lane."
+description = "B′ enrichment parity — local (PostgreSQL) content lookup backing the classifier's attach_local_* actions."
 
 [dependencies]
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-fts = { path = "../bitmagnet-fts" }
+# For `ContentResultItem` and `ResolveError` only: `PgContentSearch` deliberately
+# does not implement `ContentResolver` (that trait also covers TMDB, a different
+# backend with different failure modes), but it matches the two local methods'
+# signatures and error type exactly so a composite resolver is a plain forward.
+# No cycle: bitmagnet-classifier does not depend on this crate.
+bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 sqlx.workspace = true
+# Go wires `localSearch` behind `localSearchSemaphore` (capacity 1); that bound
+# is reproduced with `tokio::sync::Semaphore`.
+tokio.workspace = true
 
 [lints]
 workspace = true
