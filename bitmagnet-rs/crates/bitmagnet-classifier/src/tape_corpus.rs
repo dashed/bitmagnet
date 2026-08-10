@@ -37,7 +37,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bitmagnet_tape::Replay;
+use bitmagnet_tape::{Record, Replay};
 use serde::Serialize;
 
 use crate::resolver::tape::TapeContentResolver;
@@ -138,9 +138,10 @@ impl CorpusReport {
 /// because each subject needs its own resolver and the resolver is baked in at
 /// construction.
 ///
-/// `input_for` maps a subject id to the input to classify. Returning `None`
-/// skips the subject, which is what a caller does when its corpus does not carry
-/// that subject's torrent.
+/// `input_for` maps one exact record to the input to classify. It receives the
+/// whole [`Record`], rather than only a subject id, because repeat attempts may
+/// carry different classifier-time inputs. Returning `None` skips the record,
+/// which is what a legacy caller does when its out-of-band corpus lacks it.
 ///
 /// Each subject runs under **the flags the recording was made with**, taken from
 /// the tape record rather than assumed: replaying a flags-ON recording under
@@ -159,49 +160,46 @@ pub async fn run<F, I>(
 ) -> Result<CorpusReport, crate::ClassifierError>
 where
     F: FnMut(Arc<TapeContentResolver>) -> Result<Classifier, crate::ClassifierError>,
-    I: FnMut(&str) -> Option<ClassifierInput>,
+    I: FnMut(&Record) -> Option<ClassifierInput>,
 {
     // Deterministic order so two runs of the same corpus produce comparable
     // artifacts; the tape's own index is a hash map.
-    let mut subjects: Vec<_> = replay
-        .subjects()
-        .map(|record| {
-            (
-                record.subject.clone(),
-                record.attempt,
-                record.workflow.clone(),
-                flags_from_record(&record.flags),
-                record.observations.len(),
-                record.authoritative(),
-                record.outcome.as_ref().map_or_else(
-                    || "unknown".to_owned(),
-                    |o| format!("{:?}", o.kind).to_lowercase(),
-                ),
-            )
-        })
-        .collect();
-    subjects.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    let mut records: Vec<_> = replay.subjects().collect();
+    records.sort_by(|a, b| (&a.subject, a.attempt).cmp(&(&b.subject, b.attempt)));
 
-    let mut reports = Vec::with_capacity(subjects.len());
+    let mut reports = Vec::with_capacity(records.len());
 
-    for (subject, attempt, workflow, flags, recorded, authoritative, outcome) in subjects {
-        let Some(input) = input_for(&subject) else {
+    for record in records {
+        let Some(input) = input_for(record) else {
             continue;
         };
 
-        let resolver = Arc::new(TapeContentResolver::new(replay, &subject, attempt));
+        let flags = flags_from_record(&record.flags);
+        let resolver = Arc::new(TapeContentResolver::new(
+            replay,
+            &record.subject,
+            record.attempt,
+        ));
         let classifier = classifier_for(Arc::clone(&resolver))?;
 
-        let result = classifier.run(&workflow, &flags, &input).await;
+        let result = classifier.run(&record.workflow, &flags, &input).await;
 
         let remaining = resolver.remaining();
+        let recorded = record.observations.len();
         let consumed = recorded.saturating_sub(remaining);
-        let verdict =
-            downgrade_if_not_an_oracle(verdict_for(&result, remaining), authoritative, &outcome);
+        let outcome = record.outcome.as_ref().map_or_else(
+            || "unknown".to_owned(),
+            |outcome| format!("{:?}", outcome.kind).to_lowercase(),
+        );
+        let verdict = downgrade_if_not_an_oracle(
+            verdict_for(&result, remaining),
+            record.authoritative(),
+            &outcome,
+        );
 
         reports.push(SubjectReport {
-            subject,
-            attempt,
+            subject: record.subject.clone(),
+            attempt: record.attempt,
             recorded,
             consumed,
             verdict,

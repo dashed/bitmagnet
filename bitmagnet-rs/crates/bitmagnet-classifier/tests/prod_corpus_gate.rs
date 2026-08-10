@@ -54,10 +54,13 @@
 //! recording. `contents` is still supplied, so the genuine pre-attach still
 //! fires wherever the STORED hint carries a source.
 //!
-//! **The real fix is for the tape to record its own input.** Then a replay uses
-//! the input Go actually had and needs no post-hoc export for these fields. This
-//! is the same snapshot-versus-replay non-idempotency (T2) that caps the
-//! write-set gate at ~86.6%, showing up in a second place.
+//! **The real fix is for the tape to record its own input.** The format and
+//! writer now support that: a replay uses a record's embedded input first and
+//! needs no post-hoc export for those fields. This particular production tape
+//! predates the field, so its baseline cannot change until a new writer is
+//! explicitly deployed and a new artifact is recorded. This is the same
+//! snapshot-versus-replay non-idempotency (T2) that caps the write-set gate at
+//! ~86.6%, showing up in a second place.
 //!
 //! # Known limitations, which the numbers must be read against
 //!
@@ -90,7 +93,7 @@ use bitmagnet_classifier::{Classifier, ClassifierInput, InputContent, InputFile,
 use bitmagnet_processor::load::{
     effective_hint, has_stored_file_list, CurrentContent, CurrentHint,
 };
-use bitmagnet_tape::Replay;
+use bitmagnet_tape::{Record, Replay};
 use serde::Deserialize;
 
 const PROD_DIGEST: &str = "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432d403d2acc3c2c809ae";
@@ -216,6 +219,21 @@ fn load_inputs() -> HashMap<String, ClassifierInput> {
         .collect()
 }
 
+fn recorded_or_legacy_input(
+    record: &Record,
+    legacy_inputs: &HashMap<String, ClassifierInput>,
+) -> Option<ClassifierInput> {
+    match record.input.as_ref() {
+        Some(raw) => Some(serde_json::from_str(raw.get()).unwrap_or_else(|error| {
+            panic!(
+                "embedded classifier input for {}#{} does not decode: {error}",
+                record.subject, record.attempt
+            )
+        })),
+        None => legacy_inputs.get(&record.subject).cloned(),
+    }
+}
+
 async fn run_gate() -> CorpusReport {
     let replay = Replay::load(corpus_dir(), PROD_DIGEST).expect("prod tape loads");
     let inputs = load_inputs();
@@ -223,7 +241,7 @@ async fn run_gate() -> CorpusReport {
     tape_corpus::run(
         &replay,
         |resolver| Classifier::from_core_with(resolver as Arc<_>),
-        |subject| inputs.get(subject).cloned(),
+        |record| recorded_or_legacy_input(record, &inputs),
         32,
     )
     .await
@@ -341,12 +359,95 @@ errored={} not_authoritative={} observations={}/{}",
     // The corpus cannot reproduce Go's input for these: their content
     // pre-existed the recording, so Go pre-attached where the replay searches.
     // See the module docs. Pinned, not asserted as a pass — this is the number
-    // that a tape recording its own input would drive to zero.
+    // that a NEW tape recorded by a writer containing input capture should
+    // drive to zero.
     assert!(
         report.not_authoritative <= 9,
         "more subjects than expected cannot be reproduced from the corpus: {:?}",
         report.failures
     );
+}
+
+#[test]
+fn embedded_inputs_win_per_attempt_over_the_legacy_export() {
+    let legacy = HashMap::from([(
+        "s".to_owned(),
+        ClassifierInput {
+            id: "s".to_owned(),
+            name: "post-hoc legacy snapshot".to_owned(),
+            size: 1,
+            files_status: "no_info".to_owned(),
+            extension: None,
+            files_count: None,
+            files: Vec::new(),
+            hint: None,
+            contents: Vec::new(),
+        },
+    )]);
+    let record = |attempt, name: &str| Record {
+        subject: "s".to_owned(),
+        attempt,
+        workflow: "default".to_owned(),
+        flags: serde_json::Map::new(),
+        input: Some(
+            serde_json::value::RawValue::from_string(format!(
+                r#"{{"id":"s","name":"{name}","size":2,"filesStatus":"single","files":[],"contents":[]}}"#
+            ))
+            .expect("raw input"),
+        ),
+        observations: Vec::new(),
+        incomplete: false,
+        outcome: None,
+    };
+
+    let first = record(0, "classifier-time first");
+    let second = record(1, "classifier-time second");
+    assert_eq!(
+        recorded_or_legacy_input(&first, &legacy)
+            .expect("first input")
+            .name,
+        "classifier-time first"
+    );
+    assert_eq!(
+        recorded_or_legacy_input(&second, &legacy)
+            .expect("second input")
+            .name,
+        "classifier-time second"
+    );
+}
+
+#[test]
+#[should_panic(expected = "embedded classifier input for s#0 does not decode")]
+fn malformed_embedded_input_never_falls_back() {
+    let legacy = HashMap::from([(
+        "s".to_owned(),
+        ClassifierInput {
+            id: "s".to_owned(),
+            name: "tempting fallback".to_owned(),
+            size: 1,
+            files_status: "no_info".to_owned(),
+            extension: None,
+            files_count: None,
+            files: Vec::new(),
+            hint: None,
+            contents: Vec::new(),
+        },
+    )]);
+    let record = Record {
+        subject: "s".to_owned(),
+        attempt: 0,
+        workflow: "default".to_owned(),
+        flags: serde_json::Map::new(),
+        input: Some(
+            serde_json::value::RawValue::from_string(r#"{"name":42}"#.to_owned())
+                .expect("raw input"),
+        ),
+        observations: Vec::new(),
+        incomplete: false,
+        outcome: None,
+    };
+
+    let _ = recorded_or_legacy_input(&record, &legacy);
 }
 
 /// Pins WHY this gate replays the stored hint rather than the processor's
@@ -362,9 +463,10 @@ errored={} not_authoritative={} observations={}/{}",
 ///
 /// This is not a defect in `effective_hint` — it is correct production logic,
 /// and T9 exists because Rust must reproduce it. It is a defect in feeding it a
-/// snapshot taken after the classification it is meant to precede. The fix is
-/// for the tape to record its own input; until then, this test stops anyone
-/// "improving" the loader by wiring the synthesis back in.
+/// snapshot taken after the classification it is meant to precede. New tapes
+/// record their own input; this legacy corpus still needs the stored-hint
+/// fallback, and this test stops anyone "improving" that fallback by wiring the
+/// synthesis back in.
 #[test]
 fn synthesising_the_hint_from_post_hoc_contents_fabricates_a_pre_attach() {
     let association = CurrentContent {

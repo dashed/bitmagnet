@@ -22,7 +22,22 @@ list that was **actually observed**, which is what this tape holds.
 
 ## What is recorded
 
-Per classification, in the order the classification made them:
+Each classification record embeds the exact, language-neutral classifier input
+captured at `runner.Run` entry: name and size, file status/list in slice order,
+the **effective** hint the processor handed to the classifier, and existing
+content associations (including hydrated content rows) in slice order. This is
+the authoritative input for that specific `(subject, attempt)`; it avoids
+reconstructing pre-classification state from a database export taken after the
+classification has already written its result.
+
+The `input` field is optional within the v1 schema so existing tapes remain
+loadable. A replay may use its legacy out-of-band input only when the field is
+absent. A present-but-null or present-but-undecodable input fails closed rather
+than falling back. New v1 records therefore require the updated reader; older
+strict Go readers reject the new field instead of silently replaying it wrong.
+
+Per classification, the following dependency observations are then recorded in
+the order the classification made them:
 
 | Kind | Seam | Recorded |
 | --- | --- | --- |

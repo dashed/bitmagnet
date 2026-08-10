@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use bitmagnet_classifier::tape_corpus::{self, Verdict};
 use bitmagnet_classifier::{Classifier, ClassifierInput, InputHint};
-use bitmagnet_tape::Replay;
+use bitmagnet_tape::{Record, Replay};
 
 const GOLDEN_DIGEST: &str =
     "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432d403d2acc3c2c809ae";
@@ -34,12 +34,21 @@ fn replay() -> Replay {
     Replay::load(dir, GOLDEN_DIGEST).expect("golden tape loads")
 }
 
-/// The golden's subjects are synthetic fixtures, not real torrents, so the
-/// corpus supplies a minimal input per subject. What the gate measures is which
-/// dependency calls the classification makes, not what it decides.
-fn input_for(subject: &str) -> Option<ClassifierInput> {
+/// New golden records carry the exact classifier-time input. The synthetic
+/// value remains as the compatibility path for an older v1 tape whose `input`
+/// field is absent.
+fn input_for(record: &Record) -> Option<ClassifierInput> {
+    if let Some(raw) = record.input.as_ref() {
+        return Some(serde_json::from_str(raw.get()).unwrap_or_else(|error| {
+            panic!(
+                "embedded classifier input for {}#{} does not decode: {error}",
+                record.subject, record.attempt
+            )
+        }));
+    }
+
     Some(ClassifierInput {
-        id: subject.to_owned(),
+        id: record.subject.clone(),
         // Parses to base title "Cinderella" + year 1950, which is exactly the
         // question the golden recorded. Anything else would desync on purpose.
         name: "Cinderella (1950)".to_owned(),
@@ -86,6 +95,24 @@ async fn gate_runs_over_every_recorded_subject() {
         report.recorded_observations, 5,
         "and five observations across them"
     );
+}
+
+#[test]
+fn every_golden_record_carries_decodable_classifier_input() {
+    let replay = replay();
+
+    for record in replay.subjects() {
+        let input = record.input.as_ref().unwrap_or_else(|| {
+            panic!("{}#{} has no embedded input", record.subject, record.attempt)
+        });
+        let decoded: ClassifierInput = serde_json::from_str(input.get()).unwrap_or_else(|error| {
+            panic!(
+                "{}#{} embedded input does not decode: {error}",
+                record.subject, record.attempt
+            )
+        });
+        assert_eq!(decoded.id, record.subject);
+    }
 }
 
 /// The current baseline, with all four attach actions — local AND TMDB —

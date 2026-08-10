@@ -1,8 +1,10 @@
 package tape
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -101,9 +103,40 @@ func (r *Recorder) Begin(
 	subject string,
 	workflow string,
 	flags map[string]any,
+	input any,
 ) context.Context {
 	if r == nil || subject == "" {
 		return ctx
+	}
+
+	// The cheap first check avoids encoding inputs after the cap has already
+	// been reached. A second check under the registration lock below handles
+	// concurrent Begin calls racing for the last slot.
+	r.mu.Lock()
+	if len(r.records) >= r.maxRecords {
+		alreadyFull := r.truncated
+		r.truncated = true
+		onFull := r.onFull
+		r.mu.Unlock()
+
+		if !alreadyFull && onFull != nil {
+			onFull()
+		}
+
+		return ctx
+	}
+	r.mu.Unlock()
+
+	var (
+		encodedInput []byte
+		encodeErr    error
+	)
+	if input != nil {
+		encodedInput, encodeErr = Marshal(input)
+
+		if encodeErr == nil && bytes.Equal(bytes.TrimSpace(encodedInput), []byte("null")) {
+			encodeErr = errors.New("encoded as null")
+		}
 	}
 
 	r.mu.Lock()
@@ -121,6 +154,15 @@ func (r *Recorder) Begin(
 		return ctx
 	}
 
+	if encodeErr != nil {
+		r.err = errors.Join(
+			r.err,
+			fmt.Errorf("tape: encode classifier input for %q: %w", subject, encodeErr),
+		)
+		r.mu.Unlock()
+		return ctx
+	}
+
 	attempt := r.attempts[subject]
 	r.attempts[subject] = attempt + 1
 
@@ -129,6 +171,7 @@ func (r *Recorder) Begin(
 		Attempt:  attempt,
 		Workflow: workflow,
 		Flags:    copyFlags(flags),
+		Input:    encodedInput,
 		// Never nil: an empty observation list must survive to disk as [].
 		Observations: []Observation{},
 	}
@@ -230,6 +273,7 @@ func (r *Recorder) Records() ([]Record, error) {
 
 	for _, record := range r.records {
 		copied := *record
+		copied.Input = bytes.Clone(record.Input)
 		// Snapshotting a run that is still going catches whatever
 		// classifications happen to be mid-flight; their observation lists are
 		// prefixes, and saying so is the difference between a short answer and

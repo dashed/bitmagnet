@@ -63,12 +63,21 @@ type ObservationError struct {
 // so it is not an oracle for that subject and a reader excludes it: asking
 // about the subject then reports a miss rather than a short answer.
 type Record struct {
-	Subject      string         `json:"subject"`
-	Attempt      int            `json:"attempt"`
-	Workflow     string         `json:"workflow"`
-	Flags        map[string]any `json:"flags"`
-	Observations []Observation  `json:"observations"`
-	Incomplete   bool           `json:"incomplete,omitempty"`
+	Subject  string         `json:"subject"`
+	Attempt  int            `json:"attempt"`
+	Workflow string         `json:"workflow"`
+	Flags    map[string]any `json:"flags"`
+	// Input is the classifier input as it existed when this record began. It is
+	// encoded immediately by Recorder.Begin, before the workflow can attach
+	// content or otherwise make a later database snapshot disagree with the
+	// state Go actually classified.
+	//
+	// Nil is valid for tapes recorded before input capture existed. Readers must
+	// use their legacy out-of-band input only in that case; a present value is
+	// the authoritative input for this specific subject AND attempt.
+	Input        json.RawMessage `json:"input,omitempty"`
+	Observations []Observation   `json:"observations"`
+	Incomplete   bool            `json:"incomplete,omitempty"`
 	// Outcome is how the classification ended. Nil means either that the record
 	// was still open when the tape was written (see Incomplete) or that the tape
 	// predates outcome recording -- in both cases the outcome is UNKNOWN, which
@@ -268,6 +277,10 @@ func (r Record) validate() error {
 
 	if r.Observations == nil {
 		return fmt.Errorf("record %q has a null observations list; an empty list must encode as []", r.Subject)
+	}
+
+	if bytes.Equal(bytes.TrimSpace(r.Input), []byte("null")) {
+		return fmt.Errorf("record %q has a null input; an unavailable legacy input must be absent", r.Subject)
 	}
 
 	for i, obs := range r.Observations {

@@ -5,7 +5,7 @@
 //! protects, because a reader that is laxer than the writer turns a corrupt
 //! tape into wrong answers rather than an error.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
 /// Identifies the on-disk format. A reader refuses a tape it does not recognise.
@@ -54,6 +54,7 @@ pub struct Manifest {
 /// A replay consumes observations by position, so a port that consults its
 /// dependencies in a different order desyncs.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     pub subject: String,
     /// Disambiguates repeat classifications of one subject within a run. In a
@@ -61,6 +62,18 @@ pub struct Record {
     pub attempt: i64,
     pub workflow: String,
     pub flags: serde_json::Map<String, serde_json::Value>,
+    /// The classifier input at the instant Go entered `runner.Run`, before the
+    /// workflow could change what a later database snapshot would show.
+    ///
+    /// Absent on legacy tapes. When present, this record-and-attempt-specific
+    /// value is authoritative and callers must not replace it with an
+    /// out-of-band input merely because it fails to decode.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_raw",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input: Option<Box<RawValue>>,
     pub observations: Vec<Observation>,
     /// Marks a record whose classification had not finished when the tape was
     /// written. Its observation list is a prefix, so it is **not** an oracle for
@@ -75,6 +88,17 @@ pub struct Record {
     /// is not the same as "it finished normally", and must not be read as such.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<RecordOutcome>,
+}
+
+// `Option<T>` normally collapses an explicit JSON null into `None`, which would
+// make a malformed new record indistinguishable from a legacy record whose
+// input field is absent. Missing fields take `default`; present fields always
+// deserialize as RawValue so validation can reject null fail-closed.
+fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
 /// How a classification ended — Go `tape.RecordOutcome`.
@@ -272,6 +296,17 @@ impl Record {
             )));
         }
 
+        if self
+            .input
+            .as_ref()
+            .is_some_and(|input| input.get().trim() == "null")
+        {
+            return Err(TapeError::Invalid(format!(
+                "record {:?} has a null input; an unavailable legacy input must be absent",
+                self.subject
+            )));
+        }
+
         for (i, observation) in self.observations.iter().enumerate() {
             observation.validate().map_err(|err| {
                 TapeError::Invalid(format!("record {:?} observation {i}: {err}", self.subject))
@@ -390,6 +425,40 @@ mod outcome_tests {
             !decoded.authoritative(),
             "an unknown outcome is not a claim that the classification finished"
         );
+    }
+
+    #[test]
+    fn classifier_input_is_optional_and_round_trips_raw() {
+        let legacy = record(&format!(r#"{{{BASE}}}"#));
+        assert!(legacy.input.is_none());
+
+        let decoded = record(&format!(
+            r#"{{{BASE},"input":{{"name":"Cinderella","files":[]}}}}"#
+        ));
+        assert_eq!(
+            decoded.input.as_ref().map(|input| input.get()),
+            Some(r#"{"name":"Cinderella","files":[]}"#)
+        );
+
+        let encoded = serde_json::to_string(&decoded).expect("record encodes");
+        let round_tripped = record(&encoded);
+        assert_eq!(
+            round_tripped.input.as_ref().map(|input| input.get()),
+            decoded.input.as_ref().map(|input| input.get())
+        );
+    }
+
+    #[test]
+    fn null_input_is_not_a_legacy_absence() {
+        let decoded = record(&format!(r#"{{{BASE},"input":null}}"#));
+        assert!(decoded.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_record_fields_fail_closed_like_the_go_reader() {
+        let error = serde_json::from_str::<Record>(&format!(r#"{{{BASE},"extra":1}}"#))
+            .expect_err("unknown record field should fail");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     /// An open record has no outcome and is never authoritative, whatever else

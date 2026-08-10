@@ -340,6 +340,94 @@ func TestTapeRecordsTiedCandidateWindow(t *testing.T) {
 	}
 }
 
+// TestTapeCapturesClassifierTimeInput pins the boundary the production corpus
+// needs: the Record owns the exact Torrent handed to runner.Run, including the
+// effective hint and any content that was already attached, before the workflow
+// can make the database state diverge from that input.
+func TestTapeCapturesClassifierTimeInput(t *testing.T) {
+	recorder := tape.NewRecorder(testDigest, 0, tape.Provenance{Command: "test"})
+	runner := newTapeRunner(
+		t,
+		localSearchDeps(forbiddenContentSearch{t}, forbiddenRequester{t}),
+		recorder,
+	)
+
+	content := testContent("42", "Cinderella", 1950)
+	content.OriginalTitle = model.NewNullString("Cendrillon")
+	content.CreatedAt = time.Unix(11, 0).UTC()
+	content.UpdatedAt = time.Unix(12, 0).UTC()
+	content.Collections = []model.ContentCollection{
+		{Type: "genre", Source: "tmdb", ID: "1", Name: "Fantasy"},
+		{Type: "genre", Source: "tmdb", ID: "2", Name: "Family"},
+	}
+	content.Attributes = []model.ContentAttribute{
+		{ContentType: model.ContentTypeMovie, ContentSource: "tmdb", ContentID: "42", Source: "imdb", Key: "id", Value: "tt0042332"},
+	}
+
+	torrent := movieTorrent("Cinderella.1950.2160p.UHD.BluRay.x265")
+	torrent.FilesCount = model.NewNullUint(2)
+	torrent.Files = []model.TorrentFile{
+		{Index: 1, Path: "extras/trailer.mp4", Extension: model.NewNullString("mp4"), Size: 20},
+		{Index: 0, Path: "Cinderella.mkv", Extension: model.NewNullString("mkv"), Size: 100},
+	}
+	torrent.Hint = model.TorrentHint{
+		ContentType:   model.ContentTypeMovie,
+		ContentSource: model.NewNullString("tmdb"),
+		ContentID:     model.NewNullString("42"),
+		Languages:     model.Languages{model.Language("fr"): {}, model.Language("en"): {}},
+		Episodes:      model.Episodes{1: {2: {}}},
+		ReleaseGroup:  model.NewNullString("GROUP"),
+	}
+	torrent.Contents = []model.TorrentContent{
+		{
+			ID:            "first",
+			ContentType:   model.NewNullContentType(model.ContentTypeMovie),
+			ContentSource: model.NewNullString("tmdb"),
+			ContentID:     model.NewNullString("42"),
+			Content:       content,
+		},
+		{
+			ID:            "second",
+			ContentType:   model.NewNullContentType(model.ContentTypeMovie),
+			ContentSource: model.NewNullString("tmdb"),
+			ContentID:     model.NewNullString("99"),
+		},
+	}
+
+	ctx := tape.WithSubject(context.Background(), "classifier-time")
+	if _, err := runner.Run(ctx, "default", testFlagsOn, torrent); err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("records: %v", err)
+	}
+	if len(records) != 1 || len(records[0].Input) == 0 {
+		t.Fatalf("record has no captured input: %+v", records)
+	}
+
+	var got tapeClassifierInput
+	if err := json.Unmarshal(records[0].Input, &got); err != nil {
+		t.Fatalf("decode input: %v", err)
+	}
+	if !reflect.DeepEqual(got, newTapeClassifierInput("classifier-time", torrent)) {
+		t.Fatalf("captured input differs\ngot:  %+v\nwant: %+v", got, newTapeClassifierInput("classifier-time", torrent))
+	}
+	if got.Hint == nil || got.Hint.Episodes != "S01E02" || fmt.Sprint(got.Hint.Languages) != "[en fr]" || got.Hint.ReleaseGroup == nil || *got.Hint.ReleaseGroup != "GROUP" {
+		t.Fatalf("effective hint was not captured completely: %+v", got.Hint)
+	}
+	if len(got.Files) != 2 || got.Files[0].Path != "extras/trailer.mp4" || got.Files[1].Path != "Cinderella.mkv" {
+		t.Fatalf("file order changed: %+v", got.Files)
+	}
+	if len(got.Contents) != 2 || got.Contents[0].Content == nil || got.Contents[1].Content != nil {
+		t.Fatalf("content hydration or order changed: %+v", got.Contents)
+	}
+	if got.Contents[0].Content.CreatedAt == nil || *got.Contents[0].Content.CreatedAt != 11 || len(got.Contents[0].Content.Collections) != 2 || len(got.Contents[0].Content.Attributes) != 1 {
+		t.Fatalf("hydrated content was not captured completely: %+v", got.Contents[0].Content)
+	}
+}
+
 // TestTapeDistinguishesEmptyFromMissing is the guarantee the Rust side mirrors:
 // a recorded empty answer is an answer, and a gap is not.
 func TestTapeDistinguishesEmptyFromMissing(t *testing.T) {
@@ -635,7 +723,7 @@ func TestTapeRecordsTmdbFailureKinds(t *testing.T) {
 			recorder := tape.NewRecorder(testDigest, 0, tape.Provenance{Command: "test"})
 			client := tmdb.NewClient(stubRequester{err: testCase.err})
 
-			ctx := recorder.Begin(context.Background(), "subject", "default", nil)
+			ctx := recorder.Begin(context.Background(), "subject", "default", nil, nil)
 			if _, err := client.SearchMovie(ctx, tmdb.SearchMovieRequest{Query: "x"}); !errors.Is(err, testCase.err) {
 				t.Fatalf("record: got %v, want %v", err, testCase.err)
 			}

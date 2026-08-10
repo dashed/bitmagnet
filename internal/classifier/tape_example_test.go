@@ -99,7 +99,7 @@ func TestTapeExampleGolden(t *testing.T) {
 	failingClient := tmdb.NewClient(stubRequester{err: tmdb.ErrUnauthorized})
 	failureCtx := recorder.Begin(context.Background(), "tmdb-failure", "default", map[string]any{
 		"apis_enabled": true, "tmdb_enabled": true,
-	})
+	}, newTapeClassifierInput("tmdb-failure", movieTorrent("Cinderella (1950)")))
 
 	if _, err := failingClient.SearchMovie(failureCtx, tmdb.SearchMovieRequest{
 		Query:        "Cinderella",

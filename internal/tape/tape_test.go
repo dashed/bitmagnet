@@ -47,7 +47,7 @@ func writeAndLoad(t *testing.T, recorder *Recorder, wantDigest string) (*Replay,
 func TestNoSessionWithoutRecorder(t *testing.T) {
 	var recorder *Recorder
 
-	ctx := recorder.Begin(context.Background(), "subject", "default", nil)
+	ctx := recorder.Begin(context.Background(), "subject", "default", nil, nil)
 	if SessionFrom(ctx) != nil {
 		t.Fatal("a nil recorder opened a session")
 	}
@@ -58,7 +58,7 @@ func TestNoSessionWithoutRecorder(t *testing.T) {
 // observation list, and it must not degrade into a null on the way to disk.
 func TestEmptyRecordSurvives(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", map[string]any{"a": true})).End(RecordOutcome{Kind: RecordCompleted})
+	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", map[string]any{"a": true}, nil)).End(RecordOutcome{Kind: RecordCompleted})
 
 	replay, dir := writeAndLoad(t, recorder, digest)
 
@@ -69,6 +69,9 @@ func TestEmptyRecordSurvives(t *testing.T) {
 
 	if !strings.Contains(string(raw), `"observations":[]`) {
 		t.Fatalf("empty observation list did not survive encoding: %s", raw)
+	}
+	if strings.Contains(string(raw), `"input"`) {
+		t.Fatalf("a legacy record without an input encoded one: %s", raw)
 	}
 
 	// The record exists, so the subject was classified; the first question asked
@@ -81,9 +84,75 @@ func TestEmptyRecordSurvives(t *testing.T) {
 	}
 }
 
+func TestInputIsCapturedImmediatelyAndSurvivesRoundTrip(t *testing.T) {
+	recorder := newTestRecorder(t, 0)
+	input := map[string]any{
+		"name": "before",
+		"files": []any{
+			map[string]any{"path": "before.mkv"},
+		},
+	}
+
+	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, input))
+	input["name"] = "after"
+	input["files"].([]any)[0].(map[string]any)["path"] = "after.mkv"
+	session.End(RecordOutcome{Kind: RecordCompleted})
+
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("records: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(records[0].Input, &got); err != nil {
+		t.Fatalf("decode captured input: %v", err)
+	}
+	if got["name"] != "before" || got["files"].([]any)[0].(map[string]any)["path"] != "before.mkv" {
+		t.Fatalf("captured input changed after Begin: %s", records[0].Input)
+	}
+
+	replay, _ := writeAndLoad(t, recorder, digest)
+	roundTripped := replay.Subjects()
+	if len(roundTripped) != 1 || !bytes.Equal(roundTripped[0].Input, records[0].Input) {
+		t.Fatalf("input did not survive round trip: before=%s after=%s", records[0].Input, roundTripped[0].Input)
+	}
+}
+
+func TestInputEncodingFailureFailsClosed(t *testing.T) {
+	recorder := newTestRecorder(t, 0)
+	ctx := recorder.Begin(context.Background(), "s", "default", nil, func() {})
+	if SessionFrom(ctx) != nil {
+		t.Fatal("an unencodable input opened a session")
+	}
+	if _, err := recorder.Records(); err == nil || !strings.Contains(err.Error(), "encode classifier input") {
+		t.Fatalf("got %v, want a latched input encoding error", err)
+	}
+}
+
+func TestInputAfterRecordCapCannotPoisonTape(t *testing.T) {
+	recorder := newTestRecorder(t, 1)
+	SessionFrom(recorder.Begin(context.Background(), "kept", "default", nil, map[string]any{"name": "kept"})).
+		End(RecordOutcome{Kind: RecordCompleted})
+
+	ctx := recorder.Begin(context.Background(), "refused", "default", nil, func() {})
+	if SessionFrom(ctx) != nil {
+		t.Fatal("a classification past the cap opened a session")
+	}
+	records, err := recorder.Records()
+	if err != nil {
+		t.Fatalf("an input refused after the cap poisoned the tape: %v", err)
+	}
+	if len(records) != 1 || records[0].Subject != "kept" {
+		t.Fatalf("unexpected records after cap: %+v", records)
+	}
+}
+
 func TestRecordedEmptyResponseIsAnAnswer(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
+	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, nil))
 	session.Observe("k", map[string]string{"q": "x"}, map[string][]string{"items": {}})
 	session.End(RecordOutcome{Kind: RecordCompleted})
 
@@ -106,7 +175,7 @@ func TestRecordedEmptyResponseIsAnAnswer(t *testing.T) {
 
 func TestDesyncOnDifferentRequest(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
+	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, nil))
 	session.Observe("k", map[string]any{"query": "cinderella", "year": 1950}, map[string]any{"ok": true})
 	session.End(RecordOutcome{Kind: RecordCompleted})
 
@@ -139,7 +208,7 @@ func TestDesyncOnDifferentRequest(t *testing.T) {
 
 func TestDigestDriftFailsClosed(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
-	SessionFrom(recorder.Begin(context.Background(), "s", "default", nil)).End(RecordOutcome{Kind: RecordCompleted})
+	SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, nil)).End(RecordOutcome{Kind: RecordCompleted})
 
 	dir := t.TempDir()
 	if err := recorder.Write(dir, time.Unix(0, 0).UTC()); err != nil {
@@ -154,6 +223,7 @@ func TestDigestDriftFailsClosed(t *testing.T) {
 func TestReaderRejectsMalformedRecords(t *testing.T) {
 	for name, line := range map[string]string{
 		"null observations": `{"subject":"s","attempt":0,"workflow":"w","flags":{},"observations":null}`,
+		"null input":        `{"subject":"s","attempt":0,"workflow":"w","flags":{},"input":null,"observations":[]}`,
 		"missing request": `{"subject":"s","attempt":0,"workflow":"w","flags":{},"observations":` +
 			`[{"kind":"k","outcome":"ok","response":{}}]`,
 		"ok without response": `{"subject":"s","attempt":0,"workflow":"w","flags":{},"observations":` +
@@ -183,7 +253,7 @@ func TestTruncationIsRecorded(t *testing.T) {
 	recorder.OnFull(func() { full++ })
 
 	for _, subject := range []string{"a", "b", "c", "d"} {
-		ctx := recorder.Begin(context.Background(), subject, "default", nil)
+		ctx := recorder.Begin(context.Background(), subject, "default", nil, nil)
 		if SessionFrom(ctx) == nil && subject < "c" {
 			t.Fatalf("subject %s was refused a session before the cap", subject)
 		}
@@ -216,12 +286,12 @@ func TestTruncationIsRecorded(t *testing.T) {
 func TestUnfinishedRecordIsExcluded(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 
-	finished := SessionFrom(recorder.Begin(context.Background(), "finished", "default", nil))
+	finished := SessionFrom(recorder.Begin(context.Background(), "finished", "default", nil, nil))
 	finished.Observe("k", map[string]any{"q": 1}, map[string]any{})
 	finished.End(RecordOutcome{Kind: RecordCompleted})
 
 	// Begun, observed once, and deliberately not ended: still in flight.
-	unfinished := SessionFrom(recorder.Begin(context.Background(), "unfinished", "default", nil))
+	unfinished := SessionFrom(recorder.Begin(context.Background(), "unfinished", "default", nil, nil))
 	unfinished.Observe("k", map[string]any{"q": 1}, map[string]any{})
 
 	replay, dir := writeAndLoad(t, recorder, digest)
@@ -276,7 +346,7 @@ func TestConcurrentSessionsAreIndependent(t *testing.T) {
 
 		observe := func(i int) {
 			subject := string(rune('a'+i/26)) + string(rune('a'+i%26))
-			session := SessionFrom(recorder.Begin(context.Background(), subject, "default", nil))
+			session := SessionFrom(recorder.Begin(context.Background(), subject, "default", nil, nil))
 
 			for step := range 3 {
 				session.Observe("k", map[string]any{"subject": subject, "step": step},
@@ -351,7 +421,7 @@ func TestRepeatSubjectGetsDistinctAttempt(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 
 	for range 2 {
-		session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil))
+		session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, nil))
 		session.Observe("k", map[string]any{"attempt": session.Attempt()}, map[string]any{})
 		session.End(RecordOutcome{Kind: RecordCompleted})
 	}
@@ -374,7 +444,7 @@ func TestProvenanceDocumentNamesTheRun(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", map[string]any{
 		"local_search_enabled": true,
-	}))
+	}, nil))
 	session.Observe("local.content_by_search", map[string]any{}, map[string]any{})
 	session.End(RecordOutcome{Kind: RecordCompleted})
 
@@ -411,10 +481,10 @@ func TestRecordOutcomeDisambiguatesAnEmptyObservationList(t *testing.T) {
 	recorder := NewRecorder("sha256:test", 0, Provenance{})
 
 	// Ran to the end and legitimately consulted nothing.
-	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", nil)).
+	SessionFrom(recorder.Begin(context.Background(), "quiet", "default", nil, nil)).
 		End(RecordOutcome{Kind: RecordCompleted})
 	// Began and was cancelled before it consulted anything.
-	SessionFrom(recorder.Begin(context.Background(), "cancelled", "default", nil)).
+	SessionFrom(recorder.Begin(context.Background(), "cancelled", "default", nil, nil)).
 		End(RecordOutcome{Kind: RecordCanceled, Error: "context canceled"})
 
 	records, err := recorder.Records()
@@ -452,7 +522,7 @@ func TestRecordOutcomeDisambiguatesAnEmptyObservationList(t *testing.T) {
 // one that finished.
 func TestAnOpenRecordIsNeverAuthoritative(t *testing.T) {
 	recorder := NewRecorder("sha256:test", 0, Provenance{})
-	_ = recorder.Begin(context.Background(), "in-flight", "default", nil)
+	_ = recorder.Begin(context.Background(), "in-flight", "default", nil, nil)
 
 	records, err := recorder.Records()
 	if err != nil {

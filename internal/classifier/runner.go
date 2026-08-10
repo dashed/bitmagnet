@@ -82,7 +82,14 @@ func (r runner) Run(
 	// each holds its own session, so the interleaving between them cannot
 	// disturb the sequence within one.
 	if r.recorder != nil {
-		ctx = r.recorder.Begin(ctx, r.subject(ctx, t), workflow, effectiveFlagValues(cfs))
+		subject := r.subject(ctx, t)
+		ctx = r.recorder.Begin(
+			ctx,
+			subject,
+			workflow,
+			effectiveFlagValues(cfs),
+			newTapeClassifierInput(subject, t),
+		)
 		// Closing the session is what lets a tape written mid-run tell a
 		// finished classification from one whose observations are still
 		// arriving; the outcome is what lets it tell a classification that
