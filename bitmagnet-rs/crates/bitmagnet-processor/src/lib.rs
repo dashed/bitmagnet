@@ -13,7 +13,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bitmagnet_classifier::{Classifier, ClassifierError, ClassifierInput, FlagValue, Flags};
+use bitmagnet_classifier::{
+    Classification, Classifier, ClassifierError, ClassifierInput, FlagValue, Flags,
+};
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -196,17 +198,32 @@ impl Materializer {
             // 🔜 When lane B′-4 wires a real resolver in, this call actually
             // does I/O and `materialize` must itself become async — this
             // `block_on` is the marker for that change, not a permanent bridge.
-            let raw = futures::executor::block_on(self.classifier.run(
+            // 🔑 `classify`, not `run`: the normalized object reports
+            // `contentAttached` as a bare boolean and carries no content row, so
+            // going through it would discard exactly what an attached torrent
+            // needs. See `Classifier::classify`.
+            let (result, outcome) = futures::executor::block_on(self.classifier.classify(
                 workflow,
                 &flags,
                 &torrent.classifier_input,
             ));
-            let result: ClassifierResult = serde_json::from_value(raw)?;
-            match result.outcome.as_str() {
+            match outcome.tag() {
                 "deleted" => write_set.delete_info_hashes.push(info_hash),
                 "classified" => {
-                    if result.content_attached {
-                        return Err(MaterializeError::AttachedContentUnsupported { info_hash });
+                    // An attached content row belongs in the expected image:
+                    // `compare` reconstructs the end STATE, attaching each
+                    // ContentWrite to the torrents whose torrent_contents row
+                    // references it. Emitting nothing would leave the expected
+                    // image without a row the live one has.
+                    //
+                    // 🚨 This is deliberately NOT conditioned on whether Go would
+                    // have UPSERT-ed the row. Go upserts attached content only
+                    // when `Content.CreatedAt.IsZero()` (persist.go), so a reused
+                    // row is not rewritten -- but the comparison is end-state,
+                    // not a literal statement log, and the row is present either
+                    // way.
+                    if let Some(content) = result.content.as_ref() {
+                        write_set.contents.push(content_write(content));
                     }
                     let tc = torrent_content_write(&torrent, result);
                     for existing_id in torrent.existing_content_ids {
@@ -246,23 +263,6 @@ pub enum MaterializeError {
     UnknownOutcome(String),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClassifierResult {
-    content_type: String,
-    languages: Vec<String>,
-    episodes: String,
-    video_resolution: Option<String>,
-    video_source: Option<String>,
-    video_codec: Option<String>,
-    #[serde(rename = "video3d")]
-    video_3d: Option<String>,
-    video_modifier: Option<String>,
-    release_group: Option<String>,
-    content_attached: bool,
-    outcome: String,
-}
-
 fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, MaterializeError> {
     let mut flags = Flags::new();
     for (name, value) in raw.into_iter().flatten() {
@@ -278,18 +278,39 @@ fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, Mate
     Ok(flags)
 }
 
-fn torrent_content_write(
-    torrent: &LoadedTorrent,
-    mut result: ClassifierResult,
-) -> TorrentContentWrite {
-    result.languages.sort();
-    result.languages.dedup();
+/// The `content` row an attached result implies.
+///
+/// `identifiers` is deliberately empty: it would come from `content_attributes`,
+/// which the frozen shadow role has no grant on — and the live snapshot leaves
+/// it empty for that same reason, so both sides agree by construction. If that
+/// grant is ever added, BOTH sides must start populating it together, or the
+/// comparison will drift on a difference that is not a port defect.
+fn content_write(content: &bitmagnet_model::Content) -> ContentWrite {
+    ContentWrite {
+        content_type: content.content_type.as_str().to_owned(),
+        source: content.source.clone(),
+        id: content.id.clone(),
+        title: content.title.clone(),
+        release_year: content
+            .release_year
+            .and_then(|year| u16::try_from(year).ok()),
+        identifiers: BTreeMap::new(),
+    }
+}
 
-    let content_type = nonempty(result.content_type);
-    // The flags-off result cannot attach content, so source/id are invalid in
-    // exactly the same way as Go's `newTorrentContent` corpus path.
-    let content_source = None;
-    let content_id = None;
+fn torrent_content_write(torrent: &LoadedTorrent, result: Classification) -> TorrentContentWrite {
+    let mut languages = result.languages;
+    languages.sort();
+    languages.dedup();
+
+    let content_type = result
+        .content_type
+        .map(|content_type| content_type.as_str().to_owned());
+    // Go's `newTorrentContent` carries the attached content's ref onto the
+    // torrent_contents row; with nothing attached both stay NULL.
+    let (content_source, content_id) = result.content.as_ref().map_or((None, None), |content| {
+        (Some(content.source.clone()), Some(content.id.clone()))
+    });
     let id = infer_id(
         &torrent.info_hash,
         content_type.as_deref(),
@@ -308,13 +329,13 @@ fn torrent_content_write(
         content_type,
         content_source,
         content_id,
-        languages: result.languages,
-        episodes: result.episodes,
-        video_resolution: result.video_resolution,
-        video_source: result.video_source,
-        video_codec: result.video_codec,
-        video_3d: result.video_3d,
-        video_modifier: result.video_modifier,
+        languages,
+        episodes: result.episodes.to_string(),
+        video_resolution: result.video_resolution.map(|v| v.as_str().to_owned()),
+        video_source: result.video_source.map(|v| v.as_str().to_owned()),
+        video_codec: result.video_codec.map(|v| v.as_str().to_owned()),
+        video_3d: result.video_3d.map(|v| v.as_str().to_owned()),
+        video_modifier: result.video_modifier.map(|v| v.as_str().to_owned()),
         release_group: result.release_group,
         size: torrent.classifier_input.size,
         files_count,
@@ -355,10 +376,6 @@ fn validate_info_hash(value: &str) -> Result<(), MaterializeError> {
     } else {
         Err(MaterializeError::InvalidInfoHash(value.to_string()))
     }
-}
-
-fn nonempty(value: String) -> Option<String> {
-    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(test)]

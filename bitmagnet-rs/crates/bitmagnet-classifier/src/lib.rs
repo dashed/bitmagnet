@@ -198,7 +198,30 @@ impl Classifier {
     /// never yields, so a caller that is still synchronous can drive it to
     /// completion with `futures::executor::block_on` without a runtime.
     #[must_use]
+    /// Classify, returning the normalized corpus `expected` object.
+    ///
+    /// A thin wrapper over [`Self::classify`]; the two must stay in step, which
+    /// is why this delegates rather than duplicating the run.
     pub async fn run(&self, workflow: &str, flags: &Flags, input: &ClassifierInput) -> Json {
+        let (result, outcome) = self.classify(workflow, flags, input).await;
+        to_expected_json(&result, &outcome)
+    }
+
+    /// Classify, returning the STRUCTURED result.
+    ///
+    /// 🔑 Callers that need the attached content must use this, not
+    /// [`Self::run`]. The normalized object is the frozen corpus `expected`
+    /// schema (contract §2.1/§2.3): it reports `contentAttached` as a bare
+    /// boolean and carries no content row, because the flags-off corpus can
+    /// never attach one. Going through it therefore loses exactly the
+    /// information the write-set materializer needs, which is what made
+    /// attached content "unsupported" there.
+    pub async fn classify(
+        &self,
+        workflow: &str,
+        flags: &Flags,
+        input: &ClassifierInput,
+    ) -> (Classification, Outcome) {
         // Merge runtime flags over the compiled defaults, resolving one value
         // per defined flag (`runner.Run`).
         let mut merged: BTreeMap<String, FlagValue> = BTreeMap::new();
@@ -212,17 +235,17 @@ impl Classifier {
         let torrent_val = match to_value(build_cel_torrent(input)) {
             Ok(v) => v,
             Err(e) => {
-                return to_expected_json(
-                    &Classification::default(),
-                    &Outcome::Error(format!("serialize torrent: {e}")),
+                return (
+                    Classification::default(),
+                    Outcome::Error(format!("serialize torrent: {e}")),
                 )
             }
         };
 
         let Some(wf) = self.workflows.get(workflow) else {
-            return to_expected_json(
-                &Classification::default(),
-                &Outcome::Error(format!("workflow not found: {workflow}")),
+            return (
+                Classification::default(),
+                Outcome::Error(format!("workflow not found: {workflow}")),
             );
         };
 
@@ -248,15 +271,13 @@ impl Classifier {
             resolver: self.resolver.as_ref(),
         };
 
-        let (final_result, outcome) = match run_action(wf, &ctx, result).await {
+        match run_action(wf, &ctx, result).await {
             Ok(r) => (r, Outcome::Classified),
             Err(e) if e.is_delete() => (Classification::default(), Outcome::Deleted(e.to_string())),
             Err(e) if e.is_unmatched() => {
                 (Classification::default(), Outcome::Unmatched(e.to_string()))
             }
             Err(e) => (Classification::default(), Outcome::Error(e.to_string())),
-        };
-
-        to_expected_json(&final_result, &outcome)
+        }
     }
 }
