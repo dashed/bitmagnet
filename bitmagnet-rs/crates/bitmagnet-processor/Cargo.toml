@@ -22,6 +22,8 @@ serde_json.workspace = true
 sqlx.workspace = true
 # T9: the shared `content` row select list + decoder.
 bitmagnet-content-search = { path = "../bitmagnet-content-search" }
+# Reads the recorded tape the live local search is compared against.
+bitmagnet-tape = { path = "../bitmagnet-tape" }
 # Go `Languages.Slice()` ordering for the torrent_contents language list.
 bitmagnet-release = { path = "../bitmagnet-release" }
 thiserror.workspace = true
@@ -36,3 +38,7 @@ path = "src/bin/bitmagnet-ingest-shadow.rs"
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "bitmagnet-localsearch-replay"
+path = "src/bin/bitmagnet-localsearch-replay.rs"

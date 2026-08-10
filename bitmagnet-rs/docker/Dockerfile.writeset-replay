@@ -11,6 +11,13 @@
 #
 # Like the shadow image, this copies both bitmagnet-rs and the Go classifier
 # core, so it needs the repository-root archive and build context.
+#
+# It carries a SECOND gate runner, `bitmagnet-localsearch-replay`, which
+# re-issues a recorded tape's local-search requests against live PostgreSQL and
+# diffs the answers. Same read-only guarantees, same SELECT-only role, same
+# one-shot Job shape — so it rides in this image rather than duplicating the
+# build. The ENTRYPOINT stays the write-set runner; select the other with an
+# explicit `command:`.
 
 FROM rust:1.97-slim-bookworm AS builder
 ENV RUSTUP_TOOLCHAIN=1.97.0
@@ -21,9 +28,12 @@ WORKDIR /build
 COPY bitmagnet-rs ./bitmagnet-rs
 COPY internal/classifier/classifier.core.yml ./internal/classifier/classifier.core.yml
 RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release \
-      -p bitmagnet-processor --bin bitmagnet-writeset-replay \
+      -p bitmagnet-processor \
+      --bin bitmagnet-writeset-replay --bin bitmagnet-localsearch-replay \
     && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-writeset-replay \
       /out/bitmagnet-writeset-replay \
+    && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-localsearch-replay \
+      /out/bitmagnet-localsearch-replay \
     && rm -rf bitmagnet-rs/target
 
 FROM debian:bookworm-slim AS runtime
@@ -34,6 +44,12 @@ RUN apt-get update \
     && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
 
 COPY --from=builder /out/bitmagnet-writeset-replay /usr/local/bin/bitmagnet-writeset-replay
+COPY --from=builder /out/bitmagnet-localsearch-replay /usr/local/bin/bitmagnet-localsearch-replay
+
+# The recorded corpus the local-search comparison diffs against. Baking it in
+# keeps the job self-contained; it is a few hundred KB and this is a gate
+# runner, not a serving image. 🚨 A new corpus therefore needs a new image.
+COPY testdata/parity/classifier-attach /opt/bitmagnet/tapes
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/bitmagnet-writeset-replay"]

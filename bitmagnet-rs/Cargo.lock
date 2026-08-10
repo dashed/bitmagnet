@@ -983,6 +983,7 @@ dependencies = [
  "bitmagnet-model",
  "bitmagnet-queue",
  "bitmagnet-release",
+ "bitmagnet-tape",
  "clap",
  "futures",
  "hex",
