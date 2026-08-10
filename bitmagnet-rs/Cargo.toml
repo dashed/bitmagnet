@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/bitmagnet-proto",
+    "crates/bitmagnet-resolver",
     "crates/bitmagnet-common",
     "crates/bitmagnet-model",
     "crates/bitmagnet-db",

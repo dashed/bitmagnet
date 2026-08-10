@@ -1031,6 +1031,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-resolver"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitmagnet-classifier",
+ "bitmagnet-content-search",
+ "bitmagnet-model",
+ "bitmagnet-tmdb",
+]
+
+[[package]]
 name = "bitmagnet-search"
 version = "0.1.0"
 dependencies = [
