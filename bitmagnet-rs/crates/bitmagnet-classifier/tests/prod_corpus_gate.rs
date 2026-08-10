@@ -384,20 +384,22 @@ fn embedded_inputs_win_per_attempt_over_the_legacy_export() {
             contents: Vec::new(),
         },
     )]);
-    let record = |attempt, name: &str| Record {
-        subject: "s".to_owned(),
-        attempt,
-        workflow: "default".to_owned(),
-        flags: serde_json::Map::new(),
-        input: Some(
-            serde_json::value::RawValue::from_string(format!(
-                r#"{{"id":"s","name":"{name}","size":2,"filesStatus":"single","files":[],"contents":[]}}"#
-            ))
-            .expect("raw input"),
-        ),
-        observations: Vec::new(),
-        incomplete: false,
-        outcome: None,
+    let record = |attempt, name: &str| {
+        Record {
+            subject: "s".to_owned(),
+            attempt,
+            workflow: "default".to_owned(),
+            flags: serde_json::Map::new(),
+            input: Some(
+                serde_json::value::RawValue::from_string(format!(
+                    r#"{{"id":"s","name":"{name}","size":2,"filesStatus":"single","files":[],"contents":[]}}"#
+                ))
+                .expect("raw input"),
+            ),
+            observations: Vec::new(),
+            incomplete: false,
+            outcome: None,
+        }
     };
 
     let first = record(0, "classifier-time first");

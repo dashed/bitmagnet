@@ -103,7 +103,10 @@ fn every_golden_record_carries_decodable_classifier_input() {
 
     for record in replay.subjects() {
         let input = record.input.as_ref().unwrap_or_else(|| {
-            panic!("{}#{} has no embedded input", record.subject, record.attempt)
+            panic!(
+                "{}#{} has no embedded input",
+                record.subject, record.attempt
+            )
         });
         let decoded: ClassifierInput = serde_json::from_str(input.get()).unwrap_or_else(|error| {
             panic!(
