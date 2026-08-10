@@ -847,6 +847,11 @@ dependencies = [
 [[package]]
 name = "bitmagnet-content-search"
 version = "0.1.0"
+dependencies = [
+ "bitmagnet-fts",
+ "bitmagnet-model",
+ "sqlx",
+]
 
 [[package]]
 name = "bitmagnet-db"
@@ -972,6 +977,7 @@ dependencies = [
  "anyhow",
  "bitmagnet-classifier",
  "bitmagnet-common",
+ "bitmagnet-content-search",
  "bitmagnet-model",
  "bitmagnet-queue",
  "clap",

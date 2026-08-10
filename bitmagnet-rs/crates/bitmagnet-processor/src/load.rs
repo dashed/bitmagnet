@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use bitmagnet_classifier::{ClassifierInput, InputFile, InputHint};
+use bitmagnet_classifier::{ClassifierInput, InputContent, InputFile, InputHint};
+use bitmagnet_model::Content;
 use bitmagnet_model::{deserialize_files_bounded, BlobError};
 use bitmagnet_queue::{ProcessTorrentParams, CLASSIFY_MODE_REMATCH};
 use futures::TryStreamExt;
@@ -74,6 +75,8 @@ pub(crate) async fn load_torrents_in(
                 content_id: row.try_get("content_id")?,
             });
     }
+
+    let hydrated = hydrate_contents(&mut *connection, &current).await?;
 
     let hint_rows = sqlx::query(
         "SELECT encode(info_hash, 'hex') AS info_hash, content_type, \
@@ -201,25 +204,90 @@ pub(crate) async fn load_torrents_in(
                 files_count,
                 files,
                 hint,
-                // T9: the classifier can now pre-attach an existing content row,
-                // but doing so needs the HYDRATED `content` row and this loader
-                // selects only `torrent_contents` ids -- no join to `content`.
-                // Passing the ids alone would be worse than passing nothing: the
-                // pre-attach guards on the content actually being loaded, so a
-                // half-populated association would be silently skipped and look
-                // like a decision rather than a gap.
-                //
-                // `attach_hint_unsupported` (above) already excludes exactly
-                // these torrents from the write-set comparison, so the processor
-                // path is unchanged and still honest. Hydrating them is the next
-                // step, and is what lets the enrichmentDependent bucket move.
-                contents: Vec::new(),
+                // T9: the associations the classifier pre-attaches from. An
+                // association whose `content` row could not be hydrated is
+                // carried with `content: None`, which the pre-attach treats
+                // exactly as Go treats an unloaded association -- it skips it
+                // rather than attaching a blank row.
+                contents: existing
+                    .iter()
+                    .map(|content| content.to_input(&hydrated))
+                    .collect(),
             },
-            existing_content_ids: existing.into_iter().map(|content| content.id).collect(),
+            existing_content_ids: existing.iter().map(|content| content.id.clone()).collect(),
             attach_hint_unsupported,
         });
     }
     Ok(loaded)
+}
+
+/// The `(type, source, id)` key of a `content` row.
+type ContentKey = (String, String, String);
+
+/// Loads the `content` rows the associations point at, keyed by their primary
+/// key.
+///
+/// A separate query rather than a join, because `torrent_contents` and `content`
+/// both have an `id` column and aliasing one of them away would mean the shared
+/// [`bitmagnet_content_search::CONTENT_COLUMNS`] select list could not be used
+/// verbatim. Reusing that list is the point: the live `ContentResolver` will
+/// hydrate the same row, and a second hand-written copy could drift.
+///
+/// A referenced row that does not come back is simply absent from the map. That
+/// is not an error — an association can outlive the content it points at — and
+/// the caller turns it into `content: None`, which the pre-attach skips.
+async fn hydrate_contents(
+    connection: &mut PgConnection,
+    current: &BTreeMap<String, Vec<CurrentContent>>,
+) -> Result<BTreeMap<ContentKey, Content>, LoadError> {
+    let mut types = Vec::new();
+    let mut sources = Vec::new();
+    let mut ids = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for content in current.values().flatten() {
+        let Some(key) = content.key() else { continue };
+        if seen.insert(key.clone()) {
+            types.push(key.0);
+            sources.push(key.1);
+            ids.push(key.2);
+        }
+    }
+
+    if types.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    // The only interpolation is a compile-time constant select list; every
+    // value is bound. The keys go in as three parallel arrays rather than a
+    // generated IN-list, so the statement text is fixed regardless of how many
+    // rows are requested -- which also keeps it plan-cacheable.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM content \
+         WHERE (type::text, source, id) \
+               IN (SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[]))",
+        bitmagnet_content_search::CONTENT_COLUMNS
+    )))
+    .bind(&types)
+    .bind(&sources)
+    .bind(&ids)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let mut hydrated = BTreeMap::new();
+    for row in rows {
+        let content = bitmagnet_content_search::content_from_row(&row)?;
+        hydrated.insert(
+            (
+                content.content_type.as_str().to_owned(),
+                content.source.clone(),
+                content.id.clone(),
+            ),
+            content,
+        );
+    }
+
+    Ok(hydrated)
 }
 
 struct CurrentHint {
@@ -236,6 +304,27 @@ struct CurrentContent {
 }
 
 impl CurrentContent {
+    /// The `content` primary key this association points at, when it points at
+    /// one at all.
+    fn key(&self) -> Option<ContentKey> {
+        Some((
+            self.content_type.clone()?,
+            self.content_source.clone()?,
+            self.content_id.clone()?,
+        ))
+    }
+
+    /// The classifier-side view, with the `content` row attached when it was
+    /// hydrated.
+    fn to_input(&self, hydrated: &BTreeMap<ContentKey, Content>) -> InputContent {
+        InputContent {
+            content_type: self.content_type.clone().unwrap_or_default(),
+            content_source: self.content_source.clone().unwrap_or_default(),
+            content_id: self.content_id.clone().unwrap_or_default(),
+            content: self.key().and_then(|key| hydrated.get(&key)).cloned(),
+        }
+    }
+
     fn is_source_backed(&self) -> bool {
         self.content_type.is_some() && self.content_source.is_some()
     }
@@ -366,6 +455,8 @@ fn enforce_job_budget(
 #[cfg(test)]
 mod tests {
     use super::{effective_hint, has_stored_file_list, CurrentContent, CurrentHint};
+    use bitmagnet_model::Content;
+    use std::collections::BTreeMap;
 
     #[test]
     fn reusable_hint_requires_type_and_source() {
@@ -400,6 +491,85 @@ mod tests {
                 .content_source,
             ""
         );
+    }
+
+    #[test]
+    fn an_association_hydrates_into_the_classifier_input() {
+        let association = CurrentContent {
+            id: "tc".into(),
+            content_type: Some("movie".into()),
+            content_source: Some("tmdb".into()),
+            content_id: Some("77117".into()),
+        };
+        let key = association.key().expect("a fully-keyed association");
+        let hydrated = BTreeMap::from([(
+            key,
+            Content {
+                content_type: bitmagnet_model::ContentType::Movie,
+                source: "tmdb".into(),
+                id: "77117".into(),
+                title: "Sunny".into(),
+                release_date: None,
+                release_year: Some(2011),
+                adult: None,
+                original_language: None,
+                original_title: None,
+                overview: None,
+                runtime: None,
+                popularity: None,
+                vote_average: None,
+                vote_count: None,
+                created_at: Some(1),
+                updated_at: None,
+                tsv: Default::default(),
+                collections: Vec::new(),
+                attributes: Vec::new(),
+            },
+        )]);
+
+        let input = association.to_input(&hydrated);
+
+        assert_eq!(input.content_type, "movie");
+        assert_eq!(input.content_source, "tmdb");
+        assert_eq!(input.content_id, "77117");
+        assert_eq!(
+            input.content.as_ref().map(|content| content.title.as_str()),
+            Some("Sunny"),
+            "the pre-attach needs the hydrated row, not just the ids"
+        );
+    }
+
+    /// An association whose content row is gone must arrive as `None`. The
+    /// classifier's pre-attach then skips it, matching Go's guard on an unloaded
+    /// association — attaching a blank row would be worse than not attaching.
+    #[test]
+    fn a_missing_content_row_hydrates_to_none() {
+        let association = CurrentContent {
+            id: "tc".into(),
+            content_type: Some("movie".into()),
+            content_source: Some("tmdb".into()),
+            content_id: Some("77117".into()),
+        };
+
+        let input = association.to_input(&BTreeMap::new());
+
+        assert_eq!(input.content_id, "77117");
+        assert!(input.content.is_none());
+    }
+
+    /// A partially-keyed association points at no content row at all, so it can
+    /// never be hydrated and must not be looked up.
+    #[test]
+    fn a_partially_keyed_association_has_no_content_key() {
+        let association = CurrentContent {
+            id: "tc".into(),
+            content_type: Some("movie".into()),
+            content_source: None,
+            content_id: Some("77117".into()),
+        };
+
+        assert!(association.key().is_none());
+        assert!(association.to_input(&BTreeMap::new()).content.is_none());
     }
 
     #[test]

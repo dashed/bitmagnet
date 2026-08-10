@@ -8,6 +8,9 @@ repository.workspace = true
 description = "B′ enrichment parity — local (PostgreSQL) content lookup backing the classifier's attach_local_* actions. Placeholder registered by the B′-0 seam lane."
 
 [dependencies]
+bitmagnet-model = { path = "../bitmagnet-model" }
+bitmagnet-fts = { path = "../bitmagnet-fts" }
+sqlx.workspace = true
 
 [lints]
 workspace = true
