@@ -1,5 +1,11 @@
 # Rust rewrite — current state, 2026-08-08
 
+> 🚨 **SUPERSEDED by [`08-current-state-2026-08-09.md`](08-current-state-2026-08-09.md).**
+> Kept for history. Three of its claims are now wrong: TMDB replay IS wired, the
+> corpus harness and parity gate DO exist, and the tsquery / unicode-class
+> divergence is CLOSED (merged, with the character class generated from Go).
+> Read 08 instead.
+
 The other documents in this directory (`00-overview` … `06-risks-open-questions`,
 `phase*-tasks`, `phase3-contracts`) describe the *plan*. They were last revised in
 mid-July and several of their claims are now stale. **This document is the
