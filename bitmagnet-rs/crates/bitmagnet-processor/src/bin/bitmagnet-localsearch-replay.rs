@@ -51,8 +51,19 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-/// Only the two tables the local search reads.
-const TOUCHED_TABLES: [&str; 2] = ["content", "content_attributes"];
+/// Without this there is nothing to compare.
+const REQUIRED_TABLES: [&str; 1] = ["content"];
+
+/// Read ONLY by `content_by_id`'s alternative-identifier branch.
+///
+/// 🚨 Optional on purpose. The frozen shadow role has no SELECT on
+/// `content_attributes` (the T11 grant gap), and demanding it would withhold a
+/// whole run's worth of evidence over a branch the corpus may never exercise —
+/// the 2026-08-09 tape holds 72 `local.content_by_search` observations and zero
+/// `local.content_by_id`. A gate that refuses to produce evidence it could have
+/// produced is worse than one that states its own coverage limit, so the limit
+/// travels in the report instead.
+const OPTIONAL_TABLES: [&str; 1] = ["content_attributes"];
 
 const KIND_CONTENT_BY_SEARCH: &str = "local.content_by_search";
 const KIND_CONTENT_BY_ID: &str = "local.content_by_id";
@@ -178,6 +189,8 @@ struct KindSummary {
 #[derive(Debug, Serialize)]
 struct Report {
     scope: &'static str,
+    /// What this run could NOT cover, so the artifact carries its own limits.
+    coverage: Vec<String>,
     tape_dir: String,
     by_kind: BTreeMap<String, KindSummary>,
     differences: Vec<ObservationReport>,
@@ -222,7 +235,18 @@ async fn main() -> Result<()> {
         .await
         .context("connecting to PostgreSQL")?;
 
-    preflight(&pool, args.allow_write_capable_role).await?;
+    let unreadable = preflight(&pool, args.allow_write_capable_role).await?;
+    let coverage = unreadable
+        .iter()
+        .map(|table| {
+            format!(
+                "no SELECT on {table}: content_by_id's alternative-identifier branch is NOT covered"
+            )
+        })
+        .collect::<Vec<_>>();
+    for note in &coverage {
+        tracing::warn!("{note}");
+    }
 
     let search = PgContentSearch::new(pool.clone());
     let mut by_kind: BTreeMap<String, KindSummary> = BTreeMap::new();
@@ -269,6 +293,7 @@ async fn main() -> Result<()> {
 
     let report = Report {
         scope: SCOPE,
+        coverage,
         tape_dir: args.tape_dir.display().to_string(),
         by_kind,
         differences,
@@ -396,7 +421,10 @@ fn unknown_type(value: &str) -> Verdict {
 }
 
 /// Layer 2 of the read-only guarantee: refuse a role that could write.
-async fn preflight(pool: &PgPool, allow_write_capable_role: bool) -> Result<()> {
+///
+/// Returns the OPTIONAL tables the role cannot read, so the caller can state the
+/// resulting coverage limit rather than failing the whole run over it.
+async fn preflight(pool: &PgPool, allow_write_capable_role: bool) -> Result<Vec<String>> {
     let read_only: String = sqlx::query_scalar("SHOW default_transaction_read_only")
         .fetch_one(pool)
         .await
@@ -406,7 +434,11 @@ async fn preflight(pool: &PgPool, allow_write_capable_role: bool) -> Result<()> 
         "session is not read-only (default_transaction_read_only = {read_only})"
     );
 
-    let tables = TOUCHED_TABLES.map(str::to_owned).to_vec();
+    let tables: Vec<String> = REQUIRED_TABLES
+        .iter()
+        .chain(OPTIONAL_TABLES.iter())
+        .map(|t| (*t).to_owned())
+        .collect();
     let rows = sqlx::query(
         "SELECT t AS table_name, \
                 has_table_privilege(current_user, t, 'SELECT') AS may_select, \
@@ -420,22 +452,29 @@ async fn preflight(pool: &PgPool, allow_write_capable_role: bool) -> Result<()> 
     .await
     .context("checking table privileges")?;
 
-    let mut missing_select = Vec::new();
+    let mut missing_required = Vec::new();
+    let mut missing_optional = Vec::new();
     let mut writable = Vec::new();
     for row in rows {
         let table: String = row.try_get("table_name")?;
         if !row.try_get::<bool, _>("may_select")? {
-            missing_select.push(table.clone());
+            if REQUIRED_TABLES.contains(&table.as_str()) {
+                missing_required.push(table.clone());
+            } else {
+                missing_optional.push(table.clone());
+            }
         }
+        // The write check applies to every table, required or not: a role that
+        // can write anything this touches is the wrong role.
         if row.try_get::<bool, _>("may_write")? {
             writable.push(table);
         }
     }
 
     anyhow::ensure!(
-        missing_select.is_empty(),
+        missing_required.is_empty(),
         "role cannot SELECT the tables this compares: {}",
-        missing_select.join(", ")
+        missing_required.join(", ")
     );
 
     if !writable.is_empty() {
@@ -448,7 +487,7 @@ async fn preflight(pool: &PgPool, allow_write_capable_role: bool) -> Result<()> 
         tracing::warn!(tables = ?writable, "running with a write-capable role by explicit opt-in");
     }
 
-    Ok(())
+    Ok(missing_optional)
 }
 
 #[cfg(test)]
