@@ -1,88 +1,49 @@
 //! The B′ desync gate against a **real production corpus**.
 //!
-//! The tape at `testdata/parity/classifier-attach/prod-20260810` was recorded
+//! The tape at `testdata/parity/classifier-attach/prod-20260811` was recorded
 //! live from `bitmagnet-0` — the only pod that runs the classifier with the
-//! enrichment flags ON against real traffic — over ~150 minutes at ~13
-//! classifications/min. Every subject is a real torrent classified by the
-//! production workflow, so its verdicts are a measurement rather than a smoke
-//! test of the wiring.
+//! enrichment flags ON against real traffic — by the exact writer image
+//! `p0-97304a42`. Every subject is a real torrent classified by the production
+//! workflow, so its verdicts are a measurement rather than a smoke test of the
+//! wiring.
 //!
 //! # The measurement
 //!
 //! ```text
-//! subjects=1912 matched=1903 desynced=0 missed=0 unconsumed=0 errored=0
-//! not_authoritative=9  observations=653/653
+//! subjects=2000 matched=2000 desynced=0 missed=0 unconsumed=0 errored=0
+//! not_authoritative=0 observations=715/715
 //! ```
 //!
-//! **Zero desyncs, and every recorded observation consumed.** Across 1,912 real
-//! classifications Rust asked exactly the questions Go asked — 386
-//! `local.content_by_search`, 254 `tmdb.request` and 13 `local.content_by_id` —
+//! **Every subject matched and every recorded observation was consumed.**
+//! Across 2,000 real classifications Rust asked exactly the questions Go asked
+//! — 418 `local.content_by_search`, 280 `tmdb.request` and 17
+//! `local.content_by_id` —
 //! each matching Go's recorded request byte for byte, in order, none left over.
 //!
-//! Against the previous 300-record corpus this is **5.5× the subjects that
-//! actually exercise a seam** (399 vs 72) and 5.4× the observations. That ratio
-//! is the one that matters: a subject observing nothing agrees trivially, so it
-//! is the observing subjects that carry the evidence.
+//! Every record embeds the exact input captured at Go's classifier boundary and
+//! carries a terminal outcome. The clean-shutdown generation has 2,000
+//! authoritative records, zero incomplete records, and no out-of-band
+//! `inputs.json`. That removes both failure modes demonstrated by the 2026-08-10
+//! corpus: subjects can no longer disappear between recording and a post-hoc
+//! export, and their classifier-time effective hint no longer has to be
+//! reconstructed. In this independent sample, all 2,000 inputs — including the
+//! 60 classifications that ended by deleting the torrent — remain replayable.
 //!
-//! It is also the first corpus to cover `local.content_by_id` at all — 13
-//! observations, every one with source `imdb`, i.e. the ALTERNATIVE-identifier
-//! branch.
-//!
-//! # 🚨 Why this replays the STORED hint, not the processor's synthesised one
-//!
-//! Go's classifier does not see the `torrent_hints` row directly.
-//! `processor.go` synthesises an effective hint from the first sourced
-//! `torrent_contents` association whenever the stored row has no content
-//! SOURCE, and `runner.Run` then PRE-ATTACHES that content, suppressing the
-//! whole enrichment branch. Reproducing that faithfully is what T9 was.
-//!
-//! So the obvious thing is to run the real `load::effective_hint` over this
-//! corpus's `contents`. **That was tried, and it is wrong here**: it moved the
-//! gate from 9 non-matching subjects to 172, every one of them Rust asking
-//! FEWER questions than Go.
-//!
-//! The reason is that `inputs.json` is a snapshot taken *after* the recorded
-//! classification wrote its result. Subject `02c1f244…` makes it concrete: the
-//! tape shows Go performing `content_by_search` for "K 19 The Widowmaker" and
-//! getting one hit, while the export shows no stored hint and
-//! `contents = [(movie, tmdb, 8665)]` — the content that search *produced*.
-//! Synthesising from that hands the replay knowledge Go did not have at the
-//! time, turning a successful search into an already-attached row.
-//!
-//! Replaying the stored hint is therefore the less-wrong option for a corpus of
-//! freshly crawled torrents, whose content mostly did not pre-exist the
-//! recording. `contents` is still supplied, so the genuine pre-attach still
-//! fires wherever the STORED hint carries a source.
-//!
-//! **The real fix is for the tape to record its own input.** The format and
-//! writer now support that: a replay uses a record's embedded input first and
-//! needs no post-hoc export for those fields. This particular production tape
-//! predates the field, so its baseline cannot change until a new writer is
-//! explicitly deployed and a new artifact is recorded. This is the same
-//! snapshot-versus-replay non-idempotency (T2) that caps the write-set gate at
-//! ~86.6%, showing up in a second place.
+//! The legacy export decoder remains in this gate so older v1 tapes can still be
+//! diagnosed. Embedded input always wins per `(subject, attempt)`, and malformed
+//! embedded input fails closed instead of falling back to a post-hoc snapshot.
+//! The regression below also pins why the legacy fallback must keep its stored
+//! hint rather than synthesising one from contents exported after classification.
 //!
 //! # Known limitations, which the numbers must be read against
 //!
-//! * **The 9 non-matching subjects (0.5%)** are that same artifact seen from the
-//!   other side: their content DID pre-exist the recording, so Go pre-attached
-//!   and the replay searches. Proportionally identical to the old corpus's 2 of
-//!   284 (0.7%), which is what a stable artifact rather than a regression looks
-//!   like.
 //! * **Truncated.** Hitting the record cap marks the tape truncated. "These
 //!   2,000 classifications replay" is supportable; "all traffic replays" is not.
-//! * **79 of 2,000 subjects are gone** — deleted between recording and export.
-//!   Ordinary churn; they have no input and are skipped.
-//! * 🚨 **No outcomes.** The deployed writer image predates `tape.RecordOutcome`,
-//!   so every record's outcome is `unknown` and nothing here is authoritative in
-//!   the sense [`bitmagnet_tape::Record::authoritative`] means. That is why the 9
-//!   land in `not_authoritative` rather than `missed`.
-//! * 🚨 **File lists come from `torrent_files`, not the `files_data` blob the
-//!   processor hydrates from.** Expected to agree; not proven to.
-//!
-//! A `Match` is deliberately NOT downgraded for a non-authoritative record:
-//! agreement over a prefix is still agreement, it just proves less, and the
-//! separate `not_authoritative` count is what keeps that honest.
+//! * The tape proves the classifier from the captured input boundary onward. It
+//!   does not independently prove the upstream processor constructed that input
+//!   correctly.
+//! * The search-string tape seam still does not expose tsquery construction;
+//!   that Unicode-sensitive boundary is proven separately.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -100,7 +61,7 @@ const PROD_DIGEST: &str = "sha256:95ffc278681f50fbcee2a3498e4388378ffe78156bc432
 
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../testdata/parity/classifier-attach/prod-20260810")
+        .join("../../../testdata/parity/classifier-attach/prod-20260811")
 }
 
 /// One exported torrent, in the shape the SQL export writes.
@@ -161,7 +122,12 @@ struct ExportedHint {
 }
 
 fn load_inputs() -> HashMap<String, ClassifierInput> {
-    let raw = std::fs::read(corpus_dir().join("inputs.json")).expect("corpus inputs");
+    let path = corpus_dir().join("inputs.json");
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(error) => panic!("failed to read {}: {error}", path.display()),
+    };
     let exported: Vec<ExportedInput> = serde_json::from_slice(&raw).expect("inputs parse");
 
     exported
@@ -254,30 +220,35 @@ fn the_tape_is_a_real_production_recording() {
     let manifest = replay.manifest();
 
     assert_eq!(manifest.record_count, 2000);
-    assert_eq!(manifest.observation_count, 653);
+    assert_eq!(manifest.observation_count, 715);
+    assert_eq!(manifest.authoritative_record_count, 2000);
     assert!(
         manifest.truncated,
         "hitting the cap marks the tape truncated; the numbers describe THESE subjects"
     );
     assert_eq!(
-        manifest.incomplete_record_count, 9,
-        "records still classifying when the cap hit are excluded from replay"
+        manifest.incomplete_record_count, 0,
+        "the clean-shutdown generation closes every in-flight record"
+    );
+    assert!(
+        replay
+            .subjects()
+            .all(|record| record.input.is_some() && record.authoritative()),
+        "every production record must carry classifier-time input and a complete outcome"
     );
 }
 
-/// The measurement. This is not asserted to pass — it pins what the port
-/// currently does against real traffic, so a lane that changes it has to say so.
+/// The measurement. Its exact passing counts are pinned so a lane that changes
+/// production behavior has to move them visibly.
 #[tokio::test]
 async fn prod_corpus_baseline() {
     let report = run_gate().await;
 
-    // 2000 recorded − 9 incomplete (excluded by the loader) − 79 torrents
-    // deleted between recording and export.
-    assert!(
-        report.subjects >= 1900 && report.subjects <= 1991,
-        "unexpected subject count {}: {:?}",
-        report.subjects,
-        report.by_verdict
+    assert_eq!(report.subjects, 2000, "every recorded input is embedded");
+    assert_eq!(report.matched, 2000, "every production subject matches");
+    assert_eq!(
+        report.recorded_observations, 715,
+        "the gate covers every recorded production observation"
     );
 
     // Printed so the artifact is visible in CI output, not just asserted on.
@@ -340,30 +311,17 @@ errored={} not_authoritative={} observations={}/{}",
         "every recorded observation should be consumed"
     );
 
-    // No misses. The two that used to appear here were a RECORDING artifact --
-    // running Go's own classifier on their corpus input produces exactly the
-    // request Rust makes -- and the tape now carries an outcome, so a record
-    // that cannot support a verdict is reported as such instead of being
-    // counted as a divergence.
+    // A miss against these complete, classifier-time inputs is a real
+    // divergence rather than a post-hoc recording artifact.
     assert_eq!(
         report.missed, 0,
         "a miss against an authoritative record is a real divergence: {:?}",
         report.failures
     );
 
-    // 🚨 This corpus was recorded BEFORE outcomes existed, so every record's
-    // ending is "unknown" and nothing in it is authoritative. That is why the
-    // two subjects above land here rather than in `missed`, and it is the honest
-    // reading: their observation lists cannot be shown to be complete. Re-record
-    // to turn this into a real number.
-    // The corpus cannot reproduce Go's input for these: their content
-    // pre-existed the recording, so Go pre-attached where the replay searches.
-    // See the module docs. Pinned, not asserted as a pass — this is the number
-    // that a NEW tape recorded by a writer containing input capture should
-    // drive to zero.
-    assert!(
-        report.not_authoritative <= 9,
-        "more subjects than expected cannot be reproduced from the corpus: {:?}",
+    assert_eq!(
+        report.not_authoritative, 0,
+        "every record carries a complete outcome and classifier-time input: {:?}",
         report.failures
     );
 }
@@ -416,6 +374,39 @@ fn embedded_inputs_win_per_attempt_over_the_legacy_export() {
             .name,
         "classifier-time second"
     );
+}
+
+#[test]
+fn absent_embedded_input_uses_the_legacy_export() {
+    let legacy = HashMap::from([(
+        "legacy".to_owned(),
+        ClassifierInput {
+            id: "legacy".to_owned(),
+            name: "stored legacy snapshot".to_owned(),
+            size: 7,
+            files_status: "no_info".to_owned(),
+            extension: None,
+            files_count: None,
+            files: Vec::new(),
+            hint: None,
+            contents: Vec::new(),
+        },
+    )]);
+    let record = Record {
+        subject: "legacy".to_owned(),
+        attempt: 0,
+        workflow: "default".to_owned(),
+        flags: serde_json::Map::new(),
+        input: None,
+        observations: Vec::new(),
+        incomplete: false,
+        outcome: None,
+    };
+
+    let input = recorded_or_legacy_input(&record, &legacy).expect("legacy input");
+    assert_eq!(input.id, "legacy");
+    assert_eq!(input.name, "stored legacy snapshot");
+    assert_eq!(input.size, 7);
 }
 
 #[test]

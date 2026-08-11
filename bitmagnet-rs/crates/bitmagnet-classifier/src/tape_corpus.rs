@@ -18,21 +18,13 @@
 //!
 //! # Where this stands
 //!
-//! All four `attach_*` actions are implemented against both seams, and against
-//! the production corpus the gate reports **284 subjects, 0 desyncs, 120/120
-//! observations consumed** — Rust asks exactly Go's questions, local and TMDB
-//! alike, in order, with none left over.
-//!
-//! The two verdicts that are NOT `Match` there are
-//! [`Verdict::NotAuthoritative`]: their recordings ended before reaching the
-//! enrichment step, so their observation lists are prefixes and cannot support a
-//! verdict either way. Running Go's own classifier over their input produces
-//! exactly the request the replay makes. See `tests/prod_corpus_gate.rs`.
-//!
-//! Its assertions deliberately pin the current numbers rather than asserting a
-//! pass, so a lane that changes behaviour has to move them visibly. That has
-//! caught the right thing twice: implementing the local attach actions, and
-//! wiring TMDB replay, each turned the assertions red.
+//! All four `attach_*` actions are implemented against both seams. Against the
+//! 2026-08-11 production corpus the gate reports **2,000/2,000 subjects matched,
+//! 0 desyncs and 715/715 observations consumed** — Rust asks exactly Go's
+//! questions, local and TMDB alike, in order, with none left over. Every record
+//! carries classifier-time input and a complete outcome, so none of those
+//! verdicts is downgraded as non-authoritative. See
+//! `tests/prod_corpus_gate.rs`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

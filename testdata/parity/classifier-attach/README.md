@@ -2,8 +2,9 @@
 
 This directory is where a recording of the Go classifier's **flags-ON**
 enrichment observations lands. `example/` holds a committed fixture-generated
-tape that pins the format; the real recording is produced by a separate,
-explicitly authorised run against production and is not in this repository yet.
+tape that pins the format. The dated `prod-*` directories are separately
+authorised recordings of real production traffic; `prod-20260811` is the first
+one whose writer captured classifier-time input and terminal outcomes directly.
 
 ## Why a tape
 
@@ -132,11 +133,13 @@ CLASSIFIER_TAPE_DIR=/path/to/tape
 CLASSIFIER_TAPE_MAX_RECORDS=5000
 ```
 
-and run the classifier over the population you want to capture. The tape is
-written when the record cap is reached, and again on a clean shutdown. Reaching
+and run the classifier over the population you want to capture. The recorder
+accepts exactly that many records; the next classification is refused a tape
+session and synchronously writes the cap snapshot. A clean shutdown writes
+again, closing any classifications that were in flight at the cap. Exceeding
 the cap marks the tape truncated: a truncated tape is not a complete oracle for
-the population it was drawn from, and replaying that whole population against it
-will report misses.
+the population it was drawn from, and replaying that whole population against
+it will report misses.
 
 **This is an offline evidence-gathering mode, not a serving mode.** Recording a
 production run is a separate, explicitly authorised step.
