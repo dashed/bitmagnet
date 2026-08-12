@@ -175,12 +175,38 @@ btree's pure 160-bit behavior:
   leaves, absence of empty/singleton branches, total count, and the complete
   bucket histogram after mutations.
 
+The seventh bounded source-only slice adds only the deterministic current-state
+node keyspace that directly consumes `RoutingTree`:
+
+- `NodeTable` is fixed to Go's node capacity `80`, splitting enabled, and
+  closest limit `8`. `RoutingNode` carries only an exact `Id20` and owned
+  `SocketAddr`; IPv4-mapped IPv6 and native IPv6 numeric scopes remain distinct,
+  IPv6 flowinfo is always zero, port zero is retained, and two IDs may share an
+  endpoint independently;
+- the origin is rejected. A new accepted ID installs its address; an existing
+  ID returns `AlreadyExists` and updates its address even when the bucket is
+  full; a capacity rejection changes neither routing nor payload state. Drop
+  removes both states and a successful drop reopens capacity;
+- an exact closest target returns only that node, matching Go's keyspace
+  shortcut. An absent target uses the routing tree's exact traversal and
+  returns at most eight payloads; and
+- a same-package checked oracle runs the real Go `ktable.New`/`PutNode`/
+  `DropNode`/`GetClosestNodes` path. It records exact sorted state after every
+  operation across an empty table, a nonzero origin, the full 80-entry bucket
+  and rejected 81st entry, duplicate address update, drop/reopen, forward and
+  reverse insertion, Go's nonnumeric sibling traversal, drain/reuse, shared
+  endpoints, IPv4, mapped IPv4, native scoped IPv6, and port zero. Go's invalid
+  zero `netip.AddrPort` rejection is recorded as a typed boundary: safe Rust
+  `SocketAddr` has no corresponding invalid value.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
-or dispatch validation, live query wiring, the generic Kademlia table/keyspace,
-node/hash values, reverse maps, time/random eviction policy, metrics,
+or dispatch validation, live query wiring, the combined Kademlia table and hash keyspace,
+hash values, the shared reverse-address map, response clocks and node options,
+BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
+metrics,
 concurrency, responders, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
-BEP-51 scheduling, BEP-9/10 metadata transfer, crawler orchestration,
+BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension
 values other than the explicitly unsupported BEP-44 `v` are syntax-validated
 and discarded. Neither the pure registry nor the new parser is connected to

@@ -3,6 +3,7 @@
 mod compact;
 mod inbound;
 mod krpc;
+mod node_table;
 mod receive;
 mod routing_tree;
 mod scrape;
@@ -14,6 +15,7 @@ pub use inbound::{
     MAX_INBOUND_DATAGRAM_BYTES, MAX_INBOUND_NESTING_DEPTH, MAX_INBOUND_VALUES,
 };
 pub use krpc::{ByteString, KrpcError, KrpcMessage, MessageArgs, MessageReturn, WireError};
+pub use node_table::{NodeTable, RoutingNode, NODE_TABLE_CAPACITY, NODE_TABLE_CLOSEST_LIMIT};
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,
