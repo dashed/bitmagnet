@@ -145,7 +145,10 @@ query: group the live table by `(queue,status)`, return all four status labels
 when present, and omit zero-valued combinations. Prometheus registration remains
 gated because Go awaits this query during each scrape, while the current Rust
 registry invokes collectors synchronously; a background cache would expose
-stale data and is not parity.
+stale data and is not parity. The queue adapter now builds a fresh, unregistered
+`bitmagnet_queue_jobs_total{queue,status}` gauge family from each awaited
+snapshot and emits no family for an empty table. The common metrics server can
+await such families per scrape, but no queue runtime activates that hook yet.
 
 Still outstanding before Go queue retirement: guarded batch-consumer image and
 single-consumer deployment wiring, bounded multi-worker orchestration for

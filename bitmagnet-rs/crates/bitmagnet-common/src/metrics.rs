@@ -1,6 +1,8 @@
 //! Process-wide Prometheus metrics registration and optional HTTP exposition.
 
 use std::env;
+use std::fmt::Display;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
@@ -149,7 +151,17 @@ pub fn register_histogram(name: &str, help: &str, buckets: Vec<f64>) -> promethe
 /// Gather the process-wide registry in Prometheus text exposition format.
 #[must_use]
 pub fn gather_text() -> String {
-    let metric_families = registry().gather();
+    encode_metric_families(registry().gather())
+}
+
+fn gather_text_with(mut extra: Vec<prometheus::proto::MetricFamily>) -> String {
+    let mut metric_families = registry().gather();
+    metric_families.append(&mut extra);
+    metric_families.sort_by(|left, right| left.name().cmp(right.name()));
+    encode_metric_families(metric_families)
+}
+
+fn encode_metric_families(metric_families: Vec<prometheus::proto::MetricFamily>) -> String {
     let mut buffer = Vec::new();
     prometheus::TextEncoder::new()
         .encode(&metric_families, &mut buffer)
@@ -163,6 +175,26 @@ pub fn gather_text() -> String {
 /// An unset or empty variable returns `Ok(None)` without binding a socket.
 pub async fn maybe_spawn_metrics_server(
 ) -> crate::Result<Option<(tokio::task::JoinHandle<()>, SocketAddr)>> {
+    maybe_spawn_metrics_server_with_async_gatherer(|| async {
+        Ok::<_, std::convert::Infallible>(Vec::new())
+    })
+    .await
+}
+
+/// Start the optional metrics server with metric families freshly awaited for
+/// every successful scrape.
+///
+/// Gatherer errors omit only the async families and still return the normal
+/// process registry with HTTP 200, matching Prometheus custom-collector
+/// failure semantics without caching stale data.
+pub async fn maybe_spawn_metrics_server_with_async_gatherer<G, Fut, E>(
+    gatherer: G,
+) -> crate::Result<Option<(tokio::task::JoinHandle<()>, SocketAddr)>>
+where
+    G: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Vec<prometheus::proto::MetricFamily>, E>> + Send,
+    E: Display,
+{
     let configured_addr = match env::var(METRICS_ADDR_ENV) {
         Ok(value) => value,
         Err(env::VarError::NotPresent) => return Ok(None),
@@ -189,7 +221,7 @@ pub async fn maybe_spawn_metrics_server(
         loop {
             match listener.accept().await {
                 Ok((stream, _peer_addr)) => {
-                    if let Err(error) = serve_metrics_connection(stream).await {
+                    if let Err(error) = serve_metrics_connection(stream, &gatherer).await {
                         tracing::warn!(%error, "failed to serve metrics connection");
                     }
                 }
@@ -203,13 +235,28 @@ pub async fn maybe_spawn_metrics_server(
     Ok(Some((handle, bound_addr)))
 }
 
-async fn serve_metrics_connection(mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
+async fn serve_metrics_connection<G, Fut, E>(
+    mut stream: tokio::net::TcpStream,
+    gatherer: &G,
+) -> std::io::Result<()>
+where
+    G: Fn() -> Fut,
+    Fut: Future<Output = Result<Vec<prometheus::proto::MetricFamily>, E>>,
+    E: Display,
+{
     let mut request = [0_u8; REQUEST_BUFFER_SIZE];
     let bytes_read = stream.read(&mut request).await?;
     let target = request_target(&request[..bytes_read]);
 
     let (status_line, body) = if matches!(target, Some("/") | Some("/metrics")) {
-        ("HTTP/1.1 200 OK", gather_text().into_bytes())
+        let extra = match gatherer().await {
+            Ok(families) => families,
+            Err(error) => {
+                tracing::warn!(%error, "failed to gather asynchronous metrics");
+                Vec::new()
+            }
+        };
+        ("HTTP/1.1 200 OK", gather_text_with(extra).into_bytes())
     } else {
         ("HTTP/1.1 404 Not Found", Vec::new())
     };
@@ -242,9 +289,11 @@ fn build_http_response(status_line: &str, content_type: &str, body: &[u8]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::{
-        build_http_response, gather_text, maybe_spawn_metrics_server, register_computed_gauge,
+        build_http_response, gather_text, maybe_spawn_metrics_server,
+        maybe_spawn_metrics_server_with_async_gatherer, register_computed_gauge,
         register_int_gauge, METRICS_ADDR_ENV, PROMETHEUS_CONTENT_TYPE,
     };
+    use prometheus::core::Collector as _;
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -282,6 +331,24 @@ mod tests {
             .enable_all()
             .build()
             .expect("test Tokio runtime builds")
+    }
+
+    async fn request(addr: std::net::SocketAddr, target: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("metrics listener accepts TCP connections");
+        stream
+            .write_all(
+                format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .await
+            .expect("metrics request writes");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("metrics response reads to connection close");
+        String::from_utf8(response).expect("HTTP response is valid UTF-8")
     }
 
     #[test]
@@ -339,6 +406,76 @@ mod tests {
             handle.abort();
             let error = handle.await.expect_err("aborted metrics server stops");
             assert!(error.is_cancelled());
+        });
+    }
+
+    #[test]
+    fn async_metrics_are_fresh_per_scrape_and_skipped_for_404() {
+        const METRIC_NAME: &str = "bitmagnet_common_metrics_async_test_gauge";
+
+        let _env_lock = ENV_LOCK.lock().expect("metrics env lock is not poisoned");
+        let _restore = MetricsAddrRestore::set("127.0.0.1:0");
+        let calls = Arc::new(AtomicI64::new(0));
+
+        test_runtime().block_on(async {
+            let gather_calls = Arc::clone(&calls);
+            let (handle, addr) = maybe_spawn_metrics_server_with_async_gatherer(move || {
+                let gather_calls = Arc::clone(&gather_calls);
+                async move {
+                    let value = gather_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                    let gauge = prometheus::Gauge::new(METRIC_NAME, "Async test gauge.")
+                        .expect("valid async test gauge");
+                    gauge.set(value as f64);
+                    Ok::<_, &'static str>(gauge.collect())
+                }
+            })
+            .await
+            .expect("ephemeral async metrics listener binds")
+            .expect("configured async metrics listener is enabled");
+
+            let not_found = request(addr, "/nope").await;
+            assert!(not_found.starts_with("HTTP/1.1 404 Not Found\r\n"));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let first = request(addr, "/metrics").await;
+            assert!(first.lines().any(|line| line == format!("{METRIC_NAME} 1")));
+            let second = request(addr, "/metrics").await;
+            assert!(second
+                .lines()
+                .any(|line| line == format!("{METRIC_NAME} 2")));
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+            handle.abort();
+            assert!(handle.await.unwrap_err().is_cancelled());
+        });
+    }
+
+    #[test]
+    fn async_metrics_failure_omits_only_async_families() {
+        const BASE_NAME: &str = "bitmagnet_common_metrics_async_failure_base";
+        const OMITTED_NAME: &str = "bitmagnet_common_metrics_async_failure_omitted";
+
+        let _env_lock = ENV_LOCK.lock().expect("metrics env lock is not poisoned");
+        let _restore = MetricsAddrRestore::set("127.0.0.1:0");
+        register_int_gauge(BASE_NAME, "Async failure base gauge.").set(5);
+
+        test_runtime().block_on(async {
+            let (handle, addr) = maybe_spawn_metrics_server_with_async_gatherer(|| async {
+                Err::<Vec<prometheus::proto::MetricFamily>, _>("database unavailable")
+            })
+            .await
+            .expect("ephemeral failing metrics listener binds")
+            .expect("configured failing metrics listener is enabled");
+
+            let response = request(addr, "/metrics").await;
+            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(response
+                .lines()
+                .any(|line| line == format!("{BASE_NAME} 5")));
+            assert!(!response.contains(OMITTED_NAME));
+
+            handle.abort();
+            assert!(handle.await.unwrap_err().is_cancelled());
         });
     }
 

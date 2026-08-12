@@ -1,8 +1,13 @@
 //! PostgreSQL queue-depth snapshots for metrics exposition.
 
+use prometheus::core::Collector as _;
 use sqlx::Row;
 
 use crate::{QueueJobStatus, QueuePgError, QueueStore};
+
+pub const QUEUE_JOBS_METRIC_NAME: &str = "bitmagnet_queue_jobs_total";
+pub const QUEUE_JOBS_METRIC_HELP: &str =
+    "Number of tasks enqueued; broken down by queue and status.";
 
 /// One nonempty `(queue, status)` group from the live queue table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,5 +44,40 @@ impl QueueStore {
             })
         })
         .collect()
+    }
+
+    /// Build the fresh unregistered gauge family for one asynchronous scrape.
+    pub async fn status_metric_families(
+        &self,
+    ) -> Result<Vec<prometheus::proto::MetricFamily>, QueuePgError> {
+        let counts = self.status_counts().await?;
+        if counts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let gauges = prometheus::GaugeVec::new(
+            prometheus::Opts::new(QUEUE_JOBS_METRIC_NAME, QUEUE_JOBS_METRIC_HELP),
+            &["queue", "status"],
+        )
+        .expect("the canonical queue metric descriptor must be valid");
+        for item in counts {
+            gauges
+                .with_label_values(&[&item.queue, item.status.as_str()])
+                .set(item.count as f64);
+        }
+        let mut families = gauges.collect();
+        for family in &mut families {
+            family.mut_metric().sort_by(|left, right| {
+                let key = |metric: &prometheus::proto::Metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .map(|label| (label.name().to_owned(), label.value().to_owned()))
+                        .collect::<Vec<_>>()
+                };
+                key(left).cmp(&key(right))
+            });
+        }
+        Ok(families)
     }
 }

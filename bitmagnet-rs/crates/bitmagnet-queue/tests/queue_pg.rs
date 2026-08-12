@@ -17,6 +17,7 @@ use bitmagnet_queue::{
     QueuePgError, QueueStore, PROCESS_TORRENT, PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW,
 };
 use chrono::Utc;
+use prometheus::Encoder as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tokio::sync::{oneshot, Mutex};
@@ -206,6 +207,27 @@ async fn queue_runtime_matches_go_contract() {
         ],
         "empty queue/status combinations must not synthesize zero series"
     );
+    let families = store
+        .status_metric_families()
+        .await
+        .expect("build queue metric family");
+    let mut metrics_text = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&families, &mut metrics_text)
+        .expect("encode queue metric family");
+    let metrics_text = String::from_utf8(metrics_text).expect("metric text is UTF-8");
+    assert!(metrics_text.contains(
+        "# HELP bitmagnet_queue_jobs_total Number of tasks enqueued; broken down by queue and status."
+    ));
+    assert!(metrics_text.contains("# TYPE bitmagnet_queue_jobs_total gauge"));
+    assert!(metrics_text
+        .contains("bitmagnet_queue_jobs_total{queue=\"metric-a\",status=\"pending\"} 2"));
+    reset(&pool).await;
+    assert!(store
+        .status_metric_families()
+        .await
+        .expect("empty metric snapshot")
+        .is_empty());
 
     // Strict producer insertion is a single all-or-nothing statement. It
     // preserves the constructor fingerprint across JSONB normalization and
