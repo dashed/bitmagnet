@@ -9,48 +9,48 @@ pub const QUEUE_JOBS_METRIC_NAME: &str = "bitmagnet_queue_jobs_total";
 pub const QUEUE_JOBS_METRIC_HELP: &str =
     "Number of tasks enqueued; broken down by queue and status.";
 
-/// One nonempty `(queue, status)` group from the live queue table.
+/// One nonempty `process_torrent_batch` status group from the live queue table.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueStatusCount {
+pub struct ProcessTorrentBatchStatusCount {
     pub queue: String,
     pub status: QueueJobStatus,
     pub count: u64,
 }
 
 impl QueueStore {
-    /// Read the current nonempty queue/status groups.
+    /// Read the current nonempty `process_torrent_batch` status groups.
     ///
     /// Go runs this query during every Prometheus scrape and emits no synthetic
     /// zero groups. This async primitive preserves that database snapshot; a
     /// scrape adapter must await it rather than expose a stale cache.
-    pub async fn status_counts(&self) -> Result<Vec<QueueStatusCount>, QueuePgError> {
-        sqlx::query(
-            "SELECT queue, status::text AS status, count(*)::bigint AS count \
-             FROM queue_jobs GROUP BY queue, status",
-        )
-        .fetch_all(self.pool())
-        .await?
-        .into_iter()
-        .map(|row| {
-            let status: String = row.try_get("status")?;
-            let count: i64 = row.try_get("count")?;
-            Ok(QueueStatusCount {
-                queue: row.try_get("queue")?,
-                status: super::pg::parse_status(&status)?,
-                count: u64::try_from(count).map_err(|_| QueuePgError::InvalidInteger {
-                    field: "count",
-                    value: count,
-                })?,
+    pub async fn process_torrent_batch_status_counts(
+        &self,
+    ) -> Result<Vec<ProcessTorrentBatchStatusCount>, QueuePgError> {
+        sqlx::query("SELECT queue, status, count FROM public.process_torrent_batch_status_counts()")
+            .fetch_all(self.pool())
+            .await?
+            .into_iter()
+            .map(|row| {
+                let status: String = row.try_get("status")?;
+                let count: i64 = row.try_get("count")?;
+                Ok(ProcessTorrentBatchStatusCount {
+                    queue: row.try_get("queue")?,
+                    status: super::pg::parse_status(&status)?,
+                    count: u64::try_from(count).map_err(|_| QueuePgError::InvalidInteger {
+                        field: "count",
+                        value: count,
+                    })?,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
-    /// Build the fresh unregistered gauge family for one asynchronous scrape.
+    /// Build the fresh batch-only unregistered gauge family for one
+    /// asynchronous scrape.
     pub async fn status_metric_families(
         &self,
     ) -> Result<Vec<prometheus::proto::MetricFamily>, QueuePgError> {
-        let counts = self.status_counts().await?;
+        let counts = self.process_torrent_batch_status_counts().await?;
         if counts.is_empty() {
             return Ok(Vec::new());
         }

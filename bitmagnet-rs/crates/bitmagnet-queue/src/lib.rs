@@ -49,4 +49,6 @@ pub use pg::{
     PROCESS_TORRENT_SHADOW,
 };
 pub use producer_pg::PreparedQueueJob;
-pub use status_pg::{QueueStatusCount, QUEUE_JOBS_METRIC_HELP, QUEUE_JOBS_METRIC_NAME};
+pub use status_pg::{
+    ProcessTorrentBatchStatusCount, QUEUE_JOBS_METRIC_HELP, QUEUE_JOBS_METRIC_NAME,
+};

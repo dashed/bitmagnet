@@ -1,7 +1,7 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables; point it only at a
-//! disposable goose-32 database and invoke it explicitly with
+//! disposable goose-33 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -113,7 +113,7 @@ fn assert_queue_database_code(error: QueuePgError, expected: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-32 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-33 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -174,20 +174,25 @@ async fn queue_runtime_matches_go_contract() {
         0
     );
 
-    // Queue metric snapshots include only nonempty queue/status groups. They
-    // are global across queues and preserve every PostgreSQL enum status.
+    // Batch-worker metric snapshots include only nonempty status groups for
+    // their fixed queue. Other queues are invisible and zero-valued batch
+    // statuses are not synthesized.
     reset(&pool).await;
     for (id, queue, status) in [
-        ("metric-a-pending-1", "metric-a", "pending"),
-        ("metric-a-pending-2", "metric-a", "pending"),
-        ("metric-a-processed", "metric-a", "processed"),
-        ("metric-b-retry", "metric-b", "retry"),
-        ("metric-b-failed", "metric-b", "failed"),
+        ("metric-batch-pending-1", PROCESS_TORRENT_BATCH, "pending"),
+        ("metric-batch-pending-2", PROCESS_TORRENT_BATCH, "pending"),
+        ("metric-batch-processed", PROCESS_TORRENT_BATCH, "processed"),
+        ("metric-batch-retry-1", PROCESS_TORRENT_BATCH, "retry"),
+        ("metric-batch-retry-2", PROCESS_TORRENT_BATCH, "retry"),
+        ("metric-batch-retry-3", PROCESS_TORRENT_BATCH, "retry"),
+        ("metric-batch-failed", PROCESS_TORRENT_BATCH, "failed"),
+        ("metric-other-retry", PROCESS_TORRENT, "retry"),
+        ("metric-other-failed", "other-queue", "failed"),
     ] {
         seed(&pool, id, queue, status, 0, -1, 0, 2, "{}").await;
     }
     let mut status_counts = store
-        .status_counts()
+        .process_torrent_batch_status_counts()
         .await
         .expect("read queue status counts");
     status_counts.sort_by(|left, right| {
@@ -200,12 +205,12 @@ async fn queue_runtime_matches_go_contract() {
             .map(|item| (item.queue.as_str(), item.status.as_str(), item.count))
             .collect::<Vec<_>>(),
         vec![
-            ("metric-a", "pending", 2),
-            ("metric-a", "processed", 1),
-            ("metric-b", "failed", 1),
-            ("metric-b", "retry", 1),
+            (PROCESS_TORRENT_BATCH, "failed", 1),
+            (PROCESS_TORRENT_BATCH, "pending", 2),
+            (PROCESS_TORRENT_BATCH, "processed", 1),
+            (PROCESS_TORRENT_BATCH, "retry", 3),
         ],
-        "empty queue/status combinations must not synthesize zero series"
+        "other queues and empty batch statuses must not appear"
     );
     let families = store
         .status_metric_families()
@@ -220,8 +225,10 @@ async fn queue_runtime_matches_go_contract() {
         "# HELP bitmagnet_queue_jobs_total Number of tasks enqueued; broken down by queue and status."
     ));
     assert!(metrics_text.contains("# TYPE bitmagnet_queue_jobs_total gauge"));
-    assert!(metrics_text
-        .contains("bitmagnet_queue_jobs_total{queue=\"metric-a\",status=\"pending\"} 2"));
+    assert!(metrics_text.contains(
+        "bitmagnet_queue_jobs_total{queue=\"process_torrent_batch\",status=\"pending\"} 2"
+    ));
+    assert!(!metrics_text.contains("other-queue"));
     reset(&pool).await;
     assert!(store
         .status_metric_families()
@@ -1153,6 +1160,42 @@ async fn queue_runtime_matches_go_contract() {
     .await
     .expect_err("PUBLIC must not inherit batch enqueue execution");
     assert_insufficient_privilege(public_enqueue);
+    let status_catalog = sqlx::query(
+        "SELECT p.prosecdef, p.proconfig, \
+                pg_catalog.pg_get_userbyid(p.proowner) AS owner, \
+                NOT EXISTS (\
+                  SELECT 1 \
+                  FROM pg_catalog.aclexplode(\
+                    COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))\
+                  ) AS acl \
+                  WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'\
+                ) AS public_execute_revoked \
+         FROM pg_catalog.pg_proc AS p \
+         WHERE p.oid = 'public.process_torrent_batch_status_counts()'::regprocedure",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect batch status capability catalog contract");
+    assert!(status_catalog.try_get::<bool, _>("prosecdef").unwrap());
+    assert_eq!(
+        status_catalog
+            .try_get::<Option<Vec<String>>, _>("proconfig")
+            .unwrap(),
+        Some(vec!["search_path=pg_catalog, pg_temp".to_owned()])
+    );
+    assert!(status_catalog
+        .try_get::<bool, _>("public_execute_revoked")
+        .unwrap());
+    assert_ne!(
+        status_catalog.try_get::<String, _>("owner").unwrap(),
+        "bitmagnet_queue_batch_test",
+        "runtime ownership transfer is not part of migration 33"
+    );
+    let public_status = sqlx::query("SELECT * FROM public.process_torrent_batch_status_counts()")
+        .execute(&batch_pool)
+        .await
+        .expect_err("PUBLIC must not inherit batch status execution");
+    assert_insufficient_privilege(public_status);
 
     sqlx::query(
         "GRANT EXECUTE ON FUNCTION \
@@ -1162,7 +1205,8 @@ async fn queue_runtime_matches_go_contract() {
            public.process_torrent_batch_settle_failed(text, bigint, text), \
            public.process_torrent_batch_enqueue_plan(\
              text[], timestamptz[], integer[], text, timestamptz, timestamptz\
-           ) \
+           ), \
+           public.process_torrent_batch_status_counts() \
          TO bitmagnet_queue_batch_test",
     )
     .execute(&pool)
@@ -1196,6 +1240,48 @@ async fn queue_runtime_matches_go_contract() {
     .await
     .expect_err("batch role must not directly insert queue rows");
     assert_insufficient_privilege(direct_insert);
+    let direct_status_select = sqlx::query("SELECT status FROM queue_jobs LIMIT 1")
+        .execute(&batch_pool)
+        .await
+        .expect_err("batch role must not directly read queue status rows");
+    assert_insufficient_privilege(direct_status_select);
+
+    reset(&pool).await;
+    for (id, queue, status) in [
+        ("bounded-status-pending-a", PROCESS_TORRENT_BATCH, "pending"),
+        ("bounded-status-pending-b", PROCESS_TORRENT_BATCH, "pending"),
+        (
+            "bounded-status-processed",
+            PROCESS_TORRENT_BATCH,
+            "processed",
+        ),
+        ("bounded-status-retry-a", PROCESS_TORRENT_BATCH, "retry"),
+        ("bounded-status-retry-b", PROCESS_TORRENT_BATCH, "retry"),
+        ("bounded-status-failed", PROCESS_TORRENT_BATCH, "failed"),
+        ("hidden-live-processed", PROCESS_TORRENT, "processed"),
+        ("hidden-other-retry", "unrelated-queue", "retry"),
+    ] {
+        seed(&pool, id, queue, status, 0, -1, 0, 2, "{}").await;
+    }
+    let bounded_status_store = QueueStore::new(batch_pool.clone());
+    let mut bounded_counts = bounded_status_store
+        .process_torrent_batch_status_counts()
+        .await
+        .expect("read status through fixed batch capability");
+    bounded_counts.sort_by(|left, right| left.status.as_str().cmp(right.status.as_str()));
+    assert_eq!(
+        bounded_counts
+            .iter()
+            .map(|item| (item.queue.as_str(), item.status.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        vec![
+            (PROCESS_TORRENT_BATCH, "failed", 1),
+            (PROCESS_TORRENT_BATCH, "pending", 2),
+            (PROCESS_TORRENT_BATCH, "processed", 1),
+            (PROCESS_TORRENT_BATCH, "retry", 2),
+        ],
+        "minimal role must see only nonempty fixed-label batch groups"
+    );
 
     // The enqueue capability preserves raw-text fingerprints across JSONB
     // normalization, hardcodes the two allowed queues and fixed row fields,

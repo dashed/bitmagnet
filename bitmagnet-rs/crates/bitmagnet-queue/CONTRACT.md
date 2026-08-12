@@ -161,15 +161,17 @@ the wait but drains an already-started sweep; SQLx future drop does not prove a
 server-side PostgreSQL cancellation, so the loop never returns while its DELETE
 may still be completing.
 
-The async queue-depth snapshot now matches the Go custom collector's database
-query: group the live table by `(queue,status)`, return all four status labels
-when present, and omit zero-valued combinations. Prometheus registration remains
-gated because Go awaits this query during each scrape, while the current Rust
-registry invokes collectors synchronously; a background cache would expose
-stale data and is not parity. The queue adapter now builds a fresh, unregistered
+Migration 33 bounds the batch worker's async queue-depth snapshot behind a
+no-argument `SECURITY DEFINER` capability. It hardcodes both the selected queue
+and returned `process_torrent_batch` label, returns only nonempty status groups,
+qualifies `queue_jobs`, pins `search_path=pg_catalog,pg_temp`, and revokes
+`PUBLIC` execution. The runtime needs explicit `EXECUTE` but no direct table
+read; owner transfer and runtime grants remain deployment-gated. The queue
+adapter builds a fresh, unregistered
 `bitmagnet_queue_jobs_total{queue,status}` gauge family from each awaited
-snapshot and emits no family for an empty table. The common metrics server can
-await such families per scrape. When explicitly configured with
+batch-only snapshot and emits no family when that queue is empty. Other queues
+and synthetic zero groups never appear. The common metrics server can await
+such families per scrape. When explicitly configured with
 `BITMAGNET_METRICS_ADDR`, the still-non-deployed batch worker now awaits that
 fresh family per scrape; query failures omit only the queue family and leave the
 rest of the HTTP 200 metrics response intact. At the minimum two-connection pool
