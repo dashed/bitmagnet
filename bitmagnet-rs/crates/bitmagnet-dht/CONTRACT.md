@@ -226,13 +226,42 @@ over that node table:
   response and protocol-error bytes and explicitly record the native-IPv6 Go
   panic/Rust typed-error boundary.
 
+The ninth bounded source-only slice composes that partial responder into an
+offline dispatch envelope without sending it:
+
+- `PingFindNodeDispatcher` still owns only the exact raw `ping` and
+  `find_node` methods. Ownership is resolved before arguments, and envelope
+  type is deliberately not revalidated. Every other method returns `None` so
+  the unchanged request can be offered to a future router;
+- a successful result becomes an exact `y=r`, `r=<return>` envelope. Protocol
+  error `203` becomes a normal `y=r`, `e=<error>` reply. This unusual response
+  type on an error is current Go `handleQuery` behavior and is preserved;
+- a local `NativeIpv6Node` failure is retained in a `LocalFailure` outcome,
+  while the peer-visible reply is exactly Go's generic `202`, `server error`
+  envelope. No compact nodes or other partial response fields leak into that
+  reply, and neither dispatch nor encoding panics;
+- the response echoes transaction bytes at any width, including empty and
+  binary values. All other request-only envelope fields are cleared. The reply
+  destination is the exact supplied `SocketAddr`, including mapped form,
+  native scope, and even caller-visible IPv6 flowinfo; this pure layer does not
+  normalize or open a socket; and
+- a same-package Go oracle invokes the actual server `handleQuery`
+  synchronously with a scripted responder and capture-only fake socket. It
+  locks success, direct/wrapped protocol errors, the wrapped-pointer and
+  generic-error `202` boundary, raw transaction widths, exact IPv4/mapped/
+  scoped destinations, mixed request fields, and the native-IPv6 Go panic plus
+  Go-generated fallback bytes. The Rust differential also replays all fourteen
+  prior real-responder fixtures through the dispatcher and proves all three
+  native cases retain their cause, emit exact `202`, and leave the table
+  unchanged.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
-wiring, the combined Kademlia table and hash keyspace,
+wiring and transport sends, the combined Kademlia table and hash keyspace,
 hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
-concurrency, full responder routing and wrappers, a BEP-33
+concurrency, full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension
