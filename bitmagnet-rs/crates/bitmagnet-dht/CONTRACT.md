@@ -300,6 +300,32 @@ for exactly one datagram:
   router intentionally leaves unowned queries unsent even though Go's full
   router returns method-unknown `204`.
 
+The twelfth bounded source-only slice joins outbound transaction registration
+to the existing fakeable datagram sender:
+
+- `register_and_send_query` atomically registers one raw query and its expected
+  source before it fully encodes the canonical query. Only then does it create
+  and await exactly one `DatagramSender::send` future. The sender receives the
+  caller's exact address, including mapped form, native scope, and Rust-visible
+  IPv6 flowinfo; response correlation alone uses the registry's established
+  normalization;
+- `RegisteredQuery` remains the sole owner of the live generation guard until
+  the send succeeds and becomes `PendingTransaction`. Registration, encoding,
+  and transport failures are distinct typed outcomes. Error returns, future
+  cancellation or drop, and unwinding all remove only that generation's
+  registration, while the exact transport error value is preserved;
+- a response delivered during sender backpressure stays buffered in the live
+  `Delivered` registration and can be consumed after the send succeeds. If the
+  same send then fails, the transport failure wins and the buffered response
+  and registration are discarded, matching Go `server.Query`; and
+- a same-package Go oracle invokes the actual `server.Query` method with a
+  scripted issuer and fake socket. It locks registration-before-`Send`, exact
+  raw query bytes and arguments, collision handling, destinations, response-
+  during-send behavior, send-error precedence, single-call behavior, and
+  terminal pending-map cleanup. Rust-only gates add deterministic async sender
+  backpressure, cancellation, abort, panic, bounded registration failures,
+  and the outbound-address versus response-normalization boundary.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
 wiring and production transport adapters, the combined Kademlia table and hash keyspace,
@@ -308,6 +334,7 @@ BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
 concurrency, send retry/timeout/queueing/backpressure policy, socket lifecycle,
 looping or spawning policy, logging and runtime wiring,
+typed ping/find-node client result projection,
 full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
