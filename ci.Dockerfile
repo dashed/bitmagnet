@@ -82,13 +82,13 @@ ARG REVISION=dev
 ARG SOURCE_TREE=dev
 ARG TAPE_ACQUISITION_PLAN_SHA256=sha256:c6febd6d4dbcc762050d5a4d38d401dc0d56f50f901b88fc252a382a83b455fe
 
-LABEL org.opencontainers.image.source = "https://github.com/bitmagnet-io/bitmagnet"
-LABEL org.opencontainers.image.licenses = "MIT"
-LABEL org.opencontainers.image.base.name = "alpine:latest"
-LABEL org.opencontainers.image.revision = "${REVISION}"
-LABEL io.bitmagnet.source-tree = "${SOURCE_TREE}"
-LABEL io.bitmagnet.classifier-tape-contract = "action-progress-processor-state-plan-v1"
-LABEL io.bitmagnet.classifier-tape-acquisition-plan = "${TAPE_ACQUISITION_PLAN_SHA256}"
+LABEL org.opencontainers.image.source="https://github.com/bitmagnet-io/bitmagnet"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.base.name="alpine:latest"
+LABEL org.opencontainers.image.revision="${REVISION}"
+LABEL io.bitmagnet.source-tree="${SOURCE_TREE}"
+LABEL io.bitmagnet.classifier-tape-contract="action-progress-processor-state-plan-v1"
+LABEL io.bitmagnet.classifier-tape-acquisition-plan="${TAPE_ACQUISITION_PLAN_SHA256}"
 
 RUN apk --no-cache add ca-certificates curl tzdata jq iproute2-ss
 

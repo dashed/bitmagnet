@@ -87,6 +87,21 @@ func TestTapeAcquisitionPlanFixtureIsPinnedAndStrict(t *testing.T) {
 	}
 }
 
+func TestTapeAcquisitionPlanImageContractIsExact(t *testing.T) {
+	dockerfile, err := os.ReadFile("../../ci.Dockerfile")
+	require.NoError(t, err)
+	contract := string(dockerfile)
+	require.NotContains(t, contract, "LABEL io.bitmagnet.classifier-tape-contract =")
+	require.Contains(t, contract,
+		`LABEL io.bitmagnet.classifier-tape-contract="action-progress-processor-state-plan-v1"`)
+	require.Contains(t, contract,
+		`LABEL io.bitmagnet.classifier-tape-acquisition-plan="${TAPE_ACQUISITION_PLAN_SHA256}"`)
+	require.Contains(t, contract,
+		`ARG TAPE_ACQUISITION_PLAN_SHA256=`+tapePlanFixtureDigest)
+	require.Contains(t, contract,
+		`COPY --link testdata/parity/classifier-attach/t1/acquisition-plan.json /opt/bitmagnet/t1/acquisition-plan.json`)
+}
+
 func TestTapeAcquisitionPlanConfigurationIsAllOrNothing(t *testing.T) {
 	tests := []struct {
 		name       string
