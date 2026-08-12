@@ -301,6 +301,8 @@ async fn batch_selection_matches_go_postgres_oracle() {
         Err(QueuePgError::InvalidInfoHashLength(1))
     ));
 
+    reset(&pool).await;
+
     selector_pool.close().await;
     sqlx::query("DROP OWNED BY bitmagnet_queue_batch_select_test")
         .execute(&pool)
