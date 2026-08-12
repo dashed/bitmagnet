@@ -11,6 +11,7 @@ description = "Pure BitTorrent DHT KRPC wire and compact-value codecs."
 bendy.workspace = true
 hex.workspace = true
 serde.workspace = true
+sha1.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

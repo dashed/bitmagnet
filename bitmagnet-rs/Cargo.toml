@@ -149,6 +149,9 @@ regex = "1"
 
 # Strict canonical bencode for the pure Phase-4 DHT KRPC wire boundary.
 bendy = "=0.6.1"
+# SHA-1 for BEP-33's two scrape-bloom bit indexes. This is protocol hashing,
+# not a password or signature primitive.
+sha1 = "0.10"
 
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D

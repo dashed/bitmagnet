@@ -10,6 +10,7 @@ use crate::compact::{
     decode_nodes, decode_samples, encode_nodes, encode_samples, CompactAddr, CompactCodecError,
     CompactNode, Id20,
 };
+use crate::scrape::{ScrapeBloomError, ScrapeBloomFilter};
 
 type OwnedValue = Value<'static>;
 type OwnedDict = BTreeMap<Cow<'static, [u8]>, OwnedValue>;
@@ -110,6 +111,12 @@ pub struct MessageReturn {
     /// Pointer in Go: `Some(empty)` advertises BEP-51 support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub samples: Option<Vec<Id20>>,
+    /// BEP-33 seeder filter (`BFsd` on the wire); pointer presence is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeders_bloom: Option<ScrapeBloomFilter>,
+    /// BEP-33 peer filter (`BFpe` on the wire); pointer presence is retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_bloom: Option<ScrapeBloomFilter>,
 }
 
 /// Go accepts both the canonical `[code,message]` list and a legacy bare
@@ -317,6 +324,12 @@ fn decode_args(value: OwnedValue) -> Result<MessageArgs, WireError> {
 fn encode_return(value: &MessageReturn) -> Result<OwnedValue, WireError> {
     let mut dict = OwnedDict::new();
     insert_bytes(&mut dict, b"id", value.id.as_bytes());
+    if let Some(filter) = value.seeders_bloom {
+        insert_bytes(&mut dict, b"BFsd", filter.as_bytes());
+    }
+    if let Some(filter) = value.peers_bloom {
+        insert_bytes(&mut dict, b"BFpe", filter.as_bytes());
+    }
     if let Some(nodes) = &value.nodes {
         insert_bytes(&mut dict, b"nodes", &encode_nodes(nodes, false)?);
     }
@@ -376,6 +389,12 @@ fn decode_return(value: OwnedValue) -> Result<MessageReturn, WireError> {
     let samples = take_optional_bytes(&mut dict, b"samples")?
         .map(|value| decode_samples(&value))
         .transpose()?;
+    let seeders_bloom = take_optional_bytes(&mut dict, b"BFsd")?
+        .map(|value| ScrapeBloomFilter::from_slice(&value))
+        .transpose()?;
+    let peers_bloom = take_optional_bytes(&mut dict, b"BFpe")?
+        .map(|value| ScrapeBloomFilter::from_slice(&value))
+        .transpose()?;
     Ok(MessageReturn {
         id,
         nodes,
@@ -385,6 +404,8 @@ fn decode_return(value: OwnedValue) -> Result<MessageReturn, WireError> {
         interval,
         num,
         samples,
+        seeders_bloom,
+        peers_bloom,
     })
 }
 
@@ -520,6 +541,8 @@ pub enum WireError {
     Invalid(String),
     #[error(transparent)]
     Compact(#[from] CompactCodecError),
+    #[error(transparent)]
+    ScrapeBloom(#[from] ScrapeBloomError),
 }
 
 #[cfg(test)]
@@ -678,6 +701,22 @@ mod tests {
             (
                 "return samples",
                 nested_field(b"r", b"samples", Value::Integer(1)),
+            ),
+            (
+                "return BFsd type",
+                nested_field(b"r", b"BFsd", Value::Integer(1)),
+            ),
+            (
+                "return BFpe type",
+                nested_field(b"r", b"BFpe", Value::List(vec![])),
+            ),
+            (
+                "return BFsd short",
+                nested_field(b"r", b"BFsd", bytes(&vec![0; 255])),
+            ),
+            (
+                "return BFpe long",
+                nested_field(b"r", b"BFpe", bytes(&vec![0; 257])),
             ),
             ("error empty", envelope_field(b"e", Value::List(vec![]))),
             (

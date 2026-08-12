@@ -886,6 +886,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "thiserror 2.0.18",
 ]
 

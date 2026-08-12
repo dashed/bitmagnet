@@ -1,4 +1,4 @@
-# First DHT milestone: pure KRPC wire parity
+# Pure KRPC wire and BEP-33 scrape-bloom parity
 
 This crate owns only the offline byte boundary needed before a Rust DHT runtime
 can be designed. Go remains the production implementation and the source of
@@ -20,6 +20,19 @@ The bounded contract includes:
   byte string back to nil; the fixture records that lossy canonical re-encode
   and Rust matches it.
 
+The second bounded source-only slice adds BEP-33 without adding a client or
+runtime:
+
+- the exact 2,048-bit filter, two SHA-1-derived indexes, little-endian 16-bit
+  index assembly, and least-significant-bit-first bit placement;
+- raw IP-byte insertion, preserving Go's important distinction between a
+  four-byte IPv4 and the sixteen-byte `net.IPv4` representation;
+- Go's floating `EstimateCount` and the rounded finite `ApproximatedSize` used
+  by persistence; an empty filter estimates about half an item and a full
+  filter estimates positive infinity; and
+- pointer-sensitive `BFsd` (seeders) and `BFpe` (peers) return fields, including
+  the difference between omission and a present all-zero 256-byte filter.
+
 Go accepts more bencode syntax than the pinned `bendy =0.6.1` decoder. The
 fixture therefore probes unsorted/duplicate dictionary keys, noncanonical
 integers, unknown fields, trailing values, missing `t`/`y`, `ro=0`, and the
@@ -29,13 +42,16 @@ integer flag. Rust intentionally rejects unsorted and duplicate
 keys at the strict syntax boundary even though Go accepts them. This known
 compatibility difference is gated. Both codecs reject non-20-byte IDs. The
 oracle also records one intentional shape hardening: Rust rejects non-6/18-byte
-compact peer addresses that Go's generic IP decoding accepts. These known
-differences mean this crate is **not yet admitted as an inbound live-network codec**.
+compact peer addresses that Go's generic IP decoding accepts. It likewise
+records that Go's generic fixed-array decoder pads/truncates non-256-byte
+BEP-33 filters while Rust requires the exact protocol width. These known
+differences mean this crate is **not yet admitted as an inbound live-network
+codec**.
 Unknown keys remain forward-compatible and are ignored like Go; accepted
 noncanonical projections re-encode canonically.
 
 Excluded from this milestone: UDP/TCP sockets, transaction-ID issuance and
-address correlation, timeouts, routing tables, responders, BEP-33 scrape bloom
-filters, BEP-44 mutable/immutable storage and signing, BEP-51 scheduling,
-BEP-9/10 metadata transfer, crawler orchestration, PostgreSQL, queues, images,
-and deployment. No live DHT behavior changes.
+address correlation, timeouts, routing tables, responders, a BEP-33 scrape
+client or scheduler, BEP-44 mutable/immutable storage and signing, BEP-51
+scheduling, BEP-9/10 metadata transfer, crawler orchestration, PostgreSQL,
+queues, images, and deployment. No live DHT behavior changes.
