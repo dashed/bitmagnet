@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -34,6 +34,10 @@ impl GoTime {
     #[must_use]
     pub fn zero() -> Self {
         Self("0001-01-01T00:00:00Z".to_string())
+    }
+
+    pub fn parsed(&self) -> Result<DateTime<FixedOffset>, chrono::ParseError> {
+        DateTime::parse_from_rfc3339(&self.0)
     }
 }
 

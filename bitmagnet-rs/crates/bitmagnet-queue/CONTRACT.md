@@ -80,6 +80,13 @@ that a stale replica observes the committed cursor. Its permission negative
 controls prove a minimally granted role can use the shadow capabilities but
 cannot directly mutate either queue or any cursor identity.
 
+The batch producer now has a read-only PostgreSQL page adapter over the same
+Go tables. Its typed selection contract pins the strict info-hash cursor,
+snapshot cutoff, nullable content filter, orphan exclusion, ascending order,
+and page limit. Planning the returned ordered hashes into child and
+continuation queue jobs is byte/fingerprint-gated against Go. The adapter does
+not yet insert those jobs, so it cannot be used as a live batch producer.
+
 Still outstanding before Go queue retirement: the general producer API,
 bounded multi-worker orchestration for queues that require concurrency greater
 than one, terminal-row garbage collection, runtime metrics, and the Lane P

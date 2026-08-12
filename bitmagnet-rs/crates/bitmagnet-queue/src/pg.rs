@@ -25,6 +25,10 @@ pub enum QueuePgError {
     InvalidInteger { field: &'static str, value: i64 },
     #[error("invalid mirror configuration: {0}")]
     InvalidMirrorConfig(&'static str),
+    #[error("invalid batch selection: {0}")]
+    InvalidBatchSelection(&'static str),
+    #[error("selected info hash is not exactly 20 bytes: {0}")]
+    InvalidInfoHashLength(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

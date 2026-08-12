@@ -87,6 +87,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls",
     "macros",
     "json",
+    "chrono",
 ] }
 
 # Search engine. 0.26 is the upstream target that motivated the sidecar (the

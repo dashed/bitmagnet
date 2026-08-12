@@ -9,11 +9,8 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor/batch"
-	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/handler"
 	"go.uber.org/fx"
-	"gorm.io/gen"
-	"gorm.io/gen/field"
 )
 
 type Params struct {
@@ -41,43 +38,13 @@ func New(p Params) Result {
 						return err
 					}
 					planner := batch.NewPlanner(*msg)
-					baseSelection := planner.Selection()
-					var scopes []func(gen.Dao) gen.Dao
-					if len(baseSelection.ContentTypes) > 0 {
-						scopes = append(scopes, contentTypesScope(d, baseSelection.ContentTypes))
-					}
-					if baseSelection.Orphans {
-						scopes = append(scopes, func(tx gen.Dao) gen.Dao {
-							return tx.Not(
-								gen.Exists(
-									d.TorrentContent.Where(
-										d.TorrentContent.InfoHash.EqCol(
-											d.Torrent.InfoHash,
-										),
-									),
-								),
-							)
-						})
-					}
+					selector := NewPostgresSelector(d)
 					var queueJobs []*model.QueueJob
 					for planner.ShouldQuery() {
 						selection := planner.Selection()
-						torrents, findErr := d.Torrent.WithContext(ctx).
-							Scopes(scopes...).
-							Where(
-								d.Torrent.InfoHash.Gt(selection.AfterExclusive),
-								d.Torrent.UpdatedAt.Lt(selection.UpdatedBefore),
-							).
-							Select(d.Torrent.InfoHash).
-							Order(d.Torrent.InfoHash).
-							Limit(int(selection.Limit)).
-							Find()
+						infoHashes, findErr := selector.Select(ctx, selection)
 						if findErr != nil {
 							return findErr
-						}
-						var infoHashes []protocol.ID
-						for _, t := range torrents {
-							infoHashes = append(infoHashes, t.InfoHash)
 						}
 						spec, planErr := planner.AddPage(infoHashes)
 						if planErr != nil {
@@ -115,39 +82,5 @@ func New(p Params) Result {
 				handler.Concurrency(1),
 			), nil
 		}),
-	}
-}
-
-func contentTypesScope(
-	d *dao.Query,
-	contentTypeFilters []model.NullContentType,
-) func(gen.Dao) gen.Dao {
-	var contentTypes []string
-	var unknownContentType bool
-	for _, contentType := range contentTypeFilters {
-		if !contentType.Valid {
-			unknownContentType = true
-		} else {
-			contentTypes = append(contentTypes, contentType.ContentType.String())
-		}
-	}
-	return func(tx gen.Dao) gen.Dao {
-		var contentTypeCondition field.Expr
-		switch {
-		case len(contentTypes) > 0 && unknownContentType:
-			contentTypeCondition = field.Or(
-				d.TorrentContent.ContentType.In(contentTypes...),
-				d.TorrentContent.ContentType.IsNull(),
-			)
-		case len(contentTypes) > 0:
-			contentTypeCondition = d.TorrentContent.ContentType.In(contentTypes...)
-		default:
-			contentTypeCondition = d.TorrentContent.ContentType.IsNull()
-		}
-		sq := d.TorrentContent.Where(
-			d.TorrentContent.InfoHash.EqCol(d.Torrent.InfoHash),
-			contentTypeCondition,
-		)
-		return tx.Where(gen.Exists(sq))
 	}
 }

@@ -21,6 +21,11 @@ impl ProtocolId {
         Self([0u8; 20])
     }
 
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
     /// Parse a 40-char hex string into a `ProtocolId`.
     ///
     /// # Errors
@@ -39,6 +44,16 @@ impl ProtocolId {
     #[must_use]
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
+    }
+}
+
+impl TryFrom<&[u8]> for ProtocolId {
+    type Error = usize;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let length = value.len();
+        let bytes = <[u8; 20]>::try_from(value).map_err(|_| length)?;
+        Ok(Self::from_bytes(bytes))
     }
 }
 
@@ -69,5 +84,13 @@ mod tests {
     #[test]
     fn json_decode_rejects_non_twenty_byte_hex() {
         assert!(serde_json::from_str::<ProtocolId>("\"short\"").is_err());
+    }
+
+    #[test]
+    fn database_bytes_require_exactly_twenty_bytes() {
+        assert_eq!(ProtocolId::try_from([7_u8; 19].as_slice()), Err(19));
+        let id = ProtocolId::try_from([7_u8; 20].as_slice()).expect("20-byte protocol id");
+        assert_eq!(id.as_bytes(), &[7_u8; 20]);
+        assert_eq!(ProtocolId::try_from([7_u8; 21].as_slice()), Err(21));
     }
 }
