@@ -119,6 +119,34 @@ with Go's singleton coercion before being discarded. Their fixtures mark the
 intentional projection loss and compare acceptance plus the projected message,
 not a Rust re-encode that cannot retain those excluded fields.
 
+The fifth bounded source-only slice adds a fakeable one-datagram receive and
+dispatch harness, still without opening a socket or owning a loop:
+
+- each async `receive_one` supplies one fixed 65,507-byte reusable buffer to a
+  `DatagramReceiver`; transport failures and impossible overreported lengths
+  are distinct typed errors, and a zero-length datagram is a typed no-op;
+- malformed datagrams return the bounded inbound error without disturbing a
+  pending transaction. Query and unknown-type envelopes are returned as owned
+  messages, so a later buffer overwrite cannot mutate them;
+- response and error envelopes move directly into `TransactionRegistry`.
+  That existing core remains the only transaction-ID, normalized-source,
+  first-wins duplicate, closed-registry, and waiter-gone authority; unknown
+  message types never consult it; and
+- the same-package Go oracle drives the real `server.read` with a deterministic
+  fake socket and fake responder observation. Its checked fixture covers zero,
+  malformed, canonical/permissive/minimal query shapes, response, error,
+  unknown or missing type, wrong source, duplicate, unknown transaction,
+  mapped IPv4, and native IPv6 scopes. Go's acceptance of one- and three-byte
+  registered transaction IDs is recorded as a deliberate Rust hardening
+  delta. A two-datagram Go test and a multi-call Rust test prove message
+  ownership across receive-buffer reuse. The registry's existing unit gate
+  covers `WaiterGone`, which safe public harness ownership cannot construct:
+  dropping the public pending handle also removes its registration by RAII.
+
+The harness dispatches exactly one supplied datagram per call. It does not
+spawn handlers, execute a production responder, or provide socket lifecycle,
+retry, backpressure, concurrency, or shutdown policy.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation, live query wiring, routing tables, responders, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
