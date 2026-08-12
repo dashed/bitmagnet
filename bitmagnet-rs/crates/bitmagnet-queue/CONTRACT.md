@@ -103,7 +103,18 @@ use a pool with at least two connections while `consume_one` retains the parent
 row transaction, and it must materialize children immediately after each page
 instead of assigning every child the same `run_after` at final insertion.
 
-Still outstanding before Go queue retirement: batch-handler orchestration,
-bounded multi-worker orchestration for queues that require concurrency greater
-than one, terminal-row garbage collection, runtime metrics, and the Lane P
-shadow processor/runtime deployment.
+The crate now exposes that select-plan-insert orchestration as a callable batch
+handler without registering any runtime consumer. It decodes one constructor-
+normalized payload, selects and plans each page, captures each child timestamp
+at that page boundary, captures the continuation timestamp after finalization,
+and then invokes the strict producer once. Zero `BatchSize` or `ChunkSize` is
+rejected fail-closed because every supported producer injects those defaults
+before persistence. Migration-backed tests pin chunk overshoot, job order,
+timestamps, active-fingerprint retry failure, and the empty-result no-op. A
+production consumer remains deliberately absent, so this milestone cannot
+compete with the live Go `process_torrent_batch` worker.
+
+Still outstanding before Go queue retirement: guarded batch-consumer runtime
+wiring, bounded multi-worker orchestration for queues that require concurrency
+greater than one, terminal-row garbage collection, runtime metrics, and the
+Lane P shadow processor/runtime deployment.

@@ -4,7 +4,7 @@
 //! disposable goose-29 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +12,8 @@ use std::time::Duration;
 use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
     fingerprint, new_queue_job, ConsumeOutcome, MirrorConfig, MirrorIneligibleReason,
-    PreparedQueueJob, QueueJobOptions, QueueJobStatus, QueuePgError, QueueStore, PROCESS_TORRENT,
-    PROCESS_TORRENT_SHADOW,
+    PreparedQueueJob, ProtocolId, QueueJobOptions, QueueJobStatus, QueuePgError, QueueStore,
+    PROCESS_TORRENT, PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW,
 };
 use chrono::Utc;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -128,7 +128,9 @@ async fn queue_runtime_matches_go_contract() {
         .insert_jobs_strict(&[])
         .await
         .expect("empty producer insert");
-    let materialized_at = Utc::now() - chrono::TimeDelta::seconds(2);
+    let materialized_at = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("current timestamp fits PostgreSQL precision")
+        - chrono::TimeDelta::seconds(2);
     let immediate = new_queue_job(
         "producer_contract",
         &serde_json::json!({"kind": "immediate", "nested": {"value": 1}}),
@@ -420,6 +422,171 @@ async fn queue_runtime_matches_go_contract() {
             .expect_err("parent retry must encounter committed child"),
         "23505",
     );
+
+    // Callable batch orchestration timestamps each child at its page boundary,
+    // timestamps the continuation last, then inserts the complete plan once.
+    reset(&pool).await;
+    for value in 1_u8..=5 {
+        seed_torrent(&pool, &format!("{value:040x}")).await;
+    }
+    let batch_payload = serde_json::json!({
+        "InfoHashGreaterThan": "0000000000000000000000000000000000000000",
+        "UpdatedBefore": "2100-01-01T00:00:00Z",
+        "ChunkSize": 3,
+        "BatchSize": 2
+    })
+    .to_string();
+    let child_one_at = materialized_at;
+    let child_two_at = materialized_at + chrono::TimeDelta::seconds(1);
+    let continuation_at = materialized_at + chrono::TimeDelta::seconds(2);
+    let mut clock = VecDeque::from([child_one_at, child_two_at, continuation_at]);
+    let batch_report = store
+        .handle_process_torrent_batch_payload_with_clock(&batch_payload, || {
+            clock.pop_front().expect("one clock tick per planned job")
+        })
+        .await
+        .expect("handle batch payload");
+    assert!(clock.is_empty(), "handler must consume exactly three ticks");
+    assert_eq!(batch_report.selected, 4);
+    assert_eq!(batch_report.child_jobs, 2);
+    assert!(batch_report.continuation_inserted);
+    assert!(!batch_report.done);
+    assert_eq!(
+        batch_report.max_info_hash,
+        ProtocolId::from_hex("0000000000000000000000000000000000000004").unwrap()
+    );
+    let planned = sqlx::query(
+        "SELECT queue, payload::text AS payload, fingerprint, priority, run_after \
+         FROM queue_jobs ORDER BY run_after",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read planned batch jobs");
+    assert_eq!(planned.len(), 3);
+    let planned_times = planned
+        .iter()
+        .map(|row| {
+            row.try_get::<chrono::DateTime<Utc>, _>("run_after")
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(planned_times, [child_one_at, child_two_at, continuation_at]);
+    let planned_queues = planned
+        .iter()
+        .map(|row| row.try_get::<String, _>("queue").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        planned_queues,
+        [PROCESS_TORRENT, PROCESS_TORRENT, PROCESS_TORRENT_BATCH]
+    );
+    let planned_priorities = planned
+        .iter()
+        .map(|row| row.try_get::<i32, _>("priority").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(planned_priorities, [10, 10, 0]);
+    let planned_payloads = planned
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<serde_json::Value>(&row.try_get::<String, _>("payload").unwrap())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        planned_payloads[0]["InfoHashes"],
+        serde_json::json!([
+            "0000000000000000000000000000000000000001",
+            "0000000000000000000000000000000000000002"
+        ])
+    );
+    assert_eq!(
+        planned_payloads[1]["InfoHashes"],
+        serde_json::json!([
+            "0000000000000000000000000000000000000003",
+            "0000000000000000000000000000000000000004"
+        ])
+    );
+    assert_eq!(
+        planned_payloads[2]["InfoHashGreaterThan"],
+        "0000000000000000000000000000000000000004"
+    );
+    for (row, payload) in planned.iter().zip(&planned_payloads) {
+        let queue = row.try_get::<String, _>("queue").unwrap();
+        let stored_fingerprint = row.try_get::<String, _>("fingerprint").unwrap();
+        let logical_job = if queue == PROCESS_TORRENT_BATCH {
+            bitmagnet_queue::process_torrent_batch_job(
+                &serde_json::from_value(payload.clone()).unwrap(),
+                QueueJobOptions::default(),
+            )
+            .unwrap()
+        } else {
+            bitmagnet_queue::process_torrent_job(
+                &serde_json::from_value(payload.clone()).unwrap(),
+                QueueJobOptions::default().with_priority(10),
+            )
+            .unwrap()
+        };
+        assert_eq!(stored_fingerprint, logical_job.fingerprint);
+    }
+    let count_before_retry: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM queue_jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut retry_clock = VecDeque::from([child_one_at, child_two_at, continuation_at]);
+    let retry_error = store
+        .handle_process_torrent_batch_payload_with_clock(&batch_payload, || {
+            retry_clock.pop_front().expect("retry clock tick")
+        })
+        .await
+        .expect_err("active child fingerprints must reject parent retry");
+    let bitmagnet_queue::BatchHandleError::Queue(retry_error) = retry_error else {
+        panic!("expected strict producer failure");
+    };
+    assert_queue_database_code(retry_error, "23505");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        count_before_retry,
+        "retry conflict must insert no siblings"
+    );
+
+    reset(&pool).await;
+    let mut no_match_clock_calls = 0_u8;
+    let no_match = store
+        .handle_process_torrent_batch_payload_with_clock(&batch_payload, || {
+            no_match_clock_calls += 1;
+            materialized_at
+        })
+        .await
+        .expect("empty batch payload");
+    assert_eq!(no_match.selected, 0);
+    assert_eq!(no_match.child_jobs, 0);
+    assert!(!no_match.continuation_inserted);
+    assert!(no_match.done);
+    assert_eq!(no_match_clock_calls, 0, "empty pages create no jobs");
+    for invalid in [
+        "{".to_owned(),
+        serde_json::json!({
+            "InfoHashGreaterThan": "0000000000000000000000000000000000000000",
+            "UpdatedBefore": "2100-01-01T00:00:00Z",
+            "ChunkSize": 3,
+            "BatchSize": 0
+        })
+        .to_string(),
+        serde_json::json!({
+            "InfoHashGreaterThan": "0000000000000000000000000000000000000000",
+            "UpdatedBefore": "2100-01-01T00:00:00Z",
+            "ChunkSize": 0,
+            "BatchSize": 2
+        })
+        .to_string(),
+    ] {
+        assert!(store
+            .handle_process_torrent_batch_payload_with_clock(&invalid, || materialized_at)
+            .await
+            .is_err());
+    }
 
     // Frozen dequeue order: pending before retry, then priority and run_after.
     reset(&pool).await;

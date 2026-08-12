@@ -19,6 +19,7 @@
 
 pub mod backoff;
 pub mod batch;
+mod batch_handler;
 mod batch_pg;
 pub mod id;
 pub mod job;
@@ -27,6 +28,7 @@ pub mod pg;
 mod producer_pg;
 
 pub use batch::{BatchPlan, BatchPlanError, BatchPlanner, BatchSelection};
+pub use batch_handler::{BatchHandleError, BatchHandleReport};
 pub use id::ProtocolId;
 pub use job::{
     fingerprint, new_queue_job, JobError, QueueJob, QueueJobOptions, QueueJobStatus,

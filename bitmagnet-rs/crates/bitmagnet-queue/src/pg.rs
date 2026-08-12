@@ -17,7 +17,7 @@ const DEADLINE_ERROR: &str = "the job did not complete before its deadline";
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueuePgError {
-    #[error("queue database operation failed")]
+    #[error("queue database operation failed: {0}")]
     Database(#[from] sqlx::Error),
     #[error("invalid queue status '{0}'")]
     InvalidStatus(String),
@@ -27,6 +27,8 @@ pub enum QueuePgError {
     InvalidMirrorConfig(&'static str),
     #[error("invalid batch selection: {0}")]
     InvalidBatchSelection(&'static str),
+    #[error("invalid batch payload: {0}")]
+    InvalidBatchPayload(&'static str),
     #[error("selected info hash is not exactly 20 bytes: {0}")]
     InvalidInfoHashLength(usize),
     #[error("invalid producer payload JSON")]
