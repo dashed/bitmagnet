@@ -413,9 +413,38 @@ an unbounded receive loop:
   failure identity, and a concurrent fake client ping/find-node round trip
   ending with no pending transaction.
 
-Excluded from this milestone: UDP/TCP sockets and unbounded receive loops, message-method
+The fifteenth bounded source-only slice adds the first real transport
+primitive, but still does not connect it to a production loop or binary:
+
+- `TokioIpv4UdpTransport::bind` opens exactly one IPv4 Tokio UDP socket and
+  caches the actual bound IPv4 address. Consuming it yields exactly one
+  non-cloneable `TokioIpv4UdpReceiver` and a cloneable
+  `TokioIpv4UdpSender`; both retain the same socket and cached address. Only
+  those respective types implement the receive and send traits;
+- receive requires the full 65,507-byte protocol buffer before touching the
+  socket, so a too-small buffer is rejected without consuming a datagram.
+  Tokio documents both `recv_from` and `send_to` as cancellation-safe: a
+  dropped pending operation has no datagram effect and either handle remains
+  reusable, satisfying the finite supervisor's explicit admission contract;
+- send accepts only an IPv4 destination and rejects a payload over 65,507
+  bytes before the syscall. Every admitted payload is passed to exactly one
+  `send_to`, with no retry. A platform may still reject an admitted payload
+  (notably near the maximum) as a typed `SendIo` retaining both the exact
+  IPv4 destination and original `io::Error`; no errno or `ErrorKind` is part
+  of the portable contract. A short successful syscall is a distinct error;
+- stable real-socket parity rows use the actual Go AF_INET socket at zero,
+  binary, and deterministic 8,192-byte payloads. Same-package boolean gates
+  prove Go's native and mapped IPv6 destinations are both rejected without
+  pinning platform error text. Rust gates additionally prove local preflight
+  rejection leaves no peer datagram, maximum-size success or preserved
+  platform failure, cancellation-safe reuse without duplicate delivery, and
+  a bounded real-loopback typed-client-to-supervisor ping ending with an empty
+  transaction registry.
+
+Excluded from this milestone: production socket construction or runtime
+wiring, external-network traffic, and unbounded receive loops; message-method
 or dispatch validation beyond the two explicitly owned methods, live query
-wiring and production transport adapters, the combined Kademlia table and hash keyspace,
+wiring, the combined Kademlia table and hash keyspace,
 hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,

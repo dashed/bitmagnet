@@ -14,6 +14,7 @@ mod query_send;
 mod receive;
 mod routing_tree;
 mod scrape;
+mod tokio_ipv4_udp;
 mod transaction;
 
 pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
@@ -42,6 +43,9 @@ pub use receive::{
 };
 pub use routing_tree::{RoutingPutResult, RoutingTree, ROUTING_ID_BITS};
 pub use scrape::{ScrapeBloomError, ScrapeBloomFilter, SCRAPE_BLOOM_BYTES};
+pub use tokio_ipv4_udp::{
+    TokioIpv4UdpError, TokioIpv4UdpReceiver, TokioIpv4UdpSender, TokioIpv4UdpTransport,
+};
 pub use transaction::{
     CryptoTransactionIdIssuer, DeliveryOutcome, PendingTransaction, RegisterError,
     RegisterSendError, RegisteredQuery, TransactionId, TransactionIdError, TransactionIdIssuer,
