@@ -5,6 +5,7 @@ mod inbound;
 mod krpc;
 mod node_table;
 mod ping_find_node;
+mod ping_find_node_client;
 mod ping_find_node_dispatch;
 mod ping_find_node_driver;
 mod ping_find_node_send;
@@ -22,6 +23,9 @@ pub use inbound::{
 pub use krpc::{ByteString, KrpcError, KrpcMessage, MessageArgs, MessageReturn, WireError};
 pub use node_table::{NodeTable, RoutingNode, NODE_TABLE_CAPACITY, NODE_TABLE_CLOSEST_LIMIT};
 pub use ping_find_node::{PingFindNodeError, PingFindNodeResponder};
+pub use ping_find_node_client::{
+    FindNodeResult, PingFindNodeClient, PingFindNodeClientError, PingResult,
+};
 pub use ping_find_node_dispatch::{
     PingFindNodeDispatchOutcome, PingFindNodeDispatcher, PingFindNodeReply,
 };

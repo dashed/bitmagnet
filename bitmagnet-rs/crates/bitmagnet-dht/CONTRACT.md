@@ -326,6 +326,57 @@ to the existing fakeable datagram sender:
   backpressure, cancellation, abort, panic, bounded registration failures,
   and the outbound-address versus response-normalization boundary.
 
+The thirteenth bounded source-only slice adds only the production adapter's
+typed `ping` and `find_node` client projection:
+
+- `PingFindNodeClient` builds the exact raw `ping` arguments (local ID only)
+  and `find_node` arguments (local ID plus target), then composes
+  `register_and_send_query` with the existing `PendingTransaction::wait`.
+  A zero target follows Go's non-pointer zero-value encoding and is omitted
+  from canonical wire. The fixed query timeout begins only after the one
+  datagram send succeeds, so sender backpressure is deliberately outside it;
+- registration, encoding, and the original typed transport failure remain
+  nested under `QuerySend`, with an explicit standard error source. Remote
+  KRPC errors, response/error envelopes missing their corresponding body,
+  timeout, and registry closure are distinct typed outcomes. Missing-body and
+  remote-error outcomes retain the accepted source and complete envelope;
+- ping projects only the responding ID. Find-node projects the responding ID
+  and the ordered `r.nodes` entries, retaining duplicates and port boundaries.
+  Absent and explicitly empty `nodes` both become an empty vector, while
+  `nodes6`, peer values, tokens, scrape/BEP-51 data, and other extensions are
+  ignored exactly like Go's `serverAdapter`. Compact response addresses are
+  owned `SocketAddr` values with IPv6 flowinfo and scope fixed to zero. Neither
+  method validates a response ID or mutates a node table; and
+- a client-package checked oracle invokes the actual unexported Go
+  `serverAdapter` through a scripted embedded `server.Server`. It locks exact
+  destination, method, arguments, canonical query wire, ID-only ping
+  projection, ordered/duplicate node projection, nil/empty nodes, ignored
+  IPv6 and extension fields, zero target omission, and pointer-identical query
+  errors with Go's zero result. Rust no-socket gates additionally cover a
+  response delivered during send, transport failure after buffered delivery,
+  blocked-send timeout ordering, zero timeout under paused time, wrong-source
+  timeout, remote and missing-body errors, registry close, task abort during
+  send or wait, and exact outbound versus normalized response addresses.
+
+The typed Rust boundary intentionally differs where Go depends on
+`context.Context`: caller cancellation is task/future drop or abort rather than
+a returned context error, while the client owns only its fixed post-send
+timeout. Go enters `server.Query` and performs its send before observing an
+already-cancelled context; an unpolled Rust future performs neither
+registration nor send. Rust additionally exposes registry closure as a
+first-class outcome. Go's missing-error-body path assigns a typed nil
+`*dht.Error` to `error`, yielding a non-nil interface whose dynamic pointer is
+nil; Rust instead returns the explicit `MissingErrorBody` variant with the
+accepted envelope. The Go oracle locks both of these differences. A response
+and timeout becoming ready in the same scheduler turn has nondeterministic Go
+`select` ordering and is deliberately excluded; tests establish only strict
+before/after boundaries.
+Safe `SocketAddr` cannot represent Go's invalid zero `netip.AddrPort`, and it
+can retain outbound IPv6 flowinfo that Go's address type cannot express. Rust
+also deliberately collapses nil and non-nil empty result node slices to one
+owned empty vector; the checked fixture retains the two Go inputs and proves
+their equal client projection.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
 wiring and production transport adapters, the combined Kademlia table and hash keyspace,
@@ -334,7 +385,6 @@ BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
 concurrency, send retry/timeout/queueing/backpressure policy, socket lifecycle,
 looping or spawning policy, logging and runtime wiring,
-typed ping/find-node client result projection,
 full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
