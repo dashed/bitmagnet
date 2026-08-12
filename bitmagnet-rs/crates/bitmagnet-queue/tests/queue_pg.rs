@@ -11,9 +11,11 @@ use std::time::Duration;
 
 use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
-    fingerprint, ConsumeOutcome, MirrorConfig, MirrorIneligibleReason, QueueStore, PROCESS_TORRENT,
+    fingerprint, new_queue_job, ConsumeOutcome, MirrorConfig, MirrorIneligibleReason,
+    PreparedQueueJob, QueueJobOptions, QueueJobStatus, QueuePgError, QueueStore, PROCESS_TORRENT,
     PROCESS_TORRENT_SHADOW,
 };
+use chrono::Utc;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tokio::sync::{oneshot, Mutex};
@@ -101,6 +103,13 @@ fn assert_database_code(error: sqlx::Error, expected: &str) {
     assert_eq!(error.code().as_deref(), Some(expected));
 }
 
+fn assert_queue_database_code(error: QueuePgError, expected: &str) {
+    let QueuePgError::Database(error) = error else {
+        panic!("expected a PostgreSQL queue error, got {error}");
+    };
+    assert_database_code(error, expected);
+}
+
 #[tokio::test]
 #[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-29 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
@@ -110,6 +119,307 @@ async fn queue_runtime_matches_go_contract() {
         .await
         .expect("connect disposable PostgreSQL");
     let store = QueueStore::new(pool.clone());
+
+    // Strict producer insertion is a single all-or-nothing statement. It
+    // preserves the constructor fingerprint across JSONB normalization and
+    // preserves Go's per-job run_after plus one shared application created_at.
+    reset(&pool).await;
+    store
+        .insert_jobs_strict(&[])
+        .await
+        .expect("empty producer insert");
+    let materialized_at = Utc::now() - chrono::TimeDelta::seconds(2);
+    let immediate = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"kind": "immediate", "nested": {"value": 1}}),
+        QueueJobOptions::default()
+            .with_max_retries(2)
+            .with_priority(-7),
+    )
+    .expect("construct immediate producer job");
+    let delayed = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"kind": "delayed"}),
+        QueueJobOptions::default()
+            .with_max_retries(3)
+            .with_priority(9)
+            .with_delay(Duration::from_micros(2_500_001)),
+    )
+    .expect("construct delayed producer job");
+    let immediate_prepared = PreparedQueueJob::materialize_at(immediate.clone(), materialized_at)
+        .expect("prepare immediate producer job");
+    let later_page_at = materialized_at + chrono::TimeDelta::seconds(1);
+    let delayed_prepared = PreparedQueueJob::materialize_at(delayed.clone(), later_page_at)
+        .expect("prepare delayed producer job");
+    store
+        .insert_jobs_strict(&[immediate_prepared, delayed_prepared])
+        .await
+        .expect("insert strict producer batch");
+    let immediate_row = sqlx::query(
+        "SELECT id <> '' AS has_id, fingerprint, payload::text AS payload, \
+                status::text AS status, retries, max_retries, priority, \
+                ran_at IS NULL AS ran_at_null, error IS NULL AS error_null, \
+                deadline IS NULL AS deadline_null, \
+                archival_duration = interval '7 days' AS archive_seven_days, \
+                run_after <= created_at AS ready_immediately \
+         FROM queue_jobs WHERE fingerprint = $1",
+    )
+    .bind(&immediate.fingerprint)
+    .fetch_one(&pool)
+    .await
+    .expect("read immediate producer row");
+    assert!(immediate_row.try_get::<bool, _>("has_id").expect("has id"));
+    assert_eq!(
+        immediate_row
+            .try_get::<String, _>("fingerprint")
+            .expect("stored fingerprint"),
+        immediate.fingerprint
+    );
+    let normalized_payload = immediate_row
+        .try_get::<String, _>("payload")
+        .expect("normalized payload");
+    assert_ne!(normalized_payload, immediate.payload);
+    assert_ne!(
+        fingerprint(&immediate.queue, &normalized_payload),
+        immediate.fingerprint,
+        "producer must not fingerprint PostgreSQL-normalized JSONB text"
+    );
+    assert_eq!(
+        immediate_row
+            .try_get::<String, _>("status")
+            .expect("status"),
+        "pending"
+    );
+    assert_eq!(immediate_row.try_get::<i32, _>("retries").unwrap(), 0);
+    assert_eq!(immediate_row.try_get::<i32, _>("max_retries").unwrap(), 2);
+    assert_eq!(immediate_row.try_get::<i32, _>("priority").unwrap(), -7);
+    for field in [
+        "ran_at_null",
+        "error_null",
+        "deadline_null",
+        "archive_seven_days",
+        "ready_immediately",
+    ] {
+        assert!(immediate_row.try_get::<bool, _>(field).unwrap(), "{field}");
+    }
+    let timing = sqlx::query(
+        "SELECT count(DISTINCT created_at)::bigint AS created_at_count, \
+                min(run_after) AS minimum_run_after, max(run_after) AS maximum_run_after \
+         FROM queue_jobs WHERE queue = 'producer_contract'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read producer timestamps");
+    assert_eq!(
+        timing.try_get::<i64, _>("created_at_count").unwrap(),
+        1,
+        "one insert statement must share one created_at base"
+    );
+    assert_eq!(
+        timing
+            .try_get::<chrono::DateTime<Utc>, _>("minimum_run_after")
+            .unwrap(),
+        materialized_at
+    );
+    assert_eq!(
+        timing
+            .try_get::<chrono::DateTime<Utc>, _>("maximum_run_after")
+            .unwrap(),
+        later_page_at + chrono::TimeDelta::microseconds(2_500_001),
+        "later page materialization and per-job delay must both be preserved"
+    );
+
+    // Every application-side validation runs before the insert statement.
+    for invalid in {
+        let mut malformed = immediate.clone();
+        malformed.payload = "{".to_owned();
+        let mut wrong_status = immediate.clone();
+        wrong_status.status = QueueJobStatus::Processed;
+        let mut wrong_archive = immediate.clone();
+        wrong_archive.archival_duration = Duration::from_secs(1);
+        let mut wrong_fingerprint = immediate.clone();
+        wrong_fingerprint.fingerprint = "0".repeat(64);
+        let mut max_retries_overflow = immediate.clone();
+        max_retries_overflow.max_retries = u32::MAX;
+        [
+            malformed,
+            wrong_status,
+            wrong_archive,
+            wrong_fingerprint,
+            max_retries_overflow,
+        ]
+    } {
+        let before: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("count before invalid producer job");
+        let invalid = PreparedQueueJob::materialize_at(invalid, materialized_at)
+            .expect("non-delay invalid jobs still materialize");
+        assert!(store.insert_jobs_strict(&[invalid]).await.is_err());
+        let after: i64 = sqlx::query_scalar("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .expect("count after invalid producer job");
+        assert_eq!(after, before, "invalid input must insert no row");
+    }
+    let mut delay_overflow = immediate.clone();
+    delay_overflow.delay = Duration::MAX;
+    assert!(PreparedQueueJob::materialize_at(delay_overflow, materialized_at).is_err());
+
+    // The active-fingerprint unique index is strict. A duplicate anywhere in
+    // the statement returns 23505 and rolls back every otherwise-valid row.
+    reset(&pool).await;
+    let duplicate = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"duplicate": true}),
+        QueueJobOptions::default(),
+    )
+    .expect("construct duplicate job");
+    assert_queue_database_code(
+        store
+            .insert_jobs_strict(&[
+                PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+                PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+            ])
+            .await
+            .expect_err("duplicate request must fail"),
+        "23505",
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    store
+        .insert_jobs_strict(&[
+            PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+        ])
+        .await
+        .expect("insert active fingerprint");
+    let unique = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"unique": true}),
+        QueueJobOptions::default(),
+    )
+    .expect("construct unique job");
+    assert_queue_database_code(
+        store
+            .insert_jobs_strict(&[
+                PreparedQueueJob::materialize_at(unique.clone(), materialized_at).unwrap(),
+                PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+            ])
+            .await
+            .expect_err("active collision must fail whole statement"),
+        "23505",
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&unique.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "the non-conflicting row must roll back with its batch"
+    );
+    sqlx::query("UPDATE queue_jobs SET status = 'retry' WHERE fingerprint = $1")
+        .bind(&duplicate.fingerprint)
+        .execute(&pool)
+        .await
+        .expect("make active row retry");
+    assert_queue_database_code(
+        store
+            .insert_jobs_strict(&[PreparedQueueJob::materialize_at(
+                duplicate.clone(),
+                materialized_at,
+            )
+            .unwrap()])
+            .await
+            .expect_err("retry collision must fail"),
+        "23505",
+    );
+    sqlx::query("UPDATE queue_jobs SET status = 'processed' WHERE fingerprint = $1")
+        .bind(&duplicate.fingerprint)
+        .execute(&pool)
+        .await
+        .expect("settle active fingerprint");
+    store
+        .insert_jobs_strict(&[
+            PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+        ])
+        .await
+        .expect("reuse fingerprint after processed");
+    sqlx::query(
+        "UPDATE queue_jobs SET status = 'failed' \
+         WHERE fingerprint = $1 AND status = 'pending'",
+    )
+    .bind(&duplicate.fingerprint)
+    .execute(&pool)
+    .await
+    .expect("fail second fingerprint row");
+    store
+        .insert_jobs_strict(&[
+            PreparedQueueJob::materialize_at(duplicate.clone(), materialized_at).unwrap(),
+        ])
+        .await
+        .expect("reuse fingerprint after failed");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&duplicate.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+
+    // Go's batch handler inserts children through its base DAO while the queue
+    // server retains the parent row transaction. Freeze that independent
+    // commit boundary: rolling back a simulated parent transaction does not
+    // roll back an already committed child, and retrying collides strictly.
+    reset(&pool).await;
+    let parent = pool
+        .begin()
+        .await
+        .expect("begin simulated parent transaction");
+    let child = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"child": "commits-first"}),
+        QueueJobOptions::default(),
+    )
+    .expect("construct independently committed child");
+    let child_prepared = PreparedQueueJob::materialize_at(child.clone(), materialized_at).unwrap();
+    store
+        .insert_jobs_strict(&[child_prepared])
+        .await
+        .expect("commit child outside parent transaction");
+    parent
+        .rollback()
+        .await
+        .expect("roll back simulated parent settlement");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&child.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_queue_database_code(
+        store
+            .insert_jobs_strict(
+                &[PreparedQueueJob::materialize_at(child, materialized_at).unwrap()],
+            )
+            .await
+            .expect_err("parent retry must encounter committed child"),
+        "23505",
+    );
 
     // Frozen dequeue order: pending before retry, then priority and run_after.
     reset(&pool).await;

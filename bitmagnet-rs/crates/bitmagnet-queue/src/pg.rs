@@ -29,6 +29,20 @@ pub enum QueuePgError {
     InvalidBatchSelection(&'static str),
     #[error("selected info hash is not exactly 20 bytes: {0}")]
     InvalidInfoHashLength(usize),
+    #[error("invalid producer payload JSON")]
+    InvalidProducerPayload {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("invalid producer job: {0}")]
+    InvalidProducerJob(&'static str),
+    #[error("producer integer '{field}' is outside PostgreSQL integer range: {value}")]
+    InvalidProducerInteger { field: &'static str, value: u64 },
+    #[error("producer duration '{field}' is outside PostgreSQL interval range: {microseconds} microseconds")]
+    InvalidProducerDuration {
+        field: &'static str,
+        microseconds: u128,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

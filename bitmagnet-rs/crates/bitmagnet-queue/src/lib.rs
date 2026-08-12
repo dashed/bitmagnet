@@ -24,6 +24,7 @@ pub mod id;
 pub mod job;
 pub mod message;
 pub mod pg;
+mod producer_pg;
 
 pub use batch::{BatchPlan, BatchPlanError, BatchPlanner, BatchSelection};
 pub use id::ProtocolId;
@@ -42,3 +43,4 @@ pub use pg::{
     MirrorCursor, MirrorIneligibleReason, MirrorReport, QueuePgError, QueueStore,
     PROCESS_TORRENT_SHADOW,
 };
+pub use producer_pg::PreparedQueueJob;

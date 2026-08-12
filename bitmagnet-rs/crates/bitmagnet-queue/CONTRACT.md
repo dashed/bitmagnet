@@ -85,9 +85,25 @@ Go tables. Its typed selection contract pins the strict info-hash cursor,
 snapshot cutoff, nullable content filter, orphan exclusion, ascending order,
 and page limit. Planning the returned ordered hashes into child and
 continuation queue jobs is byte/fingerprint-gated against Go. The adapter does
-not yet insert those jobs, so it cannot be used as a live batch producer.
+not yet form a live handler, but the crate now owns the general strict producer
+insert boundary. Callers materialize each logical job's absolute `run_after`
+when the job is planned; one application-clock `created_at` is shared by the
+atomic multi-row insert, matching GORM slice-create behavior. The insert keeps
+the constructor's fingerprint rather than recomputing it from PostgreSQL's
+normalized JSONB text, validates the whole input before issuing SQL, and never
+uses `ON CONFLICT`: an active pending/retry fingerprint collision returns
+SQLSTATE 23505 and inserts no siblings. A processed or failed row does not block
+the same fingerprint from being queued again.
 
-Still outstanding before Go queue retirement: the general producer API,
+The strict producer runs as its own database statement/transaction. This
+preserves Go's surprising parent/child boundary: child jobs may commit before
+the parent batch job is settled, and a later parent retry can then encounter
+the active-fingerprint constraint. A future Rust batch handler must therefore
+use a pool with at least two connections while `consume_one` retains the parent
+row transaction, and it must materialize children immediately after each page
+instead of assigning every child the same `run_after` at final insertion.
+
+Still outstanding before Go queue retirement: batch-handler orchestration,
 bounded multi-worker orchestration for queues that require concurrency greater
 than one, terminal-row garbage collection, runtime metrics, and the Lane P
 shadow processor/runtime deployment.
