@@ -179,17 +179,24 @@ jobs:
           EXPECTED_TREE: ${{ steps.source.outputs.tree }}
         run: |
           image=bitmagnet-process-torrent-batch:ci
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/amd64"
-          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "65532:65532"
-          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["/usr/local/bin/bitmagnet-process-torrent-batch"]'
-          test "$(docker image inspect --format '{{json .Config.Cmd}}' "$image")" = '[]'
-          test "$(docker image inspect --format '{{json .Config.ExposedPorts}}' "$image")" = '{"9090/tcp":{}}'
-          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$EXPECTED_COMMIT"
-          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.source-tree"}}' "$image")" = "$EXPECTED_TREE"
-          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.queue-consumer"}}' "$image")" = "process_torrent_batch"
-          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.queue-consumer-contract"}}' "$image")" = "process_torrent_batch/v1"
-          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Fx "BITMAGNET_SOURCE_COMMIT=$EXPECTED_COMMIT"
-          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Fx "BITMAGNET_SOURCE_TREE=$EXPECTED_TREE"
+          inspect="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-process-torrent-batch"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            (.[0].Config.ExposedPorts | keys) == ["9090/tcp"] and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.queue-consumer"] == "process_torrent_batch" and
+            .[0].Config.Labels["io.bitmagnet.queue-consumer-contract"] == "process_torrent_batch/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+          ' "$inspect"
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user 65532:65532 "$image" --help \
             | grep -F 'Usage: bitmagnet-process-torrent-batch'

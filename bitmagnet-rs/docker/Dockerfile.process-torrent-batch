@@ -43,7 +43,7 @@ RUN set -eu; \
     test "${#SOURCE_TREE}" -eq 40; \
     case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
 
-LABEL org.opencontainers.image.source="https://github.com/bitmagnet-io/bitmagnet" \
+LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.revision="${REVISION}" \
       io.bitmagnet.source-tree="${SOURCE_TREE}" \
