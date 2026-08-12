@@ -40,6 +40,14 @@ async fn main() -> Result<()> {
         .context("connecting batch worker to PostgreSQL")?;
     let store = QueueStore::new(pool);
     let handler_store = store.clone();
+    let metrics_store = store.clone();
+    let _metrics_server =
+        bitmagnet_common::metrics::maybe_spawn_metrics_server_with_async_gatherer(move || {
+            let store = metrics_store.clone();
+            async move { store.status_metric_families().await }
+        })
+        .await
+        .context("starting batch worker metrics listener")?;
     let mut config = ConsumerConfig::new(PROCESS_TORRENT_BATCH);
     config.check_interval = Duration::from_secs(args.check_interval_seconds);
     config.job_timeout = Duration::from_secs(args.job_timeout_seconds);

@@ -148,9 +148,15 @@ registry invokes collectors synchronously; a background cache would expose
 stale data and is not parity. The queue adapter now builds a fresh, unregistered
 `bitmagnet_queue_jobs_total{queue,status}` gauge family from each awaited
 snapshot and emits no family for an empty table. The common metrics server can
-await such families per scrape, but no queue runtime activates that hook yet.
+await such families per scrape. When explicitly configured with
+`BITMAGNET_METRICS_ADDR`, the still-non-deployed batch worker now awaits that
+fresh family per scrape; query failures omit only the queue family and leave the
+rest of the HTTP 200 metrics response intact. At the minimum two-connection pool
+size a scrape can contend with a retained parent transaction plus handler query;
+the bounded acquisition failure degrades only that scrape's queue family.
 
 Still outstanding before Go queue retirement: guarded batch-consumer image and
 single-consumer deployment wiring, bounded multi-worker orchestration for
 queues that require concurrency greater than one, terminal-row cleanup ownership
-handoff, runtime metrics, and the Lane P shadow processor/runtime deployment.
+handoff, deployment metrics plumbing, and the Lane P shadow processor/runtime
+deployment.
