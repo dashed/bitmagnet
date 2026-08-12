@@ -441,12 +441,45 @@ primitive, but still does not connect it to a production loop or binary:
   a bounded real-loopback typed-client-to-supervisor ping ending with an empty
   transaction registry.
 
+The sixteenth bounded source-only slice adds Go's current-state hash keyspace
+and its shared reverse-address behavior without adding clocks, synchronization,
+or a runtime:
+
+- `KTableCore` composes the existing fixed-capacity node table with a second
+  capacity-80 splitting routing tree for info hashes. New hashes may contain no
+  peers and are still exact `Found` results. Duplicate puts accumulate peers;
+  IP-only identity makes the last port in one or later updates win. A rejected
+  hash put changes neither payload nor reverse state, including at capacity;
+- missing-hash lookup returns the node table's exact closest-node traversal,
+  while a present empty hash never falls through. Public hash peers and reverse
+  hash IDs are sorted only to replace Go map iteration nondeterminism with a
+  stable projection; membership and last-write semantics remain Go-exact;
+- the reverse key ignores peer ports and IPv6 flowinfo, preserves mapped IPv4
+  as distinct from plain IPv4, and includes native IPv6 scope. Filtering
+  preserves every unknown input's original order, duplicates, port, scope,
+  and flowinfo even though only the reverse key decides membership;
+- production quirks are deliberately fixture-locked. A newly accepted node is
+  absent from the reverse map until an already-existing-ID update. The all-zero
+  node ID remains the reverse map's no-peer sentinel, so its entry can be known
+  yet cannot be dropped by address. Changing a node's full address or dropping
+  a node deletes the entire IP-keyed entry, including hash associations and a
+  different node's newer binding. Two node IDs sharing one IP can therefore
+  leave the older node alive but unindexed after the newer binding is dropped;
+  and
+- a same-package oracle runs the real Go `ktable.New`, node/hash put and drop,
+  `DropAddr`, `FilterKnownAddrs`, and `GetHashOrClosestNodes` paths. Its checked
+  trace includes first-put omission, same-IP port changes, shared-entry
+  destruction, zero-ID sentinel behavior, IPv4/mapped/native/scoped identity,
+  empty and accumulating hashes, last-port wins, capacity rejection and
+  duplicate update, input-preserving filtering, and closest fallback. Full
+  node, hash, and reverse state is sorted after every mutation before the Rust
+  differential compares it.
+
 Excluded from this milestone: production socket construction or runtime
 wiring, external-network traffic, and unbounded receive loops; message-method
 or dispatch validation beyond the two explicitly owned methods, live query
-wiring, the combined Kademlia table and hash keyspace,
-hash values, the shared reverse-address map, response clocks and node options,
-BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
+wiring, hash removal/expiry, peer expiry, response clocks and node/hash options,
+BEP-51 eligibility/scheduling, synchronized batch commands, time/random eviction policy,
 metrics,
 concurrent handler fan-out, send retry/timeout/queueing policy, socket lifecycle,
 production looping or spawning policy, logging and runtime wiring,
