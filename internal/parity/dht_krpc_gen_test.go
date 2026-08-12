@@ -46,14 +46,16 @@ type dhtMessageArgs struct {
 }
 
 type dhtMessageReturn struct {
-	ID       protocol.ID       `json:"id"`
-	Nodes    *[]dhtCompactNode `json:"nodes,omitempty"`
-	Nodes6   *[]dhtCompactNode `json:"nodes6,omitempty"`
-	Token    *dhtBytes         `json:"token,omitempty"`
-	Values   *[]dhtCompactAddr `json:"values,omitempty"`
-	Interval *int64            `json:"interval,omitempty"`
-	Num      *int64            `json:"num,omitempty"`
-	Samples  *[]protocol.ID    `json:"samples,omitempty"`
+	ID           protocol.ID       `json:"id"`
+	Nodes        *[]dhtCompactNode `json:"nodes,omitempty"`
+	Nodes6       *[]dhtCompactNode `json:"nodes6,omitempty"`
+	Token        *dhtBytes         `json:"token,omitempty"`
+	Values       *[]dhtCompactAddr `json:"values,omitempty"`
+	Interval     *int64            `json:"interval,omitempty"`
+	Num          *int64            `json:"num,omitempty"`
+	Samples      *[]protocol.ID    `json:"samples,omitempty"`
+	SeedersBloom *dhtBytes         `json:"seedersBloom,omitempty"`
+	PeersBloom   *dhtBytes         `json:"peersBloom,omitempty"`
 }
 
 type dhtKRPCError struct {
@@ -246,6 +248,14 @@ func projectDHTMessage(msg dht.Msg) dhtKRPCMessage {
 			values := make([]protocol.ID, len(*msg.R.Samples))
 			copy(values, *msg.R.Samples)
 			response.Samples = &values
+		}
+		if msg.R.BFsd != nil {
+			value := dhtBytes(msg.R.BFsd[:])
+			response.SeedersBloom = &value
+		}
+		if msg.R.BFpe != nil {
+			value := dhtBytes(msg.R.BFpe[:])
+			response.PeersBloom = &value
 		}
 		result.Response = &response
 	}

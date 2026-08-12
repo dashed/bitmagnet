@@ -58,7 +58,38 @@ already registered, and the checked fixture locks canonical query bytes,
 collision retry, address normalization, duplicate delivery, and every terminal
 cleanup path to the Rust differential tests.
 
-Go accepts more bencode syntax than the pinned `bendy =0.6.1` decoder. The
+The fourth bounded source-only slice admits a separate parser for future
+untrusted inbound datagrams without adding a socket or receive loop:
+
+- `KrpcMessage::decode_inbound` is a single-pass borrowed cursor with fixed,
+  non-caller-configurable limits: 65,507 datagram bytes (the exact production
+  Go UDP buffer), eight container levels, and 32,768 visited values;
+- the typed top-level, argument, and return dictionaries match Go's struct
+  decoder by accepting unsorted and duplicate fields, validating every
+  occurrence, and retaining the last successfully decoded value;
+- typed dictionary keys, scalar byte strings, signed integers (including the
+  excluded BEP-44 sequence fields), IDs, `want` entries, and the compact-node/
+  sample custom decoders recursively unwrap an exact singleton list as Go
+  does; compact addresses, peer-value entries, and fixed-array bloom filters
+  retain Go's actual non-coercing behavior;
+- unknown values are syntax-validated and discarded without a generic value
+  tree. Unknown dictionaries match Go's interface decoder by requiring strict
+  byte-key ordering and uniqueness;
+- trailing bytes, truncation, malformed lengths and integers, excessive depth,
+  wrong known-field shapes, and missing dictionary values return typed limit,
+  syntax, shape, compact-value, or scrape-bloom errors without panics; and
+- Go's boolean integer/string/singleton-list coercion, legacy error string,
+  error-list extras, optional-field presence, and compact-value behavior are
+  locked by a real anacrolix `bencode.Unmarshal` oracle. Deterministic corpus
+  mutation and every-prefix truncation tests additionally exercise the Rust
+  no-panic boundary.
+
+The existing `KrpcMessage::decode` remains the strict canonical fixture codec;
+its acceptance and encoding bytes are unchanged. The inbound parser is the
+admitted bounded wire boundary for a future receive loop, not authorization to
+dispatch a message or mutate DHT state.
+
+Go accepts more bencode syntax than the pinned `bendy =0.6.1` strict decoder. The
 fixture therefore probes unsorted/duplicate dictionary keys, noncanonical
 integers, unknown fields, trailing values, missing `t`/`y`, `ro=0`, and the
 legacy bare-string error. It also records Go's unusual boolean compatibility:
@@ -69,15 +100,30 @@ compatibility difference is gated. Both codecs reject non-20-byte IDs. The
 oracle also records one intentional shape hardening: Rust rejects non-6/18-byte
 compact peer addresses that Go's generic IP decoding accepts. It likewise
 records that Go's generic fixed-array decoder pads/truncates non-256-byte
-BEP-33 filters while Rust requires the exact protocol width. These known
-differences mean this crate is **not yet admitted as an inbound live-network
-codec**.
+BEP-33 filters while Rust requires the exact protocol width. The bounded
+inbound parser deliberately retains these protocol-width checks and rejects
+depth beyond eight or datagrams beyond the production receive ceiling; the Go
+oracle records each intentional hardening difference.
 Unknown keys remain forward-compatible and are ignored like Go; accepted
 noncanonical projections re-encode canonically.
 
-Excluded from this milestone: UDP/TCP sockets and receive loops, live query
-wiring, routing tables, responders, a BEP-33 scrape client or scheduler, BEP-44
-mutable/immutable storage and signing, BEP-51 scheduling, BEP-9/10 metadata
-transfer, crawler orchestration, PostgreSQL, queues, images, and deployment.
-The pure registry is not connected to production and this crate remains **not
-admitted for live inbound DHT traffic**. No live DHT behavior changes.
+BEP-44 values are not admitted in this slice. The oracle distinguishes the Go
+argument `v` interface decoder (canonical generic dictionaries) from the Go
+return `v` raw-byte decoder, which accepts unsorted/duplicate dictionaries,
+noncanonical integers, and even a structurally terminated dictionary with an
+unpaired key. Rust validates each form with the corresponding bounded scanner
+and returns a typed `Unsupported` error instead of accepting and then losing
+signature-sensitive raw bytes.
+The excluded BEP-44 `seq`/`cas` integer fields are nevertheless shape-validated
+with Go's singleton coercion before being discarded. Their fixtures mark the
+intentional projection loss and compare acceptance plus the projected message,
+not a Rust re-encode that cannot retain those excluded fields.
+
+Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
+or dispatch validation, live query wiring, routing tables, responders, a BEP-33
+scrape client or scheduler, BEP-44 value interpretation/storage/signing,
+BEP-51 scheduling, BEP-9/10 metadata transfer, crawler orchestration,
+PostgreSQL, queues, images, and deployment. Unknown and excluded extension
+values other than the explicitly unsupported BEP-44 `v` are syntax-validated
+and discarded. Neither the pure registry nor the new parser is connected to
+production, so no live DHT behavior changes.
