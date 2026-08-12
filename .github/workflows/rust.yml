@@ -147,6 +147,53 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  docker-process-torrent-batch:
+    name: docker build and smoke (process_torrent_batch worker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bitmagnet-rs/docker/Dockerfile.process-torrent-batch
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bitmagnet-process-torrent-batch:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=process-torrent-batch
+          cache-to: type=gha,mode=max,scope=process-torrent-batch
+      - name: Verify image contract and executable smoke
+        working-directory: ${{ github.workspace }}
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          image=bitmagnet-process-torrent-batch:ci
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/amd64"
+          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "65532:65532"
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["/usr/local/bin/bitmagnet-process-torrent-batch"]'
+          test "$(docker image inspect --format '{{json .Config.Cmd}}' "$image")" = '[]'
+          test "$(docker image inspect --format '{{json .Config.ExposedPorts}}' "$image")" = '{"9090/tcp":{}}'
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" = "$EXPECTED_COMMIT"
+          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.source-tree"}}' "$image")" = "$EXPECTED_TREE"
+          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.queue-consumer"}}' "$image")" = "process_torrent_batch"
+          test "$(docker image inspect --format '{{index .Config.Labels "io.bitmagnet.queue-consumer-contract"}}' "$image")" = "process_torrent_batch/v1"
+          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Fx "BITMAGNET_SOURCE_COMMIT=$EXPECTED_COMMIT"
+          docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$image" | grep -Fx "BITMAGNET_SOURCE_TREE=$EXPECTED_TREE"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 "$image" --help \
+            | grep -F 'Usage: bitmagnet-process-torrent-batch'
+
   docker-writeset-replay:
     name: docker build (write-set and tape parity replay)
     runs-on: ubuntu-latest

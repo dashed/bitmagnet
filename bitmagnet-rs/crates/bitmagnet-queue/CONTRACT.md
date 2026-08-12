@@ -110,17 +110,27 @@ at that page boundary, captures the continuation timestamp after finalization,
 and then invokes the strict producer once. Zero `BatchSize` or `ChunkSize` is
 rejected fail-closed because every supported producer injects those defaults
 before persistence. Migration-backed tests pin chunk overshoot, job order,
-timestamps, active-fingerprint retry failure, and the empty-result no-op. A
-production consumer remains deliberately absent, so this milestone cannot
-compete with the live Go `process_torrent_batch` worker.
+timestamps, active-fingerprint retry failure, and the empty-result no-op. An
+activated production consumer remains deliberately absent, so this milestone
+cannot compete with the live Go `process_torrent_batch` worker.
 
 A standalone `bitmagnet-process-torrent-batch` binary composes the callable
-handler with the serial queue consumer for offline/runtime testing. It pins the
-Go handler's defaults of a 30-second idle poll and 10-minute job timeout, bounds
+handler with the serial queue consumer for offline/runtime testing. A dedicated
+`Dockerfile.process-torrent-batch` now builds only that executable from the
+repository-root context required by the compile-time classifier-core embed,
+runs it as UID/GID 65532, and binds exact commit/tree provenance plus a versioned
+`process_torrent_batch/v1` consumer contract into validated OCI labels and
+environment variables. CI builds the Linux/amd64 production-shaped image,
+asserts its identity, non-root user, queue-consumer label, and entrypoint, then
+executes `--help` through the image's default entrypoint in a read-only,
+networkless, capability-free container without requiring a database. The image
+has no default arguments and does not by itself claim queue ownership or
+concurrency exclusion; those remain deployment concerns. The binary pins the Go
+handler's defaults of a 30-second idle poll and 10-minute job timeout, bounds
 PostgreSQL pool acquisition, and refuses a configured connection maximum below
 two because the retained parent transaction and the handler's independent
 selection/insertion need separate connections. The binary is not copied into a
-production image or wired into deployment automation. Its current shutdown
+shared serving image or wired into deployment automation. Its current shutdown
 path stops polling and drains the in-flight job through parent settlement; the
 migration-backed gate proves shutdown cannot cancel that handler. The 10-minute
 handler timeout still cancels work at its deadline. If a child committed first,
@@ -155,8 +165,7 @@ rest of the HTTP 200 metrics response intact. At the minimum two-connection pool
 size a scrape can contend with a retained parent transaction plus handler query;
 the bounded acquisition failure degrades only that scrape's queue family.
 
-Still outstanding before Go queue retirement: guarded batch-consumer image and
-single-consumer deployment wiring, bounded multi-worker orchestration for
-queues that require concurrency greater than one, terminal-row cleanup ownership
-handoff, deployment metrics plumbing, and the Lane P shadow processor/runtime
-deployment.
+Still outstanding before Go queue retirement: guarded single-consumer deployment
+wiring for the batch image, bounded multi-worker orchestration for queues that
+require concurrency greater than one, terminal-row cleanup ownership handoff,
+deployment metrics plumbing, and the Lane P shadow processor/runtime deployment.

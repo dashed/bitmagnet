@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1
+#
+# Dedicated image for the serial Rust `process_torrent_batch` queue consumer.
+# The repository root must be the build context because bitmagnet-classifier
+# embeds internal/classifier/classifier.core.yml at compile time.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.process-torrent-batch \
+#     --build-arg REVISION="$(git rev-parse HEAD)" \
+#     --build-arg SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+#     -t bitmagnet-process-torrent-batch .
+
+ARG REVISION
+ARG SOURCE_TREE
+
+FROM rust:1.97-slim-bookworm AS builder
+ENV RUSTUP_TOOLCHAIN=1.97.0
+
+# bitmagnet-processor reaches bitmagnet-proto through its classifier dependency,
+# so the shared tonic build script requires protoc.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY bitmagnet-rs ./bitmagnet-rs
+COPY internal/classifier/classifier.core.yml ./internal/classifier/classifier.core.yml
+
+RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release \
+      -p bitmagnet-processor --bin bitmagnet-process-torrent-batch \
+    && install -D -m 0755 \
+      bitmagnet-rs/target/release/bitmagnet-process-torrent-batch \
+      /out/bitmagnet-process-torrent-batch \
+    && rm -rf bitmagnet-rs/target
+
+FROM debian:bookworm-slim AS runtime
+ARG REVISION
+ARG SOURCE_TREE
+
+# Reject unbound or ambiguous source identity at image-build time.
+RUN set -eu; \
+    test "${#REVISION}" -eq 40; \
+    case "${REVISION}" in *[!0-9a-f]*) echo "REVISION must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac; \
+    test "${#SOURCE_TREE}" -eq 40; \
+    case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/bitmagnet-io/bitmagnet" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${REVISION}" \
+      io.bitmagnet.source-tree="${SOURCE_TREE}" \
+      io.bitmagnet.queue-consumer="process_torrent_batch" \
+      io.bitmagnet.queue-consumer-contract="process_torrent_batch/v1"
+
+ENV BITMAGNET_SOURCE_COMMIT="${REVISION}" \
+    BITMAGNET_SOURCE_TREE="${SOURCE_TREE}"
+
+# SQLx uses rustls. Keep CA roots for TLS PostgreSQL endpoints and run the
+# worker as the repository's conventional non-root uid/gid.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
+
+COPY --from=builder /out/bitmagnet-process-torrent-batch /usr/local/bin/bitmagnet-process-torrent-batch
+
+# Metrics are opt-in through BITMAGNET_METRICS_ADDR; 9090 is the deployment
+# convention but the image does not bind it unless explicitly configured.
+USER 65532:65532
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/bitmagnet-process-torrent-batch"]
+CMD []
