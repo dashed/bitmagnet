@@ -255,13 +255,36 @@ offline dispatch envelope without sending it:
   native cases retain their cause, emit exact `202`, and leave the table
   unchanged.
 
+The tenth bounded source-only slice adds only a fakeable prepared-reply send
+seam:
+
+- `send_ping_find_node_reply` borrows the already composed reply, encodes its
+  complete datagram before creating a sender future, then awaits exactly one
+  `DatagramSender::send` call. An encode error makes zero sender calls; a
+  transport error is returned as the sender's original typed value. There is
+  no implicit retry;
+- the exact reply destination is passed through without normalization,
+  including IPv4-mapped form, native IPv6 scope, and Rust-visible flowinfo.
+  The owned encoded buffer remains alive for the entire borrowed send future;
+- the async boundary preserves backpressure: the helper cannot complete while
+  the sender future is pending. It adds no timeout, queue, task, or detached
+  work; and
+- borrowing permits a caller to send the peer-visible generic `202` reply from
+  a `LocalFailure` while retaining the typed `NativeIpv6Node` cause. A
+  same-package Go oracle calls the actual server `send` method with capture and
+  failing sockets to lock canonical bytes, destinations, exact transport-error
+  propagation, and the native/mixed compact-node panic before any socket call.
+  Rust turns those encoder panics into typed zero-call encode errors and
+  composes the helper across the prior dispatch and responder matrices.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
-wiring and transport sends, the combined Kademlia table and hash keyspace,
+wiring and production transport adapters, the combined Kademlia table and hash keyspace,
 hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
-concurrency, full responder routing and runtime wrappers, a BEP-33
+concurrency, send retry/timeout/queueing/backpressure policy, socket lifecycle,
+full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension

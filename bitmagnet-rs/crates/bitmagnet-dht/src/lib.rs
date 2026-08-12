@@ -6,6 +6,7 @@ mod krpc;
 mod node_table;
 mod ping_find_node;
 mod ping_find_node_dispatch;
+mod ping_find_node_send;
 mod receive;
 mod routing_tree;
 mod scrape;
@@ -22,6 +23,7 @@ pub use ping_find_node::{PingFindNodeError, PingFindNodeResponder};
 pub use ping_find_node_dispatch::{
     PingFindNodeDispatchOutcome, PingFindNodeDispatcher, PingFindNodeReply,
 };
+pub use ping_find_node_send::{send_ping_find_node_reply, DatagramSender, PingFindNodeSendError};
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,
