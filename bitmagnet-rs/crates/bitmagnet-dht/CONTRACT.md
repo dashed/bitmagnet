@@ -277,6 +277,29 @@ seam:
   Rust turns those encoder panics into typed zero-call encode errors and
   composes the helper across the prior dispatch and responder matrices.
 
+The eleventh bounded source-only slice joins the existing offline boundaries
+for exactly one datagram:
+
+- `PingFindNodeDriver::drive_one` awaits exactly one `ReceiveDispatcher`
+  receive. Only its owned `Query` outcome is offered to the partial
+  `PingFindNodeDispatcher`; response and error delivery, zero-length,
+  decode-rejected, ignored, and typed receive failures never reach the
+  responder or sender;
+- an unowned query is returned intact as a typed `NoReply` for a future router.
+  An owned query produces the already specified response, protocol-error, or
+  local-failure envelope and awaits exactly one `DatagramSender` call;
+- successful sends and send/encode failures return the original atomic
+  `PingFindNodeDispatchOutcome`, so a peer reply can never be mismatched with
+  an optional local cause. Failures also retain the exact underlying send
+  error. The helper inherits exact destination/wire,
+  encode-before-send, and no-retry behavior from the sender seam; and
+- deterministic fake receiver/sender gates prove call counts, receive-before-
+  send ordering, and pending sender backpressure without sleeps. A same-package
+  Go oracle exercises the actual `server.read` to `handleQuery`/`handleResponse`
+  to `server.send` path with channel-observed completion. The bounded partial
+  router intentionally leaves unowned queries unsent even though Go's full
+  router returns method-unknown `204`.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
 wiring and production transport adapters, the combined Kademlia table and hash keyspace,
@@ -284,6 +307,7 @@ hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
 concurrency, send retry/timeout/queueing/backpressure policy, socket lifecycle,
+looping or spawning policy, logging and runtime wiring,
 full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
