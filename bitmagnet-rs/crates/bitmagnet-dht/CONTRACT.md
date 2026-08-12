@@ -199,12 +199,40 @@ node keyspace that directly consumes `RoutingTree`:
   zero `netip.AddrPort` rejection is recorded as a typed boundary: safe Rust
   `SocketAddr` has no corresponding invalid value.
 
+The eighth bounded source-only slice adds a deliberately partial pure responder
+over that node table:
+
+- `PingFindNodeResponder` owns only the exact raw byte methods `ping` and
+  `find_node`. It decides ownership before inspecting arguments and returns
+  `None` for empty, binary, case-changed, or any other method. A future full
+  router owns method-unknown error `204`;
+- either owned method with no argument dictionary returns the exact protocol
+  error `203`, `missing arguments`. Ping otherwise returns only the local node
+  ID. Find-node also requires a present nonzero target, then returns the node
+  table's exact singleton-or-closest-eight result. The responder does not
+  validate envelope type, transaction ID, sender ID, `want`, or unrelated
+  arguments, matching the separation in Go;
+- successful compact-node output remains only in Go's IPv4 `nodes` field and
+  never invents `nodes6`. IPv4-mapped IPv6 is canonicalized to the exact IPv4
+  wire address. A native or scoped native IPv6 result returns the typed local
+  `NativeIpv6Node` failure with no partial response or protocol error. This is
+  an explicit hardening of Go's later compact-IPv4 encoder panic, and Rust is
+  gated never to panic; and
+- a same-package oracle invokes the real Go responder over a real Go ktable,
+  then wraps its result in a fixed response envelope. Checked fixtures cover
+  argument precedence, ping, missing/zero targets, empty/exact/origin/absent
+  lookups, the full 80-node table and eight-node ceiling, ignored wants, port
+  zero, mapped IPv4, and native/scoped/mixed IPv6. They compare canonical
+  response and protocol-error bytes and explicitly record the native-IPv6 Go
+  panic/Rust typed-error boundary.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
-or dispatch validation, live query wiring, the combined Kademlia table and hash keyspace,
+or dispatch validation beyond the two explicitly owned methods, live query
+wiring, the combined Kademlia table and hash keyspace,
 hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
-concurrency, responders, a BEP-33
+concurrency, full responder routing and wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension
