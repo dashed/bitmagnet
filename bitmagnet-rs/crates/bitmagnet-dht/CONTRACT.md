@@ -1,4 +1,4 @@
-# Pure KRPC wire and BEP-33 scrape-bloom parity
+# Pure KRPC wire, scrape-bloom, and transaction-correlation parity
 
 This crate owns only the offline byte boundary needed before a Rust DHT runtime
 can be designed. Go remains the production implementation and the source of
@@ -33,6 +33,31 @@ runtime:
 - pointer-sensitive `BFsd` (seeders) and `BFpe` (peers) return fields, including
   the difference between omission and a present all-zero 256-byte filter.
 
+The third bounded source-only slice adds only the transaction-correlation core:
+
+- fallible cryptographic two-byte transaction IDs, injectable deterministic
+  issuance, a bounded 65,536-attempt collision loop, and distinct source,
+  full-space, and collision-exhaustion failures;
+- atomic register-before-send typestate: `RegisteredQuery` owns an already
+  inserted exact query message and canonical wire bytes, then transfers its
+  generation receipt to `PendingTransaction` only after the send succeeds;
+- generation-checked cleanup on send failure, cancellation, timeout, registry
+  close, task abort, and either typestate guard being dropped, preventing a
+  stale guard from deleting a later query that reused the same TID;
+- response/error type gating, exact TID lookup, normalized source-address
+  gating, and explicit first-wins delivery in that order. Plain IPv4 aliases
+  only a zero-scope IPv4-mapped address; Rust preserves a nonzero mapped scope
+  fail-closed, while native IPv6 requires equal scope and ignores flowinfo; and
+- typed success, remote-error, missing-body, timeout, cancellation, and closed
+  outcomes that retain the accepted source address and full response envelope.
+
+`internal/protocol/dht/server/transaction_parity_gen_test.go` exercises the
+actual Go `Query`, `send`, `handleResponse`, and `addrMatches` paths. Its fake
+socket asserts synchronously inside `Send` that the TID and destination are
+already registered, and the checked fixture locks canonical query bytes,
+collision retry, address normalization, duplicate delivery, and every terminal
+cleanup path to the Rust differential tests.
+
 Go accepts more bencode syntax than the pinned `bendy =0.6.1` decoder. The
 fixture therefore probes unsorted/duplicate dictionary keys, noncanonical
 integers, unknown fields, trailing values, missing `t`/`y`, `ro=0`, and the
@@ -50,8 +75,9 @@ codec**.
 Unknown keys remain forward-compatible and are ignored like Go; accepted
 noncanonical projections re-encode canonically.
 
-Excluded from this milestone: UDP/TCP sockets, transaction-ID issuance and
-address correlation, timeouts, routing tables, responders, a BEP-33 scrape
-client or scheduler, BEP-44 mutable/immutable storage and signing, BEP-51
-scheduling, BEP-9/10 metadata transfer, crawler orchestration, PostgreSQL,
-queues, images, and deployment. No live DHT behavior changes.
+Excluded from this milestone: UDP/TCP sockets and receive loops, live query
+wiring, routing tables, responders, a BEP-33 scrape client or scheduler, BEP-44
+mutable/immutable storage and signing, BEP-51 scheduling, BEP-9/10 metadata
+transfer, crawler orchestration, PostgreSQL, queues, images, and deployment.
+The pure registry is not connected to production and this crate remains **not
+admitted for live inbound DHT traffic**. No live DHT behavior changes.
