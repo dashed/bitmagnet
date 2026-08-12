@@ -21,6 +21,7 @@ pub mod backoff;
 pub mod batch;
 mod batch_handler;
 mod batch_pg;
+mod gc_pg;
 pub mod id;
 pub mod job;
 pub mod message;

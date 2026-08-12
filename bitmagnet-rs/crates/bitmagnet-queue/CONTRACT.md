@@ -128,8 +128,13 @@ it survives independently, the parent settles to retry, and the retry observes
 the strict SQLSTATE 23505 collision; this boundary is also migration-backed
 tested and preserves Go's independent child transaction semantics.
 
+The PostgreSQL cleanup primitive now preserves Go's one-pass terminal-row
+predicate exactly: only `processed`/`failed` rows with
+`ran_at + archival_duration < cutoff` are deleted, null `ran_at` values survive,
+and the affected-row count is returned. Periodic immediate-then-10-minute
+scheduling remains runtime work.
+
 Still outstanding before Go queue retirement: guarded batch-consumer image and
 single-consumer deployment wiring, bounded multi-worker orchestration for
-queues that require concurrency greater than one, terminal-row garbage
-collection, runtime metrics, and the Lane P shadow processor/runtime
-deployment.
+queues that require concurrency greater than one, periodic terminal-row cleanup
+scheduling, runtime metrics, and the Lane P shadow processor/runtime deployment.

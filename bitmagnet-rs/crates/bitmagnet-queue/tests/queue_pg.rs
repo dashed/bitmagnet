@@ -121,6 +121,58 @@ async fn queue_runtime_matches_go_contract() {
         .expect("connect disposable PostgreSQL");
     let store = QueueStore::new(pool.clone());
 
+    // Terminal-row cleanup uses Go's strict status, cutoff, and null
+    // semantics across the shared queue table.
+    reset(&pool).await;
+    let gc_cutoff = chrono::DateTime::parse_from_rfc3339("2026-08-12T07:15:00Z")
+        .expect("fixed cleanup cutoff")
+        .with_timezone(&Utc);
+    sqlx::query(
+        "INSERT INTO queue_jobs \
+         (id, fingerprint, queue, status, payload, run_after, ran_at, \
+          archival_duration, created_at, priority) VALUES \
+         ('gc-processed-expired', 'gc-fp-1', 'gc-a', 'processed', '{}', $1, $1 - interval '2 hours', interval '1 hour', $1, 0), \
+         ('gc-failed-expired', 'gc-fp-2', 'gc-b', 'failed', '{}', $1, $1 - interval '61 minutes', interval '1 hour', $1, 0), \
+         ('gc-processed-boundary', 'gc-fp-3', 'gc-a', 'processed', '{}', $1, $1 - interval '1 hour', interval '1 hour', $1, 0), \
+         ('gc-failed-future', 'gc-fp-4', 'gc-b', 'failed', '{}', $1, $1 - interval '59 minutes', interval '1 hour', $1, 0), \
+         ('gc-pending-expired', 'gc-fp-5', 'gc-a', 'pending', '{}', $1, $1 - interval '2 hours', interval '1 hour', $1, 0), \
+         ('gc-retry-expired', 'gc-fp-6', 'gc-b', 'retry', '{}', $1, $1 - interval '2 hours', interval '1 hour', $1, 0), \
+         ('gc-processed-null', 'gc-fp-7', 'gc-a', 'processed', '{}', $1, NULL, interval '1 hour', $1, 0)",
+    )
+    .bind(gc_cutoff)
+    .execute(&pool)
+    .await
+    .expect("seed terminal cleanup contract");
+    assert_eq!(
+        store
+            .delete_expired_terminal_jobs(gc_cutoff)
+            .await
+            .expect("delete expired terminal jobs"),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT array_agg(id ORDER BY id) FROM queue_jobs WHERE queue LIKE 'gc-%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read retained cleanup rows"),
+        vec![
+            "gc-failed-future".to_owned(),
+            "gc-pending-expired".to_owned(),
+            "gc-processed-boundary".to_owned(),
+            "gc-processed-null".to_owned(),
+            "gc-retry-expired".to_owned(),
+        ]
+    );
+    assert_eq!(
+        store
+            .delete_expired_terminal_jobs(gc_cutoff)
+            .await
+            .expect("repeat terminal cleanup is empty"),
+        0
+    );
+
     // Strict producer insertion is a single all-or-nothing statement. It
     // preserves the constructor fingerprint across JSONB normalization and
     // preserves Go's per-job run_after plus one shared application created_at.
