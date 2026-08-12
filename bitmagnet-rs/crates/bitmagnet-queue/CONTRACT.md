@@ -132,7 +132,13 @@ The PostgreSQL cleanup primitive now preserves Go's one-pass terminal-row
 predicate exactly: only `processed`/`failed` rows with
 `ran_at + archival_duration < cutoff` are deleted, null `ran_at` values survive,
 and the affected-row count is returned. Periodic immediate-then-10-minute
-scheduling remains runtime work.
+scheduling is implemented as an unactivated, shutdown-aware loop: each attempt
+starts immediately or ten minutes after the preceding attempt finishes, and a
+database error is logged without ending the loop. Go remains the sole live
+global cleanup owner until an explicit ownership handoff. Shutdown interrupts
+the wait but drains an already-started sweep; SQLx future drop does not prove a
+server-side PostgreSQL cancellation, so the loop never returns while its DELETE
+may still be completing.
 
 The async queue-depth snapshot now matches the Go custom collector's database
 query: group the live table by `(queue,status)`, return all four status labels
@@ -143,5 +149,5 @@ stale data and is not parity.
 
 Still outstanding before Go queue retirement: guarded batch-consumer image and
 single-consumer deployment wiring, bounded multi-worker orchestration for
-queues that require concurrency greater than one, periodic terminal-row cleanup
-scheduling, runtime metrics, and the Lane P shadow processor/runtime deployment.
+queues that require concurrency greater than one, terminal-row cleanup ownership
+handoff, runtime metrics, and the Lane P shadow processor/runtime deployment.

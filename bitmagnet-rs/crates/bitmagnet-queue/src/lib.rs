@@ -31,6 +31,7 @@ mod status_pg;
 
 pub use batch::{BatchPlan, BatchPlanError, BatchPlanner, BatchSelection};
 pub use batch_handler::{BatchHandleError, BatchHandleReport};
+pub use gc_pg::DEFAULT_GC_INTERVAL;
 pub use id::ProtocolId;
 pub use job::{
     fingerprint, new_queue_job, JobError, QueueJob, QueueJobOptions, QueueJobStatus,
