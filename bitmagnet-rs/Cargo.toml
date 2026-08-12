@@ -28,6 +28,7 @@ members = [
     "crates/bitmagnet-content-search",
     # B′ oracle reader: replays the flags-ON tape Go records.
     "crates/bitmagnet-tape",
+    "crates/bitmagnet-dht",
 ]
 
 [workspace.package]
@@ -145,6 +146,9 @@ hex = "0.4"
 # is Unicode by default, so the Lane R port emits `[0-9]` (never `\d`) and keeps
 # `\p{L}` in Unicode mode (matching Go's `[\p{L}\d]` word-char helper).
 regex = "1"
+
+# Strict canonical bencode for the pure Phase-4 DHT KRPC wire boundary.
+bendy = "=0.6.1"
 
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D
