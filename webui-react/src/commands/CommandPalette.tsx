@@ -292,6 +292,10 @@ export default function CommandPalette({ commands, isOpen, onClose }: CommandPal
     }
 
     if (event.key === "Enter") {
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
+
       event.preventDefault();
       performCommand(visibleCommands[activeIndex >= 0 ? activeIndex : 0]);
     }

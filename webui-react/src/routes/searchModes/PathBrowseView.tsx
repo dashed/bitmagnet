@@ -280,6 +280,10 @@ export default function PathBrowseView() {
     }
 
     if (event.key === "Enter") {
+      if (event.nativeEvent.isComposing) {
+        return;
+      }
+
       const activeSuggestion = suggestions[activeSuggestionIndex];
 
       if (suggestionsOpen && activeSuggestion) {

@@ -127,6 +127,21 @@ describe("CommandPalette", () => {
     });
   });
 
+  it("does not run or close the active command while Enter confirms IME composition", async () => {
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "health" } });
+
+    const healthOption = await screen.findByRole("option", { name: "Health" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(healthOption.id);
+    expect(fireEvent.keyDown(input, { isComposing: true, key: "Enter" })).toBe(true);
+    expect(router.latestLocation.pathname).toBe("/");
+    expect(screen.getByRole("combobox", { name: "Command palette" })).toBe(input);
+  });
+
   it("connects the combobox to its listbox and active option", async () => {
     await renderAt("/app/");
 

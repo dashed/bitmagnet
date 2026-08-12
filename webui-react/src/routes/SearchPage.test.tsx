@@ -148,6 +148,34 @@ describe("SearchPage", () => {
     }
   });
 
+  it("does not select or submit a path suggestion while Enter confirms IME composition", async () => {
+    const router = await renderAt("/app/?mode=paths");
+    const input = await screen.findByRole("combobox", { name: "Browse paths" });
+
+    vi.useFakeTimers();
+
+    try {
+      fireEvent.change(input, { target: { value: "mov" } });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(PATH_TYPEAHEAD_DEBOUNCE_MS);
+      });
+
+      vi.useRealTimers();
+
+      const suggestion = await screen.findByRole("option", { name: "movies/action" });
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+
+      expect(input.getAttribute("aria-activedescendant")).toBe(suggestion.id);
+      expect(fireEvent.keyDown(input, { isComposing: true, key: "Enter" })).toBe(true);
+      expect((input as HTMLInputElement).value).toBe("mov");
+      expect(router.latestLocation.search).toEqual({ mode: "paths" });
+      expect(screen.getByRole("option", { name: "movies/action" })).toBe(suggestion);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("writes custom published ranges and torrent page size to URL search params", async () => {
     const router = await renderAt("/app/?page=3&published_at=7d");
 
