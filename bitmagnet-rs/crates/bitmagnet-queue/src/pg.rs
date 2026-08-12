@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
 use crate::backoff::calculate_backoff;
-use crate::{fingerprint, QueueJobStatus};
+use crate::{fingerprint, QueueJobStatus, PROCESS_TORRENT_BATCH};
 
 pub const PROCESS_TORRENT_SHADOW: &str = "process_torrent_shadow";
 const DEADLINE_ERROR: &str = "the job did not complete before its deadline";
@@ -116,6 +116,10 @@ impl QueueStore {
             sqlx::query("SELECT * FROM public.ingest_shadow_claim_job()")
                 .fetch_optional(&mut *tx)
                 .await?
+        } else if queue == PROCESS_TORRENT_BATCH {
+            sqlx::query("SELECT * FROM public.process_torrent_batch_claim_job()")
+                .fetch_optional(&mut *tx)
+                .await?
         } else {
             sqlx::query(
                 "SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
@@ -182,6 +186,18 @@ impl QueueStore {
                         .bind(delay_seconds)
                         .execute(&mut *tx)
                         .await?;
+                } else if queue == PROCESS_TORRENT_BATCH {
+                    sqlx::query(
+                        "SELECT public.process_torrent_batch_settle_retry(\
+                           $1::text, $2::bigint, $3::text, $4::bigint\
+                         )",
+                    )
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .bind(&error)
+                    .bind(delay_seconds)
+                    .execute(&mut *tx)
+                    .await?;
                 } else {
                     sqlx::query(
                         "UPDATE queue_jobs \
@@ -206,6 +222,17 @@ impl QueueStore {
                         .bind(&error)
                         .execute(&mut *tx)
                         .await?;
+                } else if queue == PROCESS_TORRENT_BATCH {
+                    sqlx::query(
+                        "SELECT public.process_torrent_batch_settle_failed(\
+                           $1::text, $2::bigint, $3::text\
+                         )",
+                    )
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .bind(&error)
+                    .execute(&mut *tx)
+                    .await?;
                 } else {
                     sqlx::query(
                         "UPDATE queue_jobs SET status = 'failed', retries = $2, \
@@ -226,6 +253,16 @@ impl QueueStore {
                     .bind(i64::from(job.retries))
                     .execute(&mut *tx)
                     .await?;
+            } else if queue == PROCESS_TORRENT_BATCH {
+                sqlx::query(
+                    "SELECT public.process_torrent_batch_settle_processed(\
+                       $1::text, $2::bigint\
+                     )",
+                )
+                .bind(&job.id)
+                .bind(i64::from(job.retries))
+                .execute(&mut *tx)
+                .await?;
             } else {
                 sqlx::query(
                     "UPDATE queue_jobs SET status = 'processed', retries = $2, \

@@ -1,7 +1,7 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables; point it only at a
-//! disposable goose-29 database and invoke it explicitly with
+//! disposable goose-30 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -113,7 +113,7 @@ fn assert_queue_database_code(error: QueuePgError, expected: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-29 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-30 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -985,6 +985,282 @@ async fn queue_runtime_matches_go_contract() {
     assert_eq!(failed_parent.try_get::<i32, _>("retries").unwrap(), 1);
     assert!(failed_parent.try_get::<bool, _>("has_ran_at").unwrap());
     assert_eq!(failed_parent.try_get::<String, _>("error").unwrap(), error);
+
+    // A minimally granted batch-consumer role can claim and settle only the
+    // fixed process_torrent_batch queue through migration-30 capabilities.
+    // PUBLIC has no implicit EXECUTE, and the caller transaction retains the
+    // claimed row lock so a two-connection pool skips to the next batch job.
+    reset(&pool).await;
+    seed(
+        &pool,
+        "batch-boundary-live",
+        PROCESS_TORRENT,
+        "pending",
+        -100,
+        -100,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    seed(
+        &pool,
+        "batch-boundary-a",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -2,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    seed(
+        &pool,
+        "batch-boundary-b",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    sqlx::query(
+        "DO $$ BEGIN \
+         IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'bitmagnet_queue_batch_test') THEN \
+           EXECUTE 'DROP OWNED BY bitmagnet_queue_batch_test'; \
+           EXECUTE 'DROP ROLE bitmagnet_queue_batch_test'; \
+         END IF; END $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("remove prior queue batch role");
+    sqlx::query(
+        "CREATE ROLE bitmagnet_queue_batch_test LOGIN PASSWORD 'queue-batch-test-password' \
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
+    )
+    .execute(&pool)
+    .await
+    .expect("create queue batch role");
+    sqlx::query("GRANT USAGE ON SCHEMA public TO bitmagnet_queue_batch_test")
+        .execute(&pool)
+        .await
+        .expect("grant public schema usage to batch role");
+
+    let capability_catalog = sqlx::query(
+        "SELECT p.oid::regprocedure::text AS signature, \
+                p.prosecdef, p.proconfig, \
+                pg_catalog.pg_get_userbyid(p.proowner) AS owner, \
+                NOT EXISTS (\
+                  SELECT 1 \
+                  FROM pg_catalog.aclexplode(\
+                    COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))\
+                  ) AS acl \
+                  WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'\
+                ) AS public_execute_revoked \
+         FROM pg_catalog.pg_proc AS p \
+         WHERE p.oid = ANY(ARRAY[\
+           'public.process_torrent_batch_claim_job()'::regprocedure, \
+           'public.process_torrent_batch_settle_processed(text,bigint)'::regprocedure, \
+           'public.process_torrent_batch_settle_retry(text,bigint,text,bigint)'::regprocedure, \
+           'public.process_torrent_batch_settle_failed(text,bigint,text)'::regprocedure\
+         ]) \
+         ORDER BY signature",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("inspect batch capability catalog contract");
+    assert_eq!(capability_catalog.len(), 4);
+    for row in capability_catalog {
+        let signature = row.try_get::<String, _>("signature").unwrap();
+        assert!(
+            row.try_get::<bool, _>("prosecdef").unwrap(),
+            "{signature} must be SECURITY DEFINER"
+        );
+        assert_eq!(
+            row.try_get::<Option<Vec<String>>, _>("proconfig").unwrap(),
+            Some(vec!["search_path=pg_catalog, pg_temp".to_owned()]),
+            "{signature} must pin its search_path"
+        );
+        assert!(
+            row.try_get::<bool, _>("public_execute_revoked").unwrap(),
+            "{signature} must revoke PUBLIC EXECUTE"
+        );
+        assert_ne!(
+            row.try_get::<String, _>("owner").unwrap(),
+            "bitmagnet_queue_batch_test",
+            "runtime ownership transfer is not part of migration 30"
+        );
+    }
+
+    let batch_options = PgConnectOptions::from_str(&database_url)
+        .expect("parse PostgreSQL URL")
+        .username("bitmagnet_queue_batch_test")
+        .password("queue-batch-test-password");
+    let batch_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(batch_options)
+        .await
+        .expect("connect minimally granted queue batch role");
+    let public_claim = sqlx::query("SELECT * FROM public.process_torrent_batch_claim_job()")
+        .execute(&batch_pool)
+        .await
+        .expect_err("PUBLIC must not inherit batch claim execution");
+    assert_insufficient_privilege(public_claim);
+
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION \
+           public.process_torrent_batch_claim_job(), \
+           public.process_torrent_batch_settle_processed(text, bigint), \
+           public.process_torrent_batch_settle_retry(text, bigint, text, bigint), \
+           public.process_torrent_batch_settle_failed(text, bigint, text) \
+         TO bitmagnet_queue_batch_test",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant reviewed batch queue capabilities");
+    let cross_queue_settle = sqlx::query(
+        "SELECT public.process_torrent_batch_settle_failed(\
+           $1::text, $2::bigint, $3::text\
+         )",
+    )
+    .bind("batch-boundary-live")
+    .bind(0_i64)
+    .bind("forbidden cross-queue settlement")
+    .execute(&batch_pool)
+    .await
+    .expect_err("batch settle capability must reject another queue");
+    assert_database_code(cross_queue_settle, "P0002");
+    let direct_settle =
+        sqlx::query("UPDATE queue_jobs SET status = 'failed' WHERE id = 'batch-boundary-a'")
+            .execute(&batch_pool)
+            .await
+            .expect_err("batch role must not directly settle queue rows");
+    assert_insufficient_privilege(direct_settle);
+
+    let batch_store = QueueStore::new(batch_pool.clone());
+    let (batch_claimed_tx, batch_claimed_rx) = oneshot::channel();
+    let (batch_release_tx, batch_release_rx) = oneshot::channel();
+    let batch_claimed_tx = Arc::new(Mutex::new(Some(batch_claimed_tx)));
+    let first_batch_store = batch_store.clone();
+    let first_batch = tokio::spawn(async move {
+        first_batch_store
+            .consume_one(PROCESS_TORRENT_BATCH, move |job| {
+                let batch_claimed_tx = Arc::clone(&batch_claimed_tx);
+                async move {
+                    batch_claimed_tx
+                        .lock()
+                        .await
+                        .take()
+                        .expect("batch claim notifier")
+                        .send(job.id)
+                        .expect("send claimed batch id");
+                    batch_release_rx.await.expect("release first batch handler");
+                    Ok::<(), String>(())
+                }
+            })
+            .await
+    });
+    assert_eq!(
+        batch_claimed_rx.await.expect("first batch claim"),
+        "batch-boundary-a"
+    );
+    let second_batch = batch_store
+        .consume_one(PROCESS_TORRENT_BATCH, |_| async { Ok::<(), String>(()) })
+        .await
+        .expect("second capability-mediated batch consume");
+    assert!(matches!(
+        second_batch,
+        ConsumeOutcome::Processed { ref job } if job.id == "batch-boundary-b"
+    ));
+    batch_release_tx
+        .send(())
+        .expect("release first batch handler");
+    assert!(matches!(
+        first_batch
+            .await
+            .expect("join first batch")
+            .expect("first batch consume"),
+        ConsumeOutcome::Processed { ref job } if job.id == "batch-boundary-a"
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM queue_jobs WHERE id = 'batch-boundary-live'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read isolated live queue row"),
+        "pending"
+    );
+    let repeat_settle = sqlx::query(
+        "SELECT public.process_torrent_batch_settle_processed(\
+           $1::text, $2::bigint\
+         )",
+    )
+    .bind("batch-boundary-a")
+    .bind(0_i64)
+    .execute(&batch_pool)
+    .await
+    .expect_err("terminal batch row must not settle twice");
+    assert_database_code(repeat_settle, "P0002");
+
+    reset(&pool).await;
+    seed(
+        &pool,
+        "batch-boundary-retry",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        2,
+        "{}",
+    )
+    .await;
+    assert!(matches!(
+        batch_store
+            .consume_one(PROCESS_TORRENT_BATCH, |_| async {
+                Err::<(), _>("capability retry")
+            })
+            .await
+            .expect("settle batch retry through capability"),
+        ConsumeOutcome::RetryScheduled { ref job, .. }
+            if job.id == "batch-boundary-retry"
+    ));
+    reset(&pool).await;
+    seed(
+        &pool,
+        "batch-boundary-failed",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    assert!(matches!(
+        batch_store
+            .consume_one(PROCESS_TORRENT_BATCH, |_| async {
+                Err::<(), _>("capability failed")
+            })
+            .await
+            .expect("settle batch failure through capability"),
+        ConsumeOutcome::Failed { ref job, .. }
+            if job.id == "batch-boundary-failed"
+    ));
+    batch_pool.close().await;
+    sqlx::query("DROP OWNED BY bitmagnet_queue_batch_test")
+        .execute(&pool)
+        .await
+        .expect("drop queue batch role grants");
+    sqlx::query("DROP ROLE bitmagnet_queue_batch_test")
+        .execute(&pool)
+        .await
+        .expect("drop queue batch role");
 
     // Frozen dequeue order: pending before retry, then priority and run_after.
     reset(&pool).await;
