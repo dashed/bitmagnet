@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
@@ -94,6 +96,21 @@ impl QueueStore {
         Fut: Future<Output = Result<(), E>>,
         E: std::fmt::Display,
     {
+        self.consume_one_observed(queue, || {}, handler).await
+    }
+
+    async fn consume_one_observed<O, H, Fut, E>(
+        &self,
+        queue: &str,
+        on_claim: O,
+        handler: H,
+    ) -> Result<ConsumeOutcome, QueuePgError>
+    where
+        O: FnOnce(),
+        H: FnOnce(DequeuedJob) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+        E: std::fmt::Display,
+    {
         let mut tx = self.pool.begin().await?;
         let row = if queue == PROCESS_TORRENT_SHADOW {
             sqlx::query("SELECT * FROM public.ingest_shadow_claim_job()")
@@ -133,6 +150,7 @@ impl QueueStore {
             priority: row.try_get("priority")?,
         };
         let deadline_exceeded: bool = row.try_get("deadline_exceeded")?;
+        on_claim();
 
         let handler_error = if deadline_exceeded {
             Some(DEADLINE_ERROR.to_owned())
@@ -288,18 +306,32 @@ impl Consumer {
         loop {
             let queue = self.config.queue.clone();
             let timeout = self.config.job_timeout;
-            let consume = self.store.consume_one(&queue, |job| async {
-                match tokio::time::timeout(timeout, handler(job)).await {
-                    Ok(result) => result.map_err(|error| error.to_string()),
-                    Err(_) => Err(format!("job exceeded its {timeout:?} timeout")),
-                }
-            });
+            let claimed = Arc::new(AtomicBool::new(false));
+            let consume_claimed = Arc::clone(&claimed);
+            let consume = self.store.consume_one_observed(
+                &queue,
+                move || consume_claimed.store(true, Ordering::Release),
+                |job| async {
+                    match tokio::time::timeout(timeout, handler(job)).await {
+                        Ok(result) => result.map_err(|error| error.to_string()),
+                        Err(_) => Err(format!("job exceeded its {timeout:?} timeout")),
+                    }
+                },
+            );
+            tokio::pin!(consume);
             let outcome = tokio::select! {
-                () = &mut shutdown => return Ok(()),
-                result = consume => result?,
+                biased;
+                () = &mut shutdown => {
+                    if claimed.load(Ordering::Acquire) {
+                        consume.await?;
+                    }
+                    return Ok(());
+                }
+                result = &mut consume => result?,
             };
             if matches!(outcome, ConsumeOutcome::Empty) {
                 tokio::select! {
+                    biased;
                     () = &mut shutdown => return Ok(()),
                     () = tokio::time::sleep(self.config.check_interval) => {}
                 }

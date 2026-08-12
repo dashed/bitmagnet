@@ -121,14 +121,15 @@ PostgreSQL pool acquisition, and refuses a configured connection maximum below
 two because the retained parent transaction and the handler's independent
 selection/insertion need separate connections. The binary is not copied into a
 production image or wired into deployment automation. Its current shutdown
-select cancels an in-flight parent transaction; children already committed
-independently survive and can make the restarted parent collide with SQLSTATE
-23505. Production admission is blocked until shutdown stops polling and
-drains/settles the active job, and timeout/shutdown partial-child behavior is
-migration-backed tested.
+path stops polling and drains the in-flight job through parent settlement; the
+migration-backed gate proves shutdown cannot cancel that handler. The 10-minute
+handler timeout still cancels work at its deadline. If a child committed first,
+it survives independently, the parent settles to retry, and the retry observes
+the strict SQLSTATE 23505 collision; this boundary is also migration-backed
+tested and preserves Go's independent child transaction semantics.
 
 Still outstanding before Go queue retirement: guarded batch-consumer image and
-deployment wiring with graceful drain semantics, bounded multi-worker
-orchestration for queues that require concurrency greater than one,
-terminal-row garbage collection, runtime metrics, and the Lane P shadow
-processor/runtime deployment.
+single-consumer deployment wiring, bounded multi-worker orchestration for
+queues that require concurrency greater than one, terminal-row garbage
+collection, runtime metrics, and the Lane P shadow processor/runtime
+deployment.

@@ -6,14 +6,15 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
-    fingerprint, new_queue_job, ConsumeOutcome, MirrorConfig, MirrorIneligibleReason,
-    PreparedQueueJob, ProtocolId, QueueJobOptions, QueueJobStatus, QueuePgError, QueueStore,
-    PROCESS_TORRENT, PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW,
+    fingerprint, new_queue_job, ConsumeOutcome, Consumer, ConsumerConfig, MirrorConfig,
+    MirrorIneligibleReason, PreparedQueueJob, ProtocolId, QueueJobOptions, QueueJobStatus,
+    QueuePgError, QueueStore, PROCESS_TORRENT, PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW,
 };
 use chrono::Utc;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -587,6 +588,295 @@ async fn queue_runtime_matches_go_contract() {
             .await
             .is_err());
     }
+
+    // A shutdown observed before a claim must not start a fresh job.
+    reset(&pool).await;
+    seed(
+        &pool,
+        "idle-shutdown-parent",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        2,
+        "{}",
+    )
+    .await;
+    let idle_handler_called = Arc::new(AtomicBool::new(false));
+    let idle_handler_called_for_run = Arc::clone(&idle_handler_called);
+    let mut idle_config = ConsumerConfig::new(PROCESS_TORRENT_BATCH);
+    idle_config.check_interval = Duration::from_secs(60);
+    let idle_consumer = Consumer::new(store.clone(), idle_config);
+    idle_consumer
+        .run_until(
+            move |_| {
+                idle_handler_called_for_run.store(true, Ordering::SeqCst);
+                std::future::ready(Ok::<(), QueuePgError>(()))
+            },
+            std::future::ready(()),
+        )
+        .await
+        .expect("pre-signaled shutdown succeeds");
+    assert!(!idle_handler_called.load(Ordering::SeqCst));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM queue_jobs WHERE id = 'idle-shutdown-parent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "pending"
+    );
+
+    let lifecycle_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect two-connection lifecycle pool");
+    let lifecycle_store = QueueStore::new(lifecycle_pool);
+
+    // Graceful shutdown stops after the current job: it must not cancel an
+    // in-flight handler or roll back its retained parent transaction.
+    reset(&pool).await;
+    seed(
+        &pool,
+        "drain-parent",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        2,
+        "{}",
+    )
+    .await;
+    seed(
+        &pool,
+        "drain-parent-next",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        1,
+        -1,
+        0,
+        2,
+        "{}",
+    )
+    .await;
+    let drain_child = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"child": "graceful-drain"}),
+        QueueJobOptions::default(),
+    )
+    .expect("construct graceful-drain child");
+    let drain_child = PreparedQueueJob::materialize_at(drain_child, materialized_at).unwrap();
+    let (drain_started_tx, drain_started_rx) = oneshot::channel();
+    let drain_started_tx = Arc::new(Mutex::new(Some(drain_started_tx)));
+    let (drain_release_tx, drain_release_rx) = oneshot::channel();
+    let drain_release_rx = Arc::new(Mutex::new(Some(drain_release_rx)));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let mut drain_config = ConsumerConfig::new(PROCESS_TORRENT_BATCH);
+    drain_config.check_interval = Duration::from_secs(60);
+    drain_config.job_timeout = Duration::from_secs(5);
+    let drain_consumer = Consumer::new(lifecycle_store.clone(), drain_config);
+    let drain_store = lifecycle_store.clone();
+    let drain_task = tokio::spawn(async move {
+        drain_consumer
+            .run_until(
+                move |_| {
+                    let drain_store = drain_store.clone();
+                    let drain_child = drain_child.clone();
+                    let drain_started_tx = Arc::clone(&drain_started_tx);
+                    let drain_release_rx = Arc::clone(&drain_release_rx);
+                    async move {
+                        drain_store.insert_jobs_strict(&[drain_child]).await?;
+                        drain_started_tx
+                            .lock()
+                            .await
+                            .take()
+                            .expect("one drain notification")
+                            .send(())
+                            .expect("notify drain handler start");
+                        drain_release_rx
+                            .lock()
+                            .await
+                            .take()
+                            .expect("one drain release")
+                            .await
+                            .expect("release drain handler");
+                        Ok::<(), QueuePgError>(())
+                    }
+                },
+                async {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+    });
+    drain_started_rx.await.expect("drain handler started");
+    shutdown_tx.send(()).expect("signal graceful shutdown");
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !drain_task.is_finished(),
+        "shutdown must await the in-flight handler"
+    );
+    drain_release_tx.send(()).expect("release drained handler");
+    drain_task
+        .await
+        .expect("join drained consumer")
+        .expect("drained consumer succeeds");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM queue_jobs WHERE id = 'drain-parent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "processed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM queue_jobs WHERE id = 'drain-parent-next'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "pending"
+    );
+
+    // A handler timeout after an independently committed child settles the
+    // parent to retry. Reprocessing then surfaces the strict 23505 collision
+    // and reaches the parent's terminal failure at max_retries=1.
+    reset(&pool).await;
+    seed(
+        &pool,
+        "timeout-parent",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        1,
+        "{}",
+    )
+    .await;
+    let timeout_child = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"child": "timeout-survivor"}),
+        QueueJobOptions::default(),
+    )
+    .expect("construct timeout child");
+    let timeout_child = PreparedQueueJob::materialize_at(timeout_child, materialized_at).unwrap();
+    let (timeout_inserted_tx, timeout_inserted_rx) = oneshot::channel();
+    let timeout_inserted_tx = Arc::new(Mutex::new(Some(timeout_inserted_tx)));
+    let (timeout_shutdown_tx, timeout_shutdown_rx) = oneshot::channel();
+    let mut timeout_config = ConsumerConfig::new(PROCESS_TORRENT_BATCH);
+    timeout_config.check_interval = Duration::from_secs(60);
+    timeout_config.job_timeout = Duration::from_millis(25);
+    let timeout_consumer = Consumer::new(lifecycle_store.clone(), timeout_config);
+    let timeout_store = lifecycle_store.clone();
+    let timeout_task = tokio::spawn(async move {
+        timeout_consumer
+            .run_until(
+                move |_| {
+                    let timeout_store = timeout_store.clone();
+                    let timeout_child = timeout_child.clone();
+                    let timeout_inserted_tx = Arc::clone(&timeout_inserted_tx);
+                    async move {
+                        timeout_store.insert_jobs_strict(&[timeout_child]).await?;
+                        timeout_inserted_tx
+                            .lock()
+                            .await
+                            .take()
+                            .expect("one timeout notification")
+                            .send(())
+                            .expect("notify timeout child insert");
+                        std::future::pending::<Result<(), QueuePgError>>().await
+                    }
+                },
+                async {
+                    let _ = timeout_shutdown_rx.await;
+                },
+            )
+            .await
+    });
+    timeout_inserted_rx.await.expect("timeout child committed");
+    timeout_shutdown_tx
+        .send(())
+        .expect("stop after timed-out parent settles");
+    timeout_task
+        .await
+        .expect("join timeout consumer")
+        .expect("timeout settlement succeeds");
+    let timeout_parent = sqlx::query(
+        "SELECT status::text AS status, retries, error \
+         FROM queue_jobs WHERE id = 'timeout-parent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read timed-out parent");
+    assert_eq!(
+        timeout_parent.try_get::<String, _>("status").unwrap(),
+        "retry"
+    );
+    assert_eq!(timeout_parent.try_get::<i32, _>("retries").unwrap(), 0);
+    assert!(timeout_parent
+        .try_get::<String, _>("error")
+        .unwrap()
+        .contains("job exceeded its 25ms timeout"));
+    make_ready(&pool, "timeout-parent").await;
+    let retry_child = new_queue_job(
+        "producer_contract",
+        &serde_json::json!({"child": "timeout-survivor"}),
+        QueueJobOptions::default(),
+    )
+    .expect("reconstruct timeout child");
+    let retry_child = PreparedQueueJob::materialize_at(retry_child, materialized_at).unwrap();
+    let retry_store = lifecycle_store.clone();
+    let (collision_code_tx, collision_code_rx) = oneshot::channel();
+    let retry_outcome = lifecycle_store
+        .consume_one(PROCESS_TORRENT_BATCH, move |_| {
+            let retry_store = retry_store.clone();
+            async move {
+                let result = retry_store.insert_jobs_strict(&[retry_child]).await;
+                let code = match &result {
+                    Err(QueuePgError::Database(sqlx::Error::Database(error))) => {
+                        error.code().map(|value| value.into_owned())
+                    }
+                    _ => None,
+                };
+                collision_code_tx
+                    .send(code)
+                    .expect("report retry collision SQLSTATE");
+                result
+            }
+        })
+        .await
+        .expect("settle strict retry collision");
+    assert_eq!(
+        collision_code_rx.await.expect("receive collision SQLSTATE"),
+        Some("23505".to_owned())
+    );
+    let ConsumeOutcome::Failed { job, error } = retry_outcome else {
+        panic!("retry collision must fail terminally");
+    };
+    assert_eq!(job.id, "timeout-parent");
+    assert_eq!(job.retries, 1);
+    assert!(error.contains("duplicate key value violates unique constraint"));
+    let failed_parent = sqlx::query(
+        "SELECT status::text AS status, retries, ran_at IS NOT NULL AS has_ran_at, error \
+         FROM queue_jobs WHERE id = 'timeout-parent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read terminal retry collision");
+    assert_eq!(
+        failed_parent.try_get::<String, _>("status").unwrap(),
+        "failed"
+    );
+    assert_eq!(failed_parent.try_get::<i32, _>("retries").unwrap(), 1);
+    assert!(failed_parent.try_get::<bool, _>("has_ran_at").unwrap());
+    assert_eq!(failed_parent.try_get::<String, _>("error").unwrap(), error);
 
     // Frozen dequeue order: pending before retry, then priority and run_after.
     reset(&pool).await;
