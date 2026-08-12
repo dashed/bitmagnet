@@ -3,6 +3,7 @@ package batch
 import (
 	"bytes"
 	"errors"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
@@ -42,6 +43,18 @@ type Plan struct {
 	Done        bool
 }
 
+// Selection is the exact database page requested by the batch handler. It
+// freezes the keyset cursor, snapshot cutoff, content/orphan filters, ascending
+// info-hash order, and page limit independently from the returned rows.
+type Selection struct {
+	AfterExclusive protocol.ID             `json:"afterExclusive"`
+	UpdatedBefore  time.Time               `json:"updatedBefore"`
+	ContentTypes   []model.NullContentType `json:"contentTypes"`
+	Orphans        bool                    `json:"orphans"`
+	OrderBy        string                  `json:"orderBy"`
+	Limit          uint                    `json:"limit"`
+}
+
 // Planner incrementally reproduces the process_torrent_batch handler's pure
 // queue-planning boundary.
 type Planner struct {
@@ -59,6 +72,17 @@ func NewPlanner(message MessageParams) *Planner {
 
 func (p *Planner) MaxInfoHash() protocol.ID {
 	return p.max
+}
+
+func (p *Planner) Selection() Selection {
+	return Selection{
+		AfterExclusive: p.max,
+		UpdatedBefore:  p.message.UpdatedBefore,
+		ContentTypes:   append([]model.NullContentType{}, p.message.ContentTypes...),
+		Orphans:        p.message.Orphans,
+		OrderBy:        "info_hash_asc",
+		Limit:          p.message.BatchSize,
+	}
 }
 
 func (p *Planner) ShouldQuery() bool {

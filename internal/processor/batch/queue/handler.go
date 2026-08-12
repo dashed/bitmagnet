@@ -40,11 +40,13 @@ func New(p Params) Result {
 					if err := json.Unmarshal([]byte(job.Payload), msg); err != nil {
 						return err
 					}
+					planner := batch.NewPlanner(*msg)
+					baseSelection := planner.Selection()
 					var scopes []func(gen.Dao) gen.Dao
-					if len(msg.ContentTypes) > 0 {
-						scopes = append(scopes, contentTypesScope(d, msg.ContentTypes))
+					if len(baseSelection.ContentTypes) > 0 {
+						scopes = append(scopes, contentTypesScope(d, baseSelection.ContentTypes))
 					}
-					if msg.Orphans {
+					if baseSelection.Orphans {
 						scopes = append(scopes, func(tx gen.Dao) gen.Dao {
 							return tx.Not(
 								gen.Exists(
@@ -57,18 +59,18 @@ func New(p Params) Result {
 							)
 						})
 					}
-					planner := batch.NewPlanner(*msg)
 					var queueJobs []*model.QueueJob
 					for planner.ShouldQuery() {
+						selection := planner.Selection()
 						torrents, findErr := d.Torrent.WithContext(ctx).
 							Scopes(scopes...).
 							Where(
-								d.Torrent.InfoHash.Gt(planner.MaxInfoHash()),
-								d.Torrent.UpdatedAt.Lt(msg.UpdatedBefore),
+								d.Torrent.InfoHash.Gt(selection.AfterExclusive),
+								d.Torrent.UpdatedAt.Lt(selection.UpdatedBefore),
 							).
 							Select(d.Torrent.InfoHash).
 							Order(d.Torrent.InfoHash).
-							Limit(int(msg.BatchSize)).
+							Limit(int(selection.Limit)).
 							Find()
 						if findErr != nil {
 							return findErr

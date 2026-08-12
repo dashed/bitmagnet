@@ -19,13 +19,8 @@ type queueBatchPlanInput struct {
 	Pages   [][]protocol.ID     `json:"pages"`
 }
 
-type queueBatchQuery struct {
-	AfterExclusive protocol.ID `json:"afterExclusive"`
-	Limit          uint        `json:"limit"`
-}
-
 type queueBatchPlanExpected struct {
-	Queries     []queueBatchQuery          `json:"queries"`
+	Queries     []batch.Selection          `json:"queries"`
 	Jobs        []queueFingerprintExpected `json:"jobs"`
 	MaxInfoHash protocol.ID                `json:"maxInfoHash"`
 	ChunkSize   uint                       `json:"chunkSize"`
@@ -106,15 +101,12 @@ func TestGenerateQueueBatchPlanFixtures(t *testing.T) {
 	fixtures := make([]Fixture, 0, len(queueBatchPlanScenarios()))
 	for _, scenario := range queueBatchPlanScenarios() {
 		planner := batch.NewPlanner(scenario.message)
-		queries := make([]queueBatchQuery, 0, len(scenario.pages))
+		queries := make([]batch.Selection, 0, len(scenario.pages))
 		for _, page := range scenario.pages {
 			if !planner.ShouldQuery() {
 				t.Fatalf("scenario %q supplies a page after the planner stopped", scenario.id)
 			}
-			queries = append(queries, queueBatchQuery{
-				AfterExclusive: planner.MaxInfoHash(),
-				Limit:          scenario.message.BatchSize,
-			})
+			queries = append(queries, planner.Selection())
 			if _, err := planner.AddPage(page); err != nil {
 				t.Fatalf("scenario %q: add page: %v", scenario.id, err)
 			}

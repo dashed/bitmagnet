@@ -3,6 +3,7 @@ package batch
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
@@ -93,6 +94,34 @@ func TestPlannerOvershootsChunkByOnePageAndContinues(t *testing.T) {
 	require.Len(t, continuation.ContentTypes, 1)
 	require.False(t, continuation.ContentTypes[0].Valid)
 	require.True(t, continuation.Orphans)
+}
+
+func TestPlannerSelectionFreezesEveryDatabasePredicate(t *testing.T) {
+	updatedBefore := time.Date(2026, time.August, 12, 4, 5, 6, 123456789, time.UTC)
+	message := MessageParams{
+		InfoHashGreaterThan: plannerID(10),
+		UpdatedBefore:       updatedBefore,
+		BatchSize:           2,
+		ChunkSize:           10,
+		ContentTypes: []model.NullContentType{
+			model.NewNullContentType(model.ContentTypeMovie),
+			model.NewNullContentType(nil),
+		},
+		Orphans: true,
+	}
+	planner := NewPlanner(message)
+	require.Equal(t, Selection{
+		AfterExclusive: plannerID(10),
+		UpdatedBefore:  updatedBefore,
+		ContentTypes:   message.ContentTypes,
+		Orphans:        true,
+		OrderBy:        "info_hash_asc",
+		Limit:          2,
+	}, planner.Selection())
+
+	_, err := planner.AddPage([]protocol.ID{plannerID(11), plannerID(12)})
+	require.NoError(t, err)
+	require.Equal(t, plannerID(12), planner.Selection().AfterExclusive)
 }
 
 func TestPlannerFinalizesOnce(t *testing.T) {

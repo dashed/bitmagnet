@@ -5,9 +5,10 @@
 //! API-disabled priority, chunk overshoot, keyset cursor, and continuation job.
 
 use crate::{
-    process_torrent_batch_job, process_torrent_job, JobError, ProcessTorrentBatchParams,
+    process_torrent_batch_job, process_torrent_job, GoTime, JobError, ProcessTorrentBatchParams,
     ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions,
 };
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BatchPlanError {
@@ -25,6 +26,17 @@ pub struct BatchPlan {
     pub max_info_hash: ProtocolId,
     pub chunk_size: u64,
     pub done: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchSelection {
+    pub after_exclusive: ProtocolId,
+    pub updated_before: GoTime,
+    pub content_types: Vec<Option<String>>,
+    pub orphans: bool,
+    pub order_by: String,
+    pub limit: u64,
 }
 
 pub struct BatchPlanner {
@@ -52,6 +64,18 @@ impl BatchPlanner {
     #[must_use]
     pub const fn max_info_hash(&self) -> ProtocolId {
         self.max_info_hash
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> BatchSelection {
+        BatchSelection {
+            after_exclusive: self.max_info_hash,
+            updated_before: self.message.updated_before.clone(),
+            content_types: self.message.content_types.clone(),
+            orphans: self.message.orphans,
+            order_by: "info_hash_asc".to_string(),
+            limit: self.message.batch_size,
+        }
     }
 
     #[must_use]

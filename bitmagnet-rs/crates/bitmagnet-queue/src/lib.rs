@@ -24,7 +24,7 @@ pub mod job;
 pub mod message;
 pub mod pg;
 
-pub use batch::{BatchPlan, BatchPlanError, BatchPlanner};
+pub use batch::{BatchPlan, BatchPlanError, BatchPlanner, BatchSelection};
 pub use id::ProtocolId;
 pub use job::{
     fingerprint, new_queue_job, JobError, QueueJob, QueueJobOptions, QueueJobStatus,

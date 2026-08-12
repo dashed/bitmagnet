@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use bitmagnet_queue::{BatchPlanner, ProcessTorrentBatchParams, ProtocolId, QueueJob};
+use bitmagnet_queue::{
+    BatchPlanner, BatchSelection, ProcessTorrentBatchParams, ProtocolId, QueueJob,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -24,13 +26,6 @@ struct Input {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Query {
-    after_exclusive: ProtocolId,
-    limit: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ExpectedJob {
     queue: String,
     payload: String,
@@ -43,7 +38,7 @@ struct ExpectedJob {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Expected {
-    queries: Vec<Query>,
+    queries: Vec<BatchSelection>,
     jobs: Vec<ExpectedJob>,
     max_info_hash: ProtocolId,
     chunk_size: u64,
@@ -92,17 +87,7 @@ fn process_torrent_batch_plan_matches_go() {
         let mut planner = BatchPlanner::new(fixture.input.message.clone());
         for (page, query) in fixture.input.pages.iter().zip(&fixture.expected.queries) {
             assert!(planner.should_query(), "[{}] unexpected stop", fixture.id);
-            assert_eq!(
-                planner.max_info_hash(),
-                query.after_exclusive,
-                "[{}] query cursor",
-                fixture.id
-            );
-            assert_eq!(
-                fixture.input.message.batch_size, query.limit,
-                "[{}] query limit",
-                fixture.id
-            );
+            assert_eq!(&planner.selection(), query, "[{}] selection", fixture.id);
             planner
                 .add_page(page)
                 .unwrap_or_else(|error| panic!("[{}] add page: {error}", fixture.id));
