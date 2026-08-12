@@ -147,8 +147,38 @@ The harness dispatches exactly one supplied datagram per call. It does not
 spawn handlers, execute a production responder, or provide socket lifecycle,
 retry, backpressure, concurrency, or shutdown policy.
 
+The sixth bounded source-only slice ports only the production Go routing
+btree's pure 160-bit behavior:
+
+- `RoutingTree` accepts only the crate's exact-width `Id20`, stores an
+  empty/leaf/branch trie over `id XOR origin`, and keeps Go's separate
+  leading-zero bucket counts. The origin is rejected, a duplicate is detected
+  before capacity, and `k = 0` rejects every non-origin insertion;
+- capacity and optional splitting follow Go mechanically, including its
+  recursive `countCloserThanSubpath` leaf predicate. This predicate is not
+  replaced with an intuitive numeric comparison: at origin zero with `k = 1`,
+  inserting distance `80..` then `c0..` accepts both, while the reverse order
+  rejects `80..`;
+- deletion updates the matching leading-zero bucket and collapses empty or
+  singleton branch structure exactly. Closest traversal preserves Go's exact
+  preferred-subtree then zero-first sibling order and is independent of
+  insertion order. The sibling phase is deliberately not re-sorted into global
+  numeric XOR order. Limit zero and a limit larger than the tree are bounded
+  without allocating from the caller's limit; and
+- a checked real-Go `btree.New` trace covers the original production `k = 4`
+  split and unsplit matrices at 20 bytes, capacity boundaries `0`, `1`, `4`,
+  and `80`, a nonzero origin, deepest-bit branching, rejection/duplicate state
+  preservation, missing/repeated drops, branch collapse, capacity reopening,
+  drain/reuse, and exact/missing/origin closest targets. Every operation records
+  exact count, target membership, and a full ordered membership snapshot.
+  Rust-only invariant gates additionally verify cached subtree counts, unique
+  leaves, absence of empty/singleton branches, total count, and the complete
+  bucket histogram after mutations.
+
 Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
-or dispatch validation, live query wiring, routing tables, responders, a BEP-33
+or dispatch validation, live query wiring, the generic Kademlia table/keyspace,
+node/hash values, reverse maps, time/random eviction policy, metrics,
+concurrency, responders, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-51 scheduling, BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension

@@ -4,6 +4,7 @@ mod compact;
 mod inbound;
 mod krpc;
 mod receive;
+mod routing_tree;
 mod scrape;
 mod transaction;
 
@@ -17,6 +18,7 @@ pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,
 };
+pub use routing_tree::{RoutingPutResult, RoutingTree, ROUTING_ID_BITS};
 pub use scrape::{ScrapeBloomError, ScrapeBloomFilter, SCRAPE_BLOOM_BYTES};
 pub use transaction::{
     CryptoTransactionIdIssuer, DeliveryOutcome, PendingTransaction, RegisterError,
