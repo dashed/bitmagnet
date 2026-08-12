@@ -9,6 +9,7 @@ mod ping_find_node_client;
 mod ping_find_node_dispatch;
 mod ping_find_node_driver;
 mod ping_find_node_send;
+mod ping_find_node_supervisor;
 mod query_send;
 mod receive;
 mod routing_tree;
@@ -33,6 +34,7 @@ pub use ping_find_node_driver::{
     PingFindNodeDriver, PingFindNodeDriverError, PingFindNodeDriverOutcome,
 };
 pub use ping_find_node_send::{send_ping_find_node_reply, DatagramSender, PingFindNodeSendError};
+pub use ping_find_node_supervisor::{PingFindNodeSupervisor, PingFindNodeSupervisorExit};
 pub use query_send::{register_and_send_query, QuerySendError};
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,

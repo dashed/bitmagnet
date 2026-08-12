@@ -377,14 +377,50 @@ also deliberately collapses nil and non-nil empty result node slices to one
 owned empty vector; the checked fixture retains the two Go inputs and proves
 their equal client projection.
 
-Excluded from this milestone: UDP/TCP sockets and receive loops, message-method
+The fourteenth bounded source-only slice adds a finite supervisor around the
+existing fake one-datagram driver, still without opening a socket or creating
+an unbounded receive loop:
+
+- `PingFindNodeSupervisor::drive_batch` accepts an exact nonzero `u8` budget,
+  retains fully settled outcomes in receive order, and performs at most 255
+  sequential steps. Zero-length, decode-rejected, ignored, response, and error
+  datagrams each consume one step. A reply send must finish before the next
+  receive starts, so sender backpressure bounds both work and memory;
+- a biased `tokio::select!` checks the caller's shutdown future first before
+  every step. Shutdown cancels at most one in-flight driver future and returns
+  the settled prefix. `DatagramReceiver` and `DatagramSender` implementations
+  admitted to this supervisor must therefore both be cancellation-safe:
+  dropping either pending future may not poison its transport or make a later
+  batch unusable. A cancelled send is not settled, is absent from the returned
+  prefix, and is never implicitly retried; the transport must make the effect
+  of dropping its own pending send future safe and explicit;
+- exhausting the exact budget, shutdown, an intact unowned query, and a typed
+  driver failure are separate terminal states. Unowned queries stop before a
+  later receive and remain a single owned `ReceiveDispatchOutcome::Query` for
+  a future full router. Failures retain the ordered prefix plus the complete
+  receive error or inseparable prepared reply/local cause and send error; and
+- a same-package Go oracle exercises the actual `server.read` boundaries with
+  channel barriers. It records three deliberate lifecycle differences: Go's
+  full router sends method-unknown `204` where the partial Rust supervisor
+  pauses intact; Go logs and continues after a reply-send error where Rust
+  stops with the typed error; and Go panics on an active receive error where
+  Rust stops with the typed transport failure. No Go goroutine ordering is
+  claimed. Rust-only gates prove biased shutdown, receiver and sender
+  cancellation-safe reuse, shutdown/drop/task-abort at each pending boundary,
+  no implicit retry or double send,
+  strict sequential backpressure, batches of one and 255, resume across
+  batches, terminal-prefix retention, response/error registry delivery, local
+  failure identity, and a concurrent fake client ping/find-node round trip
+  ending with no pending transaction.
+
+Excluded from this milestone: UDP/TCP sockets and unbounded receive loops, message-method
 or dispatch validation beyond the two explicitly owned methods, live query
 wiring and production transport adapters, the combined Kademlia table and hash keyspace,
 hash values, the shared reverse-address map, response clocks and node options,
 BEP-51 eligibility/scheduling, batch commands, time/random eviction policy,
 metrics,
-concurrency, send retry/timeout/queueing/backpressure policy, socket lifecycle,
-looping or spawning policy, logging and runtime wiring,
+concurrent handler fan-out, send retry/timeout/queueing policy, socket lifecycle,
+production looping or spawning policy, logging and runtime wiring,
 full responder routing and runtime wrappers, a BEP-33
 scrape client or scheduler, BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
