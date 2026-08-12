@@ -46,6 +46,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/logging"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	queueserver "github.com/bitmagnet-io/bitmagnet/internal/queue/server"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
 	"github.com/bitmagnet-io/bitmagnet/internal/search/searchfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb"
@@ -61,7 +62,7 @@ const configEnvMapGoldenRel = "testdata/parity/config-env-map.golden"
 
 // configSpecs is the deployed set of config root specs, one per
 // configfx.NewConfigModule call across the fx modules the application loads
-// (grep: `NewConfigModule` — 16 unique root keys; devfx re-registers "postgres"
+// (grep: `NewConfigModule` — 17 unique root keys; devfx re-registers "postgres"
 // with the same struct, so it adds no keys). Keep this list in lockstep with the
 // modules; a missing spec silently drops that section's env keys from the
 // contract, and the assert test below pins the known-good anchors as a tripwire.
@@ -83,6 +84,7 @@ func configSpecs() []config.Spec {
 		{Key: "blob_migration", DefaultValue: blobmigration.NewDefaultConfig()},
 		{Key: "torznab", DefaultValue: torznab.NewDefaultConfig()},
 		{Key: "log", DefaultValue: logging.NewDefaultConfig()},
+		{Key: "queue_server", DefaultValue: queueserver.NewDefaultConfig()},
 	}
 }
 
@@ -207,6 +209,7 @@ func TestConfigEnvMapKnownGood(t *testing.T) {
 		"GRAPHQL_SHADOW_MAX_CONCURRENT":         "graphql_shadow.max_concurrent",
 		"GRAPHQL_SHADOW_LOG_DISCREPANCIES":      "graphql_shadow.log_discrepancies",
 		"POSTGRES_HOST":                         "postgres.host",
+		"QUEUE_SERVER_DISABLED_QUEUES":          "queue_server.disabled_queues",
 		"WEBUI_DEFAULT_FRONTEND":                "webui.default_frontend",
 	}
 

@@ -12,6 +12,8 @@ CLASSIFIER_FLAGS	classifier.flags
 CLASSIFIER_KEYWORDS	classifier.keywords
 CLASSIFIER_TAPE_DIR	classifier.tape_dir
 CLASSIFIER_TAPE_MAX_RECORDS	classifier.tape_max_records
+CLASSIFIER_TAPE_PLAN_PATH	classifier.tape_plan_path
+CLASSIFIER_TAPE_PLAN_SHA_256	classifier.tape_plan_sha_256
 CLASSIFIER_WORKFLOW	classifier.workflow
 DHT_CRAWLER_BOOTSTRAP_NODES	dht_crawler.bootstrap_nodes
 DHT_CRAWLER_RESCRAPE_THRESHOLD	dht_crawler.rescrape_threshold
@@ -71,6 +73,7 @@ POSTGRES_SSL_KEY_PATH	postgres.ssl_key_path
 POSTGRES_SSL_MODE	postgres.ssl_mode
 POSTGRES_SSL_ROOT_CERT_PATH	postgres.ssl_root_cert_path
 POSTGRES_USER	postgres.user
+QUEUE_SERVER_DISABLED_QUEUES	queue_server.disabled_queues
 SEARCH_ADDRESS	search.address
 SEARCH_BATCH_TIMEOUT	search.batch_timeout
 SEARCH_CANARY_PERCENT	search.canary_percent

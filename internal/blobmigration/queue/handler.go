@@ -16,6 +16,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/handler"
+	"github.com/bitmagnet-io/bitmagnet/internal/queue/server"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -58,7 +59,7 @@ type Params struct {
 
 type Result struct {
 	fx.Out
-	Handler lazy.Lazy[handler.Handler] `group:"queue_handlers"`
+	Handler server.RegisteredHandler `group:"queue_handlers"`
 }
 
 func New(p Params) Result {
@@ -68,29 +69,32 @@ func New(p Params) Result {
 	}
 
 	return Result{
-		Handler: lazy.New(func() (handler.Handler, error) {
-			d, err := p.Dao.Get()
-			if err != nil {
-				return handler.Handler{}, err
-			}
+		Handler: server.RegisteredHandler{
+			Name: MessageName,
+			Handler: lazy.New(func() (handler.Handler, error) {
+				d, err := p.Dao.Get()
+				if err != nil {
+					return handler.Handler{}, err
+				}
 
-			p.Logger.Infow("blob-migration handler initialised",
-				"concurrency", concurrency, "checkInterval", dispatchCheckInterval.String(),
-				"defaultChunkSize", DefaultChunkSize)
+				p.Logger.Infow("blob-migration handler initialised",
+					"concurrency", concurrency, "checkInterval", dispatchCheckInterval.String(),
+					"defaultChunkSize", DefaultChunkSize)
 
-			return handler.New(
-				MessageName,
-				newHandleFunc(d, p.Logger),
-				handler.JobTimeout(10*time.Minute),
-				// Parallel range-workers: K jobs are seeded by `start`, each owning a disjoint
-				// info_hash range; Concurrency(K) lets the queue server run them simultaneously.
-				handler.Concurrency(concurrency),
-				// The default 30s check interval makes the dispatcher effectively serial (it only
-				// re-checks right after a job completes); a low value lets it ramp the pool to
-				// Concurrency and hold it. Blob handler only.
-				handler.CheckInterval(dispatchCheckInterval),
-			), nil
-		}),
+				return handler.New(
+					MessageName,
+					newHandleFunc(d, p.Logger),
+					handler.JobTimeout(10*time.Minute),
+					// Parallel range-workers: K jobs are seeded by `start`, each owning a disjoint
+					// info_hash range; Concurrency(K) lets the queue server run them simultaneously.
+					handler.Concurrency(concurrency),
+					// The default 30s check interval makes the dispatcher effectively serial (it only
+					// re-checks right after a job completes); a low value lets it ramp the pool to
+					// Concurrency and hold it. Blob handler only.
+					handler.CheckInterval(dispatchCheckInterval),
+				), nil
+			}),
+		},
 	}
 }
 

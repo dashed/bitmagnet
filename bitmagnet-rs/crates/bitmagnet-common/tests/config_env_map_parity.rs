@@ -13,7 +13,7 @@ const GOLDEN: &str = include_str!("fixtures/config-env-map.golden");
 /// Line count of `GOLDEN`, asserted so a truncated or partially-copied fixture
 /// is caught rather than silently shrinking the test's coverage. It is expected
 /// to change whenever the Go config surface does; see [`GOLDEN`].
-const EXPECTED_KEYS: usize = 124;
+const EXPECTED_KEYS: usize = 127;
 
 #[test]
 fn go_config_env_map_golden_is_preserved() {

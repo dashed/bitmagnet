@@ -73,6 +73,7 @@ POSTGRES_SSL_KEY_PATH	postgres.ssl_key_path
 POSTGRES_SSL_MODE	postgres.ssl_mode
 POSTGRES_SSL_ROOT_CERT_PATH	postgres.ssl_root_cert_path
 POSTGRES_USER	postgres.user
+QUEUE_SERVER_DISABLED_QUEUES	queue_server.disabled_queues
 SEARCH_ADDRESS	search.address
 SEARCH_BATCH_TIMEOUT	search.batch_timeout
 SEARCH_CANARY_PERCENT	search.canary_percent

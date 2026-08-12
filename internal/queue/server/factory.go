@@ -6,7 +6,6 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
-	"github.com/bitmagnet-io/bitmagnet/internal/queue/handler"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
@@ -14,9 +13,10 @@ import (
 
 type Params struct {
 	fx.In
-	Query lazy.Lazy[*dao.Query]
+	Config Config
+	Query  lazy.Lazy[*dao.Query]
 	// PgxPool  lazy.Lazy[*pgxpool.Pool]
-	Handlers []lazy.Lazy[handler.Handler] `group:"queue_handlers"`
+	Handlers []RegisteredHandler `group:"queue_handlers"`
 	Logger   *zap.SugaredLogger
 }
 
@@ -33,6 +33,14 @@ func New(p Params) Result {
 			"queue_server",
 			fx.Hook{
 				OnStart: func(context.Context) error {
+					logger := p.Logger.Named("queue")
+					enabled, disabled, err := selectHandlerRegistrations(
+						p.Handlers,
+						p.Config.DisabledQueues,
+					)
+					if err != nil {
+						return err
+					}
 					// pool, err := p.PgxPool.Get()
 					// if err != nil {
 					// 	return err
@@ -41,13 +49,10 @@ func New(p Params) Result {
 					if err != nil {
 						return err
 					}
-					handlers := make([]handler.Handler, 0, len(p.Handlers))
-					for _, lh := range p.Handlers {
-						h, err := lh.Get()
-						if err != nil {
-							return err
-						}
-						handlers = append(handlers, h)
+					logDisabledQueues(logger, disabled)
+					handlers, err := realizeHandlers(enabled)
+					if err != nil {
+						return err
 					}
 					srv := server{
 						stopped: stopped,
@@ -55,7 +60,7 @@ func New(p Params) Result {
 						// pool:       pool,
 						handlers:   handlers,
 						gcInterval: time.Minute * 10,
-						logger:     p.Logger.Named("queue"),
+						logger:     logger,
 					}
 					// todo: Fix!
 					//nolint:contextcheck

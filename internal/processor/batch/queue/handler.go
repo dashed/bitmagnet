@@ -10,6 +10,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor/batch"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/handler"
+	"github.com/bitmagnet-io/bitmagnet/internal/queue/server"
 	"go.uber.org/fx"
 )
 
@@ -20,67 +21,70 @@ type Params struct {
 
 type Result struct {
 	fx.Out
-	Handler lazy.Lazy[handler.Handler] `group:"queue_handlers"`
+	Handler server.RegisteredHandler `group:"queue_handlers"`
 }
 
 func New(p Params) Result {
 	return Result{
-		Handler: lazy.New(func() (handler.Handler, error) {
-			d, err := p.Dao.Get()
-			if err != nil {
-				return handler.Handler{}, err
-			}
-			return handler.New(
-				batch.MessageName,
-				func(ctx context.Context, job model.QueueJob) (err error) {
-					msg := &batch.MessageParams{}
-					if err := json.Unmarshal([]byte(job.Payload), msg); err != nil {
-						return err
-					}
-					planner := batch.NewPlanner(*msg)
-					selector := NewPostgresSelector(d)
-					var queueJobs []*model.QueueJob
-					for planner.ShouldQuery() {
-						selection := planner.Selection()
-						infoHashes, findErr := selector.Select(ctx, selection)
-						if findErr != nil {
-							return findErr
+		Handler: server.RegisteredHandler{
+			Name: batch.MessageName,
+			Handler: lazy.New(func() (handler.Handler, error) {
+				d, err := p.Dao.Get()
+				if err != nil {
+					return handler.Handler{}, err
+				}
+				return handler.New(
+					batch.MessageName,
+					func(ctx context.Context, job model.QueueJob) (err error) {
+						msg := &batch.MessageParams{}
+						if err := json.Unmarshal([]byte(job.Payload), msg); err != nil {
+							return err
 						}
-						spec, planErr := planner.AddPage(infoHashes)
+						planner := batch.NewPlanner(*msg)
+						selector := NewPostgresSelector(d)
+						var queueJobs []*model.QueueJob
+						for planner.ShouldQuery() {
+							selection := planner.Selection()
+							infoHashes, findErr := selector.Select(ctx, selection)
+							if findErr != nil {
+								return findErr
+							}
+							spec, planErr := planner.AddPage(infoHashes)
+							if planErr != nil {
+								return planErr
+							}
+							if spec != nil {
+								queueJob, jobErr := spec.QueueJob()
+								if jobErr != nil {
+									return jobErr
+								}
+								queueJobs = append(queueJobs, &queueJob)
+							}
+						}
+						plan, planErr := planner.Finalize()
 						if planErr != nil {
 							return planErr
 						}
-						if spec != nil {
-							queueJob, jobErr := spec.QueueJob()
+						for _, spec := range plan.Jobs[len(queueJobs):] {
+							job, jobErr := spec.QueueJob()
 							if jobErr != nil {
 								return jobErr
 							}
-							queueJobs = append(queueJobs, &queueJob)
+							queueJobs = append(queueJobs, &job)
 						}
-					}
-					plan, planErr := planner.Finalize()
-					if planErr != nil {
-						return planErr
-					}
-					for _, spec := range plan.Jobs[len(queueJobs):] {
-						job, jobErr := spec.QueueJob()
-						if jobErr != nil {
-							return jobErr
+						if len(queueJobs) > 0 {
+							if createErr := d.QueueJob.
+								WithContext(ctx).
+								Create(queueJobs...); createErr != nil {
+								return createErr
+							}
 						}
-						queueJobs = append(queueJobs, &job)
-					}
-					if len(queueJobs) > 0 {
-						if createErr := d.QueueJob.
-							WithContext(ctx).
-							Create(queueJobs...); createErr != nil {
-							return createErr
-						}
-					}
-					return nil
-				},
-				handler.JobTimeout(time.Second*60*10),
-				handler.Concurrency(1),
-			), nil
-		}),
+						return nil
+					},
+					handler.JobTimeout(time.Second*60*10),
+					handler.Concurrency(1),
+				), nil
+			}),
+		},
 	}
 }
