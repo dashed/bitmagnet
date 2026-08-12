@@ -11,7 +11,7 @@ name: Rust
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, alberto/my-fork]
     paths:
       - "bitmagnet-rs/**"
       - "go.mod"
@@ -26,6 +26,7 @@ on:
       - "migrations/**"
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
+      - "testdata/parity/queue/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
       - ".github/workflows/rust.yml"
@@ -44,6 +45,7 @@ on:
       - "migrations/**"
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
+      - "testdata/parity/queue/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
       - ".github/workflows/rust.yml"
@@ -222,6 +224,7 @@ jobs:
       BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -239,6 +242,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bitmagnet-rs
+      - name: Run process_torrent_batch PostgreSQL differential
+        working-directory: ${{ github.workspace }}
+        run: |
+          go test -tags integration -count=1 ./internal/parity \
+            -run '^TestGenerateQueueBatchSelectionPgFixture$'
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-queue --test batch_selection_pg -- \
+            --ignored --exact batch_selection_matches_go_postgres_oracle \
+            --test-threads=1
       # These #[ignore]d tests connect to the migrated schema. The queue gate
       # truncates queue_jobs, so the CI service must remain disposable.
       - name: Run live-PG (ignored) tests
