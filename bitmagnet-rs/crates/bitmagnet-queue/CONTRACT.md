@@ -134,6 +134,13 @@ predicate exactly: only `processed`/`failed` rows with
 and the affected-row count is returned. Periodic immediate-then-10-minute
 scheduling remains runtime work.
 
+The async queue-depth snapshot now matches the Go custom collector's database
+query: group the live table by `(queue,status)`, return all four status labels
+when present, and omit zero-valued combinations. Prometheus registration remains
+gated because Go awaits this query during each scrape, while the current Rust
+registry invokes collectors synchronously; a background cache would expose
+stale data and is not parity.
+
 Still outstanding before Go queue retirement: guarded batch-consumer image and
 single-consumer deployment wiring, bounded multi-worker orchestration for
 queues that require concurrency greater than one, periodic terminal-row cleanup

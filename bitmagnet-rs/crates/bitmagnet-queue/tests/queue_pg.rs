@@ -173,6 +173,40 @@ async fn queue_runtime_matches_go_contract() {
         0
     );
 
+    // Queue metric snapshots include only nonempty queue/status groups. They
+    // are global across queues and preserve every PostgreSQL enum status.
+    reset(&pool).await;
+    for (id, queue, status) in [
+        ("metric-a-pending-1", "metric-a", "pending"),
+        ("metric-a-pending-2", "metric-a", "pending"),
+        ("metric-a-processed", "metric-a", "processed"),
+        ("metric-b-retry", "metric-b", "retry"),
+        ("metric-b-failed", "metric-b", "failed"),
+    ] {
+        seed(&pool, id, queue, status, 0, -1, 0, 2, "{}").await;
+    }
+    let mut status_counts = store
+        .status_counts()
+        .await
+        .expect("read queue status counts");
+    status_counts.sort_by(|left, right| {
+        (left.queue.as_str(), left.status.as_str())
+            .cmp(&(right.queue.as_str(), right.status.as_str()))
+    });
+    assert_eq!(
+        status_counts
+            .iter()
+            .map(|item| (item.queue.as_str(), item.status.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        vec![
+            ("metric-a", "pending", 2),
+            ("metric-a", "processed", 1),
+            ("metric-b", "failed", 1),
+            ("metric-b", "retry", 1),
+        ],
+        "empty queue/status combinations must not synthesize zero series"
+    );
+
     // Strict producer insertion is a single all-or-nothing statement. It
     // preserves the constructor fingerprint across JSONB normalization and
     // preserves Go's per-job run_after plus one shared application created_at.

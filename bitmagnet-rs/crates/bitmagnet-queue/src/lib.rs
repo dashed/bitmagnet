@@ -27,6 +27,7 @@ pub mod job;
 pub mod message;
 pub mod pg;
 mod producer_pg;
+mod status_pg;
 
 pub use batch::{BatchPlan, BatchPlanError, BatchPlanner, BatchSelection};
 pub use batch_handler::{BatchHandleError, BatchHandleReport};
@@ -47,3 +48,4 @@ pub use pg::{
     PROCESS_TORRENT_SHADOW,
 };
 pub use producer_pg::PreparedQueueJob;
+pub use status_pg::QueueStatusCount;

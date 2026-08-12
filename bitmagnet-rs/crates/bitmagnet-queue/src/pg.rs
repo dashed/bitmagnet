@@ -243,7 +243,7 @@ impl QueueStore {
     }
 }
 
-fn parse_status(value: &str) -> Result<QueueJobStatus, QueuePgError> {
+pub(crate) fn parse_status(value: &str) -> Result<QueueJobStatus, QueuePgError> {
     match value {
         "pending" => Ok(QueueJobStatus::Pending),
         "processed" => Ok(QueueJobStatus::Processed),
