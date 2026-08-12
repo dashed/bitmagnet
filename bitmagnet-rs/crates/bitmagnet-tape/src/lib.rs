@@ -16,8 +16,9 @@
 //! follows is first-wins with an early exit. Re-running the query against a
 //! frozen snapshot re-rolls that dice.
 //!
-//! So the only replayable artifact is the ordered candidate list Go actually
-//! observed. Go records it; this crate reads it back.
+//! So the only replayable artifact is the exact control-flow evidence Go
+//! observed: ordered attach-action entries plus each ordered dependency answer
+//! (including the candidate window). Go records it; this crate reads it back.
 //!
 //! # The three rules that make a replay evidence rather than theatre
 //!
@@ -47,7 +48,8 @@ mod replay;
 
 pub use canonical::marshal;
 pub use format::{
-    Desync, Manifest, Observation, ObservationError, Record, RecordOutcome, RecordOutcomeKind,
-    TapeError, MANIFEST_FILE_NAME, OUTCOME_ERROR, OUTCOME_OK, SCHEMA, TAPE_FILE_NAME,
+    ActionEntry, Desync, Manifest, Observation, ObservationError, ProcessorState, Record,
+    RecordOutcome, RecordOutcomeKind, TapeError, MANIFEST_FILE_NAME, OUTCOME_ERROR, OUTCOME_OK,
+    SCHEMA, TAPE_FILE_NAME,
 };
 pub use replay::{decode_records, Answer, Replay, Session};

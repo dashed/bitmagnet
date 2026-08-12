@@ -6,8 +6,10 @@
 //! exactly (`workflows.default.[0].if_else.if_action.delete`), because the
 //! corpus `error` field pins those strings verbatim (contract §2.1).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
+use bitmagnet_tape::ActionEntry;
 use cel::{Program, Value};
 use futures::future::LocalBoxFuture;
 use serde_yaml::Value as Yaml;
@@ -32,10 +34,9 @@ pub(crate) enum Action {
     Delete(Vec<String>),
     /// `unmatched` — raises `ErrUnmatched` wrapped at its compile path.
     Unmatched(Vec<String>),
-    /// `add_tag` — records tag names. `classifier.core.yml` never uses it and
-    /// tags are not part of the corpus output surface, so the names are held
-    /// (compiled + validated) but not yet consumed at runtime.
-    #[allow(dead_code)]
+    /// `add_tag` — adds validated names to the classification's tag set.
+    /// Tags are intentionally absent from the normalized corpus JSON but are
+    /// part of the processor write-set contract.
     AddTag(Vec<String>),
     /// `find_match` — first non-unmatched sub-action wins; carries its path for
     /// wrapping non-unmatched errors.
@@ -175,7 +176,18 @@ fn compile_dispatch(
             Ok(Action::FindMatch { actions, path })
         }
         "if_else" => compile_if_else(value, path, workflows),
-        "add_tag" => Ok(Action::AddTag(string_list(value, &path, "add_tag")?)),
+        "add_tag" => {
+            let tags = string_list(value, &path, "add_tag")?;
+            for tag in &tags {
+                if !valid_tag_name(tag) {
+                    return Err(err_at(
+                        &path,
+                        format!("invalid tag name: '{tag}' (must be kebab-case and no longer than 30 characters)"),
+                    ));
+                }
+            }
+            Ok(Action::AddTag(tags))
+        }
         "run_workflow" => {
             let names = string_list(value, &path, "run_workflow")?;
             for n in &names {
@@ -187,6 +199,17 @@ fn compile_dispatch(
         }
         other => Err(err_at(&path, format!("no action matched '{other}'"))),
     }
+}
+
+fn valid_tag_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 30
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 fn compile_if_else(
@@ -324,6 +347,10 @@ pub(crate) struct ExecCtx<'a> {
     pub flags_val: &'a Value,
     pub input: &'a ClassifierInput,
     pub workflows: &'a HashMap<String, Action>,
+    /// Ordered trace of every attach action as it is entered. The hook lives at
+    /// the dispatch boundary, before action-specific guards, so early-unmatched
+    /// branches remain visible rather than disappearing as "no observation".
+    pub action_entries: &'a RefCell<Vec<ActionEntry>>,
     /// The B′-0 dependency seam. Held as a trait object so the same compiled
     /// workflows run against the live PG/TMDB backends or a recorded tape.
     ///
@@ -368,7 +395,11 @@ pub(crate) fn run_action<'a>(
             }
             Action::Delete(path) => Err(FlowError::runtime(path, FlowError::Delete)),
             Action::Unmatched(path) => Err(FlowError::runtime(path, FlowError::Unmatched)),
-            Action::AddTag(_) => Ok(result),
+            Action::AddTag(tags) => {
+                let mut r = result;
+                r.tags.extend(tags.iter().cloned());
+                Ok(r)
+            }
             Action::FindMatch { actions, path } => {
                 for a in actions {
                     match run_action(a, ctx, result.clone()).await {
@@ -424,7 +455,12 @@ pub(crate) fn run_action<'a>(
                 }
                 Ok(r)
             }
-            Action::Attach(kind) => run_attach(*kind, ctx, result).await,
+            Action::Attach(kind) => {
+                ctx.action_entries.borrow_mut().push(ActionEntry {
+                    name: kind.name().to_owned(),
+                });
+                run_attach(*kind, ctx, result).await
+            }
         }
     })
 }
@@ -473,6 +509,17 @@ pub(crate) enum AttachKind {
     /// `attach_tmdb_content_by_search` — Go
     /// `action_attach_tmdb_content_by_search.go`.
     TmdbContentBySearch,
+}
+
+impl AttachKind {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocalContentById => "attach_local_content_by_id",
+            Self::LocalContentBySearch => "attach_local_content_by_search",
+            Self::TmdbContentById => "attach_tmdb_content_by_id",
+            Self::TmdbContentBySearch => "attach_tmdb_content_by_search",
+        }
+    }
 }
 
 /// Run one `attach_*` action against [`ExecCtx::resolver`].

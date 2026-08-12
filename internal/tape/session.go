@@ -48,9 +48,12 @@ type Session struct {
 	recorder *Recorder
 
 	// replay state; a nil recorder means this is a replay session.
-	mu       sync.Mutex
-	recorded []Observation
-	cursor   int
+	mu              sync.Mutex
+	recorded        []Observation
+	cursor          int
+	recordedActions []ActionEntry
+	actionCursor    int
+	actionsKnown    bool
 }
 
 // End marks the classification finished with the given outcome, so a tape
@@ -85,6 +88,121 @@ func (s *Session) Attempt() int { return s.attempt }
 // Replaying reports whether this session answers from a recording instead of
 // recording live observations.
 func (s *Session) Replaying() bool { return s.recorder == nil }
+
+// EnterAction records or verifies one workflow action invocation. Recording
+// appends the action to this classification's ordered trace. Replay compares it
+// immediately with the next recorded entry, so a wrong branch fails at the
+// branch boundary rather than being inferred later from dependency traffic.
+func (s *Session) EnterAction(name string) error {
+	if s == nil {
+		return nil
+	}
+
+	if s.recorder != nil {
+		s.recorder.appendActionEntry(s.subject, s.attempt, ActionEntry{Name: name})
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.actionsKnown {
+		return nil
+	}
+
+	sequence := s.actionCursor
+	s.actionCursor++
+
+	if sequence >= len(s.recordedActions) {
+		return &ActionMissError{
+			Subject:  s.subject,
+			Attempt:  s.attempt,
+			Sequence: sequence,
+			Name:     name,
+		}
+	}
+
+	want := s.recordedActions[sequence].Name
+	if want != name {
+		return &ActionDesyncError{
+			Subject:  s.subject,
+			Attempt:  s.attempt,
+			Sequence: sequence,
+			WantName: want,
+			GotName:  name,
+		}
+	}
+
+	return nil
+}
+
+// EnterAction records or verifies an action on the session carried by ctx. A
+// normally configured serving process has no session, so this is one context
+// lookup and a nil check outside evidence mode.
+func EnterAction(ctx context.Context, name string) error {
+	return SessionFrom(ctx).EnterAction(name)
+}
+
+// RemainingObservations reports how many recorded dependency observations a
+// replay has not consumed. It is zero for a recording session.
+func (s *Session) RemainingObservations() int {
+	if s == nil || s.recorder != nil {
+		return 0
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return remaining(len(s.recorded), s.cursor)
+}
+
+// RemainingActions reports the unconsumed ordered action entries and whether
+// the tape knows the trace. known=false is the legacy-v1 case: absence means
+// unknown and must not be treated as an empty trace.
+func (s *Session) RemainingActions() (remainingActions int, known bool) {
+	if s == nil || s.recorder != nil {
+		return 0, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return remaining(len(s.recordedActions), s.actionCursor), s.actionsKnown
+}
+
+// VerifyComplete checks the two independent replay streams. Observation
+// exhaustion is always known; action exhaustion is enforced only when the
+// manifest declares action-entry capability.
+func (s *Session) VerifyComplete() error {
+	if s == nil || s.recorder != nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	remainingObservations := remaining(len(s.recorded), s.cursor)
+	remainingActions := remaining(len(s.recordedActions), s.actionCursor)
+	if remainingObservations == 0 && (!s.actionsKnown || remainingActions == 0) {
+		return nil
+	}
+
+	return &UnconsumedError{
+		Subject:               s.subject,
+		Attempt:               s.attempt,
+		RemainingObservations: remainingObservations,
+		RemainingActions:      remainingActions,
+		ActionsKnown:          s.actionsKnown,
+	}
+}
+
+func remaining(total, consumed int) int {
+	if consumed >= total {
+		return 0
+	}
+
+	return total - consumed
+}
 
 // Observe appends a successful observation.
 //

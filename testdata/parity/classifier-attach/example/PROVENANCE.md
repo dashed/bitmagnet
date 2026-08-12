@@ -19,6 +19,7 @@ ordered candidate list that was actually observed is replayable.
 - Observations: 5
 - Incomplete records: 0
 - Authoritative records: 4
+- Action entries: 3
 - Truncated: false
   - ended completed: 4
 
@@ -33,6 +34,11 @@ ordered candidate list that was actually observed is replayable.
 - `local.content_by_search (ok)`: 2
 - `tmdb.request (error)`: 1
 - `tmdb.request (ok)`: 2
+
+## Action entries
+
+- `attach_local_content_by_search`: 2
+- `attach_tmdb_content_by_search`: 1
 
 ## What a green replay against this tape does NOT prove
 

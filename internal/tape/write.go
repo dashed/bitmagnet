@@ -24,50 +24,40 @@ const (
 //
 // generatedAt is passed in rather than read from the clock so callers that need
 // byte-reproducible output (tests) can pin it.
-func (r *Recorder) Write(dir string, generatedAt time.Time) error {
-	records, err := r.Records()
+func (r *Recorder) Write(dir string, generatedAt time.Time) (writeErr error) {
+	// A cap callback and lifecycle stop can race. Serialize whole generations so
+	// their three files cannot interleave in the shared directory.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	var (
+		summary   recordSummary
+		truncated bool
+		revision  uint64
+	)
+	defer func() { r.finishWrite(generatedAt, summary, truncated, revision, writeErr) }()
+
+	records, truncated, revision, err := r.snapshotRecords()
 	if err != nil {
 		return err
 	}
-
-	observationCount := 0
-	incompleteCount := 0
-	authoritativeCount := 0
-	outcomeCounts := make(map[string]int)
-
-	for _, record := range records {
-		observationCount += len(record.Observations)
-
-		if record.Incomplete {
-			incompleteCount++
-		}
-
-		if record.Authoritative() {
-			authoritativeCount++
-		}
-
-		// An open record has no outcome yet; counting it as "unknown" keeps the
-		// breakdown summing to RecordCount, so a reader can see at a glance that
-		// nothing went unaccounted for.
-		kind := "unknown"
-		if record.Outcome != nil {
-			kind = string(record.Outcome.Kind)
-		}
-
-		outcomeCounts[kind]++
-	}
+	summary = summarizeRecords(records)
+	actionEntryCount := summary.actionEntryCount
 
 	manifest := Manifest{
-		Schema:                Schema,
-		EffectiveConfigDigest: r.digest,
-		GeneratedAt:           generatedAt.UTC().Format(time.RFC3339),
-		Recorder:              r.provenance.Command,
-		RecordCount:           len(records),
-		ObservationCount:      observationCount,
-		IncompleteRecordCount:    incompleteCount,
-		AuthoritativeRecordCount: authoritativeCount,
-		RecordOutcomeCounts:      outcomeCounts,
-		Truncated:                r.Truncated(),
+		Schema:                   Schema,
+		EffectiveConfigDigest:    r.digest,
+		AcquisitionPlanDigest:    r.provenance.AcquisitionPlanDigest,
+		GeneratedAt:              generatedAt.UTC().Format(time.RFC3339),
+		Recorder:                 r.provenance.Command,
+		RecordCount:              summary.recordCount,
+		ObservationCount:         summary.observationCount,
+		IncompleteRecordCount:    summary.incompleteRecordCount,
+		AuthoritativeRecordCount: summary.authoritativeRecordCount,
+		RecordOutcomeCounts:      copyCountMap(summary.recordOutcomeCounts),
+		ActionEntryCount:         &actionEntryCount,
+		ActionEntryCounts:        copyCountMap(summary.actionEntryCounts),
+		Truncated:                truncated,
 	}
 
 	if err := os.MkdirAll(dir, tapeDirPermissions); err != nil {
@@ -141,10 +131,16 @@ func (r *Recorder) provenanceDocument(manifest Manifest, records []Record) strin
 	fmt.Fprintf(&doc, "- Generated at: %s\n", manifest.GeneratedAt)
 	fmt.Fprintf(&doc, "- Content database: %s\n", orUnknown(r.provenance.Database))
 	fmt.Fprintf(&doc, "- Effective classifier config digest: %s\n", orUnknown(manifest.EffectiveConfigDigest))
+	if manifest.AcquisitionPlanDigest != "" {
+		fmt.Fprintf(&doc, "- Acquisition plan digest: %s\n", manifest.AcquisitionPlanDigest)
+	}
 	fmt.Fprintf(&doc, "- Records: %d\n", manifest.RecordCount)
 	fmt.Fprintf(&doc, "- Observations: %d\n", manifest.ObservationCount)
 	fmt.Fprintf(&doc, "- Incomplete records: %d\n", manifest.IncompleteRecordCount)
 	fmt.Fprintf(&doc, "- Authoritative records: %d\n", manifest.AuthoritativeRecordCount)
+	if manifest.ActionEntryCount != nil {
+		fmt.Fprintf(&doc, "- Action entries: %d\n", *manifest.ActionEntryCount)
+	}
 	fmt.Fprintf(&doc, "- Truncated: %t\n", manifest.Truncated)
 
 	for _, kind := range sortedKeys(manifest.RecordOutcomeCounts) {
@@ -179,6 +175,12 @@ func (r *Recorder) provenanceDocument(manifest Manifest, records []Record) strin
 	doc.WriteString("\n## Observation kinds\n\n")
 
 	for _, line := range kindSummary(records) {
+		fmt.Fprintf(&doc, "- %s\n", line)
+	}
+
+	doc.WriteString("\n## Action entries\n\n")
+
+	for _, line := range actionEntrySummary(records) {
 		fmt.Fprintf(&doc, "- %s\n", line)
 	}
 
@@ -239,6 +241,18 @@ func kindSummary(records []Record) []string {
 	}
 
 	return summaryLines(counts, "no observations")
+}
+
+func actionEntrySummary(records []Record) []string {
+	counts := make(map[string]int)
+
+	for _, record := range records {
+		for _, action := range record.ActionEntries {
+			counts[action.Name]++
+		}
+	}
+
+	return summaryLines(counts, "no action entries")
 }
 
 func summaryLines(counts map[string]int, empty string) []string {

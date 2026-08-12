@@ -5,7 +5,9 @@
 //! protects, because a reader that is laxer than the writer turns a corrupt
 //! tape into wrong answers rather than an error.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, HashSet};
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 /// Identifies the on-disk format. A reader refuses a tape it does not recognise.
@@ -19,7 +21,7 @@ pub const OUTCOME_OK: &str = "ok";
 pub const OUTCOME_ERROR: &str = "error";
 
 /// The tape header, written alongside the records.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub schema: String,
@@ -31,6 +33,10 @@ pub struct Manifest {
     pub recorder: String,
     pub record_count: usize,
     pub observation_count: usize,
+    /// Exact reviewed acquisition plan used to seed rare action/outcome strata.
+    /// Absent on organic/legacy recordings; explicit null is malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_plan_digest: Option<String>,
     /// Records still being classified when the tape was written. Excluded from
     /// replay — see [`Record::incomplete`].
     #[serde(default)]
@@ -42,10 +48,89 @@ pub struct Manifest {
     /// Zero on a tape recorded before outcomes existed, where it is unknowable.
     #[serde(default)]
     pub authoritative_record_count: usize,
+    /// Exact counts of the terminal outcomes carried by the records. Absent on
+    /// tapes written before outcomes were added; an absent map means unknown,
+    /// not an assertion that no outcomes occurred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_outcome_counts: Option<BTreeMap<String, usize>>,
+    /// Total number of ordered attach-action entries in the tape. Presence is
+    /// also the run-level capability bit: old tapes omit this field, while a
+    /// traced run writes it even when the total is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_entry_count: Option<usize>,
+    /// Per-action breakdown for [`Self::action_entry_count`]. The Go writer
+    /// omits an empty map, so `None` is equivalent to an empty map only when
+    /// `action_entry_count` is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_entry_counts: Option<BTreeMap<String, usize>>,
     /// Set when the recording hit its cap. A truncated tape is not a complete
     /// oracle and a replay of the full population will report misses.
     #[serde(default)]
     pub truncated: bool,
+    /// An older manifest's absent authoritative count is unknown, not a claim
+    /// of zero. Kept private because callers consume the normalized public
+    /// value while load validation needs the original field presence.
+    #[serde(skip)]
+    pub(crate) authoritative_record_count_present: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManifestWire {
+    schema: String,
+    effective_config_digest: String,
+    generated_at: String,
+    recorder: String,
+    record_count: usize,
+    observation_count: usize,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    acquisition_plan_digest: Option<String>,
+    #[serde(default)]
+    incomplete_record_count: usize,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    authoritative_record_count: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    record_outcome_counts: Option<BTreeMap<String, usize>>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    action_entry_count: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    action_entry_counts: Option<BTreeMap<String, usize>>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for Manifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ManifestWire::deserialize(deserializer)?;
+        let authoritative_record_count_present = wire.authoritative_record_count.is_some();
+        Ok(Self {
+            schema: wire.schema,
+            effective_config_digest: wire.effective_config_digest,
+            generated_at: wire.generated_at,
+            recorder: wire.recorder,
+            record_count: wire.record_count,
+            observation_count: wire.observation_count,
+            acquisition_plan_digest: wire.acquisition_plan_digest,
+            incomplete_record_count: wire.incomplete_record_count,
+            authoritative_record_count: wire.authoritative_record_count.unwrap_or_default(),
+            record_outcome_counts: wire.record_outcome_counts,
+            action_entry_count: wire.action_entry_count,
+            action_entry_counts: wire.action_entry_counts,
+            truncated: wire.truncated,
+            authoritative_record_count_present,
+        })
+    }
 }
 
 /// One classification: the subject, the flag state it ran under, and the
@@ -74,6 +159,29 @@ pub struct Record {
         skip_serializing_if = "Option::is_none"
     )]
     pub input: Option<Box<RawValue>>,
+    /// Attach actions entered by this classification, in execution order.
+    ///
+    /// The field is absent on legacy tapes. On a traced tape (identified by a
+    /// present manifest `actionEntryCount`), an absent per-record field is the
+    /// writer's `omitempty` encoding of an empty sequence.
+    #[serde(
+        rename = "actionEntries",
+        default,
+        deserialize_with = "deserialize_present_action_entries",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub action_entries: Option<Vec<ActionEntry>>,
+    /// Processor-owned state that is not classifier input but is required to
+    /// reproduce the eventual write set. New writers emit it even when the id
+    /// list is empty; legacy tapes omit it and therefore cannot prove stale-id
+    /// deletion parity.
+    #[serde(
+        rename = "processorState",
+        default,
+        deserialize_with = "deserialize_present_processor_state",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub processor_state: Option<ProcessorState>,
     pub observations: Vec<Observation>,
     /// Marks a record whose classification had not finished when the tape was
     /// written. Its observation list is a prefix, so it is **not** an oracle for
@@ -101,6 +209,43 @@ where
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
+// As with embedded input, explicit null must not collapse into legacy absence.
+// Missing fields take `default`; a present field must contain an actual array.
+fn deserialize_present_action_entries<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ActionEntry>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<ActionEntry>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_processor_state<'de, D>(
+    deserializer: D,
+) -> Result<Option<ProcessorState>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ProcessorState::deserialize(deserializer).map(Some)
+}
+
+/// One attach action entered by a classification. The array position is the
+/// execution order and is therefore part of the parity contract.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionEntry {
+    pub name: String,
+}
+
+/// The pre-classification processor state needed by write-set replay. It stays
+/// separate from classifier input because the classifier neither reads nor
+/// owns these association row identifiers.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessorState {
+    pub existing_content_ids: Vec<String>,
+}
+
 /// How a classification ended — Go `tape.RecordOutcome`.
 ///
 /// 🚨 Without this, a record holding an **empty** observation list is ambiguous
@@ -120,8 +265,7 @@ pub struct RecordOutcome {
 }
 
 /// The endings a classification can have.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecordOutcomeKind {
     /// Ran to the end and returned a result.
     Completed,
@@ -137,8 +281,47 @@ pub enum RecordOutcomeKind {
     /// A kind this build does not know. Kept rather than rejected so a newer
     /// recorder cannot make an older reader fail closed on an unrelated tape —
     /// but it is deliberately NOT authoritative.
-    #[serde(other)]
-    Unknown,
+    Unknown(String),
+}
+
+impl RecordOutcomeKind {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Completed => "completed",
+            Self::Unmatched => "unmatched",
+            Self::Deleted => "deleted",
+            Self::Canceled => "canceled",
+            Self::Error => "error",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordOutcomeKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "completed" => Self::Completed,
+            "unmatched" => Self::Unmatched,
+            "deleted" => Self::Deleted,
+            "canceled" => Self::Canceled,
+            "error" => Self::Error,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+impl Serialize for RecordOutcomeKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl Record {
@@ -158,12 +341,10 @@ impl Record {
         }
 
         matches!(
-            self.outcome.as_ref().map(|outcome| outcome.kind),
-            Some(
-                RecordOutcomeKind::Completed
-                    | RecordOutcomeKind::Unmatched
-                    | RecordOutcomeKind::Deleted
-            )
+            self.outcome.as_ref().map(|outcome| &outcome.kind),
+            Some(RecordOutcomeKind::Completed)
+                | Some(RecordOutcomeKind::Unmatched)
+                | Some(RecordOutcomeKind::Deleted)
         )
     }
 }
@@ -307,6 +488,35 @@ impl Record {
             )));
         }
 
+        if let Some(entries) = &self.action_entries {
+            for (i, entry) in entries.iter().enumerate() {
+                if entry.name.is_empty() {
+                    return Err(TapeError::Invalid(format!(
+                        "record {:?} action entry {i} has an empty name",
+                        self.subject
+                    )));
+                }
+            }
+        }
+
+        if let Some(state) = &self.processor_state {
+            let mut seen = HashSet::with_capacity(state.existing_content_ids.len());
+            for (i, id) in state.existing_content_ids.iter().enumerate() {
+                if id.is_empty() {
+                    return Err(TapeError::Invalid(format!(
+                        "record {:?} processor state existing content id {i} is empty",
+                        self.subject
+                    )));
+                }
+                if !seen.insert(id) {
+                    return Err(TapeError::Invalid(format!(
+                        "record {:?} processor state repeats existing content id {id:?}",
+                        self.subject
+                    )));
+                }
+            }
+        }
+
         for (i, observation) in self.observations.iter().enumerate() {
             observation.validate().map_err(|err| {
                 TapeError::Invalid(format!("record {:?} observation {i}: {err}", self.subject))
@@ -358,6 +568,38 @@ impl Observation {
                 }
             }
             other => Err(format!("observation has an unknown outcome {other:?}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    const BASE: &str = r#""schema":"bitmagnet.classifier-attach-tape/v1","effectiveConfigDigest":"sha256:test","generatedAt":"2026-08-12T00:00:00Z","recorder":"test","recordCount":0,"observationCount":0"#;
+
+    #[test]
+    fn explicit_null_aggregate_capabilities_are_not_legacy_absence() {
+        for field in [
+            r#""acquisitionPlanDigest":null"#,
+            r#""authoritativeRecordCount":null"#,
+            r#""recordOutcomeCounts":null"#,
+            r#""actionEntryCount":null"#,
+            r#""actionEntryCounts":null"#,
+        ] {
+            serde_json::from_str::<Manifest>(&format!(r#"{{{BASE},{field}}}"#)).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn unknown_and_misspelled_manifest_fields_fail_closed() {
+        for field in [r#""futureAggregate":0"#, r#""actionEntriesCount":0"#] {
+            let error = serde_json::from_str::<Manifest>(&format!(r#"{{{BASE},{field}}}"#))
+                .expect_err("unknown manifest field should fail");
+            assert!(
+                error.to_string().contains("unknown field"),
+                "unexpected error for {field}: {error}"
+            );
         }
     }
 }
@@ -455,6 +697,89 @@ mod outcome_tests {
     }
 
     #[test]
+    fn action_entries_are_optional_ordered_and_round_trip() {
+        let legacy = record(&format!(r#"{{{BASE}}}"#));
+        assert!(legacy.action_entries.is_none(), "legacy absence is unknown");
+
+        let decoded = record(&format!(
+            r#"{{{BASE},"actionEntries":[{{"name":"attach_local_content_by_id"}},{{"name":"attach_tmdb_content_by_search"}}]}}"#
+        ));
+        let names: Vec<_> = decoded
+            .action_entries
+            .as_ref()
+            .expect("present action entries")
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "attach_local_content_by_id",
+                "attach_tmdb_content_by_search"
+            ],
+            "array order is the execution order"
+        );
+
+        let encoded = serde_json::to_string(&decoded).expect("record encodes");
+        let round_tripped = record(&encoded);
+        assert_eq!(round_tripped.action_entries, decoded.action_entries);
+    }
+
+    #[test]
+    fn null_action_entries_are_not_legacy_absence() {
+        serde_json::from_str::<Record>(&format!(r#"{{{BASE},"actionEntries":null}}"#))
+            .expect_err("explicit null is not an ordered action array");
+    }
+
+    #[test]
+    fn empty_action_names_fail_validation() {
+        let decoded = record(&format!(r#"{{{BASE},"actionEntries":[{{"name":""}}]}}"#));
+        assert!(decoded.validate().is_err());
+    }
+
+    #[test]
+    fn processor_state_is_optional_ordered_and_round_trips() {
+        let legacy = record(&format!(r#"{{{BASE}}}"#));
+        assert!(
+            legacy.processor_state.is_none(),
+            "legacy absence is unknown, not an empty prior write set"
+        );
+
+        let decoded = record(&format!(
+            r#"{{{BASE},"processorState":{{"existingContentIds":["tc-2","tc-1"]}}}}"#
+        ));
+        assert_eq!(
+            decoded
+                .processor_state
+                .as_ref()
+                .expect("processor state")
+                .existing_content_ids,
+            ["tc-2", "tc-1"],
+            "slice order is preserved"
+        );
+
+        let encoded = serde_json::to_string(&decoded).expect("record encodes");
+        let round_tripped = record(&encoded);
+        assert_eq!(round_tripped.processor_state, decoded.processor_state);
+    }
+
+    #[test]
+    fn null_processor_state_is_not_legacy_absence() {
+        serde_json::from_str::<Record>(&format!(r#"{{{BASE},"processorState":null}}"#))
+            .expect_err("explicit null is not processor state");
+    }
+
+    #[test]
+    fn processor_state_ids_must_be_nonempty_and_unique() {
+        for ids in [r#"[""]"#, r#"["tc-1","tc-1"]"#] {
+            let decoded = record(&format!(
+                r#"{{{BASE},"processorState":{{"existingContentIds":{ids}}}}}"#
+            ));
+            assert!(decoded.validate().is_err(), "ids {ids} must fail");
+        }
+    }
+
+    #[test]
     fn unknown_record_fields_fail_closed_like_the_go_reader() {
         let error = serde_json::from_str::<Record>(&format!(r#"{{{BASE},"extra":1}}"#))
             .expect_err("unknown record field should fail");
@@ -479,8 +804,14 @@ mod outcome_tests {
         let decoded = record(&format!(r#"{{{BASE},"outcome":{{"kind":"teleported"}}}}"#));
 
         assert_eq!(
-            decoded.outcome.as_ref().map(|o| o.kind),
-            Some(RecordOutcomeKind::Unknown)
+            decoded.outcome.as_ref().map(|o| &o.kind),
+            Some(&RecordOutcomeKind::Unknown("teleported".into()))
+        );
+        assert_eq!(
+            serde_json::to_value(decoded.outcome.as_ref().expect("outcome").kind.clone())
+                .expect("kind serialises"),
+            "teleported",
+            "an older reader must preserve the newer writer's count key"
         );
         assert!(!decoded.authoritative());
     }

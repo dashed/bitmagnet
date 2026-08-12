@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bitmagnet_classifier::{
-    Classification, Classifier, ClassifierError, ClassifierInput, FlagValue, Flags,
+    Classification, Classifier, ClassifierError, ClassifierInput, FlagValue, Flags, Outcome,
 };
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde::{Deserialize, Serialize};
@@ -212,42 +212,81 @@ impl Materializer {
                 &flags,
                 &torrent.classifier_input,
             ));
-            match outcome.tag() {
-                "deleted" => write_set.delete_info_hashes.push(info_hash),
-                "classified" => {
-                    // An attached content row belongs in the expected image:
-                    // `compare` reconstructs the end STATE, attaching each
-                    // ContentWrite to the torrents whose torrent_contents row
-                    // references it. Emitting nothing would leave the expected
-                    // image without a row the live one has.
-                    //
-                    // 🚨 This is deliberately NOT conditioned on whether Go would
-                    // have UPSERT-ed the row. Go upserts attached content only
-                    // when `Content.CreatedAt.IsZero()` (persist.go), so a reused
-                    // row is not rewritten -- but the comparison is end-state,
-                    // not a literal statement log, and the row is present either
-                    // way.
-                    if let Some(content) = result.content.as_ref() {
-                        write_set.contents.push(content_write(content));
-                    }
-                    let tc = torrent_content_write(&torrent, result);
-                    for existing_id in torrent.existing_content_ids {
-                        if existing_id != tc.id {
-                            write_set.delete_ids.push(existing_id);
-                        }
-                    }
-                    write_set.torrent_contents.push(tc);
-                }
-                "unmatched" | "error" => write_set.failed_info_hashes.push(info_hash),
-                other => {
-                    return Err(MaterializeError::UnknownOutcome(other.to_string()));
-                }
-            }
+            append_classification_write(&mut write_set, torrent, result, outcome, false)?;
         }
 
         write_set.canonicalize();
         Ok(write_set)
     }
+
+    /// Materialize one classifier result that was produced by replaying an
+    /// observation-tape record.
+    ///
+    /// This is the same-state side of the Go/Rust rerun gate: the caller runs
+    /// the Rust classifier over the record's exact embedded input and recorded
+    /// dependency session, then hands the structured result and the captured
+    /// processor state here. Unlike the live-row comparator, neither side is
+    /// compared with a settled database image from a different run.
+    pub fn materialize_replayed(
+        &self,
+        torrent: LoadedTorrent,
+        result: Classification,
+        outcome: Outcome,
+    ) -> Result<WriteSet, MaterializeError> {
+        validate_info_hash(&torrent.info_hash)?;
+
+        let mut write_set = WriteSet::default();
+        append_classification_write(&mut write_set, torrent, result, outcome, true)?;
+        write_set.canonicalize();
+        Ok(write_set)
+    }
+}
+
+fn append_classification_write(
+    write_set: &mut WriteSet,
+    torrent: LoadedTorrent,
+    result: Classification,
+    outcome: Outcome,
+    include_identifiers: bool,
+) -> Result<(), MaterializeError> {
+    let info_hash = torrent.info_hash.clone();
+    match outcome.tag() {
+        "deleted" => write_set.delete_info_hashes.push(info_hash),
+        "classified" => {
+            // An attached content row belongs in the expected image:
+            // `compare` reconstructs the end STATE, attaching each ContentWrite
+            // to the torrents whose torrent_contents row references it.
+            // Emitting nothing would leave the expected image without a row the
+            // live one has.
+            //
+            // 🚨 This is deliberately NOT conditioned on whether Go would have
+            // UPSERT-ed the row. Go upserts attached content only when
+            // `Content.CreatedAt.IsZero()` (persist.go), so a reused row is not
+            // rewritten -- but the comparison is end-state, not a literal
+            // statement log, and the row is present either way.
+            if let Some(content) = result.content.as_ref() {
+                write_set
+                    .contents
+                    .push(content_write(content, include_identifiers));
+            }
+            if !result.tags.is_empty() {
+                write_set
+                    .add_tags
+                    .insert(info_hash.clone(), result.tags.iter().cloned().collect());
+            }
+            let tc = torrent_content_write(&torrent, result);
+            for existing_id in torrent.existing_content_ids {
+                if existing_id != tc.id {
+                    write_set.delete_ids.push(existing_id);
+                }
+            }
+            write_set.torrent_contents.push(tc);
+        }
+        "unmatched" | "error" => write_set.failed_info_hashes.push(info_hash),
+        other => return Err(MaterializeError::UnknownOutcome(other.to_string())),
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -285,12 +324,21 @@ fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, Mate
 
 /// The `content` row an attached result implies.
 ///
-/// `identifiers` is deliberately empty: it would come from `content_attributes`,
-/// which the frozen shadow role has no grant on — and the live snapshot leaves
-/// it empty for that same reason, so both sides agree by construction. If that
-/// grant is ever added, BOTH sides must start populating it together, or the
-/// comparison will drift on a difference that is not a port defect.
-fn content_write(content: &bitmagnet_model::Content) -> ContentWrite {
+/// The live-shadow path deliberately leaves `identifiers` empty because its
+/// frozen role cannot read `content_attributes`. The same-input tape rerun has
+/// the exact recorded content object and opts in so it can compare Go's full
+/// classification-derived image without changing that production ACL contract.
+fn content_write(content: &bitmagnet_model::Content, include_identifiers: bool) -> ContentWrite {
+    let identifiers = if include_identifiers {
+        content
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.key == "id")
+            .map(|attribute| (attribute.source.clone(), attribute.value.clone()))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
     ContentWrite {
         content_type: content.content_type.as_str().to_owned(),
         source: content.source.clone(),
@@ -299,7 +347,7 @@ fn content_write(content: &bitmagnet_model::Content) -> ContentWrite {
         release_year: content
             .release_year
             .and_then(|year| u16::try_from(year).ok()),
-        identifiers: BTreeMap::new(),
+        identifiers,
     }
 }
 

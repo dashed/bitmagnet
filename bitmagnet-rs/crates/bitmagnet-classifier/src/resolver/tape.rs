@@ -159,6 +159,10 @@ struct TapeContent {
     vote_average: Option<NullFloat32>,
     #[serde(default)]
     vote_count: Option<NullUint>,
+    #[serde(default)]
+    collections: Option<Vec<bitmagnet_model::ContentCollection>>,
+    #[serde(default)]
+    attributes: Option<Vec<bitmagnet_model::ContentAttribute>>,
 }
 
 /// Go `model.Date` — untagged, so PascalCase on the wire.
@@ -241,8 +245,8 @@ impl From<TapeContent> for Content {
             created_at: None,
             updated_at: None,
             tsv: Tsvector::default(),
-            collections: Vec::new(),
-            attributes: Vec::new(),
+            collections: taped.collections.unwrap_or_default(),
+            attributes: taped.attributes.unwrap_or_default(),
         }
     }
 }

@@ -206,7 +206,7 @@ async fn run_gate() -> CorpusReport {
 
     tape_corpus::run(
         &replay,
-        |resolver| Classifier::from_core_with(resolver as Arc<_>),
+        |resolver| Classifier::from_core_with_tape_evidence(resolver as Arc<_>),
         |record| recorded_or_legacy_input(record, &inputs),
         32,
     )
@@ -354,6 +354,8 @@ fn embedded_inputs_win_per_attempt_over_the_legacy_export() {
                 ))
                 .expect("raw input"),
             ),
+            action_entries: None,
+            processor_state: None,
             observations: Vec::new(),
             incomplete: false,
             outcome: None,
@@ -398,6 +400,8 @@ fn absent_embedded_input_uses_the_legacy_export() {
         workflow: "default".to_owned(),
         flags: serde_json::Map::new(),
         input: None,
+        action_entries: None,
+        processor_state: None,
         observations: Vec::new(),
         incomplete: false,
         outcome: None,
@@ -435,6 +439,8 @@ fn malformed_embedded_input_never_falls_back() {
             serde_json::value::RawValue::from_string(r#"{"name":42}"#.to_owned())
                 .expect("raw input"),
         ),
+        action_entries: None,
+        processor_state: None,
         observations: Vec::new(),
         incomplete: false,
         outcome: None,

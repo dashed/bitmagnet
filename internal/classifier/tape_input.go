@@ -1,6 +1,9 @@
 package classifier
 
-import "github.com/bitmagnet-io/bitmagnet/internal/model"
+import (
+	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
+)
 
 // tapeClassifierInput is the stable, language-neutral shape embedded in each
 // tape record. It is deliberately not model.Torrent: the database model carries
@@ -136,6 +139,21 @@ func newTapeClassifierInput(subject string, torrent model.Torrent) tapeClassifie
 	}
 
 	return input
+}
+
+// newTapeProcessorState captures state that affects processor write-set
+// materialization but is deliberately outside the classifier input contract.
+// Preserve torrent.Contents order; each side canonicalizes delete IDs only when
+// constructing its write set.
+func newTapeProcessorState(torrent model.Torrent) tape.ProcessorState {
+	state := tape.ProcessorState{
+		ExistingContentIDs: make([]string, 0, len(torrent.Contents)),
+	}
+	for _, content := range torrent.Contents {
+		state.ExistingContentIDs = append(state.ExistingContentIDs, content.ID)
+	}
+
+	return state
 }
 
 func newTapeClassifierHint(hint model.TorrentHint) *tapeClassifierHint {

@@ -15,6 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const tapeProgressLogInterval = time.Minute
+
 type Params struct {
 	fx.In
 	Config     Config
@@ -45,6 +47,9 @@ func New(params Params) Result {
 
 		if _, ok := src.Workflows[params.Config.Workflow]; !ok {
 			return Source{}, fmt.Errorf("default workflow '%s' not found", params.Config.Workflow)
+		}
+		if err := rejectReservedTapeEvidenceWorkflows(src); err != nil {
+			return Source{}, err
 		}
 
 		return src, nil
@@ -103,11 +108,69 @@ func New(params Params) Result {
 	})
 
 	// Written on a clean shutdown as well as when the record cap is reached, so
-	// a run that is stopped early still leaves its evidence behind. Nothing is
-	// constructed here that was not already needed: if no recorder was ever
-	// built there is nothing to write.
+	// a run that is stopped early still leaves its evidence behind. A bounded
+	// evidence run is intentionally long-lived; while it is active, structured
+	// progress logs expose exact registered/open/authoritative/action counts to
+	// the no-exec Kubernetes controller.
+	var (
+		progressCancel context.CancelFunc
+		progressDone   chan struct{}
+	)
 	params.Lifecycle.Append(fx.Hook{
+		OnStart: func(startCtx context.Context) error {
+			planConfigured, err := tapePlanConfigured(params.Config)
+			if err != nil {
+				return err
+			}
+			if params.Config.TapeDir == "" {
+				return nil
+			}
+
+			recorder, err := lrec.Get()
+			if err != nil {
+				return err
+			}
+			if recorder == nil {
+				return nil
+			}
+			if planConfigured {
+				source, sourceErr := lsrc.Get()
+				if sourceErr != nil {
+					return sourceErr
+				}
+				executor, executorErr := newTapeAcquisitionPlanExecutor(params.Config, source, recorder)
+				if executorErr != nil {
+					return executorErr
+				}
+				if runErr := executor.Run(startCtx); runErr != nil {
+					return fmt.Errorf("execute classifier tape acquisition plan: %w", runErr)
+				}
+			}
+
+			progressCtx, cancel := context.WithCancel(context.Background())
+			progressCancel = cancel
+			progressDone = make(chan struct{})
+			logTapeProgress(params.Logger, params.Config.TapeDir, recorder)
+			go func() {
+				defer close(progressDone)
+				logTapeProgressUntilDone(
+					progressCtx,
+					params.Logger,
+					params.Config.TapeDir,
+					recorder,
+					tapeProgressLogInterval,
+				)
+			}()
+
+			return nil
+		},
 		OnStop: func(context.Context) error {
+			if progressCancel != nil {
+				progressCancel()
+			}
+			if progressDone != nil {
+				<-progressDone
+			}
 			return lrec.IfInitialized(func(recorder *tape.Recorder) error {
 				return writeTape(params.Logger, params.Config.TapeDir, recorder)
 			})
@@ -154,8 +217,9 @@ func newTapeRecorder(params Params, digest string) *tape.Recorder {
 	host, _ := os.Hostname()
 
 	recorder := tape.NewRecorder(digest, params.Config.TapeMaxRecords, tape.Provenance{
-		Command: "bitmagnet classifier (CLASSIFIER_TAPE_DIR set)",
-		Host:    host,
+		Command:               "bitmagnet classifier (CLASSIFIER_TAPE_DIR set)",
+		Host:                  host,
+		AcquisitionPlanDigest: params.Config.TapePlanSHA256,
 		// Enough to tell two database snapshots apart, and no credentials.
 		Database: fmt.Sprintf(
 			"postgres %s:%d/%s",
@@ -197,8 +261,74 @@ func writeTape(logger *zap.SugaredLogger, dir string, recorder *tape.Recorder) e
 	}
 
 	if logger != nil {
-		logger.Infow("wrote classifier tape", "tape_dir", dir, "truncated", recorder.Truncated())
+		progress := recorder.Progress()
+		logger.Infow(
+			"wrote classifier tape",
+			"tape_dir", dir,
+			"truncated", progress.Truncated,
+			"registered_records", progress.RegisteredRecords,
+			"open_sessions", progress.OpenSessions,
+			"authoritative_records", progress.AuthoritativeRecords,
+			"non_authoritative_records", progress.NonAuthoritativeRecords,
+			"observation_count", progress.ObservationCount,
+			"action_entry_count", progress.ActionEntryCount,
+			"action_entry_counts", progress.ActionEntryCounts,
+			"record_outcome_counts", progress.RecordOutcomeCounts,
+			"write_attempt", progress.LastWrite.Attempt,
+			"write_final", progress.LastWrite.Final,
+			"acquisition_plan_digest", progress.AcquisitionPlanDigest,
+		)
 	}
 
 	return nil
+}
+
+func logTapeProgressUntilDone(
+	ctx context.Context,
+	logger *zap.SugaredLogger,
+	dir string,
+	recorder *tape.Recorder,
+	interval time.Duration,
+) {
+	if logger == nil || recorder == nil || interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			logTapeProgress(logger, dir, recorder)
+		}
+	}
+}
+
+func logTapeProgress(logger *zap.SugaredLogger, dir string, recorder *tape.Recorder) {
+	if logger == nil || recorder == nil {
+		return
+	}
+
+	progress := recorder.Progress()
+	logger.Infow(
+		"classifier tape progress",
+		"tape_dir", dir,
+		"registered_records", progress.RegisteredRecords,
+		"open_sessions", progress.OpenSessions,
+		"authoritative_records", progress.AuthoritativeRecords,
+		"non_authoritative_records", progress.NonAuthoritativeRecords,
+		"observation_count", progress.ObservationCount,
+		"action_entry_count", progress.ActionEntryCount,
+		"action_entry_counts", progress.ActionEntryCounts,
+		"record_outcome_counts", progress.RecordOutcomeCounts,
+		"truncated", progress.Truncated,
+		"error", progress.Error,
+		"write_attempt", progress.LastWrite.Attempt,
+		"write_final", progress.LastWrite.Final,
+		"write_error", progress.LastWrite.Error,
+		"acquisition_plan_digest", progress.AcquisitionPlanDigest,
+	)
 }

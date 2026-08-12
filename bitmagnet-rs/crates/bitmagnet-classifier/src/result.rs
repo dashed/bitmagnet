@@ -2,6 +2,8 @@
 //! `corpus_test.go normalizeClassifierResult` (the frozen corpus `expected`
 //! schema, contract §2.1/§2.3).
 
+use std::collections::BTreeSet;
+
 use bitmagnet_model::Content;
 use bitmagnet_release::{
     Episodes, Video3D, VideoCodec, VideoModifier, VideoResolution, VideoSource,
@@ -40,6 +42,9 @@ pub struct Classification {
     /// [`crate::NullContentResolver`] every lookup misses and the `attach_*`
     /// actions all raise `unmatched`.
     pub content: Option<Content>,
+    /// Torrent tags accumulated by `add_tag`. A sorted set matches Go's set
+    /// semantics while making the processor write-set deterministic.
+    pub tags: BTreeSet<String>,
 }
 
 impl Classification {

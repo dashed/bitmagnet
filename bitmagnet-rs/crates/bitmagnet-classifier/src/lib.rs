@@ -37,17 +37,23 @@ mod result;
 mod source;
 pub mod tape_corpus;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use bitmagnet_tape::ActionEntry;
 use cel::to_value;
 use serde_json::Value as Json;
 
 pub use errors::FlowError;
-pub use model::{ClassifierInput, InputContent, InputFile, InputHint};
+pub use model::{ClassifierInput, ContentType, InputContent, InputFile, InputHint};
 pub use resolver::{ContentResolver, ContentResultItem, NullContentResolver, ResolveError};
 pub use result::{Classification, Outcome};
-pub use source::{core_config_digest, FlagType, FlagValue, Source, SourceError};
+pub use source::{
+    core_config_digest, FlagType, FlagValue, Source, SourceError,
+    TAPE_EVIDENCE_ACTION_ENTRIES_WORKFLOW, TAPE_EVIDENCE_DELETED_WORKFLOW,
+    TAPE_EVIDENCE_UNMATCHED_WORKFLOW,
+};
 
 use cel_value::build_cel_torrent;
 use engine::{compile_workflows, run_action, Action, CompileError, ExecCtx};
@@ -158,6 +164,14 @@ impl Classifier {
         Classifier::compile(Source::load_core()?, resolver)
     }
 
+    /// Compile core plus the reserved T1 acquisition workflows for tape replay.
+    /// Normal serving constructors intentionally omit these workflows.
+    pub fn from_core_with_tape_evidence(
+        resolver: Arc<dyn ContentResolver>,
+    ) -> Result<Classifier, ClassifierError> {
+        Classifier::compile(Source::load_core_with_tape_evidence()?, resolver)
+    }
+
     /// Compile a parsed source against a [`ContentResolver`].
     pub fn compile(
         source: Source,
@@ -207,6 +221,23 @@ impl Classifier {
         to_expected_json(&result, &outcome)
     }
 
+    /// Classify and return the ordered attach actions entered along the way.
+    ///
+    /// This is the action-level half of the production tape gate. It is kept as
+    /// a sibling of [`Self::run`] so normal classifier callers do not acquire a
+    /// tape-shaped return type merely because the evidence harness needs one.
+    pub async fn run_with_action_entries(
+        &self,
+        workflow: &str,
+        flags: &Flags,
+        input: &ClassifierInput,
+    ) -> (Json, Vec<ActionEntry>) {
+        let (result, outcome, action_entries) = self
+            .classify_with_action_entries(workflow, flags, input)
+            .await;
+        (to_expected_json(&result, &outcome), action_entries)
+    }
+
     /// Classify, returning the STRUCTURED result.
     ///
     /// 🔑 Callers that need the attached content must use this, not
@@ -222,6 +253,24 @@ impl Classifier {
         flags: &Flags,
         input: &ClassifierInput,
     ) -> (Classification, Outcome) {
+        let (result, outcome, _) = self
+            .classify_with_action_entries(workflow, flags, input)
+            .await;
+        (result, outcome)
+    }
+
+    /// Classify and return both the structured result and the exact ordered
+    /// attach-action trace. The same-input processor rerun gate needs both;
+    /// callers that only need the normalized corpus object should use
+    /// [`Self::run_with_action_entries`].
+    pub async fn classify_with_action_entries(
+        &self,
+        workflow: &str,
+        flags: &Flags,
+        input: &ClassifierInput,
+    ) -> (Classification, Outcome, Vec<ActionEntry>) {
+        let action_entries = RefCell::new(Vec::new());
+
         // Merge runtime flags over the compiled defaults, resolving one value
         // per defined flag (`runner.Run`).
         let mut merged: BTreeMap<String, FlagValue> = BTreeMap::new();
@@ -238,6 +287,7 @@ impl Classifier {
                 return (
                     Classification::default(),
                     Outcome::Error(format!("serialize torrent: {e}")),
+                    action_entries.into_inner(),
                 )
             }
         };
@@ -246,6 +296,7 @@ impl Classifier {
             return (
                 Classification::default(),
                 Outcome::Error(format!("workflow not found: {workflow}")),
+                action_entries.into_inner(),
             );
         };
 
@@ -268,16 +319,19 @@ impl Classifier {
             flags_val: &flags_val,
             input,
             workflows: &self.workflows,
+            action_entries: &action_entries,
             resolver: self.resolver.as_ref(),
         };
 
-        match run_action(wf, &ctx, result).await {
+        let classified = match run_action(wf, &ctx, result).await {
             Ok(r) => (r, Outcome::Classified),
             Err(e) if e.is_delete() => (Classification::default(), Outcome::Deleted(e.to_string())),
             Err(e) if e.is_unmatched() => {
                 (Classification::default(), Outcome::Unmatched(e.to_string()))
             }
             Err(e) => (Classification::default(), Outcome::Error(e.to_string())),
-        }
+        };
+
+        (classified.0, classified.1, action_entries.into_inner())
     }
 }

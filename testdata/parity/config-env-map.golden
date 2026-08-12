@@ -12,6 +12,8 @@ CLASSIFIER_FLAGS	classifier.flags
 CLASSIFIER_KEYWORDS	classifier.keywords
 CLASSIFIER_TAPE_DIR	classifier.tape_dir
 CLASSIFIER_TAPE_MAX_RECORDS	classifier.tape_max_records
+CLASSIFIER_TAPE_PLAN_PATH	classifier.tape_plan_path
+CLASSIFIER_TAPE_PLAN_SHA_256	classifier.tape_plan_sha_256
 CLASSIFIER_WORKFLOW	classifier.workflow
 DHT_CRAWLER_BOOTSTRAP_NODES	dht_crawler.bootstrap_nodes
 DHT_CRAWLER_RESCRAPE_THRESHOLD	dht_crawler.rescrape_threshold

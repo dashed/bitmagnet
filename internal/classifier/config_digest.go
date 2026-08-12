@@ -48,6 +48,18 @@ func EffectiveConfigDigest(source Source, defaultWorkflow string) (string, error
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// CoreEffectiveConfigDigest returns the digest of the embedded core source
+// under the production default workflow. Offline cross-language evidence uses
+// this rather than accepting an unpinned tape digest from the caller.
+func CoreEffectiveConfigDigest() (string, error) {
+	source, err := yamlSourceProvider{rawSourceProvider: coreSourceProvider{}}.source()
+	if err != nil {
+		return "", err
+	}
+
+	return EffectiveConfigDigest(source, "default")
+}
+
 func logEffectiveConfigDigest(
 	logger *zap.SugaredLogger,
 	source Source,

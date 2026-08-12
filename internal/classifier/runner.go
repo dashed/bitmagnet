@@ -31,6 +31,13 @@ func (r runner) Run(
 	// Named so the deferred session end can read how the classification
 	// actually finished; see the tape.EndSession call below.
 ) (result classification.Result, err error) {
+	if isTapeEvidenceWorkflow(workflow) && !hasTapeEvidenceCapability(ctx) {
+		return classification.Result{}, fmt.Errorf(
+			"workflow %q is reserved for validated classifier tape evidence",
+			workflow,
+		)
+	}
+
 	w, ok := r.workflows[workflow]
 	if !ok {
 		return classification.Result{}, fmt.Errorf("workflow not found: %s", workflow)
@@ -89,6 +96,7 @@ func (r runner) Run(
 			workflow,
 			effectiveFlagValues(cfs),
 			newTapeClassifierInput(subject, t),
+			newTapeProcessorState(t),
 		)
 		// Closing the session is what lets a tape written mid-run tell a
 		// finished classification from one whose observations are still

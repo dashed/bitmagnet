@@ -1,14 +1,16 @@
 //! The B′ corpus harness: run the classifier over every subject in a tape and
-//! report, per subject, whether Rust asked the questions Go asked.
+//! report, per subject, whether Rust entered the attach actions and asked the
+//! dependency questions Go did, in the same order.
 //!
 //! # What this gate actually proves
 //!
-//! It is a **desync gate**, not a result-diff. The tape records the observations
-//! a classification made against its impure dependencies; it does not record the
-//! classification's final verdict. So what this harness can establish — and it is
-//! the thing worth establishing first — is that Rust's control flow through the
-//! enrichment path is identical to Go's: the same lookups, with the same
-//! arguments, in the same order, and no more or fewer of them.
+//! It is a **desync gate**, not a result-diff. New tapes record both the attach
+//! actions a classification entered and its observations against impure
+//! dependencies; legacy tapes carry only the observations. The harness can
+//! therefore establish that Rust's control flow through the enrichment path is
+//! identical to Go's: the same action entries and lookups, with the same
+//! arguments, in the same order, and no more or fewer of them. It still does not
+//! compare the two classifiers' final materialized results.
 //!
 //! That is a strong property. Go's flags-ON path is a sequence of decisions
 //! (search locally, then fall back to TMDB, then fetch details) where each step's
@@ -29,11 +31,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bitmagnet_tape::{Record, Replay};
+use bitmagnet_tape::{ActionEntry, Record, Replay};
 use serde::Serialize;
 
 use crate::resolver::tape::TapeContentResolver;
-use crate::{Classifier, ClassifierInput, FlagValue, Flags};
+use crate::{Classifier, ClassifierInput, ContentType, FlagValue, Flags};
 
 /// What happened when one subject was replayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -107,10 +109,11 @@ pub struct CorpusReport {
     pub failures: Vec<SubjectReport>,
 }
 
-const SCOPE_NOTE: &str = "Desync gate, NOT a result diff: the tape records the observations a \
-classification made against its impure dependencies, not its final verdict. A Match means Rust \
-asked exactly the questions Go asked, with the same arguments, in the same order, and consumed \
-them all. It does NOT mean the two classifiers produced the same content attachment. Separately: \
+const SCOPE_NOTE: &str = "Desync gate, NOT a result diff: a traced tape records the attach actions \
+entered plus the observations a classification made against its impure dependencies. A legacy \
+tape's absent action trace is unknown and only its observations are compared. A Match means Rust \
+entered every known action and asked exactly the questions Go did, in the same order, consuming \
+all recorded evidence. It does NOT mean the two classifiers produced the same content attachment. Separately: \
 the tape records the SEARCH STRING handed to the query builder, not the tsquery it compiles \
 into, so implementations that agree on the string and disagree on the tsquery match here \
 regardless.";
@@ -158,6 +161,9 @@ where
     // artifacts; the tape's own index is a hash map.
     let mut records: Vec<_> = replay.subjects().collect();
     records.sort_by(|a, b| (&a.subject, a.attempt).cmp(&(&b.subject, b.attempt)));
+    // Manifest presence distinguishes a traced run whose per-record empty
+    // arrays were omitted from a legacy run where absence means unknown.
+    let action_entries_known = replay.manifest().action_entry_count.is_some();
 
     let mut reports = Vec::with_capacity(records.len());
 
@@ -166,7 +172,19 @@ where
             continue;
         };
 
-        let flags = flags_from_record(&record.flags);
+        let flags = match flags_from_record(&record.flags) {
+            Ok(flags) => flags,
+            Err(detail) => {
+                reports.push(SubjectReport {
+                    subject: record.subject.clone(),
+                    attempt: record.attempt,
+                    recorded: record.observations.len(),
+                    consumed: 0,
+                    verdict: Verdict::Error { detail },
+                });
+                continue;
+            }
+        };
         let resolver = Arc::new(TapeContentResolver::new(
             replay,
             &record.subject,
@@ -174,20 +192,32 @@ where
         ));
         let classifier = classifier_for(Arc::clone(&resolver))?;
 
-        let result = classifier.run(&record.workflow, &flags, &input).await;
+        let (result, actual_action_entries) = classifier
+            .run_with_action_entries(&record.workflow, &flags, &input)
+            .await;
 
         let remaining = resolver.remaining();
         let recorded = record.observations.len();
         let consumed = recorded.saturating_sub(remaining);
         let outcome = record.outcome.as_ref().map_or_else(
             || "unknown".to_owned(),
-            |outcome| format!("{:?}", outcome.kind).to_lowercase(),
+            |outcome| outcome.kind.as_str().to_owned(),
         );
-        let verdict = downgrade_if_not_an_oracle(
-            verdict_for(&result, remaining),
-            record.authoritative(),
-            &outcome,
-        );
+        let authoritative = record.authoritative();
+        let recorded_action_entries = (action_entries_known && authoritative)
+            .then(|| record.action_entries.as_deref().unwrap_or_default());
+        let outcome_verdict = authoritative.then(|| {
+            let actual = normalized_outcome(&result);
+            (actual != outcome).then(|| Verdict::Desync {
+                detail: format!(
+                    "terminal outcome mismatch: recorded {outcome}, Rust produced {actual}"
+                ),
+            })
+        });
+        let verdict = action_entry_verdict(recorded_action_entries, &actual_action_entries)
+            .or_else(|| outcome_verdict.flatten())
+            .unwrap_or_else(|| verdict_for(&result, remaining));
+        let verdict = downgrade_if_not_an_oracle(verdict, authoritative, &outcome);
 
         reports.push(SubjectReport {
             subject: record.subject.clone(),
@@ -201,21 +231,81 @@ where
     Ok(summarise(reports, failure_sample))
 }
 
+/// Exact ordered action-entry comparison. `None` is a legacy/unknown trace and
+/// deliberately does not claim that zero actions ran.
+fn action_entry_verdict(
+    recorded: Option<&[ActionEntry]>,
+    actual: &[ActionEntry],
+) -> Option<Verdict> {
+    let recorded = recorded?;
+    if recorded == actual {
+        return None;
+    }
+
+    let first_difference = recorded
+        .iter()
+        .zip(actual)
+        .position(|(expected, got)| expected != got)
+        .unwrap_or_else(|| recorded.len().min(actual.len()));
+    let names = |entries: &[ActionEntry]| {
+        entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>()
+    };
+
+    Some(Verdict::Desync {
+        detail: format!(
+            "action-entry desync at sequence {first_difference}: recorded {:?}, replay entered {:?}",
+            names(recorded),
+            names(actual)
+        ),
+    })
+}
+
 /// The flags the recording ran under, as the classifier wants them.
 ///
 /// Only booleans are carried: every flag the enrichment path keys on
 /// (`local_search_enabled`, `apis_enabled`, `tmdb_enabled`) is a boolean, and
 /// silently coercing anything else would fabricate a flag state the recording
 /// never had.
-fn flags_from_record(recorded: &serde_json::Map<String, serde_json::Value>) -> Flags {
+fn flags_from_record(
+    recorded: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Flags, String> {
     recorded
         .iter()
-        .filter_map(|(name, value)| {
-            value
-                .as_bool()
-                .map(|flag| (name.clone(), FlagValue::Bool(flag)))
+        .map(|(name, value)| {
+            let value = if let Some(flag) = value.as_bool() {
+                FlagValue::Bool(flag)
+            } else if let Some(values) = value.as_array() {
+                let content_types = values
+                    .iter()
+                    .map(|value| {
+                        let raw = value.as_str().ok_or_else(|| {
+                            format!("classifier flag {name:?} contains a non-string value")
+                        })?;
+                        ContentType::parse(raw).ok_or_else(|| {
+                            format!("classifier flag {name:?} has unknown content type {raw:?}")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                FlagValue::ContentTypeList(content_types)
+            } else {
+                return Err(format!(
+                    "classifier flag {name:?} has unsupported recorded value {value}"
+                ));
+            };
+            Ok((name.clone(), value))
         })
         .collect()
+}
+
+fn normalized_outcome(result: &crate::Json) -> String {
+    match result.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("classified") => "completed".to_owned(),
+        Some(value) => value.to_owned(),
+        None => "unknown".to_owned(),
+    }
 }
 
 /// Reclassifies a verdict when the RECORDING, not the port, is what cannot be
@@ -367,5 +457,62 @@ fn summarise(reports: Vec<SubjectReport>, failure_sample: usize) -> CorpusReport
         consumed_observations,
         by_verdict,
         failures,
+    }
+}
+
+#[cfg(test)]
+mod action_entry_tests {
+    use super::*;
+
+    fn entries(names: &[&str]) -> Vec<ActionEntry> {
+        names
+            .iter()
+            .map(|name| ActionEntry {
+                name: (*name).to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_absence_does_not_claim_zero_actions() {
+        assert_eq!(
+            action_entry_verdict(None, &entries(&["attach_local_content_by_id"])),
+            None
+        );
+    }
+
+    #[test]
+    fn exact_action_order_is_part_of_the_gate() {
+        let recorded = entries(&[
+            "attach_local_content_by_id",
+            "attach_local_content_by_search",
+        ]);
+        assert_eq!(action_entry_verdict(Some(&recorded), &recorded), None);
+
+        let reversed = entries(&[
+            "attach_local_content_by_search",
+            "attach_local_content_by_id",
+        ]);
+        let verdict = action_entry_verdict(Some(&recorded), &reversed)
+            .expect("same actions in a different order must desync");
+        assert!(
+            matches!(verdict, Verdict::Desync { ref detail }
+                if detail.contains("sequence 0") && detail.contains("attach_local_content_by_id")),
+            "unexpected verdict: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn missing_or_extra_action_entries_desync() {
+        let recorded = entries(&["attach_local_content_by_id"]);
+        for actual in [
+            entries(&[]),
+            entries(&["attach_local_content_by_id", "attach_tmdb_content_by_id"]),
+        ] {
+            assert!(matches!(
+                action_entry_verdict(Some(&recorded), &actual),
+                Some(Verdict::Desync { .. })
+            ));
+        }
     }
 }

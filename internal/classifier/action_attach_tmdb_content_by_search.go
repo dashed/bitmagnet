@@ -3,6 +3,7 @@ package classifier
 import (
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classification"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 )
 
 const attachTmdbContentBySearchName = "attach_tmdb_content_by_search"
@@ -25,6 +26,9 @@ func (attachTmdbContentBySearchAction) compileAction(ctx compilerContext) (actio
 
 	return action{
 		run: func(ctx executionContext) (classification.Result, error) {
+			if err := tape.EnterAction(ctx.Context, attachTmdbContentBySearchName); err != nil {
+				return ctx.result, err
+			}
 			cl := ctx.result
 			if !cl.BaseTitle.Valid {
 				return cl, classification.ErrUnmatched

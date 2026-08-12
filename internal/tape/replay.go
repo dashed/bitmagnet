@@ -85,12 +85,8 @@ func Load(dir string, effectiveConfigDigest string) (*Replay, error) {
 		indexed[key] = record
 	}
 
-	if manifest.RecordCount != len(records) {
-		return nil, fmt.Errorf(
-			"tape manifest declares %d records but the tape holds %d",
-			manifest.RecordCount,
-			len(records),
-		)
+	if err := validateManifestRecords(manifest, records); err != nil {
+		return nil, err
 	}
 
 	return &Replay{manifest: manifest, records: indexed}, nil
@@ -150,9 +146,11 @@ func (r *Replay) Begin(ctx context.Context, subject string, attempt int) context
 	record := r.records[recordKey{subject, attempt}]
 
 	return context.WithValue(ctx, contextKey{}, &Session{
-		subject:  subject,
-		attempt:  attempt,
-		recorded: record.Observations,
+		subject:         subject,
+		attempt:         attempt,
+		recorded:        record.Observations,
+		recordedActions: record.ActionEntries,
+		actionsKnown:    r.manifest.ActionEntryCount != nil,
 	})
 }
 
@@ -160,7 +158,7 @@ func (r *Replay) Begin(ctx context.Context, subject string, attempt int) context
 func (r *Replay) Subjects() []Record {
 	records := make([]Record, 0, len(r.records))
 	for _, record := range r.records {
-		records = append(records, record)
+		records = append(records, cloneRecord(record))
 	}
 
 	return records

@@ -19,6 +19,12 @@ type Config struct {
 	// TapeMaxRecords bounds how many classifications a recording run captures
 	// before it stops. Reaching the cap writes the tape and marks it truncated.
 	TapeMaxRecords int
+	// TapePlanPath and TapePlanSHA256 opt into a reviewed, digest-pinned
+	// acquisition plan that seeds synthetic evidence records before normal
+	// classifier traffic starts. Both must be set together, and TapeDir must be
+	// enabled. With both empty the plan facility is completely inactive.
+	TapePlanPath   string
+	TapePlanSHA256 string
 }
 
 func NewDefaultConfig() Config {

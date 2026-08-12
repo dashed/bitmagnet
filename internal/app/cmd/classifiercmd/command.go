@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/processor"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/fx"
 	"gopkg.in/yaml.v3"
@@ -78,8 +82,74 @@ func New(p Params) (Result, error) {
 					)
 				},
 			},
+			{
+				Name:  "tape-rerun",
+				Usage: "Replay a traced classifier tape through Go and emit canonical processor write sets",
+				Flags: []cli.Flag{
+					&cli.PathFlag{
+						Name:     "dir",
+						Usage:    "Directory holding manifest.json and tape.jsonl",
+						Required: true,
+					},
+					&cli.PathFlag{
+						Name:     "output",
+						Usage:    "Create-only JSON report path",
+						Required: true,
+					},
+				},
+				Action: func(ctx *cli.Context) error {
+					digest, digestErr := classifier.CoreEffectiveConfigDigest()
+					if digestErr != nil {
+						return digestErr
+					}
+					replay, loadErr := tape.Load(ctx.Path("dir"), digest)
+					if loadErr != nil {
+						return loadErr
+					}
+					report, rerunErr := processor.ReplayClassifierTape(ctx.Context, replay)
+					if rerunErr != nil {
+						return rerunErr
+					}
+					return writeCreateOnlyJSON(ctx.Path("output"), report)
+				},
+			},
 		},
 	}}, nil
+}
+
+func writeCreateOnlyJSON(path string, value any) (err error) {
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempPath)
+	}()
+
+	encoded, err := tape.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if _, err = temp.Write(append(encoded, '\n')); err != nil {
+		return err
+	}
+	if err = temp.Sync(); err != nil {
+		return err
+	}
+	if err = temp.Close(); err != nil {
+		return err
+	}
+	// A hard link publishes the fully-written inode without overwriting an
+	// existing evidence artifact. Source and destination share a directory, so
+	// they are necessarily on the same filesystem.
+	if err = os.Link(tempPath, path); err != nil {
+		return fmt.Errorf("publish create-only JSON report %q: %w", path, err)
+	}
+
+	return nil
 }
 
 func write(writer io.Writer, src any, format string) error {

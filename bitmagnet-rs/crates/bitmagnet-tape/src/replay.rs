@@ -1,7 +1,7 @@
 //! Answering observations from a recorded tape — a port of Go's
 //! `internal/tape/replay.go` and the replay half of `session.go`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,19 @@ impl Replay {
             )));
         }
 
+        if let Some(plan_digest) = &manifest.acquisition_plan_digest {
+            let valid = plan_digest.len() == 71
+                && plan_digest.starts_with("sha256:")
+                && plan_digest[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+            if !valid {
+                return Err(TapeError::Invalid(format!(
+                    "tape acquisition plan digest {plan_digest:?} is not canonical sha256"
+                )));
+            }
+        }
+
         if !effective_config_digest.is_empty()
             && manifest.effective_config_digest != effective_config_digest
         {
@@ -95,13 +108,7 @@ impl Replay {
 
         // Counted against ALL records, including the incomplete ones that were
         // just excluded — the manifest describes the file, not the index.
-        if manifest.record_count != records.len() {
-            return Err(TapeError::Invalid(format!(
-                "tape manifest declares {} records but the tape holds {}",
-                manifest.record_count,
-                records.len()
-            )));
-        }
+        validate_manifest_counts(&manifest, &records)?;
 
         Ok(Self {
             manifest,
@@ -145,6 +152,111 @@ impl Replay {
             cursor: 0,
         }
     }
+}
+
+/// Recomputes every manifest count from the records. A manifest is an integrity
+/// cross-check, not decorative metadata: accepting a hand-edited count would
+/// let a gate claim coverage that the tape does not contain.
+fn validate_manifest_counts(manifest: &Manifest, records: &[Record]) -> Result<(), TapeError> {
+    count_eq("records", manifest.record_count, records.len())?;
+
+    let observation_count = records.iter().map(|record| record.observations.len()).sum();
+    count_eq(
+        "observations",
+        manifest.observation_count,
+        observation_count,
+    )?;
+
+    let incomplete_count = records.iter().filter(|record| record.incomplete).count();
+    count_eq(
+        "incomplete records",
+        manifest.incomplete_record_count,
+        incomplete_count,
+    )?;
+
+    if manifest.authoritative_record_count_present {
+        let authoritative_count = records
+            .iter()
+            .filter(|record| record.authoritative())
+            .count();
+        count_eq(
+            "authoritative records",
+            manifest.authoritative_record_count,
+            authoritative_count,
+        )?;
+    }
+
+    if let Some(declared) = &manifest.record_outcome_counts {
+        let mut actual = BTreeMap::new();
+        for record in records {
+            let kind = record
+                .outcome
+                .as_ref()
+                .map_or("unknown", |outcome| outcome.kind.as_str());
+            *actual.entry(kind.to_owned()).or_insert(0) += 1;
+        }
+        map_eq("record outcome counts", declared, &actual)?;
+    }
+
+    let records_carry_actions = records.iter().any(|record| record.action_entries.is_some());
+    match manifest.action_entry_count {
+        None => {
+            if manifest.action_entry_counts.is_some() || records_carry_actions {
+                return Err(TapeError::Invalid(
+                    "tape carries action entries or actionEntryCounts but its manifest has no actionEntryCount; legacy absence is unknown, not zero"
+                        .into(),
+                ));
+            }
+        }
+        Some(declared_total) => {
+            let mut actual_total = 0usize;
+            let mut actual_counts = BTreeMap::new();
+            for entry in records
+                .iter()
+                .flat_map(|record| record.action_entries.iter().flatten())
+            {
+                actual_total += 1;
+                *actual_counts.entry(entry.name.clone()).or_insert(0) += 1;
+            }
+
+            count_eq("action entries", declared_total, actual_total)?;
+            let empty_counts = BTreeMap::new();
+            map_eq(
+                "action entry counts",
+                manifest
+                    .action_entry_counts
+                    .as_ref()
+                    .unwrap_or(&empty_counts),
+                &actual_counts,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn count_eq(kind: &str, declared: usize, actual: usize) -> Result<(), TapeError> {
+    if declared == actual {
+        return Ok(());
+    }
+
+    Err(TapeError::Invalid(format!(
+        "tape manifest declares {declared} {kind} but the tape holds {actual}"
+    )))
+}
+
+fn map_eq(
+    kind: &str,
+    declared: &BTreeMap<String, usize>,
+    actual: &BTreeMap<String, usize>,
+) -> Result<(), TapeError> {
+    if declared == actual {
+        return Ok(());
+    }
+
+    Err(TapeError::Invalid(format!(
+        "tape manifest declares {kind} {declared:?} but the tape holds {actual:?}"
+    )))
 }
 
 /// Newline-delimited tape records, each validated.
@@ -282,5 +394,118 @@ impl Session {
                 .as_deref()
                 .expect("validated: ok outcome carries a response"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod manifest_count_tests {
+    use super::*;
+
+    fn records(with_actions: bool) -> Vec<Record> {
+        let actions = if with_actions {
+            r#","actionEntries":[{"name":"attach_local_content_by_id"},{"name":"attach_tmdb_content_by_search"}]"#
+        } else {
+            ""
+        };
+        let line = format!(
+            r#"{{"subject":"s","attempt":0,"workflow":"default","flags":{{}},"observations":[],"outcome":{{"kind":"completed"}}{actions}}}"#
+        );
+        decode_records(line.as_bytes()).expect("record decodes")
+    }
+
+    fn manifest(with_actions: bool) -> Manifest {
+        let actions = if with_actions {
+            r#","actionEntryCount":2,"actionEntryCounts":{"attach_local_content_by_id":1,"attach_tmdb_content_by_search":1}"#
+        } else {
+            ""
+        };
+        serde_json::from_str(&format!(
+            r#"{{"schema":"{SCHEMA}","effectiveConfigDigest":"digest","generatedAt":"now","recorder":"test","recordCount":1,"observationCount":0,"incompleteRecordCount":0,"authoritativeRecordCount":1,"recordOutcomeCounts":{{"completed":1}},"truncated":false{actions}}}"#
+        ))
+        .expect("manifest decodes")
+    }
+
+    #[test]
+    fn legacy_tapes_leave_action_coverage_unknown() {
+        validate_manifest_counts(&manifest(false), &records(false))
+            .expect("both action fields absent is a valid legacy tape");
+    }
+
+    #[test]
+    fn legacy_absent_authoritative_count_is_unknown() {
+        let mut legacy = manifest(false);
+        legacy.authoritative_record_count = 0;
+        legacy.authoritative_record_count_present = false;
+        validate_manifest_counts(&legacy, &records(false))
+            .expect("an absent post-v1-extension count is not a declared zero");
+    }
+
+    #[test]
+    fn a_manifest_total_is_required_for_recorded_actions() {
+        let error = validate_manifest_counts(&manifest(false), &records(true))
+            .expect_err("record actions without a run-level capability bit must fail");
+        assert!(error.to_string().contains("legacy absence is unknown"));
+    }
+
+    #[test]
+    fn every_manifest_count_is_recomputed() {
+        let records = records(true);
+        let good = manifest(true);
+        validate_manifest_counts(&good, &records).expect("baseline is internally consistent");
+
+        let mut cases: Vec<(&str, Manifest)> = Vec::new();
+
+        let mut wrong = good.clone();
+        wrong.record_count += 1;
+        cases.push(("records", wrong));
+
+        let mut wrong = good.clone();
+        wrong.observation_count += 1;
+        cases.push(("observations", wrong));
+
+        let mut wrong = good.clone();
+        wrong.incomplete_record_count += 1;
+        cases.push(("incomplete records", wrong));
+
+        let mut wrong = good.clone();
+        wrong.authoritative_record_count = 0;
+        cases.push(("authoritative records", wrong));
+
+        let mut wrong = good.clone();
+        wrong
+            .record_outcome_counts
+            .as_mut()
+            .expect("outcome counts")
+            .insert("completed".into(), 2);
+        cases.push(("record outcome counts", wrong));
+
+        let mut wrong = good.clone();
+        wrong.action_entry_count = Some(1);
+        cases.push(("action entries", wrong));
+
+        let mut wrong = good;
+        wrong
+            .action_entry_counts
+            .as_mut()
+            .expect("action counts")
+            .insert("attach_local_content_by_id".into(), 2);
+        cases.push(("action entry counts", wrong));
+
+        for (kind, tampered) in cases {
+            let error = validate_manifest_counts(&tampered, &records)
+                .expect_err("tampered manifest must fail closed");
+            assert!(
+                error.to_string().contains(kind),
+                "{kind}: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_traced_run_may_omit_the_per_action_map() {
+        let mut traced = manifest(false);
+        traced.action_entry_count = Some(0);
+        validate_manifest_counts(&traced, &records(false))
+            .expect("Go omits actionEntryCounts when it is empty");
     }
 }

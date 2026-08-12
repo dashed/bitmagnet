@@ -76,6 +76,9 @@ pub(crate) fn parse_video_content(
                 // merged into the threaded result, and `Merge` never touches
                 // `Content`.
                 content: None,
+                // Tags live on the outer classification result, not on the
+                // parsed ContentAttributes merged into it.
+                tags: Default::default(),
             };
             (Some(cls), None)
         }

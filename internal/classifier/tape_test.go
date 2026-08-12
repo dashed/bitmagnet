@@ -968,6 +968,7 @@ func tmdbBodies(t *testing.T, id int64, title string) ([]byte, []byte) {
 	details.OriginalTitle = title
 	details.OriginalLanguage = "en"
 	details.ReleaseDate = "1950-02-15"
+	details.IMDbID = "tt0042332"
 
 	detailsBody, err := json.Marshal(details)
 	if err != nil {

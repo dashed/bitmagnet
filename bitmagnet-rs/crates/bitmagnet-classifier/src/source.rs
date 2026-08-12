@@ -19,6 +19,24 @@ pub(crate) const CORE_YAML: &str =
 const EFFECTIVE_CONFIG_DIGEST_VERSION: u8 = 1;
 const CORE_DEFAULT_WORKFLOW: &str = "default";
 
+/// Reserved workflows emitted only by the reviewed classifier-tape acquisition
+/// executor. They are deliberately absent from [`Source::load_core`], so a
+/// serving caller can never select the delete/unmatched evidence paths.
+pub const TAPE_EVIDENCE_ACTION_ENTRIES_WORKFLOW: &str = "tape_evidence_action_entries";
+pub const TAPE_EVIDENCE_UNMATCHED_WORKFLOW: &str = "tape_evidence_unmatched";
+pub const TAPE_EVIDENCE_DELETED_WORKFLOW: &str = "tape_evidence_deleted";
+
+const TAPE_EVIDENCE_WORKFLOWS_YAML: &str = r#"
+workflows:
+  tape_evidence_action_entries:
+    - find_match: [attach_local_content_by_id]
+    - find_match: [attach_tmdb_content_by_id]
+    - find_match: [attach_local_content_by_search]
+    - find_match: [attach_tmdb_content_by_search]
+  tape_evidence_unmatched: unmatched
+  tape_evidence_deleted: delete
+"#;
+
 /// A flag's declared type (`FlagType`). Only the two shapes `classifier.core.yml`
 /// declares are modelled; string/int/string_list land with user config support.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +174,18 @@ impl Source {
     /// Parse the embedded `classifier.core.yml`.
     pub fn load_core() -> Result<Source, SourceError> {
         Source::parse(CORE_YAML)
+    }
+
+    /// Load core plus the private acquisition-only workflows needed to replay
+    /// a traced T1 tape. This does not alter [`core_config_digest`]: the plan
+    /// workflows are evidence apparatus, not serving classifier configuration.
+    pub fn load_core_with_tape_evidence() -> Result<Source, SourceError> {
+        let mut core = Source::load_core()?;
+        let evidence = Source::parse(TAPE_EVIDENCE_WORKFLOWS_YAML)?;
+        for (name, workflow) in evidence.workflows {
+            core.workflows.insert(name, workflow);
+        }
+        Ok(core)
     }
 
     /// Parse a classifier YAML source document.
