@@ -28,6 +28,15 @@ pub enum BatchHandleError {
 }
 
 impl QueueStore {
+    /// Handle one batch payload using the application clock.
+    pub async fn handle_process_torrent_batch_payload(
+        &self,
+        payload: &str,
+    ) -> Result<BatchHandleReport, BatchHandleError> {
+        self.handle_process_torrent_batch_payload_with_clock(payload, Utc::now)
+            .await
+    }
+
     /// Reproduce the Go batch handler's select-plan-insert boundary.
     ///
     /// Each non-empty page is timestamped immediately after planning its child;

@@ -47,3 +47,7 @@ path = "src/bin/bitmagnet-localsearch-replay.rs"
 [[bin]]
 name = "bitmagnet-tape-rerun"
 path = "src/bin/bitmagnet-tape-rerun.rs"
+
+[[bin]]
+name = "bitmagnet-process-torrent-batch"
+path = "src/bin/bitmagnet-process-torrent-batch.rs"

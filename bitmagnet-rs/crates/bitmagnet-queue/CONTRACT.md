@@ -114,7 +114,21 @@ timestamps, active-fingerprint retry failure, and the empty-result no-op. A
 production consumer remains deliberately absent, so this milestone cannot
 compete with the live Go `process_torrent_batch` worker.
 
-Still outstanding before Go queue retirement: guarded batch-consumer runtime
-wiring, bounded multi-worker orchestration for queues that require concurrency
-greater than one, terminal-row garbage collection, runtime metrics, and the
-Lane P shadow processor/runtime deployment.
+A standalone `bitmagnet-process-torrent-batch` binary composes the callable
+handler with the serial queue consumer for offline/runtime testing. It pins the
+Go handler's defaults of a 30-second idle poll and 10-minute job timeout, bounds
+PostgreSQL pool acquisition, and refuses a configured connection maximum below
+two because the retained parent transaction and the handler's independent
+selection/insertion need separate connections. The binary is not copied into a
+production image or wired into deployment automation. Its current shutdown
+select cancels an in-flight parent transaction; children already committed
+independently survive and can make the restarted parent collide with SQLSTATE
+23505. Production admission is blocked until shutdown stops polling and
+drains/settles the active job, and timeout/shutdown partial-child behavior is
+migration-backed tested.
+
+Still outstanding before Go queue retirement: guarded batch-consumer image and
+deployment wiring with graceful drain semantics, bounded multi-worker
+orchestration for queues that require concurrency greater than one,
+terminal-row garbage collection, runtime metrics, and the Lane P shadow
+processor/runtime deployment.
