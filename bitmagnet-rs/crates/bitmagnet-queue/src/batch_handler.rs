@@ -97,7 +97,8 @@ impl QueueStore {
             .zip(materialized_at)
             .map(|(job, at)| PreparedQueueJob::materialize_at(job, at))
             .collect::<Result<Vec<_>, QueuePgError>>()?;
-        self.insert_jobs_strict(&prepared).await?;
+        self.insert_process_torrent_batch_plan_strict(&prepared)
+            .await?;
 
         let job_count = u64::try_from(prepared.len()).unwrap_or(u64::MAX);
         Ok(BatchHandleReport {

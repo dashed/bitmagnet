@@ -1,7 +1,7 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables; point it only at a
-//! disposable goose-30 database and invoke it explicitly with
+//! disposable goose-32 database and invoke it explicitly with
 //! `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -113,7 +113,7 @@ fn assert_queue_database_code(error: QueuePgError, expected: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-30 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-32 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -1109,13 +1109,60 @@ async fn queue_runtime_matches_go_contract() {
         .await
         .expect_err("PUBLIC must not inherit batch claim execution");
     assert_insufficient_privilege(public_claim);
+    let enqueue_catalog = sqlx::query(
+        "SELECT p.prosecdef, p.proconfig, \
+                pg_catalog.pg_get_userbyid(p.proowner) AS owner, \
+                NOT EXISTS (\
+                  SELECT 1 \
+                  FROM pg_catalog.aclexplode(\
+                    COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))\
+                  ) AS acl \
+                  WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'\
+                ) AS public_execute_revoked \
+         FROM pg_catalog.pg_proc AS p \
+         WHERE p.oid = 'public.process_torrent_batch_enqueue_plan(\
+           text[],timestamp with time zone[],integer[],text,\
+           timestamp with time zone,timestamp with time zone\
+         )'::regprocedure",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect batch enqueue capability catalog contract");
+    assert!(enqueue_catalog.try_get::<bool, _>("prosecdef").unwrap());
+    assert_eq!(
+        enqueue_catalog
+            .try_get::<Option<Vec<String>>, _>("proconfig")
+            .unwrap(),
+        Some(vec!["search_path=pg_catalog, pg_temp".to_owned()])
+    );
+    assert!(enqueue_catalog
+        .try_get::<bool, _>("public_execute_revoked")
+        .unwrap());
+    assert_ne!(
+        enqueue_catalog.try_get::<String, _>("owner").unwrap(),
+        "bitmagnet_queue_batch_test",
+        "runtime ownership transfer is not part of migration 32"
+    );
+    let public_enqueue = sqlx::query(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           NULL::text, NULL::timestamptz, clock_timestamp()\
+         )",
+    )
+    .execute(&batch_pool)
+    .await
+    .expect_err("PUBLIC must not inherit batch enqueue execution");
+    assert_insufficient_privilege(public_enqueue);
 
     sqlx::query(
         "GRANT EXECUTE ON FUNCTION \
            public.process_torrent_batch_claim_job(), \
            public.process_torrent_batch_settle_processed(text, bigint), \
            public.process_torrent_batch_settle_retry(text, bigint, text, bigint), \
-           public.process_torrent_batch_settle_failed(text, bigint, text) \
+           public.process_torrent_batch_settle_failed(text, bigint, text), \
+           public.process_torrent_batch_enqueue_plan(\
+             text[], timestamptz[], integer[], text, timestamptz, timestamptz\
+           ) \
          TO bitmagnet_queue_batch_test",
     )
     .execute(&pool)
@@ -1139,6 +1186,283 @@ async fn queue_runtime_matches_go_contract() {
             .await
             .expect_err("batch role must not directly settle queue rows");
     assert_insufficient_privilege(direct_settle);
+    let direct_insert = sqlx::query(
+        "INSERT INTO queue_jobs \
+         (fingerprint, queue, payload, run_after, archival_duration, created_at) \
+         VALUES ('forbidden-batch-insert', 'process_torrent', '{}'::jsonb, \
+                 clock_timestamp(), interval '7 days', clock_timestamp())",
+    )
+    .execute(&batch_pool)
+    .await
+    .expect_err("batch role must not directly insert queue rows");
+    assert_insufficient_privilege(direct_insert);
+
+    // The enqueue capability preserves raw-text fingerprints across JSONB
+    // normalization, hardcodes the two allowed queues and fixed row fields,
+    // and shares one exact application created_at across all planned rows.
+    reset(&pool).await;
+    let raw_child_a = r#"{"z":1, "a":"child-a"}"#;
+    let raw_child_b = r#"{"a":"child-b","escaped":"a\\tb"}"#;
+    let raw_continuation = r#"{"BatchSize":2, "ChunkSize":3}"#;
+    let enqueue_created_at = chrono::DateTime::parse_from_rfc3339("2026-08-12T08:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let enqueue_run_a = enqueue_created_at + chrono::TimeDelta::seconds(1);
+    let enqueue_run_b = enqueue_created_at + chrono::TimeDelta::seconds(2);
+    let enqueue_run_continuation = enqueue_created_at + chrono::TimeDelta::seconds(3);
+    let inserted: i64 = sqlx::query_scalar(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           $1::text[], $2::timestamptz[], $3::integer[], \
+           $4::text, $5::timestamptz, $6::timestamptz\
+         )",
+    )
+    .bind(vec![raw_child_a, raw_child_b])
+    .bind(vec![enqueue_run_a, enqueue_run_b])
+    .bind(vec![4_i32, 10_i32])
+    .bind(raw_continuation)
+    .bind(enqueue_run_continuation)
+    .bind(enqueue_created_at)
+    .fetch_one(&batch_pool)
+    .await
+    .expect("enqueue fixed batch plan capability");
+    assert_eq!(inserted, 3);
+    let enqueued = sqlx::query(
+        "SELECT fingerprint, queue, payload::text AS payload, \
+                status::text AS status, retries, max_retries, priority, \
+                run_after, created_at, ran_at IS NULL AS ran_at_null, \
+                error IS NULL AS error_null, deadline IS NULL AS deadline_null, \
+                archival_duration = interval '7 days' AS archive_seven_days \
+         FROM queue_jobs ORDER BY run_after",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read capability-enqueued batch plan");
+    assert_eq!(enqueued.len(), 3);
+    for (index, (raw, queue, priority, run_after)) in [
+        (raw_child_a, PROCESS_TORRENT, 4, enqueue_run_a),
+        (raw_child_b, PROCESS_TORRENT, 10, enqueue_run_b),
+        (
+            raw_continuation,
+            PROCESS_TORRENT_BATCH,
+            0,
+            enqueue_run_continuation,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = &enqueued[index];
+        assert_eq!(row.try_get::<String, _>("queue").unwrap(), queue);
+        assert_eq!(
+            row.try_get::<String, _>("fingerprint").unwrap(),
+            fingerprint(queue, raw),
+            "fingerprint must use the raw payload text"
+        );
+        assert_ne!(
+            row.try_get::<String, _>("payload").unwrap(),
+            raw,
+            "fixture must observe PostgreSQL JSONB normalization"
+        );
+        assert_eq!(row.try_get::<String, _>("status").unwrap(), "pending");
+        assert_eq!(row.try_get::<i32, _>("retries").unwrap(), 0);
+        assert_eq!(row.try_get::<i32, _>("max_retries").unwrap(), 2);
+        assert_eq!(row.try_get::<i32, _>("priority").unwrap(), priority);
+        assert_eq!(
+            row.try_get::<chrono::DateTime<Utc>, _>("run_after")
+                .unwrap(),
+            run_after
+        );
+        assert_eq!(
+            row.try_get::<chrono::DateTime<Utc>, _>("created_at")
+                .unwrap(),
+            enqueue_created_at
+        );
+        for field in [
+            "ran_at_null",
+            "error_null",
+            "deadline_null",
+            "archive_seven_days",
+        ] {
+            assert!(row.try_get::<bool, _>(field).unwrap(), "{field}");
+        }
+    }
+
+    // Empty plan is an explicit successful no-op. Malformed arrays, payloads,
+    // priorities, continuation pairs, and timestamps fail closed before the
+    // single INSERT can affect any row.
+    reset(&pool).await;
+    let empty_inserted: i64 = sqlx::query_scalar(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           NULL::text, NULL::timestamptz, clock_timestamp()\
+         )",
+    )
+    .fetch_one(&batch_pool)
+    .await
+    .expect("empty batch plan is a no-op");
+    assert_eq!(empty_inserted, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    for invalid in [
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           NULL::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[['{}']]::text[], ARRAY[clock_timestamp()]::timestamptz[], \
+           ARRAY[4]::integer[], NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY['{}']::text[], ARRAY[]::timestamptz[], ARRAY[4]::integer[], \
+           NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[NULL]::text[], ARRAY[clock_timestamp()]::timestamptz[], \
+           ARRAY[4]::integer[], NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY['[]']::text[], ARRAY[clock_timestamp()]::timestamptz[], \
+           ARRAY[4]::integer[], NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY['{']::text[], ARRAY[clock_timestamp()]::timestamptz[], \
+           ARRAY[4]::integer[], NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY['{}']::text[], ARRAY[clock_timestamp()]::timestamptz[], \
+           ARRAY[0]::integer[], NULL, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           '{}'::text, NULL, clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           '[]'::text, clock_timestamp(), clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           '{}'::text, clock_timestamp(), clock_timestamp())",
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[]::text[], ARRAY[]::timestamptz[], ARRAY[]::integer[], \
+           NULL, NULL, NULL)",
+    ] {
+        let error = sqlx::query(invalid)
+            .execute(&batch_pool)
+            .await
+            .expect_err("invalid batch plan must fail closed");
+        assert_database_code(error, "22023");
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*)::bigint FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    // One native 23505 aborts every sibling in the capability's single INSERT.
+    let collision_payload = r#"{"raw": "collision"}"#;
+    sqlx::query(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[$1]::text[], ARRAY[$2]::timestamptz[], ARRAY[4]::integer[], \
+           NULL, NULL, $2::timestamptz\
+         )",
+    )
+    .bind(collision_payload)
+    .bind(enqueue_created_at)
+    .execute(&batch_pool)
+    .await
+    .expect("seed active capability fingerprint");
+    let unique_payload = r#"{"raw":"unique-sibling"}"#;
+    let collision = sqlx::query(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[$1, $2]::text[], ARRAY[$3, $3]::timestamptz[], \
+           ARRAY[10, 4]::integer[], NULL, NULL, $3::timestamptz\
+         )",
+    )
+    .bind(unique_payload)
+    .bind(collision_payload)
+    .bind(enqueue_created_at)
+    .execute(&batch_pool)
+    .await
+    .expect_err("active fingerprint collision must abort every sibling");
+    assert_database_code(collision, "23505");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(fingerprint(PROCESS_TORRENT, unique_payload))
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    sqlx::query("UPDATE queue_jobs SET status = 'retry'")
+        .execute(&pool)
+        .await
+        .expect("make capability collision row retry");
+    let retry_collision = sqlx::query(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[$1]::text[], ARRAY[$2]::timestamptz[], ARRAY[4]::integer[], \
+           NULL, NULL, $2::timestamptz\
+         )",
+    )
+    .bind(collision_payload)
+    .bind(enqueue_created_at)
+    .execute(&batch_pool)
+    .await
+    .expect_err("retry fingerprint remains active");
+    assert_database_code(retry_collision, "23505");
+    sqlx::query("UPDATE queue_jobs SET status = 'processed'")
+        .execute(&pool)
+        .await
+        .expect("settle capability collision row");
+    sqlx::query(
+        "SELECT public.process_torrent_batch_enqueue_plan(\
+           ARRAY[$1]::text[], ARRAY[$2]::timestamptz[], ARRAY[4]::integer[], \
+           NULL, NULL, $2::timestamptz\
+         )",
+    )
+    .bind(collision_payload)
+    .bind(enqueue_created_at)
+    .execute(&batch_pool)
+    .await
+    .expect("processed fingerprint may be reused");
+
+    reset(&pool).await;
+    seed(
+        &pool,
+        "batch-boundary-live",
+        PROCESS_TORRENT,
+        "pending",
+        -100,
+        -100,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    seed(
+        &pool,
+        "batch-boundary-a",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -2,
+        0,
+        0,
+        "{}",
+    )
+    .await;
+    seed(
+        &pool,
+        "batch-boundary-b",
+        PROCESS_TORRENT_BATCH,
+        "pending",
+        0,
+        -1,
+        0,
+        0,
+        "{}",
+    )
+    .await;
 
     let batch_store = QueueStore::new(batch_pool.clone());
     let (batch_claimed_tx, batch_claimed_rx) = oneshot::channel();

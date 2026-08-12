@@ -80,20 +80,31 @@ that a stale replica observes the committed cursor. Its permission negative
 controls prove a minimally granted role can use the shadow capabilities but
 cannot directly mutate either queue or any cursor identity.
 
-The batch producer now has a read-only PostgreSQL page adapter over the same
-Go tables. Its typed selection contract pins the strict info-hash cursor,
-snapshot cutoff, nullable content filter, orphan exclusion, ascending order,
-and page limit. Planning the returned ordered hashes into child and
-continuation queue jobs is byte/fingerprint-gated against Go. The adapter does
-not yet form a live handler, but the crate now owns the general strict producer
-insert boundary. Callers materialize each logical job's absolute `run_after`
-when the job is planned; one application-clock `created_at` is shared by the
-atomic multi-row insert, matching GORM slice-create behavior. The insert keeps
-the constructor's fingerprint rather than recomputing it from PostgreSQL's
-normalized JSONB text, validates the whole input before issuing SQL, and never
-uses `ON CONFLICT`: an active pending/retry fingerprint collision returns
-SQLSTATE 23505 and inserts no siblings. A processed or failed row does not block
-the same fingerprint from being queued again.
+Migrations 31 and 32 bound the batch handler's database access behind fixed
+`SECURITY DEFINER` capabilities. Selection hardcodes the `torrents` and
+`torrent_contents` query, strict info-hash cursor, snapshot cutoff, nullable
+content filter, orphan exclusion, ascending order, and page limit. Plan enqueue
+accepts no queue name or fingerprint: it hardcodes `process_torrent` children
+and at most one final `process_torrent_batch` continuation, computes each
+fingerprint from the exact raw JSON text before casting it to JSONB, and fixes
+pending status, retry count, maximum retries, archival duration, and null
+settlement fields. Both functions qualify database objects, pin
+`search_path=pg_catalog,pg_temp`, and revoke `PUBLIC` execution. The batch
+runtime therefore needs explicit `EXECUTE` on these functions but no direct
+`SELECT` on source tables or `INSERT` on `queue_jobs`. As with migration 29,
+deployment remains blocked until automation transfers function ownership to a
+reviewed least-privilege NOLOGIN owner and proves the runtime grants in-cluster.
+
+Planning the returned ordered hashes into child and continuation queue jobs is
+byte/fingerprint-gated against Go. Callers materialize each logical job's
+absolute `run_after` when the job is planned; one application-clock
+`created_at` is shared by the atomic multi-row insert, matching GORM
+slice-create behavior. Migration 32 issues one INSERT and never uses
+`ON CONFLICT`: an active pending/retry fingerprint collision returns SQLSTATE
+23505 and inserts no siblings. A processed or failed row does not block the
+same fingerprint from being queued again. The general strict producer remains
+available for non-batch callers and tests, but the batch handler uses only the
+fixed migration-32 capability.
 
 The strict producer runs as its own database statement/transaction. This
 preserves Go's surprising parent/child boundary: child jobs may commit before

@@ -6,6 +6,7 @@ use sqlx::{Postgres, QueryBuilder};
 
 use crate::{
     fingerprint, QueueJob, QueueJobStatus, QueuePgError, QueueStore, DEFAULT_ARCHIVAL_DURATION,
+    PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
 };
 
 /// A logical queue job whose application-clock eligibility timestamp has been
@@ -47,6 +48,82 @@ struct PreparedJob<'a> {
 }
 
 impl QueueStore {
+    /// Insert the closed output shape of one `process_torrent_batch` plan
+    /// through migration 32's fixed-queue capability.
+    pub(crate) async fn insert_process_torrent_batch_plan_strict(
+        &self,
+        jobs: &[PreparedQueueJob],
+    ) -> Result<(), QueuePgError> {
+        let mut child_payloads = Vec::new();
+        let mut child_run_afters = Vec::new();
+        let mut child_priorities = Vec::new();
+        let mut continuation_payload = None;
+        let mut continuation_run_after = None;
+
+        for (index, prepared) in jobs.iter().enumerate() {
+            let job = &prepared.job;
+            let payload = validate_common_job(job)?;
+            if !payload.is_object() {
+                return Err(QueuePgError::InvalidProducerJob(
+                    "batch plan payload must be a JSON object",
+                ));
+            }
+            if job.max_retries != 2 {
+                return Err(QueuePgError::InvalidProducerJob(
+                    "batch plan max_retries must be two",
+                ));
+            }
+            let is_last = index + 1 == jobs.len();
+            match job.queue.as_str() {
+                PROCESS_TORRENT if matches!(job.priority, 4 | 10) => {
+                    child_payloads.push(job.payload.as_str());
+                    child_run_afters.push(prepared.run_after);
+                    child_priorities.push(job.priority);
+                }
+                PROCESS_TORRENT_BATCH if is_last && job.priority == 0 => {
+                    continuation_payload = Some(job.payload.as_str());
+                    continuation_run_after = Some(prepared.run_after);
+                }
+                PROCESS_TORRENT => {
+                    return Err(QueuePgError::InvalidProducerJob(
+                        "batch child priority must be four or ten",
+                    ));
+                }
+                PROCESS_TORRENT_BATCH => {
+                    return Err(QueuePgError::InvalidProducerJob(
+                        "batch continuation must be the final job with priority zero",
+                    ));
+                }
+                _ => {
+                    return Err(QueuePgError::InvalidProducerJob(
+                        "batch plan contains an unsupported queue",
+                    ));
+                }
+            }
+        }
+
+        let inserted: i64 = sqlx::query_scalar(
+            "SELECT public.process_torrent_batch_enqueue_plan(\
+               $1::text[], $2::timestamptz[], $3::integer[], \
+               $4::text, $5::timestamptz, $6::timestamptz\
+             )",
+        )
+        .bind(child_payloads)
+        .bind(child_run_afters)
+        .bind(child_priorities)
+        .bind(continuation_payload)
+        .bind(continuation_run_after)
+        .bind(Utc::now())
+        .fetch_one(self.pool())
+        .await?;
+        if usize::try_from(inserted).ok() != Some(jobs.len()) {
+            return Err(QueuePgError::InvalidProducerJob(
+                "batch capability inserted an unexpected row count",
+            ));
+        }
+        Ok(())
+    }
+
     /// Insert constructed jobs in one atomic statement without conflict suppression.
     ///
     /// PostgreSQL assigns the UUID. One application-clock `created_at` value is
@@ -64,21 +141,7 @@ impl QueueStore {
             .iter()
             .map(|prepared| {
                 let job = &prepared.job;
-                serde_json::from_str::<serde_json::Value>(&job.payload)
-                    .map_err(|source| QueuePgError::InvalidProducerPayload { source })?;
-                if job.status != QueueJobStatus::Pending {
-                    return Err(QueuePgError::InvalidProducerJob("status must be pending"));
-                }
-                if job.archival_duration != DEFAULT_ARCHIVAL_DURATION {
-                    return Err(QueuePgError::InvalidProducerJob(
-                        "archival_duration must be seven days",
-                    ));
-                }
-                if fingerprint(&job.queue, &job.payload) != job.fingerprint {
-                    return Err(QueuePgError::InvalidProducerJob(
-                        "fingerprint does not match queue and payload bytes",
-                    ));
-                }
+                validate_common_job(job)?;
                 let max_retries = i32::try_from(job.max_retries).map_err(|_| {
                     QueuePgError::InvalidProducerInteger {
                         field: "max_retries",
@@ -121,6 +184,25 @@ impl QueueStore {
         query.build().execute(self.pool()).await?;
         Ok(())
     }
+}
+
+fn validate_common_job(job: &QueueJob) -> Result<serde_json::Value, QueuePgError> {
+    let payload = serde_json::from_str::<serde_json::Value>(&job.payload)
+        .map_err(|source| QueuePgError::InvalidProducerPayload { source })?;
+    if job.status != QueueJobStatus::Pending {
+        return Err(QueuePgError::InvalidProducerJob("status must be pending"));
+    }
+    if job.archival_duration != DEFAULT_ARCHIVAL_DURATION {
+        return Err(QueuePgError::InvalidProducerJob(
+            "archival_duration must be seven days",
+        ));
+    }
+    if fingerprint(&job.queue, &job.payload) != job.fingerprint {
+        return Err(QueuePgError::InvalidProducerJob(
+            "fingerprint does not match queue and payload bytes",
+        ));
+    }
+    Ok(payload)
 }
 
 fn duration_interval(
