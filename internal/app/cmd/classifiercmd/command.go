@@ -1,6 +1,7 @@
 package classifiercmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -98,23 +99,29 @@ func New(p Params) (Result, error) {
 					},
 				},
 				Action: func(ctx *cli.Context) error {
-					digest, digestErr := classifier.CoreEffectiveConfigDigest()
-					if digestErr != nil {
-						return digestErr
-					}
-					replay, loadErr := tape.Load(ctx.Path("dir"), digest)
-					if loadErr != nil {
-						return loadErr
-					}
-					report, rerunErr := processor.ReplayClassifierTape(ctx.Context, replay)
+					report, rerunErr := replayClassifierTape(ctx.Context, ctx.Path("dir"))
 					if rerunErr != nil {
 						return rerunErr
 					}
 					return writeCreateOnlyJSON(ctx.Path("output"), report)
 				},
 			},
+			newTapeParityCommand(),
 		},
 	}}, nil
+}
+
+func replayClassifierTape(ctx context.Context, dir string) (processor.TapeRerunReport, error) {
+	digest, err := classifier.CoreEffectiveConfigDigest()
+	if err != nil {
+		return processor.TapeRerunReport{}, err
+	}
+	replay, err := tape.Load(dir, digest)
+	if err != nil {
+		return processor.TapeRerunReport{}, err
+	}
+
+	return processor.ReplayClassifierTape(ctx, replay)
 }
 
 func writeCreateOnlyJSON(path string, value any) (err error) {

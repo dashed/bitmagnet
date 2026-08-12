@@ -14,7 +14,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use bitmagnet_classifier::resolver::tape::TapeContentResolver;
 use bitmagnet_classifier::{
-    core_config_digest, Classifier, ClassifierInput, ContentType, FlagValue, Flags, Outcome,
+    core_config_digest, Classifier, ClassifierInput, ContentType, FlagValue, Flags,
+    NormalizedClassifierResult, Outcome,
 };
 use bitmagnet_processor::{LoadedTorrent, Materializer, WriteSet};
 use bitmagnet_tape::{marshal, ActionEntry, Record, Replay};
@@ -22,7 +23,7 @@ use clap::Parser;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-const REPORT_SCHEMA: &str = "bitmagnet.classifier-tape-rerun/v1";
+const REPORT_SCHEMA: &str = "bitmagnet.classifier-tape-rerun/v2";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,6 +61,7 @@ struct RerunRecord {
     processor_state: bitmagnet_tape::ProcessorState,
     observation_count: usize,
     action_entries: Vec<ActionEntry>,
+    classification: NormalizedClassifierResult,
     outcome: &'static str,
     write_set: WriteSet,
 }
@@ -196,6 +198,9 @@ fn rerun_record(
         );
     }
 
+    let normalized_classification =
+        NormalizedClassifierResult::from_result(&classification, &outcome);
+
     let write_set = materializer
         .materialize_replayed(
             LoadedTorrent {
@@ -222,6 +227,7 @@ fn rerun_record(
         processor_state: processor_state.clone(),
         observation_count: record.observations.len(),
         action_entries: actual_actions,
+        classification: normalized_classification,
         outcome: actual_outcome,
         write_set,
     })

@@ -28,6 +28,7 @@ fn rust_report_matches_go_byte_for_byte() {
 
     let report: serde_json::Value = serde_json::from_slice(&expected).expect("decode Go report");
     let records = report["records"].as_array().expect("report records");
+    assert_eq!(report["schema"], "bitmagnet.classifier-tape-rerun/v2");
     assert_eq!(
         report["acquisitionPlanDigest"],
         "sha256:c6febd6d4dbcc762050d5a4d38d401dc0d56f50f901b88fc252a382a83b455fe"
@@ -66,6 +67,26 @@ fn rust_report_matches_go_byte_for_byte() {
         }),
         "fixture must cover non-empty content identifiers"
     );
+    assert!(
+        records.iter().any(|record| {
+            record["classification"]["baseTitle"] == "Cinderella"
+                && record["classification"]["date"]["year"] == 1950
+        }),
+        "fixture must cover classifier-only title and date evidence"
+    );
+    for record in records
+        .iter()
+        .filter(|record| record["outcome"] == "deleted" || record["outcome"] == "unmatched")
+    {
+        assert_eq!(record["classification"]["contentType"], "");
+        assert!(record["classification"]["baseTitle"].is_null());
+        assert!(record["classification"]["date"].is_null());
+        assert_eq!(
+            record["classification"]["outcome"], record["outcome"],
+            "terminal classifier normalization must agree with the tape outcome"
+        );
+        assert!(record["classification"]["error"].is_string());
+    }
 
     fs::remove_dir_all(output_dir).expect("remove output dir");
 }

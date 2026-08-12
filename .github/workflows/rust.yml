@@ -1,7 +1,8 @@
 name: Rust
 
 # Rust workspace lives under bitmagnet-rs/ in this polyglot monorepo, so this
-# pipeline is scoped to that subtree and to its own workflow file.
+# pipeline is scoped to that subtree, the shared Go/Rust tape parity surface,
+# and to its own workflow file.
 #
 # Future work: the Go pipeline (.github/workflows/checks.yml) runs inside
 # `nix develop` + `task`. Once the Rust toolchain is added to the repo's Nix
@@ -13,16 +14,38 @@ on:
     branches: [main, develop]
     paths:
       - "bitmagnet-rs/**"
-      - "internal/classifier/classifier.core.yml"
+      - "go.mod"
+      - "go.sum"
+      - "**/*.go"
+      - "main.go"
+      - "internal/app/cmd/classifiercmd/**"
+      - "internal/classifier/**"
+      - "internal/model/**"
+      - "internal/processor/**"
+      - "internal/tape/**"
       - "migrations/**"
+      - "testdata/parity/classifier-attach/**"
+      - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/migrations.golden"
+      - "Makefile"
       - ".github/workflows/rust.yml"
   pull_request:
     paths:
       - "bitmagnet-rs/**"
-      - "internal/classifier/classifier.core.yml"
+      - "go.mod"
+      - "go.sum"
+      - "**/*.go"
+      - "main.go"
+      - "internal/app/cmd/classifiercmd/**"
+      - "internal/classifier/**"
+      - "internal/model/**"
+      - "internal/processor/**"
+      - "internal/tape/**"
       - "migrations/**"
+      - "testdata/parity/classifier-attach/**"
+      - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/migrations.golden"
+      - "Makefile"
       - ".github/workflows/rust.yml"
 
 permissions:
@@ -121,6 +144,46 @@ jobs:
           tags: bitmagnet-ingest-shadow:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  docker-writeset-replay:
+    name: docker build (write-set and tape parity replay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bitmagnet-rs/docker/Dockerfile.writeset-replay
+          push: false
+          load: true
+          tags: bitmagnet-writeset-replay:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=writeset-replay
+          cache-to: type=gha,mode=max,scope=writeset-replay
+      - name: Run exact Go and Rust tape parity gate
+        working-directory: ${{ github.workspace }}
+        run: |
+          evidence_root="$(mktemp -d)"
+          make classifier-tape-parity \
+            PARITY_IMAGE=bitmagnet-writeset-replay:ci \
+            TAPE_DIR="${{ github.workspace }}/testdata/parity/classifier-tape-rerun/example/tape" \
+            OUTPUT_DIR="$evidence_root/evidence"
+          jq -e '
+            .schema == "bitmagnet.classifier-tape-parity/v1" and
+            .reportSchema == "bitmagnet.classifier-tape-rerun/v2" and
+            .recordCount == 9 and
+            .reportsEqual == true and
+            .goReportSha256 == .rustReportSha256
+          ' "$evidence_root/evidence/receipt.json"
 
   cargo-deny:
     name: cargo-deny

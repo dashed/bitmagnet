@@ -24,10 +24,11 @@ type TapeReplayer struct {
 // TapeReplayResult is the deterministic classifier boundary consumed by the
 // processor write-set parity harness.
 type TapeReplayResult struct {
-	Record         tape.Record
-	Torrent        model.Torrent
-	Classification classification.Result
-	Outcome        tape.RecordOutcome
+	Record                   tape.Record
+	Torrent                  model.Torrent
+	Classification           classification.Result
+	NormalizedClassification NormalizedResult
+	Outcome                  tape.RecordOutcome
 }
 
 // NewTapeReplayer compiles the embedded Go classifier once and binds it to a
@@ -147,10 +148,11 @@ func (r *TapeReplayer) Run(ctx context.Context, record tape.Record) (TapeReplayR
 	}
 
 	return TapeReplayResult{
-		Record:         record,
-		Torrent:        torrent,
-		Classification: result,
-		Outcome:        actualOutcome,
+		Record:                   record,
+		Torrent:                  torrent,
+		Classification:           result,
+		NormalizedClassification: NormalizeResult(result, runErr),
+		Outcome:                  actualOutcome,
 	}, nil
 }
 

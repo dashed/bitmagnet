@@ -19,7 +19,23 @@
 # build. The ENTRYPOINT stays the write-set runner; select the other with an
 # explicit `command:`.
 
-FROM rust:1.97-slim-bookworm AS builder
+ARG REVISION
+ARG SOURCE_TREE
+
+FROM --platform=$BUILDPLATFORM golang:1.23.6-bookworm AS go-builder
+ARG REVISION
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+      go build -trimpath \
+        -ldflags "-s -w -X github.com/bitmagnet-io/bitmagnet/internal/version.GitTag=${REVISION}" \
+        -o /out/bitmagnet ./main.go
+
+FROM rust:1.97-slim-bookworm AS rust-builder
 ENV RUSTUP_TOOLCHAIN=1.97.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
@@ -30,21 +46,44 @@ COPY internal/classifier/classifier.core.yml ./internal/classifier/classifier.co
 RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release \
       -p bitmagnet-processor \
       --bin bitmagnet-writeset-replay --bin bitmagnet-localsearch-replay \
+      --bin bitmagnet-tape-rerun \
     && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-writeset-replay \
       /out/bitmagnet-writeset-replay \
     && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-localsearch-replay \
       /out/bitmagnet-localsearch-replay \
+    && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-tape-rerun \
+      /out/bitmagnet-tape-rerun \
     && rm -rf bitmagnet-rs/target
 
 FROM debian:bookworm-slim AS runtime
+ARG REVISION
+ARG SOURCE_TREE
+
+RUN set -eu; \
+    test "${#REVISION}" -eq 40; \
+    case "${REVISION}" in *[!0-9a-f]*) echo "REVISION must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac; \
+    test "${#SOURCE_TREE}" -eq 40; \
+    case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/bitmagnet-io/bitmagnet" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${REVISION}" \
+      io.bitmagnet.source-tree="${SOURCE_TREE}" \
+      io.bitmagnet.classifier-tape-parity-contract="bitmagnet.classifier-tape-parity/v1"
+
+ENV BITMAGNET_SOURCE_COMMIT="${REVISION}" \
+    BITMAGNET_SOURCE_TREE="${SOURCE_TREE}"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 bitmagnet \
     && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
 
-COPY --from=builder /out/bitmagnet-writeset-replay /usr/local/bin/bitmagnet-writeset-replay
-COPY --from=builder /out/bitmagnet-localsearch-replay /usr/local/bin/bitmagnet-localsearch-replay
+COPY --from=go-builder /out/bitmagnet /usr/local/bin/bitmagnet
+COPY --from=rust-builder /out/bitmagnet-writeset-replay /usr/local/bin/bitmagnet-writeset-replay
+COPY --from=rust-builder /out/bitmagnet-localsearch-replay /usr/local/bin/bitmagnet-localsearch-replay
+COPY --from=rust-builder /out/bitmagnet-tape-rerun /usr/local/bin/bitmagnet-tape-rerun
 
 # The recorded corpus the local-search comparison diffs against. Baking it in
 # keeps the job self-contained; it is a few hundred KB and this is a gate

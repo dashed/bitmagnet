@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -49,29 +48,7 @@ type classifierInputHint struct {
 	ContentID     string `json:"contentId,omitempty"`
 }
 
-type classifierExpected struct {
-	ContentType     string    `json:"contentType"`
-	BaseTitle       *string   `json:"baseTitle"`
-	Date            *dateDTO  `json:"date"`
-	Languages       []string  `json:"languages"`
-	LanguageMulti   bool      `json:"languageMulti"`
-	Episodes        string    `json:"episodes"`
-	VideoResolution *string   `json:"videoResolution"`
-	VideoSource     *string   `json:"videoSource"`
-	VideoCodec      *string   `json:"videoCodec"`
-	Video3D         *string   `json:"video3d"`
-	VideoModifier   *string   `json:"videoModifier"`
-	ReleaseGroup    *string   `json:"releaseGroup"`
-	ContentAttached bool      `json:"contentAttached"`
-	Outcome         string    `json:"outcome"`
-	Error           string    `json:"error,omitempty"`
-}
-
-type dateDTO struct {
-	Year  int `json:"year"`
-	Month int `json:"month"`
-	Day   int `json:"day"`
-}
+type classifierExpected = NormalizedResult
 
 type classifierCorpusRecord struct {
 	ID        string             `json:"id"`
@@ -258,62 +235,7 @@ func toTorrent(input classifierInput) model.Torrent {
 }
 
 func normalizeClassifierResult(result classification.Result, err error) classifierExpected {
-	expected := classifierExpected{
-		Languages:       make([]string, 0, len(result.Languages)),
-		LanguageMulti:   result.LanguageMulti,
-		Episodes:        result.Episodes.String(),
-		ContentAttached: result.Content != nil,
-		Outcome:         "classified",
-	}
-	if result.ContentType.Valid {
-		expected.ContentType = result.ContentType.ContentType.String()
-	}
-	if result.BaseTitle.Valid {
-		expected.BaseTitle = stringPointer(result.BaseTitle.String)
-	}
-	if !result.Date.IsNil() {
-		expected.Date = &dateDTO{
-			Year:  int(result.Date.Year),
-			Month: int(result.Date.Month),
-			Day:   int(result.Date.Day),
-		}
-	}
-	for _, language := range result.Languages.Slice() {
-		expected.Languages = append(expected.Languages, language.String())
-	}
-	if result.VideoResolution.Valid {
-		expected.VideoResolution = stringPointer(result.VideoResolution.VideoResolution.String())
-	}
-	if result.VideoSource.Valid {
-		expected.VideoSource = stringPointer(result.VideoSource.VideoSource.String())
-	}
-	if result.VideoCodec.Valid {
-		expected.VideoCodec = stringPointer(result.VideoCodec.VideoCodec.String())
-	}
-	if result.Video3D.Valid {
-		expected.Video3D = stringPointer(result.Video3D.Video3D.String())
-	}
-	if result.VideoModifier.Valid {
-		expected.VideoModifier = stringPointer(result.VideoModifier.VideoModifier.String())
-	}
-	if result.ReleaseGroup.Valid {
-		expected.ReleaseGroup = stringPointer(result.ReleaseGroup.String)
-	}
-	if err == nil {
-		return expected
-	}
-
-	switch {
-	case errors.Is(err, classification.ErrDeleteTorrent):
-		expected.Outcome = "deleted"
-	case errors.Is(err, classification.ErrUnmatched):
-		expected.Outcome = "unmatched"
-	default:
-		expected.Outcome = "error"
-	}
-	expected.Error = err.Error()
-
-	return expected
+	return NormalizeResult(result, err)
 }
 
 func encodeClassifierCorpus(t *testing.T, records []classifierCorpusRecord) []byte {
@@ -350,8 +272,4 @@ func firstClassifierCorpusDifference(expected, actual []byte) (int, string, stri
 	}
 
 	return lineCount + 1, "<different line ending>", "<different line ending>"
-}
-
-func stringPointer(value string) *string {
-	return &value
 }

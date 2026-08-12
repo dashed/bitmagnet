@@ -12,7 +12,7 @@ import (
 )
 
 // TapeRerunSchema identifies the machine-comparable Go/Rust rerun report.
-const TapeRerunSchema = "bitmagnet.classifier-tape-rerun/v1"
+const TapeRerunSchema = "bitmagnet.classifier-tape-rerun/v2"
 
 // TapeRerunReport binds every per-record write set to the exact classifier
 // configuration digest of the tape that supplied its input and dependencies.
@@ -28,15 +28,16 @@ type TapeRerunReport struct {
 // verifies the recorded action sequence while running, then emits that verified
 // sequence so Rust can emit and compare its own actual sequence byte-for-byte.
 type TapeRerunRecord struct {
-	Subject          string                 `json:"subject"`
-	Attempt          int                    `json:"attempt"`
-	Workflow         string                 `json:"workflow"`
-	InputSHA256      string                 `json:"inputSha256"`
-	ProcessorState   tape.ProcessorState    `json:"processorState"`
-	ObservationCount int                    `json:"observationCount"`
-	ActionEntries    []tape.ActionEntry     `json:"actionEntries"`
-	Outcome          tape.RecordOutcomeKind `json:"outcome"`
-	WriteSet         TapeRerunWriteSet      `json:"writeSet"`
+	Subject          string                      `json:"subject"`
+	Attempt          int                         `json:"attempt"`
+	Workflow         string                      `json:"workflow"`
+	InputSHA256      string                      `json:"inputSha256"`
+	ProcessorState   tape.ProcessorState         `json:"processorState"`
+	ObservationCount int                         `json:"observationCount"`
+	ActionEntries    []tape.ActionEntry          `json:"actionEntries"`
+	Classification   classifier.NormalizedResult `json:"classification"`
+	Outcome          tape.RecordOutcomeKind      `json:"outcome"`
+	WriteSet         TapeRerunWriteSet           `json:"writeSet"`
 }
 
 // ReplayClassifierTape runs Go's real classifier and processor materializer
@@ -130,6 +131,7 @@ func ReplayClassifierTape(ctx context.Context, replay *tape.Replay) (TapeRerunRe
 			ProcessorState:   processorState,
 			ObservationCount: len(record.Observations),
 			ActionEntries:    actions,
+			Classification:   replayed.NormalizedClassification,
 			Outcome:          replayed.Outcome.Kind,
 			WriteSet:         writeSet,
 		})

@@ -8,7 +8,8 @@ use bitmagnet_model::Content;
 use bitmagnet_release::{
     Episodes, Video3D, VideoCodec, VideoModifier, VideoResolution, VideoSource,
 };
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::model::{ContentType, Date};
 
@@ -190,47 +191,95 @@ impl Classification {
     }
 }
 
+/// Stable, complete classifier boundary used by parity evidence.
+///
+/// This deliberately mirrors the Go frozen-corpus result field order and
+/// nullable/string projections. It contains attributes such as `baseTitle`,
+/// `date`, and `languageMulti` that are not all represented in the processor
+/// write set, so a same-input rerun cannot hide classifier drift behind an
+/// unchanged persistence image.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedClassifierResult {
+    pub content_type: String,
+    pub base_title: Option<String>,
+    pub date: Option<NormalizedClassifierDate>,
+    pub languages: Vec<String>,
+    pub language_multi: bool,
+    pub episodes: String,
+    pub video_resolution: Option<String>,
+    pub video_source: Option<String>,
+    pub video_codec: Option<String>,
+    #[serde(rename = "video3d")]
+    pub video_3d: Option<String>,
+    pub video_modifier: Option<String>,
+    pub release_group: Option<String>,
+    pub content_attached: bool,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// JSON projection of Go `model.Date` for [`NormalizedClassifierResult`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct NormalizedClassifierDate {
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+}
+
+impl NormalizedClassifierResult {
+    /// Normalize a classification exactly as the Go runner exposes it.
+    ///
+    /// A terminal workflow error returns Go's zero `classification.Result`, so
+    /// deleted, unmatched, and failed results must not retain attributes that
+    /// were accumulated before the terminal action. Applying that rule here as
+    /// well makes the evidence DTO safe even if a caller supplies a partial
+    /// Rust result alongside a terminal outcome.
+    #[must_use]
+    pub fn from_result(result: &Classification, outcome: &Outcome) -> Self {
+        let empty = Classification::default();
+        let result = if matches!(outcome, Outcome::Classified) {
+            result
+        } else {
+            &empty
+        };
+
+        Self {
+            content_type: result
+                .content_type
+                .map_or_else(String::new, |content_type| content_type.as_str().to_owned()),
+            base_title: result.base_title.clone(),
+            date: (!result.date.is_nil()).then_some(NormalizedClassifierDate {
+                year: i32::from(result.date.year),
+                month: i32::from(result.date.month),
+                day: i32::from(result.date.day),
+            }),
+            languages: result.languages.clone(),
+            language_multi: result.language_multi,
+            episodes: result.episodes.to_string(),
+            video_resolution: result
+                .video_resolution
+                .map(|value| value.as_str().to_owned()),
+            video_source: result.video_source.map(|value| value.as_str().to_owned()),
+            video_codec: result.video_codec.map(|value| value.as_str().to_owned()),
+            video_3d: result.video_3d.map(|value| value.as_str().to_owned()),
+            video_modifier: result.video_modifier.map(|value| value.as_str().to_owned()),
+            release_group: result.release_group.clone(),
+            content_attached: result.content_attached(),
+            outcome: outcome.tag().to_owned(),
+            error: outcome.error_string(),
+        }
+    }
+}
+
 /// Renders the corpus `expected` object for this result + terminal outcome.
 /// Field values (not order) match `normalizeClassifierResult`; the diff harness
 /// canonicalizes keys so declaration order is irrelevant.
 #[must_use]
 pub(crate) fn to_expected_json(result: &Classification, outcome: &Outcome) -> Value {
-    // On any terminal error Go's list-runner returns the zero Result, so the
-    // attributes are empty for deleted/unmatched/error outcomes.
-    let attrs = match outcome {
-        Outcome::Classified => result,
-        _ => &Classification::default(),
-    };
-
-    let date = if attrs.date.is_nil() {
-        Value::Null
-    } else {
-        json!({"year": attrs.date.year, "month": attrs.date.month, "day": attrs.date.day})
-    };
-
-    let mut obj = json!({
-        "contentType": attrs.content_type.map_or("", ContentType::as_str),
-        "baseTitle": attrs.base_title.clone().map_or(Value::Null, Value::String),
-        "date": date,
-        "languages": attrs.languages.clone(),
-        "languageMulti": attrs.language_multi,
-        "episodes": attrs.episodes.to_string(),
-        "videoResolution": opt_str(attrs.video_resolution.map(VideoResolution::as_str)),
-        "videoSource": opt_str(attrs.video_source.map(VideoSource::as_str)),
-        "videoCodec": opt_str(attrs.video_codec.map(VideoCodec::as_str)),
-        "video3d": opt_str(attrs.video_3d.map(Video3D::as_str)),
-        "videoModifier": opt_str(attrs.video_modifier.map(VideoModifier::as_str)),
-        "releaseGroup": attrs.release_group.clone().map_or(Value::Null, Value::String),
-        "contentAttached": attrs.content_attached(),
-        "outcome": outcome.tag(),
-    });
-
-    if let Some(err) = outcome.error_string() {
-        obj.as_object_mut()
-            .unwrap()
-            .insert("error".to_string(), Value::String(err));
-    }
-    obj
+    serde_json::to_value(NormalizedClassifierResult::from_result(result, outcome))
+        .expect("normalized classifier result is JSON-serializable")
 }
 
 /// Parses an attribute the hint stored, ignoring an absent or unrecognised one.
@@ -241,10 +290,6 @@ pub(crate) fn to_expected_json(result: &Classification, outcome: &Outcome) -> Va
 /// inventing a variant would hide that.
 fn parse_attribute<T: std::str::FromStr>(value: Option<&str>) -> Option<T> {
     value.filter(|v| !v.is_empty())?.parse().ok()
-}
-
-fn opt_str(v: Option<&str>) -> Value {
-    v.map_or(Value::Null, |s| Value::String(s.to_string()))
 }
 
 /// The terminal outcome of a workflow run, mirroring the `outcome`/`error`
@@ -273,6 +318,79 @@ impl Outcome {
         match self {
             Outcome::Classified => None,
             Outcome::Deleted(e) | Outcome::Unmatched(e) | Outcome::Error(e) => Some(e.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn populated_classification() -> Classification {
+        let mut episodes = Episodes::default();
+        episodes.add_episode(2, 3);
+
+        Classification {
+            content_type: Some(ContentType::TvShow),
+            base_title: Some("Example Show".to_owned()),
+            date: Date {
+                year: 2024,
+                month: 5,
+                day: 6,
+            },
+            languages: vec!["en".to_owned(), "fr".to_owned()],
+            language_multi: true,
+            episodes,
+            video_resolution: Some(VideoResolution::V1080p),
+            video_source: Some(VideoSource::Bluray),
+            release_group: Some("GROUP".to_owned()),
+            ..Classification::default()
+        }
+    }
+
+    #[test]
+    fn normalized_result_preserves_full_classifier_only_fields_and_order() {
+        let normalized = NormalizedClassifierResult::from_result(
+            &populated_classification(),
+            &Outcome::Classified,
+        );
+
+        assert_eq!(normalized.base_title.as_deref(), Some("Example Show"));
+        assert_eq!(
+            normalized.date,
+            Some(NormalizedClassifierDate {
+                year: 2024,
+                month: 5,
+                day: 6,
+            })
+        );
+        assert!(normalized.language_multi);
+        assert_eq!(normalized.episodes, "S02E03");
+
+        let encoded = serde_json::to_string(&normalized).expect("serialize normalized result");
+        assert_eq!(
+            encoded,
+            r#"{"contentType":"tv_show","baseTitle":"Example Show","date":{"year":2024,"month":5,"day":6},"languages":["en","fr"],"languageMulti":true,"episodes":"S02E03","videoResolution":"V1080p","videoSource":"BluRay","videoCodec":null,"video3d":null,"videoModifier":null,"releaseGroup":"GROUP","contentAttached":false,"outcome":"classified"}"#
+        );
+    }
+
+    #[test]
+    fn normalized_result_zeros_attributes_for_terminal_outcomes() {
+        let populated = populated_classification();
+        for outcome in [
+            Outcome::Deleted("deleted".to_owned()),
+            Outcome::Unmatched("unmatched".to_owned()),
+            Outcome::Error("failed".to_owned()),
+        ] {
+            let normalized = NormalizedClassifierResult::from_result(&populated, &outcome);
+            assert_eq!(normalized.content_type, "");
+            assert_eq!(normalized.base_title, None);
+            assert_eq!(normalized.date, None);
+            assert!(normalized.languages.is_empty());
+            assert!(!normalized.language_multi);
+            assert_eq!(normalized.episodes, "");
+            assert_eq!(normalized.outcome, outcome.tag());
+            assert_eq!(normalized.error, outcome.error_string());
         }
     }
 }

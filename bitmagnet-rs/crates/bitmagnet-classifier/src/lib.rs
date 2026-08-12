@@ -48,7 +48,7 @@ use serde_json::Value as Json;
 pub use errors::FlowError;
 pub use model::{ClassifierInput, ContentType, InputContent, InputFile, InputHint};
 pub use resolver::{ContentResolver, ContentResultItem, NullContentResolver, ResolveError};
-pub use result::{Classification, Outcome};
+pub use result::{Classification, NormalizedClassifierDate, NormalizedClassifierResult, Outcome};
 pub use source::{
     core_config_digest, FlagType, FlagValue, Source, SourceError,
     TAPE_EVIDENCE_ACTION_ENTRIES_WORKFLOW, TAPE_EVIDENCE_DELETED_WORKFLOW,
