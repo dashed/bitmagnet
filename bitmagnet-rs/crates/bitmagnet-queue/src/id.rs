@@ -11,7 +11,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A 20-byte info-hash. Serializes to a 40-char lowercase hex string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolId([u8; 20]);
 
 impl ProtocolId {

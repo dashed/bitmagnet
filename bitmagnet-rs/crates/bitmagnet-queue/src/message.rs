@@ -16,17 +16,16 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize, Serializer};
+use chrono::DateTime;
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::id::ProtocolId;
 use crate::job::{new_queue_job, JobError, QueueJob, QueueJobOptions};
 
-/// Go's `time.Time` as it appears in a job payload. Only the zero value occurs
-/// in the frozen goldens; Go marshals the zero time as RFC3339
-/// `"0001-01-01T00:00:00Z"` (`internal/processor/batch/message.go:15`,
-/// contract §1.2). A non-zero time would marshal as RFC3339Nano — deferred
-/// until a live producer needs it (no golden exercises it).
+/// Go's `time.Time` as it appears in a job payload. Go marshals both zero and
+/// non-zero values as RFC3339Nano strings. The original representation is
+/// retained so reserialization remains byte-compatible with the Go payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoTime(String);
 
@@ -42,6 +41,47 @@ impl Serialize for GoTime {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
     }
+}
+
+impl<'de> Deserialize<'de> for GoTime {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&value)
+            .map_err(|error| D::Error::custom(format!("invalid Go time {value:?}: {error}")))?;
+        Ok(Self(value))
+    }
+}
+
+fn deserialize_content_types<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const CONTENT_TYPES: &[&str] = &[
+        "movie",
+        "tv_show",
+        "music",
+        "ebook",
+        "comic",
+        "audiobook",
+        "game",
+        "software",
+        "xxx",
+    ];
+
+    Vec::<Option<String>>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| match value {
+            None => Ok(None),
+            Some(value) => {
+                let canonical = value.to_lowercase();
+                if CONTENT_TYPES.contains(&canonical.as_str()) {
+                    Ok(Some(canonical))
+                } else {
+                    Err(D::Error::custom(format!("invalid content type {value:?}")))
+                }
+            }
+        })
+        .collect()
 }
 
 /// `ClassifyMode` enum (`internal/processor/message.go:11-20`): `Default=0`,
@@ -122,7 +162,8 @@ pub fn process_torrent_job(
 /// `process_torrent_batch` payload — `batch.MessageParams` (`:14-24`).
 /// PascalCase. `InfoHashGreaterThan` (`[20]byte`) and `UpdatedBefore`
 /// (`time.Time`) are struct/array types → ALWAYS emitted despite `omitempty`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct ProcessTorrentBatchParams {
     #[serde(rename = "InfoHashGreaterThan")]
     pub info_hash_greater_than: ProtocolId,
@@ -141,8 +182,13 @@ pub struct ProcessTorrentBatchParams {
     pub chunk_size: u64,
     #[serde(rename = "BatchSize", skip_serializing_if = "is_zero_u64")]
     pub batch_size: u64,
-    #[serde(rename = "ContentTypes", skip_serializing_if = "Vec::is_empty")]
-    pub content_types: Vec<String>,
+    #[serde(
+        rename = "ContentTypes",
+        default,
+        deserialize_with = "deserialize_content_types",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub content_types: Vec<Option<String>>,
     #[serde(rename = "Orphans", skip_serializing_if = "is_false")]
     pub orphans: bool,
 }
@@ -160,6 +206,19 @@ impl Default for ProcessTorrentBatchParams {
             content_types: Vec::new(),
             orphans: false,
         }
+    }
+}
+
+impl ProcessTorrentBatchParams {
+    /// Go's `MessageParams.ApisDisabled`: only an explicit boolean false lowers
+    /// child-job priority from 10 to 4.
+    #[must_use]
+    pub fn apis_disabled(&self) -> bool {
+        self.classifier_flags
+            .as_ref()
+            .and_then(|flags| flags.get("apis_enabled"))
+            .and_then(Value::as_bool)
+            == Some(false)
     }
 }
 
@@ -240,7 +299,7 @@ pub fn blob_migration_job(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessTorrentParams, CLASSIFY_MODE_DEFAULT};
+    use super::{ProcessTorrentBatchParams, ProcessTorrentParams, CLASSIFY_MODE_DEFAULT};
 
     #[test]
     fn process_torrent_decode_applies_go_zero_values_for_omitted_fields() {
@@ -250,5 +309,25 @@ mod tests {
         assert!(params.classifier_workflow.is_empty());
         assert!(params.classifier_flags.is_none());
         assert!(params.info_hashes.is_empty());
+    }
+
+    #[test]
+    fn batch_decode_validates_time_and_canonicalizes_nullable_content_types() {
+        let params: ProcessTorrentBatchParams = serde_json::from_str(
+            r#"{"InfoHashGreaterThan":"0000000000000000000000000000000000000000","UpdatedBefore":"2026-08-12T04:05:06.123456789Z","ContentTypes":["MOVIE",null,"tv_show"]}"#,
+        )
+        .expect("decode canonical Go batch payload");
+        assert_eq!(
+            params.content_types,
+            vec![Some("movie".to_string()), None, Some("tv_show".to_string())]
+        );
+        assert!(serde_json::from_str::<ProcessTorrentBatchParams>(
+            r#"{"InfoHashGreaterThan":"0000000000000000000000000000000000000000","UpdatedBefore":"not-a-time"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ProcessTorrentBatchParams>(
+            r#"{"InfoHashGreaterThan":"0000000000000000000000000000000000000000","UpdatedBefore":"0001-01-01T00:00:00Z","ContentTypes":["not-real"]}"#
+        )
+        .is_err());
     }
 }

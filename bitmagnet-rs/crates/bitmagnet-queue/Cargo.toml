@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Phase-3 Lane Q — PG job-queue substrate for the bitmagnet Rust rewrite."
 
 [dependencies]
+chrono = { version = "0.4", default-features = false }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

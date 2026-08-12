@@ -8,12 +8,12 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
-	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor/batch"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/handler"
 	"go.uber.org/fx"
 	"gorm.io/gen"
+	"gorm.io/gen/field"
 )
 
 type Params struct {
@@ -42,24 +42,7 @@ func New(p Params) Result {
 					}
 					var scopes []func(gen.Dao) gen.Dao
 					if len(msg.ContentTypes) > 0 {
-						var contentTypes []string
-						var unknownContentType bool
-						for _, ct := range msg.ContentTypes {
-							if !ct.Valid {
-								unknownContentType = true
-							} else {
-								contentTypes = append(contentTypes, ct.ContentType.String())
-							}
-						}
-						scopes = append(scopes, func(tx gen.Dao) gen.Dao {
-							sq := d.TorrentContent.Where(
-								d.TorrentContent.InfoHash.EqCol(d.Torrent.InfoHash),
-							).Where(d.TorrentContent.ContentType.In(contentTypes...))
-							if unknownContentType {
-								sq = sq.Or(d.TorrentContent.ContentType.IsNull())
-							}
-							return tx.Where(gen.Exists(sq))
-						})
+						scopes = append(scopes, contentTypesScope(d, msg.ContentTypes))
 					}
 					if msg.Orphans {
 						scopes = append(scopes, func(tx gen.Dao) gen.Dao {
@@ -74,20 +57,13 @@ func New(p Params) Result {
 							)
 						})
 					}
-					priority := 10
-					// prioritise jobs where API calls are disabled as they will run faster:
-					if msg.ApisDisabled() {
-						priority = 4
-					}
-					maxInfoHash := msg.InfoHashGreaterThan
-					chunkSize := uint(0)
-					done := false
+					planner := batch.NewPlanner(*msg)
 					var queueJobs []*model.QueueJob
-					for {
+					for planner.ShouldQuery() {
 						torrents, findErr := d.Torrent.WithContext(ctx).
 							Scopes(scopes...).
 							Where(
-								d.Torrent.InfoHash.Gt(maxInfoHash),
+								d.Torrent.InfoHash.Gt(planner.MaxInfoHash()),
 								d.Torrent.UpdatedAt.Lt(msg.UpdatedBefore),
 							).
 							Select(d.Torrent.InfoHash).
@@ -97,46 +73,28 @@ func New(p Params) Result {
 						if findErr != nil {
 							return findErr
 						}
-						if len(torrents) == 0 {
-							done = true
-							break
-						}
 						var infoHashes []protocol.ID
 						for _, t := range torrents {
-							maxInfoHash = t.InfoHash
 							infoHashes = append(infoHashes, t.InfoHash)
-							chunkSize++
 						}
-						job, jobErr := processor.NewQueueJob(processor.MessageParams{
-							ClassifyMode:       msg.ClassifyMode,
-							ClassifierWorkflow: msg.ClassifierWorkflow,
-							ClassifierFlags:    msg.ClassifierFlags,
-							InfoHashes:         infoHashes,
-						}, model.QueueJobPriority(priority))
-						if jobErr != nil {
-							return jobErr
+						spec, planErr := planner.AddPage(infoHashes)
+						if planErr != nil {
+							return planErr
 						}
-						queueJobs = append(queueJobs, &job)
-						if len(torrents) < int(msg.BatchSize) {
-							done = true
-							break
-						}
-						if chunkSize >= msg.ChunkSize {
-							break
+						if spec != nil {
+							queueJob, jobErr := spec.QueueJob()
+							if jobErr != nil {
+								return jobErr
+							}
+							queueJobs = append(queueJobs, &queueJob)
 						}
 					}
-					if !done {
-						job, jobErr := batch.NewQueueJob(batch.MessageParams{
-							InfoHashGreaterThan: maxInfoHash,
-							UpdatedBefore:       msg.UpdatedBefore,
-							ClassifyMode:        msg.ClassifyMode,
-							ClassifierWorkflow:  msg.ClassifierWorkflow,
-							ClassifierFlags:     msg.ClassifierFlags,
-							ChunkSize:           msg.ChunkSize,
-							BatchSize:           msg.BatchSize,
-							ContentTypes:        msg.ContentTypes,
-							Orphans:             msg.Orphans,
-						})
+					plan, planErr := planner.Finalize()
+					if planErr != nil {
+						return planErr
+					}
+					for _, spec := range plan.Jobs[len(queueJobs):] {
+						job, jobErr := spec.QueueJob()
 						if jobErr != nil {
 							return jobErr
 						}
@@ -155,5 +113,39 @@ func New(p Params) Result {
 				handler.Concurrency(1),
 			), nil
 		}),
+	}
+}
+
+func contentTypesScope(
+	d *dao.Query,
+	contentTypeFilters []model.NullContentType,
+) func(gen.Dao) gen.Dao {
+	var contentTypes []string
+	var unknownContentType bool
+	for _, contentType := range contentTypeFilters {
+		if !contentType.Valid {
+			unknownContentType = true
+		} else {
+			contentTypes = append(contentTypes, contentType.ContentType.String())
+		}
+	}
+	return func(tx gen.Dao) gen.Dao {
+		var contentTypeCondition field.Expr
+		switch {
+		case len(contentTypes) > 0 && unknownContentType:
+			contentTypeCondition = field.Or(
+				d.TorrentContent.ContentType.In(contentTypes...),
+				d.TorrentContent.ContentType.IsNull(),
+			)
+		case len(contentTypes) > 0:
+			contentTypeCondition = d.TorrentContent.ContentType.In(contentTypes...)
+		default:
+			contentTypeCondition = d.TorrentContent.ContentType.IsNull()
+		}
+		sq := d.TorrentContent.Where(
+			d.TorrentContent.InfoHash.EqCol(d.Torrent.InfoHash),
+			contentTypeCondition,
+		)
+		return tx.Where(gen.Exists(sq))
 	}
 }

@@ -95,11 +95,7 @@ fn build_job(input: &Value) -> Result<QueueJob> {
             let content_types = input
                 .get("contentTypes")
                 .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .map(|v| v.as_str().unwrap_or_default().to_string())
-                        .collect()
-                })
+                .map(|a| a.iter().map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             let params = ProcessTorrentBatchParams {
                 info_hash_greater_than,
