@@ -4,8 +4,10 @@ mod announce_token;
 mod compact;
 mod dht_client;
 mod dht_dispatch;
+mod dht_driver;
 mod dht_responder;
 mod dht_send;
+mod dht_supervisor;
 mod inbound;
 mod krpc;
 mod ktable;
@@ -30,10 +32,12 @@ pub use dht_client::{
     PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
 };
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
+pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
 pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
 pub use dht_send::{send_dht_reply, DhtSendError};
+pub use dht_supervisor::{DhtSupervisor, DhtSupervisorExit};
 pub use inbound::{
     InboundError, InboundLimitKind, InboundShapeKind, InboundSyntaxKind,
     MAX_INBOUND_DATAGRAM_BYTES, MAX_INBOUND_NESTING_DEPTH, MAX_INBOUND_VALUES,

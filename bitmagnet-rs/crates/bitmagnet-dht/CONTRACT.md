@@ -773,3 +773,73 @@ helper to Go's lower `server.send` boundary and makes no runtime error-policy
 claim. `DatagramSender::Error` remains value-preserving without requiring a
 standard error source, so encode errors have their typed wire-error source
 while transport source chaining remains implementation-independent.
+
+The twenty-first bounded source-only slice connects the existing receive
+classifier, full dispatcher, and one-send helper into a finite full-DHT driver
+and supervisor:
+
+- `DhtDriver::from_dispatcher` owns one receiver, the caller's shared
+  transaction registry, one sender, and an already-configured
+  `DhtDispatcher`. `drive_one` performs exactly one receive and at most one
+  send. Queries reach the full responder, so all five exact methods plus
+  method-unknown and missing-arguments replies are owned; responses and KRPC
+  errors are delivered to the registry, while ignored, rejected, zero-length,
+  and other non-query outcomes return without responder table effects or a
+  send;
+- one successful reply returns the complete `DhtDispatchOutcome`, preserving a
+  typed local responder cause alongside its peer-visible fallback. Receive
+  failures retain the exact `ReceiveDispatchError`; send failures retain both
+  the exact prepared dispatch and the nested `DhtSendError`. The driver's
+  standard `Error` implementation exposes that immediate typed boundary when
+  the caller's receiver and sender errors implement `Error`; transport values
+  remain explicit enum payloads rather than asserted transitive sources.
+  Constructing the driver requires neither cloneable transports nor cloneable
+  table backends;
+- backpressure is inherited by awaiting the single sender future before
+  another receive can begin. Dropping or aborting that future performs no
+  retry. An accepted announce mutates synchronously during dispatch, before
+  sender construction, and is not rolled back by a typed send failure,
+  backpressure, future drop, supervisor shutdown, task abort, or sender
+  construction/poll panic. The receiver and sender cancellation gates require
+  their scripted handles to remain reusable after a dropped in-flight future;
+- `DhtSupervisor::from_driver` wraps that exact driver without adding another
+  routing or transport layer. `drive_batch` accepts a nonzero one-byte budget,
+  runs sequentially, and returns only `BudgetExhausted`, biased `Shutdown`, or
+  `Failed`. Every completed reply or no-reply outcome consumes one unit; a
+  failure does not enter the retained prefix. Budgets 1 and 255, repeated
+  resumed batches, an unknown method followed by later work, sender
+  backpressure, exact failure prefixes, and shutdown while receiving and
+  sending are locked by deterministic lifecycle gates;
+- a checked 64-bit Go runtime-bridge oracle covers 12 production
+  read/handle/respond/send observations: ping, populated find-node, peer hit
+  and miss, successful and failed announce, populated sampling, unknown and
+  missing-argument protocol errors, duplicate unsorted query decoding,
+  receive failure, and receive-length overreport. Fully typed Rust fixture
+  structs reject unknown fields at every object level, fix the row count and
+  ordered ID set, and exhaustively consume every serialized field. Ten
+  datagram rows replay through a fresh `DhtDriver` and scripted table with
+  exact destination, canonical response bytes, call trace, send-time state,
+  final state, and transport-error identity; the two receive failures replay
+  as their exact typed Rust boundaries;
+- the bridge also records deliberate outer-loop differences. Production Go
+  enters a second receive after each handled datagram, logs and swallows its
+  one scripted send failure, and panics on receive error or an overreported
+  length. This finite Rust driver performs only one receive, returns send
+  failure, and turns both receive conditions into typed errors. Those are
+  explicit hardenings, not wire-parity claims. Go's concurrent handler
+  goroutines, context timeout, log policy, and unbounded continuation remain
+  outer runtime evidence; and
+- one bounded Tokio IPv4 loopback composes the production adapter with the full
+  supervisor for a ping request and exact response routing. The original
+  `PingFindNodeDriver`, `PingFindNodeSupervisor`, their outcomes/errors/exits,
+  and every legacy responder, dispatcher, send, and client surface remain
+  distinct and exhaustively compile-gated; the full supervisor has no legacy
+  `UnownedQuery` exit because the full dispatcher owns unknown methods.
+
+This slice still does not install a production DHT runtime. It adds no socket
+binding policy, receive-loop spawn, concurrent handler fan-out, limiter,
+responder timeout, retry, send queue, metrics, logging, node discovery,
+shutdown signal owner, task supervision, crawler orchestration, external
+network traffic, or deployment wiring. The batch is caller-bounded and
+sequential, and its shutdown future and transport lifetime remain caller
+owned.
