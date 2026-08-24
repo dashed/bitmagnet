@@ -970,3 +970,40 @@ logging, crawler scheduling and persistence, application configuration/Fx
 wiring, deployment wiring, and external bootstrap traffic also remain outside
 this slice. Those are subsequent runtime milestones, not claims made by this
 checkpoint.
+
+The twenty-fourth slice replaces that sequential runtime loop with bounded
+query fan-out while leaving every legacy finite driver and supervisor intact:
+
+- `DhtConcurrentSupervisor` owns one `ReceiveDispatcher`, one cloneable sender
+  prototype, one shared dispatcher, and one `JoinSet`. Its continuous `run`
+  loop biases shutdown before a nonempty handler join and a handler join before
+  the next receive. Response and error envelopes are therefore correlated
+  inline without consuming query capacity, even while every admitted query
+  reply is backpressured;
+- each admitted query owns one sender clone and one handler task through
+  dispatch and its exact awaited send. `DhtRuntime` uses a fixed capacity of 64.
+  At capacity, Rust drops the newest query before responder dispatch, so it
+  causes no KTable mutation and produces no reply. This fixed bound and
+  drop-newest overload policy are deliberate hardenings over Go's unbounded
+  goroutine per decoded query;
+- shutdown stops admission, aborts every handler, and fully drains the owned
+  task set before returning. The first observed receive or reply-send failure
+  performs the same sibling cleanup and retains the existing exact
+  `DhtDriverError`. A handler panic resumes its original payload after cleanup,
+  so the runtime's existing Tokio `JoinError` boundary remains exhaustive.
+  Accepted responder mutations still precede send and are never rolled back by
+  backpressure, send failure, or shutdown; and
+- deterministic channel gates hold one reply send pending while delivering a
+  later registered response, prove capacity-one drop-before-mutation and later
+  slot reuse, retain an exact send failure while aborting a blocked sibling,
+  preserve a handler panic payload, and prove shutdown drains the blocked
+  handler. The checked Go concurrency/inbound oracle separately records Go's
+  actual blocked-send/later-response partial order and the exact production
+  limiter rejection seam used by the following slice.
+
+This slice does not yet consult `DhtInboundRateLimiter`, send an overload
+rejection, expose the capacity as configuration, or count dropped queries. It
+also does not add Go's five-second responder deadline, swallowed reply-send
+policy, discovery, metrics, health, logging, crawler/persistence wiring, or
+external bootstrap traffic. Inbound enforcement and a nonblocking rejection
+path are the next runtime checkpoint.

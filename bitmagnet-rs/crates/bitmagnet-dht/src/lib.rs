@@ -3,6 +3,7 @@
 mod announce_token;
 mod compact;
 mod dht_client;
+mod dht_concurrent_supervisor;
 mod dht_dispatch;
 mod dht_driver;
 mod dht_responder;
@@ -33,6 +34,7 @@ pub use dht_client::{
     DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
     PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
 };
+pub use dht_concurrent_supervisor::{DhtConcurrentSupervisor, DhtConcurrentSupervisorExit};
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
 pub use dht_responder::{

@@ -1,20 +1,20 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::num::NonZeroU8;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::{
-    CryptoTransactionIdIssuer, DhtClient, DhtClientError, DhtDispatcher, DhtDriver, DhtDriverError,
-    DhtOutboundRateLimiter, DhtResponder, DhtSupervisor, DhtSupervisorExit, FindNodeResult,
-    GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult,
-    TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender,
-    TransactionRegistry,
+    CryptoTransactionIdIssuer, DhtClient, DhtClientError, DhtConcurrentSupervisor,
+    DhtConcurrentSupervisorExit, DhtDispatcher, DhtDriverError, DhtOutboundRateLimiter,
+    DhtResponder, FindNodeResult, GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult,
+    SampleInfoHashesResult, TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError,
+    TokioIpv4UdpWeakSender, TransactionRegistry,
 };
 
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
-const SUPERVISOR_BATCH_BUDGET: NonZeroU8 = NonZeroU8::MAX;
+const MAX_INFLIGHT_QUERIES: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 
 /// Configuration for the initial owned IPv4 DHT runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub type DhtRuntimeDriverError = DhtDriverError<TokioIpv4UdpError, TokioIpv4UdpE
 /// A terminal result from the owned DHT task.
 #[derive(Debug)]
 pub enum DhtRuntimeExit {
-    /// Graceful shutdown won before another sequential step completed.
+    /// Graceful shutdown won before another receive or joined query handler.
     Shutdown,
     /// The receive, reply-encode, or reply-send boundary failed.
     Failed(DhtRuntimeDriverError),
@@ -160,10 +160,11 @@ impl DhtRuntimeClient {
 
 /// The initial owned production DHT composition over one shared IPv4 socket.
 ///
-/// The background task uses the finite supervisor in repeated batches. Within
-/// each batch it receives, dispatches, and sends sequentially; bounded query
-/// concurrency is deliberately outside this first runtime slice. The inbound
-/// rate limiter and an outer responder timeout are also not wired here yet.
+/// The background task admits at most 64 concurrent query handlers. Response
+/// and error envelopes bypass that capacity and are delivered inline to the
+/// transaction registry even while reply sends are backpressured. At capacity,
+/// the newest query is silently dropped before responder dispatch. The inbound
+/// rate limiter and an outer responder timeout are not wired here yet.
 pub struct DhtRuntime {
     local_addr: SocketAddrV4,
     local_id: Id20,
@@ -175,8 +176,9 @@ pub struct DhtRuntime {
 }
 
 impl DhtRuntime {
-    /// Construct the production table/responder/registry/driver composition,
-    /// bind its shared IPv4 UDP socket, and spawn the owned sequential task.
+    /// Construct the production table/responder/registry/supervisor composition,
+    /// bind its shared IPv4 UDP socket, and spawn the owned bounded-concurrent
+    /// task.
     pub async fn start(config: DhtRuntimeConfig) -> Result<Self, DhtRuntimeStartError> {
         let local_id = random_local_id().map_err(DhtRuntimeStartError::LocalId)?;
         let table = KTable::new(local_id);
@@ -193,23 +195,20 @@ impl DhtRuntime {
         let weak_sender = sender.downgrade();
         let client = DhtRuntimeClient::new(local_id, &registry, config.query_timeout, weak_sender);
 
-        let driver = DhtDriver::from_dispatcher(receiver, registry.clone(), sender, dispatcher);
-        let mut supervisor = DhtSupervisor::from_driver(driver);
+        let mut supervisor = DhtConcurrentSupervisor::from_dispatcher(
+            receiver,
+            registry.clone(),
+            sender,
+            dispatcher,
+            MAX_INFLIGHT_QUERIES,
+        );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_registry = registry.clone();
         let task = tokio::spawn(async move {
             let _registry_guard = RegistryCloseGuard(task_registry);
-            loop {
-                match supervisor
-                    .drive_batch(SUPERVISOR_BATCH_BUDGET, wait_for_shutdown(&mut shutdown_rx))
-                    .await
-                {
-                    DhtSupervisorExit::BudgetExhausted { .. } => {}
-                    DhtSupervisorExit::Shutdown { .. } => return DhtRuntimeExit::Shutdown,
-                    DhtSupervisorExit::Failed { error, .. } => {
-                        return DhtRuntimeExit::Failed(error);
-                    }
-                }
+            match supervisor.run(wait_for_shutdown(&mut shutdown_rx)).await {
+                DhtConcurrentSupervisorExit::Shutdown => DhtRuntimeExit::Shutdown,
+                DhtConcurrentSupervisorExit::Failed(error) => DhtRuntimeExit::Failed(error),
             }
         });
 
