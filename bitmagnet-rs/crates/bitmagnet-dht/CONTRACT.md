@@ -1339,3 +1339,85 @@ to production. It supersedes slice twenty-seven only where that slice lists
 crawler batching, deduplication, filtering, and routing among the
 ping/find-node/sample-infohashes lanes as wholly absent; all later crawler and
 deployment exclusions remain in force.
+
+The twenty-ninth slice consumes only the scheduler's discovered-node ping lane
+with an owned, bounded query worker:
+
+- `DhtDiscoveredNodePingWorker::new` owns the route receiver, the supplied
+  production `DhtRuntimeClient` handle, the shared `KTable`, and every spawned
+  query.
+  Its default maximum in-flight count is ten, matching Go's default ping
+  concurrency, while the scheduler's ping route retains its separate capacity
+  of ten. `with_config` changes only the nonzero concurrency bound. The worker
+  does not poll or dequeue the route at capacity. Within the worker and its
+  default input route, retention is therefore at most ten active queries plus
+  ten queued nodes, with no hidden eleventh acquire waiter. A node and filtered
+  suffix held by the scheduler while it awaits route capacity, and any upstream
+  discovery ingress, remain governed by slice twenty-eight and are outside this
+  worker-local bound. Go instead dequeues before acquiring its semaphore and
+  can retain capacity plus concurrency plus one waiter;
+- the worker accepts state-free `RoutingNode` values produced by slice
+  twenty-eight. It queries the exact input address and intentionally does not
+  look the ID up in the table before the request. Go's `runPing` first rejects
+  a dropped live `KTableNodeHandle` and skips a handle whose timestamp is
+  strictly after `now - oldPeerThreshold`; the factory fixes that threshold at
+  fifteen minutes. Those guards belong to the future periodic old-node producer
+  and are not inferred from a state-free discovered node. This slice therefore
+  neither implements nor claims those two handle behaviors;
+- a successful reply to a zero advertised ID puts the response ID at the input
+  address with `Responded`. A matching nonzero response does the same. A
+  mismatching response to a nonzero advertised ID drops the advertised ID and
+  increments the mismatch counter. A client error deliberately retains the
+  deployed Go quirk: it attempts to drop the zero ID, not the advertised ID.
+  Consequently an existing advertised node can survive the error unchanged.
+  Rust retains the decision and table effect but has no KTable command reason
+  or error-identity field; the oracle's exact Go reason and error identity are
+  Go-only evidence. There is no await between a completed query result and its
+  table command;
+- route EOF stops intake, waits for every owned query and returns typed
+  `InputClosed`. Caller shutdown is biased ahead of a ready join or receive: it
+  closes and synchronously drains the route, aborts all unresolved query tasks,
+  joins the complete task set, and returns typed `Shutdown` with exact queued
+  drops and cancellations actually observed. A task that has already completed
+  its synchronous table command survives shutdown and is not counted as
+  cancelled; the oracle's cancel-after-success row directly freezes that
+  boundary. A child panic stops intake, aborts and drains its siblings, then
+  resumes the original payload. Dropping the worker closes intake and aborts
+  its owned task set, so no query is deliberately detached. These are Rust
+  lifecycle hardenings over Go's spawned, unjoined callbacks, swallowed lane
+  error, repeated closed-channel receive, and ping-lane nil-node panic;
+- sender-free `DhtDiscoveredNodePingStatsHandle` snapshots nine saturating
+  monotonic counters: dequeued nodes; started, successful, and failed client
+  futures; ID mismatches; attempted put and drop commands; and shutdown-queued
+  drops and observed query cancellations. Successful replies include ID
+  mismatches. Command counters include rejected or no-op table commands, so
+  the Go-compatible zero-ID drop is observable even when zero was absent.
+  `queries_started` proves only that a local client future entered the owned
+  task set, not rate-limit admission or UDP transmission; similarly, cancelling
+  a local future does not prove that it sent no datagram. Each live snapshot is
+  a set of independent relaxed loads. Cross-field conservation is promised only
+  after a normal terminal exit; and
+- the strict ping consumer freezes nine ordered real-Go rows, the fixture
+  SHA-256
+  `26d403becff0caeb0a27ec9027a366d51e19cdb7129ff05715cf24a6d2e1b040`,
+  every nested field and optional shape, and eight embedded Go source digests.
+  It executes the five state-free worker rows through the real private Rust
+  core, binding each scripted outcome to the exact put/drop decision, query
+  address, exit, complete terminal stats, and KTable state. The two
+  dropped/recent rows are explicitly deferred live-handle evidence; the lane
+  error row is Go-only and is paired with Rust's empty-route `InputClosed`
+  delta; and the remaining row freezes source, factory, capacity, concurrency,
+  and lifecycle facts. Go accessor counts, context identity, exact batch and
+  option traces, command reasons, and error identity remain explicitly Go-only
+  metadata rather than Rust-observed parity.
+
+This slice does not compose the scheduler or worker into `DhtRuntime` or an
+application supervisor, produce periodic old-node or bootstrap work, implement
+the find-node or sample-infohashes workers, rotate a find target, recursively
+feed response nodes into discovery, triage info hashes, run
+get-peers/scrape/metainfo stages, persist torrents or sources, expose
+Prometheus or other external metrics, add health or logging integration,
+change application or deployment configuration, contact external DHT nodes,
+or roll out to production. It supersedes slice twenty-eight only where that
+slice says the discovered-node ping query worker is absent; all other scheduler,
+crawler, application, and deployment exclusions remain in force.
