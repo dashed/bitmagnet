@@ -73,9 +73,7 @@ impl DhtInboundStats {
 }
 
 // These mutation methods are deliberately crate-private: the supervisor is the
-// sole classification boundary. They are consumed by the following wiring
-// slice, so keep this bounded primitive warning-clean while it is still dormant.
-#[allow(dead_code)]
+// sole classification boundary.
 impl DhtInboundStats {
     pub(crate) fn record_admitted(&self) {
         increment_saturating(&self.inner.admitted);
