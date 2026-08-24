@@ -19,6 +19,7 @@ mod ping_find_node_driver;
 mod ping_find_node_send;
 mod ping_find_node_supervisor;
 mod query_send;
+mod rate_limit;
 mod receive;
 mod reply;
 mod routing_tree;
@@ -62,6 +63,7 @@ pub use ping_find_node_driver::{
 pub use ping_find_node_send::{send_ping_find_node_reply, DatagramSender, PingFindNodeSendError};
 pub use ping_find_node_supervisor::{PingFindNodeSupervisor, PingFindNodeSupervisorExit};
 pub use query_send::{register_and_send_query, QuerySendError};
+pub use rate_limit::{DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError};
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,

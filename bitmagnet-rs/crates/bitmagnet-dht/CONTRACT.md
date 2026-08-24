@@ -843,3 +843,84 @@ shutdown signal owner, task supervision, crawler orchestration, external
 network traffic, or deployment wiring. The batch is caller-bounded and
 sequential, and its shutdown future and transport lifetime remain caller
 owned.
+
+The twenty-second bounded source-only slice adds the two production DHT rate
+policies as independent, cloneable values, without wiring either policy into a
+client, responder, driver, supervisor, or socket runtime:
+
+- `DhtInboundRateLimiter::new` and `Default` construct an initially full
+  per-IP one-token-per-second bucket with burst ten, bounded to 1,000 keys with
+  a fixed 20-second lifetime, followed by one shared 50-per-second bucket with
+  burst twenty. `allow(SocketAddr)` consumes the per-IP token before consulting
+  the global bucket, so a later global denial retains the Go production
+  wrapper's consumption; a per-IP denial short-circuits without consuming a
+  global token;
+- `DhtOutboundRateLimiter::new` and `Default` construct initially full
+  per-IP one-token-per-second buckets with burst four and the same 1,000-key,
+  fixed-20-second bound. `wait(SocketAddr)` is the no-deadline/no-cancellation
+  convenience. `wait_until(SocketAddr, Instant)` and `wait_with(SocketAddr,
+  Option<Instant>, Future<Output = ()>)` return the exhaustive
+  `DhtRateLimitWaitError::{Cancelled, WouldExceedDeadline}` boundary. All three
+  reserve in bucket lock-acquisition order and await the exact action time
+  without holding either cache or bucket mutex. Clones share the same cache,
+  buckets, reservations, and global inbound state;
+- keys discard the socket port and IPv6 flow information. IPv4, IPv4-mapped
+  IPv6, and native IPv6 remain distinct; nonzero numeric IPv6 scope IDs use
+  Go's exact `%N` suffix, so `fe80::1%7` and `fe80::1%8` are distinct public
+  Rust keys as well as distinct real-Go oracle observations;
+- cache hits refresh capacity recency but not expiry. Capacity replacement is
+  least-recently-used. An entry remains valid at its exact insertion deadline
+  and is replaced on the first access strictly after 20 seconds with a full
+  bucket. Rust performs this expiry lazily during access and owns no cleanup
+  task. Go's expirable LRU uses `time.Now` and a non-injectable background
+  reaper; its positive-TTL oracle therefore locks only immediate pre-expiry
+  identity. The deterministic Rust boundary and reset are independently
+  locked with Tokio paused time;
+- Rust's generic token-to-duration helper saturates non-finite or
+  greater-than-or-equal-to-MaxInt64 nanosecond results. Go's `x/time/rate`
+  guard uses strict greater-than before its float-to-`time.Duration`
+  conversion, so behavior at that astronomical exact float boundary is not a
+  parity claim. The fixed production one-token intervals cannot reach this
+  delta;
+- dropping an uncompleted outbound wait cancels only the reservation tokens
+  that Go's `x/time/rate` calculation permits. Dropping or aborting the latest
+  wait removes its extra scheduled delay but does not manufacture an immediate
+  token; a replacement still acts at the original next-token instant. An
+  older canceled reservation cannot over-restore across a later reservation,
+  and a completed wait is committed. `wait_with` polls cancellation first, so
+  a pre-ready cancellation wins before cache lookup or deadline validation and
+  a post-reservation cancellation ready alongside admission wins the biased
+  tie; cancellation while sleeping rolls back the eligible reservation. An
+  expired deadline and a reservation strictly after a future deadline return
+  `WouldExceedDeadline` without reserving, while an action exactly at the
+  deadline is accepted. Rust preserves these Go outcome classes as a typed
+  local error instead of exposing Go context and string errors;
+- poisoned internal cache and bucket mutexes recover the protected state
+  instead of cascading another panic. Source-unit poison gates and public
+  high-contention clone gates cover that behavior. Concurrent outbound waits
+  lock reservation order, one completion per one-second refill, task abort,
+  and reuse; and
+- four fully typed, unknown-field-denying real-Go JSONL oracles are consumed
+  with fixed row counts and ordered IDs. The four generic token-bucket rows and
+  five generic keyed-LRU rows are exhaustive primitive evidence because the
+  Rust public API intentionally exposes only fixed production policies. Three
+  responder-limiter rows lock production defaults, per-IP-before-global
+  ordering, exact textual keys, denial, and delegate effects. Seven query-
+  limiter rows lock wait-before-delegate ordering, exact wait/delegate error
+  identity, decided cancellation/deadline cases, textual keys, and outbound
+  production defaults. The Rust public-default lifecycle gates separately
+  exercise exact bursts, refill times, ports/flow ignored, mapped/native/scoped
+  address identities, 1,000-key eviction, strict TTL, typed pre-cancellation,
+  expired and insufficient deadlines, in-flight cancellation rollback, simple
+  future drop, abort, clone sharing, and contention. Go responder/query
+  delegate effects remain outer composition evidence because this slice
+  exports policy primitives rather than wrapper types.
+
+No existing responder, client, query-send, driver, supervisor, transport,
+transaction, KTable, or legacy ping/find-node type is wrapped or changed by
+this slice, and it adds no Cargo dependency. In particular, admission is not
+yet enforced on inbound dispatch and outbound waits are not yet consulted by
+`DhtClient` or `register_and_send_query`. This slice adds no continuous receive
+loop, responder timeout, metrics, health, logging, discovery, crawler
+scheduling, socket binding, configuration, deployment wiring, or external
+network behavior.
