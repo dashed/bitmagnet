@@ -53,10 +53,10 @@ pub use dht_discovered_node_ping_worker::{
     DhtDiscoveredNodePingWorkerConfig, DhtDiscoveredNodePingWorkerExit,
 };
 pub use dht_discovered_node_scheduler::{
-    DhtDiscoveredNodeRouteReceiver, DhtDiscoveredNodeRoutes, DhtDiscoveredNodeScheduler,
-    DhtDiscoveredNodeSchedulerConfig, DhtDiscoveredNodeSchedulerConfigError,
-    DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStats,
-    DhtDiscoveredNodeSchedulerStatsHandle,
+    DhtDiscoveredNodeFindInput, DhtDiscoveredNodeFindInputClosed, DhtDiscoveredNodeRouteReceiver,
+    DhtDiscoveredNodeRoutes, DhtDiscoveredNodeScheduler, DhtDiscoveredNodeSchedulerConfig,
+    DhtDiscoveredNodeSchedulerConfigError, DhtDiscoveredNodeSchedulerExit,
+    DhtDiscoveredNodeSchedulerStats, DhtDiscoveredNodeSchedulerStatsHandle,
 };
 pub use dht_discovery::{
     dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,

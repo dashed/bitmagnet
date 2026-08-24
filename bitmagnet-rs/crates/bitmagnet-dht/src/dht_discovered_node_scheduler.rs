@@ -68,13 +68,71 @@ pub struct DhtDiscoveredNodeRoutes {
     pub sample_infohashes: DhtDiscoveredNodeRouteReceiver,
 }
 
+/// Cloneable producer capability for the bounded `find_node` work route.
+///
+/// Every clone shares the scheduler's single configured `find_node` capacity;
+/// cloning does not create another queue. [`Self::send`] waits for that shared
+/// capacity and starts no task. Sequential awaited sends from one producer
+/// preserve program order. Competing send or reserve futures enter Tokio's
+/// FIFO waiter queue by runtime registration, with no source priority or
+/// deterministic cross-producer or cross-source order promised.
+///
+/// Each blocked `send` future owns one pending node outside the bounded queue.
+/// Every live capability clone also delays receiver EOF. Dropping the final
+/// clone releases that ownership, while closing or dropping the unique route
+/// receiver wakes blocked sends with [`DhtDiscoveredNodeFindInputClosed`].
+/// Direct sends bypass scheduler batching, deduplication, and KTable filtering.
+/// This seam records no external-producer counters: `routed_find_node` remains
+/// specific to scheduler-origin commits, and any producer must own its own
+/// stats.
+#[derive(Clone)]
+pub struct DhtDiscoveredNodeFindInput {
+    sender: mpsc::Sender<RoutingNode>,
+}
+
+/// A `find_node` input node that could not be queued because its receiver
+/// closed.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the discovered-node find input receiver is closed")]
+pub struct DhtDiscoveredNodeFindInputClosed {
+    node: RoutingNode,
+}
+
+impl DhtDiscoveredNodeFindInputClosed {
+    /// Recover the exact node that was not queued.
+    #[must_use]
+    pub fn into_node(self) -> RoutingNode {
+        self.node
+    }
+}
+
+impl DhtDiscoveredNodeFindInput {
+    /// Wait for shared route capacity and queue one node.
+    ///
+    /// Dropping this future before it completes commits no node, drops that
+    /// future-owned node, and loses its place among capacity waiters. A caller
+    /// that needs to retry must retain a copy separately. A successful return
+    /// means the node was committed to the queue, not that the worker consumed
+    /// it. Receiver closure before capacity is acquired returns the exact
+    /// unsent node.
+    pub async fn send(&self, node: RoutingNode) -> Result<(), DhtDiscoveredNodeFindInputClosed> {
+        self.sender
+            .send(node)
+            .await
+            .map_err(|error| DhtDiscoveredNodeFindInputClosed { node: error.0 })
+    }
+}
+
 /// Unique consumer for one bounded discovered-node work route.
 pub struct DhtDiscoveredNodeRouteReceiver {
     receiver: mpsc::Receiver<RoutingNode>,
 }
 
 impl DhtDiscoveredNodeRouteReceiver {
-    /// Receive the next routed node, or `None` after scheduler exit and drain.
+    /// Receive the next routed node.
+    ///
+    /// Returns `None` only after every route producer and capability is gone,
+    /// or after this receiver is closed and its queued nodes are drained.
     pub async fn recv(&mut self) -> Option<RoutingNode> {
         self.receiver.recv().await
     }
@@ -131,6 +189,8 @@ pub struct DhtDiscoveredNodeSchedulerStats {
     /// Nodes that reached downstream route-capacity selection.
     pub route_attempts: u64,
     pub routed_ping: u64,
+    /// Nodes committed by the scheduler itself, excluding direct commits made
+    /// through [`DhtDiscoveredNodeFindInput`].
     pub routed_find_node: u64,
     pub routed_sample_infohashes: u64,
     pub shutdown_dropped: u64,
@@ -239,6 +299,19 @@ impl DhtDiscoveredNodeScheduler {
             },
             stats,
         ))
+    }
+
+    /// Clone a producer capability for the scheduler's existing `find_node`
+    /// route.
+    ///
+    /// The handle is created only when requested. Retaining it after the
+    /// scheduler exits keeps the `find_node` receiver open until the handle and
+    /// all of its clones are dropped or the receiver is explicitly closed.
+    #[must_use]
+    pub fn find_node_input(&self) -> DhtDiscoveredNodeFindInput {
+        DhtDiscoveredNodeFindInput {
+            sender: self.routes.find_node.clone(),
+        }
     }
 
     /// Consume discovered nodes until shutdown, producer EOF, or route EOF.
@@ -540,7 +613,11 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
     use super::*;
-    use crate::{dht_discovery_channel, DhtDiscoveryOffer, Id20};
+    use crate::{
+        dht_discovery_channel, DhtCrawlerTarget, DhtDiscoveredNodeFindStats,
+        DhtDiscoveredNodeFindWorker, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveryOffer,
+        DhtRuntime, DhtRuntimeConfig, Id20,
+    };
 
     fn node(value: u8, addr: SocketAddr) -> RoutingNode {
         let mut bytes = [0_u8; 20];
@@ -566,6 +643,17 @@ mod tests {
             find_node_capacity: NonZeroUsize::new(route_capacity).unwrap(),
             sample_infohashes_capacity: NonZeroUsize::new(route_capacity).unwrap(),
         }
+    }
+
+    async fn poll_once_pending<F>(mut future: std::pin::Pin<&mut F>)
+    where
+        F: std::future::Future,
+    {
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
     }
 
     #[test]
@@ -600,6 +688,295 @@ mod tests {
             DhtDiscoveredNodeScheduler::with_config(receiver, KTable::new(Id20::ZERO), invalid),
             Err(DhtDiscoveredNodeSchedulerConfigError::BatchIntervalOutOfRange)
         ));
+    }
+
+    #[tokio::test]
+    async fn default_without_requested_find_input_preserves_scheduler_owned_eof() {
+        let (sender, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        drop(sender);
+
+        assert_eq!(
+            scheduler.run(std::future::pending()).await,
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(routes.ping.recv().await, None);
+        assert_eq!(routes.find_node.recv().await, None);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn find_input_clones_delay_eof_until_the_last_clone_drops() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        let last_input = input.clone();
+        drop(scheduler);
+        drop(discovery);
+
+        assert_eq!(routes.ping.recv().await, None);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+        assert!(matches!(
+            routes.find_node.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let queued = v4(1, 1001);
+        input.send(queued).await.unwrap();
+        assert_eq!(routes.find_node.recv().await, Some(queued));
+        drop(input);
+        assert!(matches!(
+            routes.find_node.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(last_input);
+        assert_eq!(routes.find_node.recv().await, None);
+    }
+
+    #[test]
+    fn public_find_input_is_send_sync_and_closed_error_round_trips_its_node() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<DhtDiscoveredNodeFindInput>();
+        assert_send_sync::<DhtDiscoveredNodeFindInputClosed>();
+        let node = v4(1, 1001);
+        assert_eq!(DhtDiscoveredNodeFindInputClosed { node }.into_node(), node);
+    }
+
+    #[tokio::test]
+    async fn immediately_closed_find_input_returns_the_exact_unsent_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        routes.find_node.close();
+
+        let node = v4(1, 1001);
+        assert_eq!(input.send(node).await.unwrap_err().into_node(), node);
+    }
+
+    #[tokio::test]
+    async fn find_input_shares_capacity_and_sequential_sends_preserve_fifo() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        drop(scheduler);
+
+        let first = v4(1, 1001);
+        let second = v4(2, 1002);
+        input.send(first).await.unwrap();
+        let mut blocked = Box::pin(input.send(second));
+        poll_once_pending(blocked.as_mut()).await;
+
+        assert_eq!(routes.find_node.recv().await, Some(first));
+        assert_eq!(blocked.await, Ok(()));
+        assert_eq!(routes.find_node.recv().await, Some(second));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_pending_find_input_send_commits_nothing_and_loses_its_waiter_position() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        drop(scheduler);
+
+        let first = v4(1, 1001);
+        let cancelled = v4(2, 1002);
+        let later = v4(3, 1003);
+        input.send(first).await.unwrap();
+        let mut blocked = Box::pin(input.send(cancelled));
+        poll_once_pending(blocked.as_mut()).await;
+        drop(blocked);
+
+        assert_eq!(routes.find_node.recv().await, Some(first));
+        input.send(later).await.unwrap();
+        assert_eq!(routes.find_node.recv().await, Some(later));
+        assert!(matches!(
+            routes.find_node.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_find_receiver_unblocks_pending_send_with_the_exact_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        drop(scheduler);
+
+        let queued = v4(1, 1001);
+        let rejected = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected));
+        poll_once_pending(blocked.as_mut()).await;
+
+        routes.find_node.close();
+        let error = blocked.await.unwrap_err();
+        assert_eq!(error.into_node(), rejected);
+        assert_eq!(routes.find_node.recv().await, Some(queued));
+        assert_eq!(routes.find_node.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn dropping_find_receiver_unblocks_a_registered_waiter_with_the_exact_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.find_node_input();
+        drop(scheduler);
+
+        let queued = v4(1, 1001);
+        let rejected = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected));
+        poll_once_pending(blocked.as_mut()).await;
+
+        drop(routes.find_node);
+        assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_rejects_pending_input_without_counting_it_as_queued() {
+        let (_discovery_ingress, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _scheduler_stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        routes.ping.close();
+        routes.sample_infohashes.close();
+        let input = scheduler.find_node_input();
+
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            sample_infohashes_interval: 10,
+        })
+        .await
+        .unwrap();
+        let client = runtime.client();
+        let table = KTable::new(Id20::ZERO);
+        let (recursive_discovery, _recursive_receiver) =
+            dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (worker, worker_stats) = DhtDiscoveredNodeFindWorker::new(
+            routes.find_node,
+            client,
+            table,
+            recursive_discovery,
+            DhtCrawlerTarget::new(Id20::ZERO),
+        );
+
+        let queued = v4(1, 1001);
+        let pending = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(pending));
+        poll_once_pending(blocked.as_mut()).await;
+
+        assert_eq!(
+            worker.run(std::future::ready(())).await,
+            DhtDiscoveredNodeFindWorkerExit::Shutdown {
+                queued_dropped: 1,
+                tasks_cancelled: 0,
+                recursive_nodes_dropped: 0,
+            }
+        );
+        assert_eq!(blocked.await.unwrap_err().into_node(), pending);
+        assert_eq!(
+            worker_stats.snapshot(),
+            DhtDiscoveredNodeFindStats {
+                shutdown_queued_dropped: 1,
+                ..DhtDiscoveredNodeFindStats::default()
+            }
+        );
+
+        drop(scheduler);
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            crate::DhtRuntimeExit::Shutdown
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_and_external_input_share_capacity_but_not_scheduler_stats() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let table = KTable::new(Id20::ZERO);
+        let external = v4(1, 1001);
+        assert_eq!(table.put_node(external), crate::RoutingPutResult::Accepted);
+        let (scheduler, mut routes, stats) =
+            DhtDiscoveredNodeScheduler::with_config(receiver, table, config(1, 1)).unwrap();
+        routes.ping.close();
+        routes.sample_infohashes.close();
+        let input = scheduler.find_node_input();
+        let discovered = v4(2, 1002);
+        input.send(external).await.unwrap();
+        assert_eq!(discovery.offer(discovered), DhtDiscoveryOffer::Queued);
+        drop(discovery);
+
+        let task = tokio::spawn(scheduler.run(std::future::pending()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = stats.snapshot();
+                if snapshot.route_attempts == 1 {
+                    assert_eq!(snapshot.routed_find_node, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the discovered node must block behind external find input");
+        assert!(!task.is_finished());
+
+        assert_eq!(routes.find_node.recv().await, Some(external));
+        assert_eq!(
+            task.await.unwrap(),
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(routes.find_node.recv().await, Some(discovered));
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.received, 1);
+        assert_eq!(snapshot.batches, 1);
+        assert_eq!(snapshot.filter_calls, 1);
+        assert_eq!(snapshot.route_attempts, 1);
+        assert_eq!(snapshot.routed_find_node, 1);
+        assert_eq!(snapshot.routed_ping, 0);
+        assert_eq!(snapshot.routed_sample_infohashes, 0);
+        drop(input);
+        assert_eq!(routes.find_node.recv().await, None);
     }
 
     #[tokio::test]
