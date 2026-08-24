@@ -3,8 +3,10 @@ package responder
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -25,16 +27,38 @@ var updateDHTResponderNodeDiscoveryParity = flag.Bool(
 )
 
 const (
-	nodeDiscoveryOrigin   = "00112233445566778899aabbccddeeff10203040"
-	nodeDiscoveryInfoHash = "11223344556677889900aabbccddeeff01020304"
-	nodeDiscoveryTarget   = "0000000000000000000000000000000000000011"
+	nodeDiscoveryOrigin        = "00112233445566778899aabbccddeeff10203040"
+	nodeDiscoveryInfoHash      = "11223344556677889900aabbccddeeff01020304"
+	nodeDiscoveryTarget        = "0000000000000000000000000000000000000011"
+	nodeDiscoveryFixtureSHA256 = "25cdc090696528dee56a89fec486b3ec36dd0021cc7c4d64844ad13c36c5918a"
 )
+
+var nodeDiscoveryFixtureIDs = [...]string{
+	"ping_success_read_only_ipv4",
+	"find_node_success_mapped_ipv4",
+	"get_peers_success_scoped_ipv6",
+	"announce_peer_success_mutates_before_notification",
+	"sample_infohashes_success_native_ipv6",
+	"ping_success_zero_requester_id",
+	"duplicate_successes_are_preserved",
+	"missing_arguments_suppresses_notification",
+	"unknown_method_suppresses_notification",
+	"missing_target_suppresses_notification",
+	"invalid_announce_token_suppresses_notification",
+}
 
 type nodeDiscoveryFixture struct {
 	ID        string                `json:"id"`
 	Subsystem string                `json:"subsystem"`
+	Oracle    nodeDiscoveryOracle   `json:"oracle"`
 	Input     nodeDiscoveryInput    `json:"input"`
 	Expected  nodeDiscoveryExpected `json:"expected"`
+}
+
+type nodeDiscoveryOracle struct {
+	Composition               string `json:"composition"`
+	Ingress                   string `json:"ingress"`
+	ProductionSocketReachable bool   `json:"productionSocketReachable"`
 }
 
 type nodeDiscoveryInput struct {
@@ -45,6 +69,7 @@ type nodeDiscoveryInput struct {
 	Target      string               `json:"target,omitempty"`
 	Token       string               `json:"token,omitempty"`
 	Source      nodeDiscoveryAddress `json:"source"`
+	ReadOnly    bool                 `json:"readOnly"`
 	Attempts    int                  `json:"attempts"`
 }
 
@@ -52,10 +77,11 @@ type nodeDiscoveryExpected struct {
 	Outcome                      string                `json:"outcome"`
 	ReturnID                     string                `json:"returnId"`
 	ProtocolError                *nodeDiscoveryError   `json:"protocolError,omitempty"`
+	NoEventEvidence              string                `json:"noEventEvidence,omitempty"`
 	RespondReturnedBeforeReceive bool                  `json:"respondReturnedBeforeReceive"`
 	Events                       []nodeDiscoveryNode   `json:"events"`
-	AnnounceStored               bool                  `json:"announceStored"`
-	AnnouncePeer                 *nodeDiscoveryAddress `json:"announcePeer,omitempty"`
+	AnnounceStoredBeforeReceive  bool                  `json:"announceStoredBeforeReceive"`
+	AnnouncePeerBeforeReceive    *nodeDiscoveryAddress `json:"announcePeerBeforeReceive,omitempty"`
 }
 
 type nodeDiscoveryError struct {
@@ -64,8 +90,11 @@ type nodeDiscoveryError struct {
 }
 
 type nodeDiscoveryNode struct {
-	ID   string               `json:"id"`
-	Addr nodeDiscoveryAddress `json:"addr"`
+	ID                          string               `json:"id"`
+	Addr                        nodeDiscoveryAddress `json:"addr"`
+	TimeZero                    bool                 `json:"timeZero"`
+	Dropped                     bool                 `json:"dropped"`
+	IsSampleInfoHashesCandidate bool                 `json:"isSampleInfoHashesCandidate"`
 }
 
 type nodeDiscoveryAddress struct {
@@ -80,8 +109,12 @@ func TestGenerateDHTResponderNodeDiscoveryParity(t *testing.T) {
 		input nodeDiscoveryInput
 	}{
 		{
-			"ping_success_ipv4",
-			nodeDiscoveryRequest("ping", true, nodeDiscoveryID(1), "192.0.2.1:6881"),
+			"ping_success_read_only_ipv4",
+			func() nodeDiscoveryInput {
+				input := nodeDiscoveryRequest("ping", true, nodeDiscoveryID(1), "192.0.2.1:6881")
+				input.ReadOnly = true
+				return input
+			}(),
 		},
 		{
 			"find_node_success_mapped_ipv4",
@@ -138,7 +171,13 @@ func TestGenerateDHTResponderNodeDiscoveryParity(t *testing.T) {
 	}
 
 	fixtures := make([]nodeDiscoveryFixture, 0, len(scenarios))
-	for _, scenario := range scenarios {
+	if len(scenarios) != len(nodeDiscoveryFixtureIDs) {
+		t.Fatalf("scenario count = %d, want %d", len(scenarios), len(nodeDiscoveryFixtureIDs))
+	}
+	for index, scenario := range scenarios {
+		if scenario.id != nodeDiscoveryFixtureIDs[index] {
+			t.Fatalf("scenario %d id = %q, want %q", index, scenario.id, nodeDiscoveryFixtureIDs[index])
+		}
 		fixtures = append(fixtures, runNodeDiscoveryScenario(t, scenario.id, scenario.input))
 	}
 	reconcileNodeDiscoveryFixtures(t, fixtures)
@@ -173,38 +212,43 @@ func runNodeDiscoveryScenario(
 			}
 			expected.Outcome = "protocol_error"
 			expected.ProtocolError = &nodeDiscoveryError{Code: protocolErr.Code, Message: protocolErr.Msg}
+			expected.NoEventEvidence = "source_predicate_err_non_nil"
 			continue
 		}
 
 		expected.Outcome = "success"
 		expected.RespondReturnedBeforeReceive = true
+		if input.Method == dht.QAnnouncePeer {
+			lookup := table.GetHashOrClosestNodes(protocol.MustParseID(nodeDiscoveryInfoHash))
+			expected.AnnounceStoredBeforeReceive = lookup.Found && len(lookup.Hash.Peers()) == 1
+			if expected.AnnounceStoredBeforeReceive {
+				peer := projectNodeDiscoveryAddress(lookup.Hash.Peers()[0].Addr)
+				expected.AnnouncePeerBeforeReceive = &peer
+			}
+		}
 		select {
 		case node := <-discovered:
 			expected.Events = append(expected.Events, nodeDiscoveryNode{
-				ID: node.ID().String(), Addr: projectNodeDiscoveryAddress(node.Addr()),
+				ID:                          node.ID().String(),
+				Addr:                        projectNodeDiscoveryAddress(node.Addr()),
+				TimeZero:                    node.Time().IsZero(),
+				Dropped:                     node.Dropped(),
+				IsSampleInfoHashesCandidate: node.IsSampleInfoHashesCandidate(),
 			})
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: timed out receiving successful discovery attempt %d", id, attempt+1)
 		}
 	}
 
-	if expected.Outcome == "protocol_error" {
-		// A mistaken post-error sender that was already launched cannot remain
-		// blocked on this unbuffered channel after the scenario returns.
-		close(discovered)
-	}
-
-	if input.Method == dht.QAnnouncePeer && expected.Outcome == "success" {
-		lookup := table.GetHashOrClosestNodes(protocol.MustParseID(nodeDiscoveryInfoHash))
-		expected.AnnounceStored = lookup.Found && len(lookup.Hash.Peers()) == 1
-		if expected.AnnounceStored {
-			peer := projectNodeDiscoveryAddress(lookup.Hash.Peers()[0].Addr)
-			expected.AnnouncePeer = &peer
-		}
-	}
-
 	return nodeDiscoveryFixture{
-		ID: id, Subsystem: "dht_responder_node_discovery", Input: input, Expected: expected,
+		ID:        id,
+		Subsystem: "dht_responder_node_discovery",
+		Oracle: nodeDiscoveryOracle{
+			Composition:               "private_core_then_actual_node_discovery_wrapper",
+			Ingress:                   "direct_recv_msg",
+			ProductionSocketReachable: input.Source.addrPort(t).Addr().Is4(),
+		},
+		Input: input, Expected: expected,
 	}
 }
 
@@ -215,7 +259,7 @@ func nodeDiscoveryMessage(
 ) dht.RecvMsg {
 	t.Helper()
 	from := input.Source.addrPort(t)
-	msg := dht.Msg{Q: input.Method, T: "ND", Y: dht.YQuery}
+	msg := dht.Msg{Q: input.Method, T: "ND", Y: dht.YQuery, ReadOnly: input.ReadOnly}
 	if !input.ArgsPresent {
 		return dht.RecvMsg{Msg: msg, From: from}
 	}
@@ -312,6 +356,10 @@ func reconcileNodeDiscoveryFixtures(t *testing.T, fixtures []nodeDiscoveryFixtur
 		}
 		encoded.Write(line)
 		encoded.WriteByte('\n')
+	}
+	fixtureHash := sha256.Sum256(encoded.Bytes())
+	if actual := fmt.Sprintf("%x", fixtureHash); actual != nodeDiscoveryFixtureSHA256 {
+		t.Fatalf("fixture SHA-256 = %s, want %s", actual, nodeDiscoveryFixtureSHA256)
 	}
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
