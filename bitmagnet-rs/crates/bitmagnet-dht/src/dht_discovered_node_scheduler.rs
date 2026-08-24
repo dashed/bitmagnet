@@ -107,6 +107,19 @@ impl DhtDiscoveredNodeFindInputClosed {
 }
 
 impl DhtDiscoveredNodeFindInput {
+    /// Wait until the unique find-route receiver closes or is dropped.
+    ///
+    /// This crate-private lifecycle hook does not consume queue capacity.
+    pub(crate) async fn closed(&self) {
+        self.sender.closed().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel(capacity: usize) -> (Self, DhtDiscoveredNodeRouteReceiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self { sender }, DhtDiscoveredNodeRouteReceiver { receiver })
+    }
+
     /// Wait for shared route capacity and queue one node.
     ///
     /// Dropping this future before it completes commits no node, drops that

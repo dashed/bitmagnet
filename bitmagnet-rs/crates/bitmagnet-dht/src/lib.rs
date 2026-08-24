@@ -12,6 +12,7 @@ mod dht_discovery;
 mod dht_dispatch;
 mod dht_driver;
 mod dht_inbound_stats;
+mod dht_oldest_node_find_producer;
 mod dht_responder;
 mod dht_runtime;
 mod dht_send;
@@ -65,6 +66,10 @@ pub use dht_discovery::{
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
 pub use dht_inbound_stats::{DhtInboundStats, DhtInboundStatsSnapshot};
+pub use dht_oldest_node_find_producer::{
+    DhtOldestNodeFindProducer, DhtOldestNodeFindProducerExit, DhtOldestNodeFindProducerStats,
+    DhtOldestNodeFindProducerStatsHandle,
+};
 pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
