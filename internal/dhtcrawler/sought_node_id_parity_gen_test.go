@@ -26,7 +26,7 @@ var updateDHTCrawlerSoughtNodeIDParity = flag.Bool(
 	"rewrite the Rust DHT crawler shared sought-node-ID parity fixture",
 )
 
-const crawlerSoughtNodeIDFixtureSHA256 = "b930aeb8e248ad419174296cb3348efa48f5f89b02c70f426e95a839f2d0ce91"
+const crawlerSoughtNodeIDFixtureSHA256 = "683162fe0da0c9fe8f39b80fffaaa3aae4f98683a0c1579b521eeb69f9aa1ea4"
 
 var crawlerSoughtNodeIDFixtureIDs = [...]string{
 	"production_shared_target_source_contract",
@@ -74,6 +74,7 @@ type crawlerSoughtNodeIDExpected struct {
 	Reads       []crawlerSoughtNodeIDRead  `json:"reads"`
 	Events      []string                   `json:"events"`
 	FinalTarget string                     `json:"finalTarget"`
+	GetCount    int                        `json:"getCount"`
 	Source      *crawlerSoughtNodeIDSource `json:"source,omitempty"`
 }
 
@@ -132,6 +133,12 @@ func TestGenerateDHTCrawlerSoughtNodeIDParity(t *testing.T) {
 	for index, fixture := range fixtures {
 		if fixture.ID != crawlerSoughtNodeIDFixtureIDs[index] {
 			t.Fatalf("fixture %d id = %q, want %q", index, fixture.ID, crawlerSoughtNodeIDFixtureIDs[index])
+		}
+	}
+	wantGetCounts := [...]int{0, 1, 1, 3, 3}
+	for index, fixture := range fixtures {
+		if fixture.Expected.GetCount != wantGetCounts[index] {
+			t.Fatalf("fixture %s get count = %d, want %d", fixture.ID, fixture.Expected.GetCount, wantGetCounts[index])
 		}
 	}
 	reconcileCrawlerSoughtNodeIDFixtures(t, fixtures)
@@ -205,7 +212,8 @@ func crawlerSoughtNodeIDRuntimeOracle() crawlerSoughtNodeIDOracle {
 
 func crawlerSoughtNodeIDZeroFixture() crawlerSoughtNodeIDFixture {
 	target := &concurrency.AtomicValue[protocol.ID]{}
-	got := target.Get()
+	getCount := 0
+	got := crawlerSoughtNodeIDGet(target, &getCount)
 	return crawlerSoughtNodeIDFixture{
 		ID: crawlerSoughtNodeIDFixtureIDs[1], Subsystem: "dht_crawler_sought_node_id",
 		Oracle: crawlerSoughtNodeIDRuntimeOracle(),
@@ -214,7 +222,7 @@ func crawlerSoughtNodeIDZeroFixture() crawlerSoughtNodeIDFixture {
 		},
 		Expected: crawlerSoughtNodeIDExpected{
 			Reads:  []crawlerSoughtNodeIDRead{{Actor: "main", After: "zero_value", Target: got.String()}},
-			Events: []string{"main_get:" + got.String()}, FinalTarget: got.String(),
+			Events: []string{"main_get:" + got.String()}, FinalTarget: got.String(), GetCount: getCount,
 		},
 	}
 }
@@ -223,7 +231,8 @@ func crawlerSoughtNodeIDSetGetFixture() crawlerSoughtNodeIDFixture {
 	target := &concurrency.AtomicValue[protocol.ID]{}
 	a := crawlerSoughtNodeID(crawlerSoughtNodeIDA)
 	target.Set(a)
-	got := target.Get()
+	getCount := 0
+	got := crawlerSoughtNodeIDGet(target, &getCount)
 	return crawlerSoughtNodeIDFixture{
 		ID: crawlerSoughtNodeIDFixtureIDs[2], Subsystem: "dht_crawler_sought_node_id",
 		Oracle: crawlerSoughtNodeIDRuntimeOracle(),
@@ -233,7 +242,7 @@ func crawlerSoughtNodeIDSetGetFixture() crawlerSoughtNodeIDFixture {
 		},
 		Expected: crawlerSoughtNodeIDExpected{
 			Reads:  []crawlerSoughtNodeIDRead{{Actor: "main", After: "main_set_a", Target: got.String()}},
-			Events: []string{"main_set:" + a.String(), "main_get:" + got.String()}, FinalTarget: got.String(),
+			Events: []string{"main_set:" + a.String(), "main_get:" + got.String()}, FinalTarget: got.String(), GetCount: getCount,
 		},
 	}
 }
@@ -244,11 +253,12 @@ func crawlerSoughtNodeIDAliasesFixture() crawlerSoughtNodeIDFixture {
 	aliasTwo := primary
 	a := crawlerSoughtNodeID(crawlerSoughtNodeIDA)
 	b := crawlerSoughtNodeID(crawlerSoughtNodeIDB)
+	getCount := 0
 	primary.Set(a)
-	afterA := aliasOne.Get()
+	afterA := crawlerSoughtNodeIDGet(aliasOne, &getCount)
 	aliasTwo.Set(b)
-	primaryAfterB := primary.Get()
-	aliasAfterB := aliasOne.Get()
+	primaryAfterB := crawlerSoughtNodeIDGet(primary, &getCount)
+	aliasAfterB := crawlerSoughtNodeIDGet(aliasOne, &getCount)
 	return crawlerSoughtNodeIDFixture{
 		ID: crawlerSoughtNodeIDFixtureIDs[3], Subsystem: "dht_crawler_sought_node_id",
 		Oracle: crawlerSoughtNodeIDRuntimeOracle(),
@@ -269,7 +279,7 @@ func crawlerSoughtNodeIDAliasesFixture() crawlerSoughtNodeIDFixture {
 				"alias_two_set:" + b.String(), "primary_get:" + primaryAfterB.String(),
 				"alias_one_get:" + aliasAfterB.String(),
 			},
-			FinalTarget: primaryAfterB.String(),
+			FinalTarget: primaryAfterB.String(), GetCount: getCount,
 		},
 	}
 }
@@ -278,6 +288,7 @@ func crawlerSoughtNodeIDCrossGoroutineFixture() crawlerSoughtNodeIDFixture {
 	target := &concurrency.AtomicValue[protocol.ID]{}
 	a := crawlerSoughtNodeID(crawlerSoughtNodeIDA)
 	b := crawlerSoughtNodeID(crawlerSoughtNodeIDB)
+	getCount := 0
 	writeRequests := make(chan protocol.ID)
 	written := make(chan struct{})
 	readRequests := make(chan struct{})
@@ -294,7 +305,7 @@ func crawlerSoughtNodeIDCrossGoroutineFixture() crawlerSoughtNodeIDFixture {
 	go func() {
 		defer workers.Done()
 		for range readRequests {
-			readValues <- target.Get()
+			readValues <- crawlerSoughtNodeIDGet(target, &getCount)
 		}
 	}()
 
@@ -314,7 +325,7 @@ func crawlerSoughtNodeIDCrossGoroutineFixture() crawlerSoughtNodeIDFixture {
 	close(writeRequests)
 	close(readRequests)
 	workers.Wait()
-	final := target.Get()
+	final := crawlerSoughtNodeIDGet(target, &getCount)
 
 	return crawlerSoughtNodeIDFixture{
 		ID: crawlerSoughtNodeIDFixtureIDs[4], Subsystem: "dht_crawler_sought_node_id",
@@ -330,9 +341,18 @@ func crawlerSoughtNodeIDCrossGoroutineFixture() crawlerSoughtNodeIDFixture {
 				{Actor: "reader", After: "writer_set_a", Target: aRead.String()},
 				{Actor: "reader", After: "writer_set_b", Target: bRead.String()},
 			},
-			Events: events, FinalTarget: final.String(),
+			Events: events, FinalTarget: final.String(), GetCount: getCount,
 		},
 	}
+}
+
+func crawlerSoughtNodeIDGet(
+	target *concurrency.AtomicValue[protocol.ID],
+	getCount *int,
+) protocol.ID {
+	value := target.Get()
+	(*getCount)++
+	return value
 }
 
 func crawlerSoughtNodeID(value string) protocol.ID {
