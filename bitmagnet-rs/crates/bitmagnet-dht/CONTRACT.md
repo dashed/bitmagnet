@@ -1691,3 +1691,74 @@ back through the scheduler or establish a recursive crawler feedback loop. All
 shared-target, rotation, sample-infohashes, producer, broader recursive
 composition, runtime, application, deployment, and rollout boundaries remain
 in force.
+
+The thirty-second slice, landed by `667201cf`, adds only a shared producer
+capability for the existing bounded `find_node` route:
+
+- `DhtDiscoveredNodeScheduler::find_node_input(&self)` lazily clones the
+  scheduler's existing find-route sender and returns a public, cloneable,
+  `Send + Sync` `DhtDiscoveredNodeFindInput`. Merely constructing the scheduler
+  creates no external handle. The capability adds no task, queue, or capacity:
+  scheduler-origin and externally supplied nodes share the one configured
+  `find_node` queue, whose default capacity remains 100;
+- `DhtDiscoveredNodeFindInput::send(&self, node)` asynchronously waits for that
+  shared capacity and returns
+  `Result<(), DhtDiscoveredNodeFindInputClosed>`. A successful return means the
+  node was synchronously committed to the queue, not that the worker has
+  dequeued or consumed it. Receiver closure returns the exact uncommitted
+  `RoutingNode`, recoverable through
+  `DhtDiscoveredNodeFindInputClosed::into_node`;
+- sequential awaited sends by one producer preserve program order. Competing
+  send or reserve futures enter Tokio's FIFO waiter queue in runtime
+  registration order. This seam assigns no source priority and promises no
+  deterministic cross-producer or scheduler-versus-external source order;
+- each pending `send` future owns one node outside the bounded queue. The seam
+  does not bound how many such futures callers may create, so the queue's
+  capacity is not a whole-composition retention bound. Dropping a pending
+  future commits nothing, drops its future-owned node, and loses its waiter
+  position; a caller that needs to retry must retain a separate copy. Once a
+  send succeeds, cancellation cannot retract the queued node;
+- without a requested find-input handle, scheduler return or drop retains the
+  prior drain-then-EOF behavior for all three routes. A live find-input handle
+  or clone intentionally keeps only the find route open after the
+  scheduler-owned sender is gone; dropping the last external clone then permits
+  drain-then-EOF. Explicitly closing or dropping the unique find-route receiver
+  wakes registered and later sends with the typed closed error. The owned find
+  worker's shutdown closes that receiver before draining already queued work:
+  a node from a pending external send is returned as uncommitted and is absent
+  from the worker's queued-drop accounting, while a previously committed queue
+  item remains worker-owned and is drained and counted under slice thirty-one;
+- direct find-input sends bypass the scheduler's discovery batching, address
+  deduplication, address projection, KTable known-address filter, and routing
+  choice. They also bypass all scheduler counters. In particular,
+  `routed_find_node` continues to count only scheduler-origin commits. The find
+  worker consumes one source-free `RoutingNode` stream and its dequeued, query,
+  table-command, recursive-discovery, and terminal counters therefore aggregate
+  committed work from every source without attributing producer provenance;
+  and
+- focused Rust gates preserve the lazy default EOF, clone-extended EOF, shared
+  capacity and sequential order, registered-send cancellation, receiver close
+  and drop recovery, exact pending-send rejection during worker shutdown, and
+  the split between direct external work and scheduler-origin stats. A known
+  KTable node sent directly through the capability proves that this seam does
+  not silently reapply scheduler filtering.
+
+This slice adds no periodic oldest-node producer, KTable oldest-node selection,
+five-second cutoff, ten-node limit, immediate first query, one-second delay,
+producer task, producer shutdown policy, or producer counters. It adds and
+consumes no Go oracle row or fixture; the oldest-node producer behavior frozen
+as source-only evidence in slice thirty-one remains source-only. It does not
+compose the scheduler, find worker, shared target or rotator, discovery
+feedback, or ping worker into a runtime or application lifecycle, and it adds
+no external DHT traffic, deployment configuration, live deployment, or
+production rollout.
+
+This slice supersedes slice twenty-eight only where that slice says every route
+receiver necessarily reaches EOF when the scheduler future returns or is
+dropped: that remains exact for ping and sample-infohashes, and for find-node
+when no external find-input clone survives. It supersedes slice thirty-one only
+where that slice excludes a second or multi-producer find-route sender seam and
+describes scheduler-produced nodes as the route's only provenance. All worker
+query semantics and statistics remain unchanged, and every periodic-producer,
+oracle, recursive-composition, runtime, application, deployment, and rollout
+exclusion remains in force.
