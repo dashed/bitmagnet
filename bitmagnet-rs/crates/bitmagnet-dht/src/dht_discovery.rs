@@ -18,6 +18,7 @@ use crate::RoutingNode;
 #[must_use]
 pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, DhtDiscoveryReceiver) {
     let (sender, receiver) = mpsc::channel(capacity.get());
+    let weak_sender = sender.downgrade();
     let stats = DhtDiscoveryStatsHandle::default();
     let receiver_state = Arc::new(Mutex::new(DhtDiscoveryReceiverState { alive: true }));
     (
@@ -29,6 +30,8 @@ pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, Dht
         DhtDiscoveryReceiver {
             receiver,
             state: receiver_state,
+            weak_sender,
+            stats,
         },
     )
 }
@@ -45,6 +48,8 @@ pub struct DhtDiscoverySender {
 pub struct DhtDiscoveryReceiver {
     receiver: mpsc::Receiver<RoutingNode>,
     state: Arc<Mutex<DhtDiscoveryReceiverState>>,
+    weak_sender: mpsc::WeakSender<RoutingNode>,
+    stats: DhtDiscoveryStatsHandle,
 }
 
 struct DhtDiscoveryReceiverState {
@@ -224,6 +229,18 @@ impl DhtDiscoveryStatsHandle {
 }
 
 impl DhtDiscoveryReceiver {
+    /// Recover a producer for this exact channel while any producer remains.
+    ///
+    /// The receiver stores only a weak sender, so this capability seam does
+    /// not keep the channel open or delay receiver EOF by itself.
+    pub(crate) fn try_sender(&self) -> Option<DhtDiscoverySender> {
+        self.weak_sender.upgrade().map(|sender| DhtDiscoverySender {
+            sender,
+            stats: self.stats.clone(),
+            receiver_state: self.state.clone(),
+        })
+    }
+
     /// Receive the next queued node, or `None` once every sender is gone and
     /// the queue has drained.
     pub async fn recv(&mut self) -> Option<RoutingNode> {
@@ -607,6 +624,47 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(node(3)));
         assert_eq!(receiver.recv().await, None);
         assert_eq!(stats.snapshot().queued, 3);
+    }
+
+    #[tokio::test]
+    async fn receiver_weak_sender_does_not_delay_eof() {
+        let (sender, mut receiver) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+
+        drop(sender);
+
+        assert_eq!(within(receiver.recv()).await, None);
+    }
+
+    #[test]
+    fn try_sender_recovers_the_exact_channel_stats_and_receiver_state() {
+        let (sender, mut receiver) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let recovered = receiver
+            .try_sender()
+            .expect("the original sender keeps the channel open");
+
+        assert_eq!(recovered.offer(node(1)), DhtDiscoveryOffer::Queued);
+        assert_eq!(receiver.try_recv().unwrap(), node(1));
+        receiver.close();
+        assert_eq!(recovered.offer(node(2)), DhtDiscoveryOffer::ReceiverClosed);
+        assert_eq!(
+            sender.stats(),
+            DhtDiscoveryStats {
+                offered: 2,
+                queued: 1,
+                full_dropped: 0,
+                receiver_closed_dropped: 1,
+            }
+        );
+        assert_eq!(recovered.stats(), sender.stats());
+    }
+
+    #[test]
+    fn try_sender_fails_after_the_last_strong_sender_drops() {
+        let (sender, receiver) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+
+        drop(sender);
+
+        assert!(receiver.try_sender().is_none());
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ mod announce_token;
 mod compact;
 mod dht_client;
 mod dht_concurrent_supervisor;
+mod dht_crawler_maintenance_supervisor;
 mod dht_crawler_target;
 mod dht_discovered_node_find_worker;
 mod dht_discovered_node_ping_worker;
@@ -43,6 +44,11 @@ pub use dht_client::{
 };
 pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
+};
+pub use dht_crawler_maintenance_supervisor::{
+    DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceStartError,
+    DhtCrawlerMaintenanceStatsHandle, DhtCrawlerMaintenanceSupervisor,
+    DhtCrawlerMaintenanceSupervisorExit,
 };
 pub use dht_crawler_target::{DhtCrawlerTarget, DhtCrawlerTargetError, DhtCrawlerTargetRotator};
 pub use dht_discovered_node_find_worker::{

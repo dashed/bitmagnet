@@ -1,0 +1,967 @@
+use std::any::Any;
+use std::error::Error;
+use std::fmt;
+use std::future::{poll_fn, Future};
+use std::panic::resume_unwind;
+use std::pin::Pin;
+use std::task::Poll;
+
+use tokio::sync::watch;
+use tokio::task::{JoinError, JoinSet};
+
+use crate::{
+    DhtCrawlerTargetError, DhtCrawlerTargetRotator, DhtDiscoveredNodeFindStatsHandle,
+    DhtDiscoveredNodeFindWorker, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingStatsHandle,
+    DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStatsHandle, DhtDiscoveryReceiver,
+    DhtDiscoveryStatsHandle, DhtOldestNodeFindProducer, DhtOldestNodeFindProducerExit,
+    DhtOldestNodeFindProducerStatsHandle, DhtRuntimeClient, KTable,
+};
+
+/// Failure to construct the partial crawler maintenance composition.
+///
+/// Both variants retain the uniquely owned discovery receiver so callers do
+/// not lose the ingress capability when construction fails.
+pub enum DhtCrawlerMaintenanceStartError {
+    /// Every strong sender was already gone, so recursive discovery could not
+    /// recover a producer for this exact channel.
+    DiscoveryClosed(DhtDiscoveryReceiver),
+    /// Initial target entropy failed before any maintenance component started.
+    TargetEntropy {
+        discovery: DhtDiscoveryReceiver,
+        source: DhtCrawlerTargetError,
+    },
+}
+
+impl DhtCrawlerMaintenanceStartError {
+    /// Recover the discovery receiver supplied to the failed constructor.
+    #[must_use]
+    pub fn into_discovery(self) -> DhtDiscoveryReceiver {
+        match self {
+            Self::DiscoveryClosed(discovery) | Self::TargetEntropy { discovery, .. } => discovery,
+        }
+    }
+}
+
+impl fmt::Debug for DhtCrawlerMaintenanceStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DiscoveryClosed(_) => formatter.write_str("DiscoveryClosed"),
+            Self::TargetEntropy { source, .. } => formatter
+                .debug_struct("TargetEntropy")
+                .field("source", source)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl fmt::Display for DhtCrawlerMaintenanceStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DiscoveryClosed(_) => {
+                formatter.write_str("the DHT discovery channel is already closed")
+            }
+            Self::TargetEntropy { source, .. } => {
+                write!(formatter, "could not create the crawler target: {source}")
+            }
+        }
+    }
+}
+
+impl Error for DhtCrawlerMaintenanceStartError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DiscoveryClosed(_) => None,
+            Self::TargetEntropy { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Cloneable sender-free bundle of every counter surface owned or shared by
+/// the partial crawler maintenance composition.
+#[derive(Clone)]
+pub struct DhtCrawlerMaintenanceStatsHandle {
+    /// Exact channel-global discovery counters shared with the runtime
+    /// responder and every recursive-discovery sender clone.
+    pub discovery: DhtDiscoveryStatsHandle,
+    /// Scheduler-only counters. In particular, `routed_find_node` excludes
+    /// direct commits made by the oldest-node producer.
+    pub scheduler: DhtDiscoveredNodeSchedulerStatsHandle,
+    /// Counters local to the discovered-node ping worker.
+    pub ping: DhtDiscoveredNodePingStatsHandle,
+    /// Find-worker counters aggregated across scheduler and oldest-producer
+    /// nodes after either source commits to the shared route.
+    pub find_node: DhtDiscoveredNodeFindStatsHandle,
+    /// Counters local to the periodic oldest-node find producer.
+    pub oldest_find: DhtOldestNodeFindProducerStatsHandle,
+}
+
+/// Stable identity of one owned maintenance child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DhtCrawlerMaintenanceChild {
+    Scheduler,
+    Ping,
+    FindNode,
+    OldestFind,
+    Target,
+}
+
+/// One complete, fixed-shape terminal record for all five children.
+///
+/// An outer shutdown remains the primary supervisor cause even if a child had
+/// already completed before the shared shutdown signal. The concrete child
+/// result is retained here rather than coerced into fabricated shutdown counts.
+#[derive(Debug)]
+pub struct DhtCrawlerMaintenanceChildExits {
+    pub scheduler: DhtDiscoveredNodeSchedulerExit,
+    pub ping: DhtDiscoveredNodePingWorkerExit,
+    pub find_node: DhtDiscoveredNodeFindWorkerExit,
+    pub oldest_find: DhtOldestNodeFindProducerExit,
+    pub target: Result<(), DhtCrawlerTargetError>,
+}
+
+/// Terminal result of the partial crawler maintenance composition.
+#[derive(Debug)]
+pub enum DhtCrawlerMaintenanceSupervisorExit {
+    /// Shutdown was ready at the preflight boundary, so no child factory was
+    /// invoked and no child task was spawned or polled.
+    ShutdownBeforeStart,
+    /// External shutdown won the biased outer selection. Every child was then
+    /// fully joined and its concrete result is retained.
+    Shutdown {
+        children: DhtCrawlerMaintenanceChildExits,
+    },
+    /// The named child was the first terminal result observed before external
+    /// shutdown. Siblings were signalled and fully joined.
+    Failed {
+        first: DhtCrawlerMaintenanceChild,
+        children: DhtCrawlerMaintenanceChildExits,
+    },
+}
+
+/// Owned partial DHT crawler maintenance composition.
+///
+/// This slice owns the discovered-node scheduler, ping and `find_node`
+/// workers, oldest-node `find_node` producer, and target rotator. It
+/// deliberately closes and discards the unsupported `sample_infohashes` route.
+/// It does not own or observe [`crate::DhtRuntime`]: its cloned weak client does
+/// not keep the UDP runtime alive, and an outer owner must propagate runtime
+/// termination through [`Self::run`]'s shutdown future.
+///
+/// The recovered recursive-discovery sender intentionally keeps scheduler
+/// ingress from reaching EOF, while the oldest-node producer intentionally
+/// keeps the shared find route from reaching EOF. Explicit shutdown or a child
+/// failure breaks both cycles. Dropping this value or its run future aborts all
+/// owned child tasks; nothing is detached.
+pub struct DhtCrawlerMaintenanceSupervisor {
+    scheduler: DhtDiscoveredNodeScheduler,
+    ping: DhtDiscoveredNodePingWorker,
+    find_node: DhtDiscoveredNodeFindWorker,
+    oldest_find: DhtOldestNodeFindProducer,
+    target_rotator: DhtCrawlerTargetRotator,
+}
+
+impl DhtCrawlerMaintenanceSupervisor {
+    /// Construct and wire the fixed partial maintenance composition.
+    ///
+    /// The client and table are cloned; the discovery receiver is consumed on
+    /// success and returned intact through either start-error variant. Initial
+    /// target entropy is obtained here, before [`Self::run`]'s shutdown
+    /// preflight.
+    pub fn new(
+        discovery: DhtDiscoveryReceiver,
+        client: &DhtRuntimeClient,
+        table: &KTable,
+    ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceStartError> {
+        Self::new_with_target_factory(discovery, client, table, DhtCrawlerTargetRotator::new)
+    }
+
+    fn new_with_target_factory<T>(
+        discovery: DhtDiscoveryReceiver,
+        client: &DhtRuntimeClient,
+        table: &KTable,
+        target_factory: T,
+    ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceStartError>
+    where
+        T: FnOnce() -> Result<
+            (crate::DhtCrawlerTarget, DhtCrawlerTargetRotator),
+            DhtCrawlerTargetError,
+        >,
+    {
+        let recursive_discovery = match discovery.try_sender() {
+            Some(sender) => sender,
+            None => return Err(DhtCrawlerMaintenanceStartError::DiscoveryClosed(discovery)),
+        };
+        let discovery_stats = recursive_discovery.stats_handle();
+        let (target, target_rotator) = match target_factory() {
+            Ok(pair) => pair,
+            Err(source) => {
+                return Err(DhtCrawlerMaintenanceStartError::TargetEntropy { discovery, source });
+            }
+        };
+
+        let (scheduler, routes, scheduler_stats) =
+            DhtDiscoveredNodeScheduler::new(discovery, table.clone());
+        let oldest_find_input = scheduler.find_node_input();
+        let crate::DhtDiscoveredNodeRoutes {
+            ping,
+            find_node,
+            mut sample_infohashes,
+        } = routes;
+        sample_infohashes.close();
+        drop(sample_infohashes);
+
+        let (ping, ping_stats) =
+            DhtDiscoveredNodePingWorker::new(ping, client.clone(), table.clone());
+        let (find_node, find_node_stats) = DhtDiscoveredNodeFindWorker::new(
+            find_node,
+            client.clone(),
+            table.clone(),
+            recursive_discovery,
+            target,
+        );
+        let (oldest_find, oldest_find_stats) =
+            DhtOldestNodeFindProducer::new(table.clone(), oldest_find_input);
+
+        Ok((
+            Self {
+                scheduler,
+                ping,
+                find_node,
+                oldest_find,
+                target_rotator,
+            },
+            DhtCrawlerMaintenanceStatsHandle {
+                discovery: discovery_stats,
+                scheduler: scheduler_stats,
+                ping: ping_stats,
+                find_node: find_node_stats,
+                oldest_find: oldest_find_stats,
+            },
+        ))
+    }
+
+    /// Run until explicit shutdown or the first child terminal result.
+    ///
+    /// A pre-ready shutdown returns before any child factory is invoked or any
+    /// child task is spawned. Once started, all five children receive one
+    /// shared shutdown broadcast and are fully joined. A child panic is resumed
+    /// with its exact payload after sibling cleanup; an unexpected task
+    /// cancellation likewise cleans siblings and then panics.
+    pub async fn run<F>(self, shutdown: F) -> DhtCrawlerMaintenanceSupervisorExit
+    where
+        F: Future<Output = ()>,
+    {
+        let Self {
+            scheduler,
+            ping,
+            find_node,
+            oldest_find,
+            target_rotator,
+        } = self;
+        run_child_factories(
+            shutdown,
+            [
+                Box::new(move |stop| {
+                    Box::pin(async move {
+                        ChildExit::Scheduler(scheduler.run(wait_for_shutdown(stop)).await)
+                    })
+                }),
+                Box::new(move |stop| {
+                    Box::pin(
+                        async move { ChildExit::Ping(ping.run(wait_for_shutdown(stop)).await) },
+                    )
+                }),
+                Box::new(move |stop| {
+                    Box::pin(async move {
+                        ChildExit::FindNode(find_node.run(wait_for_shutdown(stop)).await)
+                    })
+                }),
+                Box::new(move |stop| {
+                    Box::pin(async move {
+                        ChildExit::OldestFind(oldest_find.run(wait_for_shutdown(stop)).await)
+                    })
+                }),
+                Box::new(move |stop| {
+                    Box::pin(async move {
+                        ChildExit::Target(target_rotator.run(wait_for_shutdown(stop)).await)
+                    })
+                }),
+            ],
+        )
+        .await
+    }
+}
+
+type ChildFuture = Pin<Box<dyn Future<Output = ChildExit> + Send + 'static>>;
+type ChildFactory = Box<dyn FnOnce(watch::Receiver<bool>) -> ChildFuture + Send + 'static>;
+
+enum ChildExit {
+    Scheduler(DhtDiscoveredNodeSchedulerExit),
+    Ping(DhtDiscoveredNodePingWorkerExit),
+    FindNode(DhtDiscoveredNodeFindWorkerExit),
+    OldestFind(DhtOldestNodeFindProducerExit),
+    Target(Result<(), DhtCrawlerTargetError>),
+}
+
+async fn run_child_factories<F>(
+    shutdown: F,
+    factories: [ChildFactory; 5],
+) -> DhtCrawlerMaintenanceSupervisorExit
+where
+    F: Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
+    let pre_ready =
+        poll_fn(|context| Poll::Ready(matches!(shutdown.as_mut().poll(context), Poll::Ready(()))))
+            .await;
+    if pre_ready {
+        drop(factories);
+        return DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart;
+    }
+
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let mut tasks = JoinSet::new();
+    for factory in factories {
+        tasks.spawn(factory(stop_rx.clone()));
+    }
+    drop(stop_rx);
+
+    let mut collector = ChildCollector::default();
+    let mut first_child = None;
+    enum First {
+        Shutdown,
+        Child(Result<ChildExit, JoinError>),
+    }
+    let first = tokio::select! {
+        biased;
+        () = &mut shutdown => First::Shutdown,
+        child = tasks.join_next() => {
+            First::Child(child.expect("five maintenance children were spawned"))
+        }
+    };
+    if let First::Child(child) = first {
+        first_child = collector.record(child);
+    }
+    let _ = stop_tx.send(true);
+
+    while let Some(child) = tasks.join_next().await {
+        let _ = collector.record(child);
+    }
+    let children = collector.finish();
+    match first_child {
+        Some(first) => DhtCrawlerMaintenanceSupervisorExit::Failed { first, children },
+        None => DhtCrawlerMaintenanceSupervisorExit::Shutdown { children },
+    }
+}
+
+#[derive(Default)]
+struct ChildCollector {
+    first_panic: Option<Box<dyn Any + Send + 'static>>,
+    unexpected_cancellation: bool,
+    unexpected_join_error: Option<String>,
+    duplicate_child: Option<DhtCrawlerMaintenanceChild>,
+    scheduler: Option<DhtDiscoveredNodeSchedulerExit>,
+    ping: Option<DhtDiscoveredNodePingWorkerExit>,
+    find_node: Option<DhtDiscoveredNodeFindWorkerExit>,
+    oldest_find: Option<DhtOldestNodeFindProducerExit>,
+    target: Option<Result<(), DhtCrawlerTargetError>>,
+}
+
+impl ChildCollector {
+    fn record(
+        &mut self,
+        child: Result<ChildExit, JoinError>,
+    ) -> Option<DhtCrawlerMaintenanceChild> {
+        match child {
+            Ok(exit) => Some(self.record_exit(exit)),
+            Err(error) if error.is_panic() => {
+                if self.first_panic.is_none() {
+                    self.first_panic = Some(error.into_panic());
+                }
+                None
+            }
+            Err(error) if error.is_cancelled() => {
+                self.unexpected_cancellation = true;
+                None
+            }
+            Err(error) => {
+                if self.unexpected_join_error.is_none() {
+                    self.unexpected_join_error = Some(error.to_string());
+                }
+                None
+            }
+        }
+    }
+
+    fn record_exit(&mut self, exit: ChildExit) -> DhtCrawlerMaintenanceChild {
+        match exit {
+            ChildExit::Scheduler(exit) => {
+                if self.scheduler.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::Scheduler);
+                }
+                DhtCrawlerMaintenanceChild::Scheduler
+            }
+            ChildExit::Ping(exit) => {
+                if self.ping.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::Ping);
+                }
+                DhtCrawlerMaintenanceChild::Ping
+            }
+            ChildExit::FindNode(exit) => {
+                if self.find_node.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::FindNode);
+                }
+                DhtCrawlerMaintenanceChild::FindNode
+            }
+            ChildExit::OldestFind(exit) => {
+                if self.oldest_find.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::OldestFind);
+                }
+                DhtCrawlerMaintenanceChild::OldestFind
+            }
+            ChildExit::Target(exit) => {
+                if self.target.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::Target);
+                }
+                DhtCrawlerMaintenanceChild::Target
+            }
+        }
+    }
+
+    fn finish(self) -> DhtCrawlerMaintenanceChildExits {
+        if let Some(payload) = self.first_panic {
+            resume_unwind(payload);
+        }
+        assert!(
+            !self.unexpected_cancellation,
+            "maintenance child was cancelled outside supervisor drop"
+        );
+        assert!(
+            self.unexpected_join_error.is_none(),
+            "unexpected maintenance child join error: {}",
+            self.unexpected_join_error.as_deref().unwrap_or_default()
+        );
+        assert!(
+            self.duplicate_child.is_none(),
+            "duplicate maintenance child exit: {:?}",
+            self.duplicate_child
+        );
+        DhtCrawlerMaintenanceChildExits {
+            scheduler: self.scheduler.expect("scheduler child exit is present"),
+            ping: self.ping.expect("ping child exit is present"),
+            find_node: self.find_node.expect("find-node child exit is present"),
+            oldest_find: self.oldest_find.expect("oldest-find child exit is present"),
+            target: self.target.expect("target child exit is present"),
+        }
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::{pending, ready};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::num::NonZeroUsize;
+    use std::panic::panic_any;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::{
+        dht_discovery_channel, DhtDiscoveredNodeFindStats, DhtDiscoveredNodePingStats,
+        DhtDiscoveredNodeSchedulerStats, DhtDiscoveryOffer, DhtDiscoveryStats,
+        DhtOldestNodeFindProducerStats, DhtRuntime, DhtRuntimeConfig, Id20, RoutingNode,
+        RoutingPutResult,
+    };
+
+    fn child_factory<F, Fut>(factory: F) -> ChildFactory
+    where
+        F: FnOnce(watch::Receiver<bool>) -> Fut + Send + 'static,
+        Fut: Future<Output = ChildExit> + Send + 'static,
+    {
+        Box::new(move |shutdown| Box::pin(factory(shutdown)))
+    }
+
+    fn cooperative_factories(stopped: Arc<AtomicUsize>) -> [ChildFactory; 5] {
+        let scheduler_stopped = stopped.clone();
+        let ping_stopped = stopped.clone();
+        let find_stopped = stopped.clone();
+        let oldest_stopped = stopped.clone();
+        [
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                scheduler_stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::Scheduler(DhtDiscoveredNodeSchedulerExit::Shutdown {
+                    pending_dropped: 11,
+                })
+            }),
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                ping_stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::Ping(DhtDiscoveredNodePingWorkerExit::Shutdown {
+                    queued_dropped: 12,
+                    queries_cancelled: 13,
+                })
+            }),
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                find_stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::FindNode(DhtDiscoveredNodeFindWorkerExit::Shutdown {
+                    queued_dropped: 14,
+                    tasks_cancelled: 15,
+                    recursive_nodes_dropped: 16,
+                })
+            }),
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                oldest_stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::OldestFind(DhtOldestNodeFindProducerExit::Shutdown {
+                    selected_dropped: 17,
+                })
+            }),
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::Target(Ok(()))
+            }),
+        ]
+    }
+
+    async fn test_runtime() -> DhtRuntime {
+        DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .expect("loopback runtime starts")
+    }
+
+    fn node(value: u8) -> RoutingNode {
+        let mut id = [0_u8; 20];
+        id[19] = value;
+        RoutingNode {
+            id: Id20::from_slice(&id).unwrap(),
+            addr: SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(127, 0, 0, value),
+                10_000 + u16::from(value),
+            )),
+        }
+    }
+
+    async fn poll_once_pending<F>(mut future: Pin<&mut F>)
+    where
+        F: Future,
+    {
+        poll_fn(|context| match future.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("future completed instead of remaining pending"),
+        })
+        .await;
+    }
+
+    async fn wait_for(mut predicate: impl FnMut() -> bool, description: &'static str) {
+        tokio::time::timeout(Duration::from_secs(1), async move {
+            loop {
+                if predicate() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
+    #[tokio::test]
+    async fn constructor_wires_zeroed_stats_and_closes_the_sample_route() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(20).expect("nonzero"));
+        let (supervisor, stats) =
+            DhtCrawlerMaintenanceSupervisor::new(discovery, &client, runtime.table()).unwrap();
+
+        assert_eq!(stats.discovery.snapshot(), DhtDiscoveryStats::default());
+        assert_eq!(
+            stats.scheduler.snapshot(),
+            DhtDiscoveredNodeSchedulerStats::default()
+        );
+        assert_eq!(stats.ping.snapshot(), DhtDiscoveredNodePingStats::default());
+        assert_eq!(
+            stats.find_node.snapshot(),
+            DhtDiscoveredNodeFindStats::default()
+        );
+        assert_eq!(
+            stats.oldest_find.snapshot(),
+            DhtOldestNodeFindProducerStats::default()
+        );
+
+        for value in 1..=10 {
+            assert_eq!(sender.offer(node(value)), DhtDiscoveryOffer::Queued);
+        }
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(supervisor.run(async move {
+            let _ = shutdown_rx.await;
+        }));
+        wait_for(
+            || stats.scheduler.snapshot().route_attempts > 0,
+            "the scheduler to route one discovered node",
+        )
+        .await;
+        assert_eq!(stats.scheduler.snapshot().routed_sample_infohashes, 0);
+        assert!(
+            stats.scheduler.snapshot().routed_ping + stats.scheduler.snapshot().routed_find_node
+                > 0
+        );
+        shutdown_tx.send(()).unwrap();
+        assert!(matches!(
+            run.await.unwrap(),
+            DhtCrawlerMaintenanceSupervisorExit::Shutdown { .. }
+        ));
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_ready_shutdown_invokes_no_factory_and_runs_no_child_work() {
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let factories = std::array::from_fn(|_| {
+            let invoked = invoked.clone();
+            child_factory(move |_| {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    pending::<()>().await;
+                    unreachable!()
+                }
+            })
+        });
+        assert!(matches!(
+            run_child_factories(ready(()), factories).await,
+            DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+        ));
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let table = runtime.table().clone();
+        assert_ne!(table.put_node(node(99)), RoutingPutResult::Rejected);
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        assert_eq!(sender.offer(node(1)), DhtDiscoveryOffer::Queued);
+        let (supervisor, stats) =
+            DhtCrawlerMaintenanceSupervisor::new(discovery, &client, &table).unwrap();
+        assert!(matches!(
+            supervisor.run(ready(())).await,
+            DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+        ));
+        assert_eq!(
+            stats.scheduler.snapshot(),
+            DhtDiscoveredNodeSchedulerStats::default()
+        );
+        assert_eq!(stats.oldest_find.snapshot().table_queries, 0);
+        assert_eq!(stats.ping.snapshot(), DhtDiscoveredNodePingStats::default());
+        assert_eq!(
+            stats.find_node.snapshot(),
+            DhtDiscoveredNodeFindStats::default()
+        );
+        assert_eq!(sender.offer(node(2)), DhtDiscoveryOffer::ReceiverClosed);
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_child_exit_is_first_cause_and_all_siblings_finish_shutdown() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut factories = cooperative_factories(stopped.clone());
+        factories[0] = child_factory(|_| async {
+            ChildExit::Scheduler(DhtDiscoveredNodeSchedulerExit::InputClosed)
+        });
+
+        let DhtCrawlerMaintenanceSupervisorExit::Failed { first, children } =
+            run_child_factories(pending(), factories).await
+        else {
+            panic!("typed child exit must be the primary failure");
+        };
+        assert_eq!(first, DhtCrawlerMaintenanceChild::Scheduler);
+        assert_eq!(
+            children.scheduler,
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(
+            children.ping,
+            DhtDiscoveredNodePingWorkerExit::Shutdown {
+                queued_dropped: 12,
+                queries_cancelled: 13,
+            }
+        );
+        assert_eq!(
+            children.find_node,
+            DhtDiscoveredNodeFindWorkerExit::Shutdown {
+                queued_dropped: 14,
+                tasks_cancelled: 15,
+                recursive_nodes_dropped: 16,
+            }
+        );
+        assert_eq!(
+            children.oldest_find,
+            DhtOldestNodeFindProducerExit::Shutdown {
+                selected_dropped: 17,
+            }
+        );
+        assert!(children.target.is_ok());
+        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn target_entropy_is_typed_and_all_siblings_finish_shutdown() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut factories = cooperative_factories(stopped.clone());
+        factories[4] = child_factory(|_| async {
+            ChildExit::Target(Err(DhtCrawlerTargetError::Entropy(
+                getrandom::Error::UNEXPECTED,
+            )))
+        });
+
+        let DhtCrawlerMaintenanceSupervisorExit::Failed { first, children } =
+            run_child_factories(pending(), factories).await
+        else {
+            panic!("target entropy must be the primary failure");
+        };
+        assert_eq!(first, DhtCrawlerMaintenanceChild::Target);
+        assert!(matches!(
+            children.target,
+            Err(DhtCrawlerTargetError::Entropy(error))
+                if error == getrandom::Error::UNEXPECTED
+        ));
+        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn child_panic_joins_siblings_then_resumes_the_exact_payload() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut factories = cooperative_factories(stopped.clone());
+        factories[1] = child_factory(|_| async {
+            panic_any(String::from("maintenance child panic"));
+            #[allow(unreachable_code)]
+            ChildExit::Target(Ok(()))
+        });
+
+        let error = tokio::spawn(run_child_factories(pending(), factories))
+            .await
+            .expect_err("the exact child panic is resumed");
+        assert_eq!(
+            error
+                .into_panic()
+                .downcast::<String>()
+                .expect("panic payload remains a String")
+                .as_str(),
+            "maintenance child panic"
+        );
+        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn external_shutdown_joins_five_complete_structured_exits() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let factories = cooperative_factories(stopped.clone());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(run_child_factories(
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            factories,
+        ));
+        tokio::task::yield_now().await;
+        shutdown_tx.send(()).unwrap();
+
+        let DhtCrawlerMaintenanceSupervisorExit::Shutdown { children } = run.await.unwrap() else {
+            panic!("external shutdown must remain the primary cause");
+        };
+        assert_eq!(
+            children.scheduler,
+            DhtDiscoveredNodeSchedulerExit::Shutdown {
+                pending_dropped: 11,
+            }
+        );
+        assert_eq!(
+            children.ping,
+            DhtDiscoveredNodePingWorkerExit::Shutdown {
+                queued_dropped: 12,
+                queries_cancelled: 13,
+            }
+        );
+        assert_eq!(
+            children.find_node,
+            DhtDiscoveredNodeFindWorkerExit::Shutdown {
+                queued_dropped: 14,
+                tasks_cancelled: 15,
+                recursive_nodes_dropped: 16,
+            }
+        );
+        assert_eq!(
+            children.oldest_find,
+            DhtOldestNodeFindProducerExit::Shutdown {
+                selected_dropped: 17,
+            }
+        );
+        assert!(children.target.is_ok());
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
+    }
+
+    struct ReadyAfter(Arc<AtomicBool>);
+
+    impl Future for ReadyAfter {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _context: &mut std::task::Context<'_>) -> Poll<()> {
+            if self.0.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn biased_external_shutdown_keeps_primary_cause_and_retains_precompleted_child_exit() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut factories = cooperative_factories(stopped.clone());
+        let child_completed = Arc::new(AtomicBool::new(false));
+        let completed_by_child = child_completed.clone();
+        factories[0] = child_factory(move |_| async move {
+            completed_by_child.store(true, Ordering::SeqCst);
+            ChildExit::Scheduler(DhtDiscoveredNodeSchedulerExit::InputClosed)
+        });
+
+        let DhtCrawlerMaintenanceSupervisorExit::Shutdown { children } =
+            run_child_factories(ReadyAfter(child_completed), factories).await
+        else {
+            panic!("biased external shutdown must remain the primary cause");
+        };
+        assert_eq!(
+            children.scheduler,
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(
+            children.ping,
+            DhtDiscoveredNodePingWorkerExit::Shutdown {
+                queued_dropped: 12,
+                queries_cancelled: 13,
+            }
+        );
+        assert!(children.target.is_ok());
+        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+    }
+
+    struct DropFlag(Arc<AtomicUsize>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_run_aborts_every_owned_child_without_detaching() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let factories = std::array::from_fn(|_| {
+            let polled = polled.clone();
+            let dropped = dropped.clone();
+            child_factory(move |_| async move {
+                let _drop_flag = DropFlag(dropped);
+                polled.fetch_add(1, Ordering::SeqCst);
+                pending::<()>().await;
+                unreachable!()
+            })
+        });
+        let mut run = Box::pin(run_child_factories(pending(), factories));
+        poll_once_pending(run.as_mut()).await;
+        wait_for(
+            || polled.load(Ordering::SeqCst) == 5,
+            "all child tasks to be polled",
+        )
+        .await;
+        drop(run);
+        wait_for(
+            || dropped.load(Ordering::SeqCst) == 5,
+            "all aborted child tasks to be dropped",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn recovered_discovery_and_oldest_find_capabilities_form_intentional_eof_cycles() {
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let recursive = discovery.try_sender().expect("original sender is live");
+        drop(sender);
+        let table = KTable::new(Id20::ZERO);
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::new(discovery, table);
+        let oldest_find = scheduler.find_node_input();
+        routes.ping.close();
+        routes.sample_infohashes.close();
+        let mut scheduler_run = Box::pin(scheduler.run(pending()));
+
+        poll_once_pending(scheduler_run.as_mut()).await;
+        drop(recursive);
+        assert_eq!(
+            scheduler_run.await,
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        let mut find_eof = Box::pin(routes.find_node.recv());
+        poll_once_pending(find_eof.as_mut()).await;
+        drop(find_eof);
+        drop(oldest_find);
+        assert_eq!(routes.find_node.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn start_errors_return_the_discovery_receiver_and_preserve_entropy_source() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        drop(sender);
+        let error = match DhtCrawlerMaintenanceSupervisor::new(discovery, &client, runtime.table())
+        {
+            Ok(_) => panic!("closed discovery cannot recover a recursive sender"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DhtCrawlerMaintenanceStartError::DiscoveryClosed(_)
+        ));
+        let mut discovery = error.into_discovery();
+        assert_eq!(discovery.recv().await, None);
+
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let error = match DhtCrawlerMaintenanceSupervisor::new_with_target_factory(
+            discovery,
+            &client,
+            runtime.table(),
+            || -> Result<_, DhtCrawlerTargetError> {
+                Err(DhtCrawlerTargetError::Entropy(getrandom::Error::UNEXPECTED))
+            },
+        ) {
+            Ok(_) => panic!("target entropy failure must fail construction"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.source(),
+            Some(source) if source.to_string().contains("failed to generate DHT crawler target")
+        ));
+        let mut discovery = error.into_discovery();
+        assert_eq!(sender.offer(node(1)), DhtDiscoveryOffer::Queued);
+        assert_eq!(discovery.recv().await, Some(node(1)));
+        runtime.shutdown().await.unwrap();
+    }
+}
