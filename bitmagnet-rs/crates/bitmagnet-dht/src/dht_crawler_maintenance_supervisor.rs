@@ -677,7 +677,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn real_constructor_routes_oldest_ping_directly_to_the_ping_worker() {
-        let runtime = test_runtime().await;
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(60),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .expect("loopback runtime starts");
         let client = runtime.client();
         let table = KTable::new(Id20::ZERO);
         let oldest = node(99);
