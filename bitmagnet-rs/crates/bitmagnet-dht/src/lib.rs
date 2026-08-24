@@ -42,7 +42,7 @@ pub use dht_client::{
 pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
 };
-pub use dht_crawler_target::DhtCrawlerTarget;
+pub use dht_crawler_target::{DhtCrawlerTarget, DhtCrawlerTargetError, DhtCrawlerTargetRotator};
 pub use dht_discovered_node_ping_worker::{
     DhtDiscoveredNodePingStats, DhtDiscoveredNodePingStatsHandle, DhtDiscoveredNodePingWorker,
     DhtDiscoveredNodePingWorkerConfig, DhtDiscoveredNodePingWorkerExit,
