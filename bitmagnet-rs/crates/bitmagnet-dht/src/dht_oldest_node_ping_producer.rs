@@ -262,6 +262,10 @@ fn increment_saturating_by(counter: &AtomicU64, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_oldest_node_ping_producer_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::future::{pending, poll_fn, ready};
