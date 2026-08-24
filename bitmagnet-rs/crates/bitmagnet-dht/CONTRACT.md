@@ -2147,3 +2147,186 @@ independent find-input contract, and it does not supersede slice thirty-five's
 periodic oldest-node find producer or slice thirty-six's fixed supervisor
 wiring. Every periodic ping-producer, sample, bootstrap, higher-pipeline,
 runtime, application, deployment, and rollout exclusion remains in force.
+
+The thirty-eighth slice freezes the periodic oldest-node ping producer through
+the Go oracle at `2df7b3f10b4a85e85f5353e317be9b13d5ff3179`, the Rust
+implementation at `b0fee76a3fc9633444526876844549503840ccc2`, and the strict
+consumer at `a6e4c78d9b2b260e83c1d18090f219046283fd4d`:
+
+- `DhtOldestNodePingProducer::new` consumes the shared `KTable` and one
+  `DhtDiscoveredNodePingInput`, and returns the owned producer with a
+  sender-free `DhtOldestNodePingProducerStatsHandle`. Its public surface has
+  no configuration variant: the leading query delay is fixed at ten seconds,
+  the old-peer threshold at fifteen minutes, and the oldest-node query is
+  uncapped. The consuming `run` future starts and spawns no task. Its live
+  ping-input sender delays ping-route EOF until the producer or its polled run
+  future exits or is dropped;
+- every loop constructs a fresh, cancellation-aware ten-second Tokio sleep
+  before querying. Ready shutdown is biased first, input closure second, and
+  delay completion last. A winning shutdown or closure performs no query.
+  Focused paused-time gates fix the 9,999-millisecond pending boundary and
+  progress at the following millisecond. Delayed polling produces one query
+  and then a fresh full delay rather than catch-up ticks;
+- after delay completion, Rust reads its monotonic clock, floors subtraction
+  nonpanickingly at the oldest representable `Instant`, and synchronously calls
+  `KTable::get_oldest_nodes(cutoff, None)`. The completed-query and returned-
+  occurrence counters advance only after that call returns. The actual table
+  gate fixes the strict query boundary: a last response strictly before the
+  cutoff is selected, while a response exactly at or after the cutoff is not.
+  Rust returns equal-time handles in ID tie-break order; Go sorts by `Time`
+  while leaving equal-time order unspecified;
+- returned live handles are processed sequentially. For each occurrence,
+  ready shutdown wins, then input closure, then acquisition of one permit from
+  slice thirty-seven's existing shared ping capacity. A pending reservation
+  retains the live handle but neither rechecks nor snapshots it, so address,
+  dropped-state, and response-time mutations while capacity is blocked remain
+  visible after reservation. Cancelling the pending run releases its waiter
+  and sender without consuming capacity or committing a node;
+- once a permit is acquired, no asynchronous cancellation point remains for
+  that occurrence. Rust first checks the retained handle's dropped state. A
+  dropped handle is counted and the unused permit releases its capacity.
+  Otherwise Rust computes a fresh fifteen-minute cutoff and skips a response
+  strictly newer than it; an exact-cutoff response remains eligible. An
+  eligible handle is then projected to one immutable `RoutingNode` and
+  committed synchronously through the permit. Closing the receiver after
+  permit acquisition cannot revoke that authority. The returned Tokio sender
+  is dropped during delivery, so the consumed permit does not independently
+  extend route EOF;
+- this post-capacity guard and snapshot are a deliberate architectural delta.
+  Go's producer sends each same live `ktable.Node` without calling any node
+  accessor; `runPing` later checks `Dropped` and strict recentness only after
+  the buffered lane has dequeued the node and acquired worker concurrency.
+  Rust's state-free ping worker cannot retain that live handle, so the checks
+  move to the producer after route reservation but before immutable queue
+  commit. This is not a claim that route capacity is the same instant as Go's
+  consumer semaphore. Subsequent address mutations cannot change the queued
+  Rust node;
+- producer commits bypass scheduler batching, address deduplication and
+  projection, known-node filtering, routing choice, and every scheduler
+  counter. `routed_ping` remains scheduler-origin only, while the ping worker
+  continues to aggregate every committed source without provenance. One
+  producer preserves selected order, but no priority or deterministic order is
+  promised against scheduler commits or other ping-input clones; and
+- the exhaustive public exits are
+  `DhtOldestNodePingProducerExit::Shutdown { selected_dropped }` and
+  `InputClosed { selected_dropped }`. The count is the exact current selected
+  occurrence plus its later selected suffix that was neither classified nor
+  committed. A committed prefix and dropped or recent decisions are not
+  retracted. Receiver closure is typed, including during the leading delay or
+  a blocked reservation. Dropping a run future detaches nothing and releases
+  its sender and any unused permit, but is not a normal terminal return and
+  carries no terminal-conservation promise.
+
+`DhtOldestNodePingProducerStats` exposes seven saturating monotonic counters:
+completed `table_queries`, returned `selected` occurrences,
+`dropped_skipped`, `recent_skipped`, committed `queued` occurrences,
+`input_closed_dropped`, and `shutdown_dropped`. Snapshots load each field
+independently with relaxed ordering and are not transactional. After normal
+terminal return,
+`selected == dropped_skipped.saturating_add(recent_skipped).saturating_add(
+queued).saturating_add(input_closed_dropped).saturating_add(
+shutdown_dropped)`. The exit's `selected_dropped` is the per-run suffix added
+to the corresponding terminal counter; focused gates saturate all seven
+counters without wrapping.
+
+The strict child-module consumer denies unknown fields at every fixture level
+and freezes the exact ordered row IDs
+`production_source_factory_and_lifecycle_contract`,
+`already_cancelled_returns_before_initial_timer_and_query`, and
+`first_timer_ordered_prefix_then_cancel_at_blocked_third_send` with
+classifications `SOURCE_ONLY`, `RUNTIME_EXACT`, and `RUNTIME_EXACT`. The
+fixture SHA-256 is
+`d300e4606f9811f402af6d835748d09dbc59434f733a28079ac0df5e2f99ae5a`.
+It consumes every source, oracle, input, result, accessor, event, and optional
+field; binds Rust's fixed delay and threshold, scheduler ping capacity ten,
+and ping-worker concurrency ten; and checks these eight embedded Go sources:
+
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/ping.go`:
+  `45561d97a79060e6b96bc81f7d83491195e4ff60fbdc9460d9973675547804a2`;
+- `internal/protocol/dht/ktable/node.go`:
+  `93ed9a76a7cd0f50ee3ad255c6e77a8d19e5fe17081edc6238c5efab4983b3c3`;
+- `internal/protocol/dht/ktable/query.go`:
+  `103ec27a7904bdbbbd91f3ea1dae1f4d6ea3b3d6652757a6ab8ddbf598a7060e`;
+  and
+- `internal/protocol/dht/ktable/table.go`:
+  `68e3caf4394b2692fd9358224cce2b70ae3d90d920097bd28885b6b3bb77848f`.
+
+The source row freezes Go's leading `time.After`, cancellation-aware leading
+and per-node selects, strict unbounded oldest-node query, returned order, zero
+producer accessor calls, detached and unjoined lifecycle, production lane and
+worker bounds, and the later `runPing` dropped and strict-recent guards after
+semaphore acquisition. The factory's real ten-second timer, equal-ready Go
+select outcomes, equal-time table order, and exact callback scheduling remain
+source evidence rather than runtime observations. An empty Go query returns to
+a fresh cancellation-aware leading select.
+
+The pre-cancelled actual Go row returns before its positive sixty-second timer,
+performs no query or lane call, and records only start and return. Its Rust
+replay deliberately uses biased pre-ready shutdown, reads no clock, commits no
+work, returns `Shutdown { selected_dropped: 0 }`, and leaves all counters zero.
+The ordered-prefix Go row observes a shortened positive ten-millisecond timer,
+one runtime-bracketed unbounded query, exact A-through-D return order, A and B
+as the same live interface handles, entry into the third `In` call, and
+cancellation that abandons C and D; every producer node accessor count is zero.
+
+The corresponding Rust replay uses an injected leading-delay gate and a
+positive capacity-two Tokio route. A through D are timestamped one through
+four nanoseconds before the fixed query cutoff, while a hard-coded fifth
+sentinel exactly at the cutoff is excluded. Rust therefore records one query,
+four selected occurrences, reserves and immutably commits A then B, and blocks
+before the post-reserve callback for C; the observed post-reserve indices are
+exactly `[0, 1]` and the producer clock is read once for the query and once for
+each committed node. Biased shutdown then returns
+`Shutdown { selected_dropped: 2 }`, drains only A and B in order, and finishes
+with `table_queries=1`, `selected=4`, `queued=2`, `shutdown_dropped=2`, and all
+other outcome counters zero.
+
+The consumer explicitly classifies nine facts as Go-only metadata: fixture
+tokens; runtime-row interval values; runtime-bracketed cutoff and waited-delay
+booleans; lane `In` call counts; same-interface delivery identity; producer
+accessor counts; event logs; and the post-semaphore consumer-guard position.
+It freezes twelve deliberate Rust deltas: biased ready-event ordering; owned,
+taskless lifecycle; fresh monotonic delay without catch-up; Go limit zero to
+Rust `None`; nonpanicking cutoff flooring; deterministic ID tie-breaks;
+positive Tokio capacity with typed closure; relocation of dropped and recent
+guards to post-reservation producer code; one immutable post-capacity snapshot;
+no recheck or snapshot for a still-blocked occurrence; typed terminal exits;
+and seven saturating component-local counters with terminal conservation.
+
+This slice adds no public producer configuration, clock, delay, hook, route
+capacity, concurrency limit, or source-provenance field. It does not change
+ping query, response-ID, KTable Put or Drop, query ownership, worker shutdown,
+or worker statistics semantics from slice twenty-nine. It creates no producer
+task and adds no retry, restart, or backoff. It adds no sample-infohashes,
+bootstrap or reseed work, higher crawler pipeline, persistence, Prometheus
+registration, logging or health integration, application or deployment
+configuration, external DHT traffic, live deployment, or production rollout.
+
+In particular, the fixed five-child `DhtCrawlerMaintenanceSupervisor` from
+slice thirty-six still does not request the shared ping input or construct this
+producer. This slice does not own or observe `DhtRuntime`, join the producer to
+that supervisor, or establish a runtime, application, or process lifecycle.
+
+This slice supersedes slice thirty-seven only where that slice reserves the
+ping-input lifecycle hook for a future producer and excludes oldest-node
+selection, the post-capacity live-handle guard and snapshot, fixed cadence,
+typed exits, counters, and oracle consumption. Slice thirty-seven's shared
+capacity, direct-bypass, EOF-extension, waiter, public-send, and cross-source-
+order contracts remain unchanged; its new crate-private reservation permit is
+not a public API expansion. It supersedes slice twenty-nine only where the Go
+dropped and recent live-handle behavior remained deferred producer evidence:
+Rust now makes the equivalent decisions in the producer rather than adding
+live state to the ping worker. All ping-worker contracts remain unchanged. It
+supersedes slice thirty-six only where that slice globally excludes the
+existence of a periodic old-node ping producer; the supervisor's exact fixed
+five-child wiring and lack of a ping-input EOF cycle remain authoritative.
+Every remaining sample, bootstrap, higher-pipeline, runtime, application,
+deployment, and rollout boundary remains in force.
