@@ -119,7 +119,7 @@ pub struct DhtBootstrapPingProducer {
 impl DhtBootstrapPingProducer {
     /// Construct the fixed six-node, ten-minute production producer.
     pub fn new(input: DhtDiscoveredNodePingInput) -> (Self, DhtBootstrapPingProducerStatsHandle) {
-        Self::with_bootstrap_nodes(
+        Self::from_bootstrap_nodes(
             input,
             DEFAULT_BOOTSTRAP_NODES
                 .map(String::from)
@@ -128,7 +128,15 @@ impl DhtBootstrapPingProducer {
         )
     }
 
-    fn with_bootstrap_nodes(
+    #[cfg(test)]
+    pub(crate) fn with_bootstrap_nodes(
+        input: DhtDiscoveredNodePingInput,
+        bootstrap_nodes: Vec<String>,
+    ) -> (Self, DhtBootstrapPingProducerStatsHandle) {
+        Self::from_bootstrap_nodes(input, bootstrap_nodes)
+    }
+
+    fn from_bootstrap_nodes(
         input: DhtDiscoveredNodePingInput,
         bootstrap_nodes: Vec<String>,
     ) -> (Self, DhtBootstrapPingProducerStatsHandle) {
@@ -449,7 +457,7 @@ mod tests {
 
         fn assert_send<T: Send>(_value: T) {}
         let (input, _receiver) = DhtDiscoveredNodePingInput::test_channel(1);
-        let (producer, _stats) = DhtBootstrapPingProducer::new(input);
+        let (producer, _stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(input, Vec::new());
         assert_send(producer.run(pending()));
     }
 
@@ -612,8 +620,10 @@ mod tests {
     async fn first_round_is_immediate_and_later_round_uses_a_fresh_ten_minute_delay() {
         let selected = v4(1, 1001);
         let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(2);
-        let (producer, stats) =
-            DhtBootstrapPingProducer::with_bootstrap_nodes(input, vec!["first".to_owned()]);
+        let (producer, stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(
+            input,
+            vec!["127.0.0.1:1001".to_owned()],
+        );
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let run = producer.run(async move {
             let _ = shutdown_rx.await;
