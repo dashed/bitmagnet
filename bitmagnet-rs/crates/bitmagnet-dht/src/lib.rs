@@ -4,6 +4,7 @@ mod announce_token;
 mod compact;
 mod dht_client;
 mod dht_concurrent_supervisor;
+mod dht_discovery;
 mod dht_dispatch;
 mod dht_driver;
 mod dht_inbound_stats;
@@ -37,6 +38,10 @@ pub use dht_client::{
 };
 pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
+};
+pub use dht_discovery::{
+    dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,
+    DhtDiscoveryStats,
 };
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
