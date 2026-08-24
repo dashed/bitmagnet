@@ -2,6 +2,7 @@
 
 mod announce_token;
 mod compact;
+mod dht_bootstrap_ping_producer;
 mod dht_client;
 mod dht_concurrent_supervisor;
 mod dht_crawler_maintenance_supervisor;
@@ -39,6 +40,10 @@ mod tokio_ipv4_udp;
 mod transaction;
 
 pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
+pub use dht_bootstrap_ping_producer::{
+    DhtBootstrapPingProducer, DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStats,
+    DhtBootstrapPingProducerStatsHandle,
+};
 pub use dht_client::{
     DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
     PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
