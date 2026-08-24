@@ -465,10 +465,10 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use crate::{
-        ByteString, DhtInboundStatsSnapshot, DhtResponder, DhtResponderLookup, DhtResponderSample,
-        Id20, KTableCommand, KrpcMessage, MessageArgs, MessageReturn, ReceivedDatagram,
-        RoutingNode, TransactionId, TransactionIdSourceError, TransactionWaitOutcome,
-        MAX_INBOUND_DATAGRAM_BYTES,
+        dht_discovery_channel, ByteString, DhtDiscoveryStats, DhtInboundStatsSnapshot,
+        DhtResponder, DhtResponderLookup, DhtResponderSample, Id20, KTableCommand, KrpcMessage,
+        MessageArgs, MessageReturn, ReceivedDatagram, RoutingNode, TransactionId,
+        TransactionIdSourceError, TransactionWaitOutcome, MAX_INBOUND_DATAGRAM_BYTES,
     };
 
     use super::*;
@@ -804,8 +804,20 @@ mod tests {
             SendAction::Return(Ok(())),
         ]);
         let sender_observer = sender.clone();
-        let mut supervisor =
-            supervisor_with_policy(receiver, registry, sender, TestTable::new(), policy, 1, 2);
+        let (discovery, mut discovered) =
+            dht_discovery_channel(NonZeroUsize::new(3).expect("nonzero discovery capacity"));
+        let responder =
+            DhtResponder::with_token_secret(TestTable::new(), *b"0123456789abcdefghij", 10);
+        let dispatcher = DhtDispatcher::from_responder(responder).with_discovery(discovery.clone());
+        let mut supervisor = DhtConcurrentSupervisor::with_inbound_policy(
+            receiver,
+            registry,
+            sender,
+            dispatcher,
+            policy,
+            NonZeroUsize::new(1).expect("nonzero handler capacity"),
+            NonZeroUsize::new(2).expect("nonzero rejection capacity"),
+        );
         let handler_permits = Arc::clone(&supervisor.handler_permits);
         let stats = supervisor.inbound_stats();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -823,6 +835,15 @@ mod tests {
         assert_eq!(started.recv().await, Some(2));
         wait_for_stats(&stats, |snapshot| snapshot.rejection_sent == 1).await;
         assert_eq!(policy_observer.calls(), vec![QUERY_SOURCE]);
+        assert_eq!(
+            discovery.stats(),
+            DhtDiscoveryStats {
+                offered: 1,
+                queued: 1,
+                full_dropped: 0,
+                receiver_closed_dropped: 0,
+            }
+        );
 
         release_tx.send(Ok(())).unwrap();
         wait_for_permit(&handler_permits).await;
@@ -837,6 +858,22 @@ mod tests {
         let records = sender_observer.records();
         assert_rejection_for_tid(&records, b"C1");
         assert!(record_for_tid(&records, b"A2").response.is_some());
+        assert_eq!(
+            discovery.stats(),
+            DhtDiscoveryStats {
+                offered: 2,
+                queued: 2,
+                full_dropped: 0,
+                receiver_closed_dropped: 0,
+            }
+        );
+        let expected = RoutingNode {
+            id: requester_id(),
+            addr: QUERY_SOURCE,
+        };
+        assert_eq!(discovered.try_recv().unwrap(), expected);
+        assert_eq!(discovered.try_recv().unwrap(), expected);
+        assert_eq!(discovered.try_recv(), Err(mpsc::error::TryRecvError::Empty));
 
         shutdown_tx.send(()).unwrap();
         assert!(matches!(
