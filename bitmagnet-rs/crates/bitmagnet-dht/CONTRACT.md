@@ -1007,3 +1007,83 @@ also does not add Go's five-second responder deadline, swallowed reply-send
 policy, discovery, metrics, health, logging, crawler/persistence wiring, or
 external bootstrap traffic. Inbound enforcement and a nonblocking rejection
 path are the next runtime checkpoint.
+
+The twenty-fifth slice adds bounded inbound admission and rejection to
+`DhtConcurrentSupervisor` and wires the production policy into `DhtRuntime`:
+
+- `DhtConcurrentSupervisor::with_inbound_policy` checks the bounded handler
+  capacity before consulting the policy. A capacity rejection therefore
+  consumes neither the peer's per-IP token nor a global token. Among queries
+  that are capacity-eligible, the synchronous policy is evaluated in receive
+  order before responder dispatch. Go instead invokes its limiter as an
+  in-handler responder wrapper; moving Rust's check ahead of the responder is
+  a deliberate bounded-admission hardening. A denied query never calls the
+  Rust `DhtResponder` or mutates the KTable; when the bounded rejection lane
+  accepts it, the query reaches the Go-compatible protocol-error composition;
+- the production `DhtInboundRateLimiter` implementation supplies Go's deployed
+  defaults: one token per second with burst ten for each source-IP identity,
+  a bounded 1,000-key cache with strict twenty-second TTL, followed by a shared
+  fifty-per-second bucket with burst twenty. Ports and IPv6 flow information
+  are excluded from the per-IP key, while IPv4, mapped IPv4, native IPv6, and
+  numeric IPv6 zones retain their distinct Go-compatible identities;
+- both a handler-capacity denial and a typed per-IP or global rate denial select
+  the same overload path. When its bounded lane accepts the work, that path
+  prepares the exact Go response: a `y=r` envelope containing `e=[201, "too
+  many requests"]`, the original transaction ID, no return dictionary, and no
+  Rust responder call. One owned FIFO rejection worker awaits sends
+  sequentially. An independent permit bound counts the active rejection plus
+  every queued rejection; `DhtRuntime` fixes it at 64 total. Once exhausted,
+  the newest denial is counted and dropped before reply construction, without
+  cloning or polling a sender and without responder or table effects;
+- Rust deliberately treats a rejection encode or transport failure as the
+  exact terminal `DhtDriverError::Send`, retaining the prepared 201 outcome and
+  original error. Go's production handler logs and swallows its reply-send
+  failure instead. Shutdown, receive failure, either send failure, or a child
+  panic stops admission, aborts, and fully drains both owned task sets before
+  returning or resuming the original panic payload. No rejection worker is
+  detached;
+- response and error envelopes continue to bypass handler capacity, the
+  inbound policy, and the rejection lane, reaching the transaction registry
+  inline even while handler and rejection sends are backpressured; and
+- cloneable `DhtInboundStats` exposes nine saturating monotonic counters.
+  `admitted` counts capacity-eligible policy admissions;
+  `denied_per_ip`, `denied_global`, and `denied_handler_capacity` classify the
+  three denial boundaries; `rejection_queued` counts FIFO acceptance;
+  `rejection_queue_full_dropped` counts newest rejections refused by the total
+  bound; `rejection_sent` counts completed successful sends; and
+  `rejection_encode_failed` and `rejection_transport_failed` classify the two
+  terminal rejection-send failures. A snapshot uses independent relaxed loads
+  and is explicitly not transactional across fields. The legacy
+  `DhtConcurrentSupervisor::from_dispatcher` path consults no policy and leaves
+  all nine counters at zero.
+
+`DhtRuntime::start` now constructs the production inbound limiter and selects
+`DhtConcurrentSupervisor::with_inbound_policy` with the existing fixed 64
+handler slots and a fixed 64 total outstanding rejections. It retains a clone
+of the shared stats and exposes that live handle through `inbound_stats`.
+This supersedes slice twenty-four's silent capacity drop only for the runtime's
+policy-enabled constructor. The legacy `from_dispatcher` path retains that
+silent drop and its all-zero stats.
+
+Deterministic supervisor gates cover capacity-before-policy token
+preservation, per-IP/global receive order, exact 201 wire shape and
+drop-before-mutation, response delivery and admitted-query progress while a
+rejection blocks, the active-plus-queued bound and drop-newest recovery, exact
+terminal rejection-send error retention, stats accounting, sibling cleanup,
+and panic-payload preservation. The checked real-Go concurrency/inbound oracle
+records the production server read/handler path, its blocked-send partial
+order, and the exact direct-handler rejection envelope through its documented
+limiter adapter. The responder-limiter and rate-policy oracles separately lock
+the deployed defaults and per-IP-before-global ordering; the runtime-bridge and
+dispatch/send evidence lock Go's swallowed reply-send failure. A raw loopback
+gate freezes the limiter clock, bursts ten fixed-ID queries from one socket and
+observes ten normal replies in arbitrary handler-completion order, then locks
+the eleventh query's exact 201 wire, complete stats snapshot, graceful
+shutdown, and exact port rebind.
+Release verification ran the focused gate repeatedly without relying on the
+client's outbound wait.
+
+This slice still excludes Go's five-second responder timeout, configurable
+handler or rejection capacities, reply-send logging, Prometheus integration,
+responder discovery, crawler scheduling, persistence, external bootstrap
+traffic, application/Fx or deployment wiring, and any production rollout.

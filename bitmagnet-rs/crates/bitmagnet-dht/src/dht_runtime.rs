@@ -7,14 +7,15 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::{
     CryptoTransactionIdIssuer, DhtClient, DhtClientError, DhtConcurrentSupervisor,
-    DhtConcurrentSupervisorExit, DhtDispatcher, DhtDriverError, DhtOutboundRateLimiter,
-    DhtResponder, FindNodeResult, GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult,
-    SampleInfoHashesResult, TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError,
-    TokioIpv4UdpWeakSender, TransactionRegistry,
+    DhtConcurrentSupervisorExit, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter,
+    DhtInboundStats, DhtOutboundRateLimiter, DhtResponder, FindNodeResult, GetPeersResult,
+    GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult, TokioIpv4UdpError,
+    TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender, TransactionRegistry,
 };
 
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
 const MAX_INFLIGHT_QUERIES: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+const MAX_OUTSTANDING_REJECTIONS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 
 /// Configuration for the initial owned IPv4 DHT runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,17 +161,25 @@ impl DhtRuntimeClient {
 
 /// The initial owned production DHT composition over one shared IPv4 socket.
 ///
-/// The background task admits at most 64 concurrent query handlers. Response
-/// and error envelopes bypass that capacity and are delivered inline to the
-/// transaction registry even while reply sends are backpressured. At capacity,
-/// the newest query is silently dropped before responder dispatch. The inbound
-/// rate limiter and an outer responder timeout are not wired here yet.
+/// The background task checks its fixed 64-handler capacity before consulting
+/// the production inbound limiter. A capacity denial therefore preserves the
+/// peer and global limiter tokens; an admitted rate-policy check still precedes
+/// responder dispatch and every table effect. Both denial paths queue Go's
+/// exact `y=r`, error-201 response through one FIFO lane bounded to 64 total
+/// active-plus-queued rejections. A saturated lane drops the newest rejection.
+/// Response and error envelopes bypass both query lanes and are delivered inline
+/// to the transaction registry even while sends are backpressured.
+///
+/// Unlike Go's swallowed query-reply send errors, an admitted or rejection send
+/// failure terminates this owned task through its typed driver error. No outer
+/// responder timeout is applied by this runtime yet.
 pub struct DhtRuntime {
     local_addr: SocketAddrV4,
     local_id: Id20,
     table: KTable,
     client: DhtRuntimeClient,
     registry: TransactionRegistry<CryptoTransactionIdIssuer>,
+    inbound_stats: DhtInboundStats,
     shutdown_tx: watch::Sender<bool>,
     task: Option<JoinHandle<DhtRuntimeExit>>,
 }
@@ -195,13 +204,16 @@ impl DhtRuntime {
         let weak_sender = sender.downgrade();
         let client = DhtRuntimeClient::new(local_id, &registry, config.query_timeout, weak_sender);
 
-        let mut supervisor = DhtConcurrentSupervisor::from_dispatcher(
+        let mut supervisor = DhtConcurrentSupervisor::with_inbound_policy(
             receiver,
             registry.clone(),
             sender,
             dispatcher,
+            DhtInboundRateLimiter::new(),
             MAX_INFLIGHT_QUERIES,
+            MAX_OUTSTANDING_REJECTIONS,
         );
+        let inbound_stats = supervisor.inbound_stats();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_registry = registry.clone();
         let task = tokio::spawn(async move {
@@ -218,6 +230,7 @@ impl DhtRuntime {
             table,
             client,
             registry,
+            inbound_stats,
             shutdown_tx,
             task: Some(task),
         })
@@ -239,6 +252,15 @@ impl DhtRuntime {
     #[must_use]
     pub const fn table(&self) -> &KTable {
         &self.table
+    }
+
+    /// Clone the live monotonic inbound admission and rejection counters.
+    ///
+    /// Each snapshot loads its fields independently and is not transactional
+    /// across counters.
+    #[must_use]
+    pub fn inbound_stats(&self) -> DhtInboundStats {
+        self.inbound_stats.clone()
     }
 
     /// Clone a non-owning typed query handle.
@@ -316,13 +338,14 @@ fn random_local_id() -> Result<Id20, getrandom::Error> {
 mod tests {
     use std::future::{pending, poll_fn, Future};
     use std::task::Poll;
+    use std::time::Instant as WallInstant;
 
     use tokio::net::UdpSocket;
     use tokio::sync::oneshot;
 
     use crate::{
-        QuerySendError, RegisterError, TokioIpv4UdpWeakSendError, TransactionRegistry,
-        MAX_INBOUND_DATAGRAM_BYTES,
+        ByteString, DhtInboundStatsSnapshot, KrpcMessage, MessageArgs, QuerySendError,
+        RegisterError, TokioIpv4UdpWeakSendError, TransactionRegistry, MAX_INBOUND_DATAGRAM_BYTES,
     };
 
     use super::*;
@@ -336,9 +359,93 @@ mod tests {
         );
         assert_eq!(config.query_timeout, Duration::from_secs(4));
         assert_eq!(config.sample_infohashes_interval, 10);
+        assert_eq!(MAX_INFLIGHT_QUERIES.get(), 64);
+        assert_eq!(MAX_OUTSTANDING_REJECTIONS.get(), 64);
 
         let first = random_local_id().unwrap();
         assert_eq!(&first.as_bytes()[12..], CLIENT_SUFFIX);
+    }
+
+    #[tokio::test]
+    async fn raw_loopback_burst_allows_ten_then_sends_exact_go_201_and_releases_port() {
+        const ALLOWED_TIDS: [[u8; 2]; 10] = [
+            *b"A0", *b"A1", *b"A2", *b"A3", *b"A4", *b"A5", *b"A6", *b"A7", *b"A8", *b"A9",
+        ];
+        const DENIAL_WIRE: &[u8] = b"d1:eli201e17:too many requestse1:t2:L11:y1:re";
+
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let local_addr = runtime.local_addr();
+        let local_id = runtime.local_id();
+        let stats = runtime.inbound_stats();
+        let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+
+        // Freeze only the Tokio clock. The raw nonblocking receive helper below
+        // uses a wall-clock deadline, so this gate cannot accidentally refill
+        // the one-token-per-second inbound bucket or auto-advance to a timeout.
+        tokio::time::pause();
+
+        for transaction_id in ALLOWED_TIDS {
+            let wire = fixed_ping_query(&transaction_id);
+            assert_eq!(peer.send_to(&wire, local_addr).await.unwrap(), wire.len());
+        }
+
+        let mut observed_tids = Vec::with_capacity(ALLOWED_TIDS.len());
+        let mut buffer = [0; MAX_INBOUND_DATAGRAM_BYTES];
+        for _ in ALLOWED_TIDS {
+            let (length, source) = recv_raw_while_time_paused(&peer, &mut buffer).await;
+            assert_eq!(source, SocketAddr::V4(local_addr));
+            let message = KrpcMessage::decode_inbound(&buffer[..length]).unwrap();
+            assert_eq!(message.message_type.as_bytes(), b"r");
+            assert_eq!(message.response.as_ref().unwrap().id, local_id);
+            assert!(message.error.is_none());
+            observed_tids.push(message.transaction_id.as_bytes().to_vec());
+        }
+        observed_tids.sort();
+        assert_eq!(
+            observed_tids,
+            ALLOWED_TIDS.into_iter().map(Vec::from).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            stats.snapshot(),
+            DhtInboundStatsSnapshot {
+                admitted: 10,
+                ..DhtInboundStatsSnapshot::default()
+            }
+        );
+
+        let denied_query = fixed_ping_query(b"L1");
+        assert_eq!(
+            peer.send_to(&denied_query, local_addr).await.unwrap(),
+            denied_query.len()
+        );
+        let (length, source) = recv_raw_while_time_paused(&peer, &mut buffer).await;
+        assert_eq!(source, SocketAddr::V4(local_addr));
+        assert_eq!(&buffer[..length], DENIAL_WIRE);
+        wait_for_rejection_sent_while_time_paused(&stats).await;
+        assert_eq!(
+            stats.snapshot(),
+            DhtInboundStatsSnapshot {
+                admitted: 10,
+                denied_per_ip: 1,
+                rejection_queued: 1,
+                rejection_sent: 1,
+                ..DhtInboundStatsSnapshot::default()
+            }
+        );
+
+        tokio::time::resume();
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            DhtRuntimeExit::Shutdown
+        ));
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
     }
 
     #[tokio::test]
@@ -513,6 +620,7 @@ mod tests {
             table,
             client: client.clone(),
             registry: registry.clone(),
+            inbound_stats: DhtInboundStats::new(),
             shutdown_tx,
             task: Some(task),
         };
@@ -642,6 +750,66 @@ mod tests {
         assert!(length > 0);
     }
 
+    fn fixed_ping_query(transaction_id: &[u8]) -> Vec<u8> {
+        KrpcMessage {
+            transaction_id: ByteString::new(transaction_id),
+            message_type: ByteString::new(b"q"),
+            query: ByteString::new(b"ping"),
+            args: Some(MessageArgs {
+                id: Id20::from_hex("0000000000000000000000000000000000000044").unwrap(),
+                info_hash: None,
+                target: None,
+                token: ByteString::default(),
+                port: None,
+                implied_port: false,
+                want: None,
+                no_seed: 0,
+                scrape: 0,
+            }),
+            response: None,
+            error: None,
+            observed_addr: None,
+            read_only: false,
+            client_id: ByteString::default(),
+        }
+        .encode()
+        .unwrap()
+    }
+
+    async fn recv_raw_while_time_paused(
+        socket: &UdpSocket,
+        buffer: &mut [u8],
+    ) -> (usize, SocketAddr) {
+        let deadline = WallInstant::now() + Duration::from_secs(5);
+        loop {
+            match socket.try_recv_from(buffer) {
+                Ok(received) => return received,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        WallInstant::now() < deadline,
+                        "raw loopback reply did not arrive before wall-clock deadline"
+                    );
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => panic!("raw loopback receive failed: {error}"),
+            }
+        }
+    }
+
+    async fn wait_for_rejection_sent_while_time_paused(stats: &DhtInboundStats) {
+        let deadline = WallInstant::now() + Duration::from_secs(5);
+        loop {
+            if stats.snapshot().rejection_sent == 1 {
+                return;
+            }
+            assert!(
+                WallInstant::now() < deadline,
+                "rejection send counter did not settle before wall-clock deadline"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
     async fn wait_for_pending(
         registry: &TransactionRegistry<CryptoTransactionIdIssuer>,
         expected: usize,
@@ -713,6 +881,7 @@ mod tests {
                 table,
                 client: client.clone(),
                 registry,
+                inbound_stats: DhtInboundStats::new(),
                 shutdown_tx,
                 task: Some(task),
             },
