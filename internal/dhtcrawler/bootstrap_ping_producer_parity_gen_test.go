@@ -28,7 +28,7 @@ var updateDHTCrawlerBootstrapPingProducerParity = flag.Bool(
 	"rewrite the Rust DHT crawler bootstrap-ping-producer parity fixture",
 )
 
-const crawlerBootstrapPingProducerFixtureSHA256 = "58f1a27775f035b6ce68ae43962ce4a3677bb2eaa68917959db12b8fd528dcde"
+const crawlerBootstrapPingProducerFixtureSHA256 = "0616d53feb443d481d8d286d9c0d38ee14823b514c9075d0a4b367b938767cb4"
 
 var crawlerBootstrapPingProducerFixtureIDs = [...]string{
 	"production_source_factory_defaults_and_lifecycle_contract",
@@ -106,6 +106,7 @@ type crawlerBootstrapPingProducerSource struct {
 	EffectiveReseedIntervalSeconds         int               `json:"effectiveReseedIntervalSeconds"`
 	ConfigDefaultReseedIntervalSeconds     int               `json:"configDefaultReseedIntervalSeconds"`
 	FactoryIgnoresConfiguredReseedInterval bool              `json:"factoryIgnoresConfiguredReseedInterval"`
+	FactoryUsesConfiguredBootstrapNodes    bool              `json:"factoryUsesConfiguredBootstrapNodes"`
 	DefaultBootstrapNodes                  []string          `json:"defaultBootstrapNodes"`
 	DefaultScalingFactor                   int               `json:"defaultScalingFactor"`
 	ProductionCapacity                     int               `json:"productionCapacity"`
@@ -254,6 +255,7 @@ func crawlerBootstrapPingProducerSourceFixture(t *testing.T) crawlerBootstrapPin
 				FreshDelayAfterRound:         true, EffectiveReseedIntervalSeconds: 600,
 				ConfigDefaultReseedIntervalSeconds:     60,
 				FactoryIgnoresConfiguredReseedInterval: true,
+				FactoryUsesConfiguredBootstrapNodes:    true,
 				DefaultBootstrapNodes:                  append([]string{}, defaultNodes...),
 				DefaultScalingFactor:                   scaling, ProductionCapacity: scaling,
 				ProductionConcurrency: scaling, LaneSharedWithRunPing: true,
