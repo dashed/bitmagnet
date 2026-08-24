@@ -149,6 +149,10 @@ fn fill_random(bytes: &mut [u8; TARGET_BYTES]) -> Result<(), getrandom::Error> {
 }
 
 #[cfg(test)]
+#[path = "dht_crawler_target_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::convert::Infallible;
     use std::future::{pending, poll_fn, ready};
