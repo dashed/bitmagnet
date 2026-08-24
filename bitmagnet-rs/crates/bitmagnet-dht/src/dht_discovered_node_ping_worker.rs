@@ -391,6 +391,10 @@ fn add_saturating(counter: &AtomicU64, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_discovered_node_ping_worker_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::future::{pending, ready};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
