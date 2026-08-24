@@ -4,6 +4,7 @@ mod announce_token;
 mod compact;
 mod dht_client;
 mod dht_concurrent_supervisor;
+mod dht_crawler_target;
 mod dht_discovered_node_ping_worker;
 mod dht_discovered_node_scheduler;
 mod dht_discovery;
@@ -41,6 +42,7 @@ pub use dht_client::{
 pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
 };
+pub use dht_crawler_target::DhtCrawlerTarget;
 pub use dht_discovered_node_ping_worker::{
     DhtDiscoveredNodePingStats, DhtDiscoveredNodePingStatsHandle, DhtDiscoveredNodePingWorker,
     DhtDiscoveredNodePingWorkerConfig, DhtDiscoveredNodePingWorkerExit,
