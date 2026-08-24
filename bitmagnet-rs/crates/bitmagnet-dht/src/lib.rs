@@ -45,8 +45,8 @@ pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
 pub use dht_runtime::{
-    DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig, DhtRuntimeDriverError,
-    DhtRuntimeExit, DhtRuntimeStartError,
+    DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig,
+    DhtRuntimeControlledQueryError, DhtRuntimeDriverError, DhtRuntimeExit, DhtRuntimeStartError,
 };
 pub use dht_send::{send_dht_reply, DhtSendError};
 pub use dht_supervisor::{DhtSupervisor, DhtSupervisorExit};

@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroUsize;
 use std::time::Duration;
@@ -8,9 +9,10 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::{
     CryptoTransactionIdIssuer, DhtClient, DhtClientError, DhtConcurrentSupervisor,
     DhtConcurrentSupervisorExit, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter,
-    DhtInboundStats, DhtOutboundRateLimiter, DhtResponder, FindNodeResult, GetPeersResult,
-    GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult, TokioIpv4UdpError,
-    TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender, TransactionRegistry,
+    DhtInboundStats, DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, FindNodeResult,
+    GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult,
+    TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender,
+    TransactionRegistry,
 };
 
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
@@ -67,15 +69,36 @@ pub enum DhtRuntimeExit {
 /// The typed query failure surfaced by a runtime client handle.
 pub type DhtRuntimeClientError = DhtClientError<TokioIpv4UdpWeakSendError>;
 
+/// A controlled runtime query failed before or after outbound admission.
+#[derive(Debug, thiserror::Error)]
+pub enum DhtRuntimeControlledQueryError {
+    /// The caller's admission cancellation or deadline prevented a query.
+    #[error("DHT outbound admission failed: {0}")]
+    Admission(
+        #[from]
+        #[source]
+        DhtRateLimitWaitError,
+    ),
+    /// Admission succeeded and the existing typed query path failed.
+    #[error("DHT runtime query failed after admission: {0}")]
+    Query(
+        #[from]
+        #[source]
+        DhtRuntimeClientError,
+    ),
+}
+
 /// A cloneable typed query client that does not own the runtime's UDP socket.
 ///
 /// Clones share the production transaction registry and outbound rate limiter.
 /// The weak sender upgrades the socket only for the duration of an admitted
 /// send, so retained client handles cannot keep the runtime's bound port open.
-/// Each convenience method uses the limiter's unbounded `wait` admission; this
-/// surface does not yet expose admission deadlines or typed cancellation.
-/// Dropping or selecting away the whole method still cancels an in-flight
-/// admission reservation or query registration through their owned guards.
+/// Each convenience method uses the limiter's unbounded `wait` admission. The
+/// corresponding `*_with_admission` method exposes only the admission wait's
+/// deadline and cancellation: once admission succeeds, that cancellation
+/// future is dropped and the configured response timeout starts only after the
+/// datagram send succeeds. Dropping or selecting away the whole method still
+/// cancels whichever admission reservation or query registration it then owns.
 #[derive(Clone)]
 pub struct DhtRuntimeClient {
     client: DhtClient<CryptoTransactionIdIssuer>,
@@ -110,6 +133,25 @@ impl DhtRuntimeClient {
         self.client.ping(&mut self.sender.clone(), remote).await
     }
 
+    /// Admit with caller controls, then immediately send and await `ping`.
+    pub async fn ping_with_admission<F>(
+        &self,
+        remote: SocketAddr,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<PingResult, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut sender = self
+            .admitted_sender(remote, admission_deadline, admission_cancellation)
+            .await?;
+        self.client
+            .ping(&mut sender, remote)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Query)
+    }
+
     /// Admit, send, and await one typed `find_node` query.
     pub async fn find_node(
         &self,
@@ -120,6 +162,26 @@ impl DhtRuntimeClient {
         self.client
             .find_node(&mut self.sender.clone(), remote, target)
             .await
+    }
+
+    /// Admit with caller controls, then immediately send and await `find_node`.
+    pub async fn find_node_with_admission<F>(
+        &self,
+        remote: SocketAddr,
+        target: Id20,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<FindNodeResult, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut sender = self
+            .admitted_sender(remote, admission_deadline, admission_cancellation)
+            .await?;
+        self.client
+            .find_node(&mut sender, remote, target)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     /// Admit, send, and await one typed `get_peers` query.
@@ -134,6 +196,26 @@ impl DhtRuntimeClient {
             .await
     }
 
+    /// Admit with caller controls, then immediately send and await `get_peers`.
+    pub async fn get_peers_with_admission<F>(
+        &self,
+        remote: SocketAddr,
+        info_hash: Id20,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<GetPeersResult, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut sender = self
+            .admitted_sender(remote, admission_deadline, admission_cancellation)
+            .await?;
+        self.client
+            .get_peers(&mut sender, remote, info_hash)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Query)
+    }
+
     /// Admit, send, and await one typed BEP-33 scrape query.
     pub async fn get_peers_scrape(
         &self,
@@ -146,6 +228,26 @@ impl DhtRuntimeClient {
             .await
     }
 
+    /// Admit with caller controls, then immediately send and await BEP-33 scrape.
+    pub async fn get_peers_scrape_with_admission<F>(
+        &self,
+        remote: SocketAddr,
+        info_hash: Id20,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<GetPeersScrapeResult, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut sender = self
+            .admitted_sender(remote, admission_deadline, admission_cancellation)
+            .await?;
+        self.client
+            .get_peers_scrape(&mut sender, remote, info_hash)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Query)
+    }
+
     /// Admit, send, and await one typed BEP-51 query.
     pub async fn sample_infohashes(
         &self,
@@ -156,6 +258,42 @@ impl DhtRuntimeClient {
         self.client
             .sample_infohashes(&mut self.sender.clone(), remote, target)
             .await
+    }
+
+    /// Admit with caller controls, then immediately send and await BEP-51.
+    pub async fn sample_infohashes_with_admission<F>(
+        &self,
+        remote: SocketAddr,
+        target: Id20,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<SampleInfoHashesResult, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut sender = self
+            .admitted_sender(remote, admission_deadline, admission_cancellation)
+            .await?;
+        self.client
+            .sample_infohashes(&mut sender, remote, target)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Query)
+    }
+
+    async fn admitted_sender<F>(
+        &self,
+        remote: SocketAddr,
+        admission_deadline: Option<tokio::time::Instant>,
+        admission_cancellation: F,
+    ) -> Result<TokioIpv4UdpWeakSender, DhtRuntimeControlledQueryError>
+    where
+        F: Future<Output = ()>,
+    {
+        self.outbound_rate_limiter
+            .wait_with(remote, admission_deadline, admission_cancellation)
+            .await
+            .map_err(DhtRuntimeControlledQueryError::Admission)?;
+        Ok(self.sender.clone())
     }
 }
 
@@ -336,7 +474,7 @@ fn random_local_id() -> Result<Id20, getrandom::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::{pending, poll_fn, Future};
+    use std::future::{pending, poll_fn, ready, Future};
     use std::task::Poll;
     use std::time::Instant as WallInstant;
 
@@ -364,6 +502,219 @@ mod tests {
 
         let first = random_local_id().unwrap();
         assert_eq!(&first.as_bytes()[12..], CLIENT_SUFFIX);
+    }
+
+    #[tokio::test]
+    async fn controlled_admission_precedes_closed_registry_and_query_errors_remain_nested() {
+        let (closed_client, closed_registry, remote) = stopped_runtime_client().await;
+        closed_registry.close();
+
+        assert!(matches!(
+            closed_client
+                .ping_with_admission(remote, None, ready(()))
+                .await,
+            Err(DhtRuntimeControlledQueryError::Admission(
+                DhtRateLimitWaitError::Cancelled
+            ))
+        ));
+        assert_eq!(closed_registry.pending_count(), 0);
+
+        let expired = tokio::time::Instant::now()
+            .checked_sub(Duration::from_nanos(1))
+            .expect("Tokio instant has a predecessor");
+        assert!(matches!(
+            closed_client
+                .find_node_with_admission(remote, id(1), Some(expired), pending())
+                .await,
+            Err(DhtRuntimeControlledQueryError::Admission(
+                DhtRateLimitWaitError::WouldExceedDeadline
+            ))
+        ));
+        assert_eq!(closed_registry.pending_count(), 0);
+
+        assert!(matches!(
+            closed_client
+                .get_peers_with_admission(remote, id(2), None, pending())
+                .await,
+            Err(DhtRuntimeControlledQueryError::Query(
+                DhtClientError::QuerySend(QuerySendError::Register(RegisterError::RegistryClosed))
+            ))
+        ));
+        assert_eq!(closed_registry.pending_count(), 0);
+
+        let (stopped_client, open_registry, remote) = stopped_runtime_client().await;
+        assert!(matches!(
+            stopped_client
+                .ping_with_admission(remote, None, pending())
+                .await,
+            Err(DhtRuntimeControlledQueryError::Query(
+                DhtClientError::QuerySend(QuerySendError::Transport(
+                    TokioIpv4UdpWeakSendError::Stopped
+                ))
+            ))
+        ));
+        assert_eq!(open_registry.pending_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_controlled_admission_never_registers_and_cancellation_rolls_back() {
+        let (client, registry, remote) = stopped_runtime_client().await;
+        for _ in 0..4 {
+            client.outbound_rate_limiter.wait(remote).await;
+        }
+
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let mut blocked = Box::pin(client.ping_with_admission(remote, None, async move {
+            let _ = cancel_rx.await;
+        }));
+        let first_poll = poll_fn(|cx| Poll::Ready(blocked.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending());
+        assert_eq!(registry.pending_count(), 0);
+
+        cancel_tx.send(()).unwrap();
+        assert!(matches!(
+            blocked.await,
+            Err(DhtRuntimeControlledQueryError::Admission(
+                DhtRateLimitWaitError::Cancelled
+            ))
+        ));
+        assert_eq!(registry.pending_count(), 0);
+
+        let mut replacement = Box::pin(client.ping_with_admission(remote, None, pending()));
+        let first_poll = poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending());
+        tokio::time::advance(Duration::from_millis(999)).await;
+        let early_poll = poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await;
+        assert!(early_poll.is_pending());
+        assert_eq!(registry.pending_count(), 0);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            replacement.await,
+            Err(DhtRuntimeControlledQueryError::Query(
+                DhtClientError::QuerySend(QuerySendError::Transport(
+                    TokioIpv4UdpWeakSendError::Stopped
+                ))
+            ))
+        ));
+        assert_eq!(registry.pending_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admitted_control_drops_its_cancellation_and_whole_query_drop_cleans_registration() {
+        let registry = TransactionRegistry::default();
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let (_receiver, sender) = transport.into_parts();
+        let client = DhtRuntimeClient::new(
+            id(1),
+            &registry,
+            Duration::from_secs(60),
+            sender.downgrade(),
+        );
+        let blackhole = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let remote = blackhole.local_addr().unwrap();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let mut query = Box::pin(client.ping_with_admission(remote, None, async move {
+            let _ = cancel_rx.await;
+        }));
+
+        let first_poll = poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending());
+        assert_eq!(registry.pending_count(), 1);
+        assert!(cancel_tx.send(()).is_err());
+
+        drop(query);
+        assert_eq!(registry.pending_count(), 0);
+
+        // The successful admission remains committed even though the query was
+        // later dropped: only the other three burst tokens are still ready.
+        for _ in 0..3 {
+            client.outbound_rate_limiter.wait(remote).await;
+        }
+        let mut fifth = Box::pin(client.outbound_rate_limiter.wait(remote));
+        let fifth_poll = poll_fn(|cx| Poll::Ready(fifth.as_mut().poll(cx))).await;
+        assert!(fifth_poll.is_pending());
+    }
+
+    #[tokio::test]
+    async fn controlled_methods_forward_all_five_typed_queries() {
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let remote = SocketAddr::V4(runtime.local_addr());
+        let local_id = runtime.local_id();
+        let client = runtime.client();
+        let second_client = DhtRuntimeClient::new(
+            local_id,
+            &runtime.registry,
+            Duration::from_secs(1),
+            client.sender.clone(),
+        );
+
+        assert_eq!(
+            client
+                .ping_with_admission(remote, None, pending())
+                .await
+                .unwrap(),
+            PingResult { id: local_id }
+        );
+        assert_eq!(
+            client
+                .find_node_with_admission(remote, id(2), None, pending())
+                .await
+                .unwrap(),
+            FindNodeResult {
+                id: local_id,
+                nodes: Vec::new(),
+            }
+        );
+        assert_eq!(
+            client
+                .get_peers_with_admission(remote, id(3), None, pending())
+                .await
+                .unwrap(),
+            GetPeersResult {
+                id: local_id,
+                values: Vec::new(),
+                nodes: Vec::new(),
+            }
+        );
+        assert_eq!(
+            client
+                .sample_infohashes_with_admission(remote, id(4), None, pending())
+                .await
+                .unwrap(),
+            SampleInfoHashesResult {
+                id: local_id,
+                samples: Some(Vec::new()),
+                nodes: Vec::new(),
+                num: 0,
+                interval: 10,
+            }
+        );
+
+        assert!(matches!(
+            second_client
+                .get_peers_scrape_with_admission(remote, id(5), None, pending())
+                .await,
+            Err(DhtRuntimeControlledQueryError::Query(
+                DhtClientError::MissingScrapeBloomFilters {
+                    response_source,
+                    missing_peers: true,
+                    missing_seeders: true,
+                    ..
+                }
+            )) if response_source == remote
+        ));
+
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            DhtRuntimeExit::Shutdown
+        ));
     }
 
     #[tokio::test]
@@ -651,6 +1002,7 @@ mod tests {
         let _: fn(DhtRuntimeStartError) -> &'static str = classify_start_error;
         let _: fn(DhtRuntimeExit) -> &'static str = classify_runtime_exit;
         let _: fn(DhtRuntimeClientError) -> &'static str = classify_client_error;
+        let _: fn(DhtRuntimeControlledQueryError) -> &'static str = classify_controlled_query_error;
         let _: fn(&JoinError) -> &'static str = classify_join_error;
 
         assert_eq!(classify_runtime_exit(DhtRuntimeExit::Shutdown), "shutdown");
@@ -687,6 +1039,16 @@ mod tests {
             DhtClientError::MissingScrapeBloomFilters { .. } => "missing_blooms",
             DhtClientError::Timeout => "timeout",
             DhtClientError::RegistryClosed => "registry_closed",
+        }
+    }
+
+    fn classify_controlled_query_error(error: DhtRuntimeControlledQueryError) -> &'static str {
+        match error {
+            DhtRuntimeControlledQueryError::Admission(error) => match error {
+                DhtRateLimitWaitError::Cancelled => "admission_cancelled",
+                DhtRateLimitWaitError::WouldExceedDeadline => "admission_deadline",
+            },
+            DhtRuntimeControlledQueryError::Query(error) => classify_client_error(error),
         }
     }
 
@@ -888,5 +1250,25 @@ mod tests {
             client,
             local_addr,
         )
+    }
+
+    async fn stopped_runtime_client() -> (
+        DhtRuntimeClient,
+        TransactionRegistry<CryptoTransactionIdIssuer>,
+        SocketAddr,
+    ) {
+        let registry = TransactionRegistry::default();
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let remote = SocketAddr::V4(transport.local_addr());
+        let (receiver, sender) = transport.into_parts();
+        let client =
+            DhtRuntimeClient::new(id(9), &registry, Duration::from_secs(4), sender.downgrade());
+        drop(receiver);
+        drop(sender);
+        (client, registry, remote)
+    }
+
+    fn id(byte: u8) -> Id20 {
+        Id20::from_slice(&[byte; 20]).unwrap()
     }
 }
