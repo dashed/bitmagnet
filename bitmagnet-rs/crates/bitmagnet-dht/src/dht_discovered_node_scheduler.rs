@@ -90,6 +90,23 @@ pub struct DhtDiscoveredNodePingInput {
     sender: mpsc::Sender<RoutingNode>,
 }
 
+/// One reserved slot in the shared ping route.
+///
+/// Acquiring this value is the commit-authority boundary. Closing the receiver
+/// after acquisition does not revoke the slot, and [`Self::deliver`] commits
+/// synchronously. Dropping an unused permit releases its capacity and commits
+/// no node.
+pub(crate) struct DhtDiscoveredNodePingPermit {
+    permit: mpsc::OwnedPermit<RoutingNode>,
+}
+
+/// Failure to reserve shared ping-route capacity.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum DhtDiscoveredNodePingReserveError {
+    #[error("the discovered-node ping input receiver is closed")]
+    ReceiverClosed,
+}
+
 /// A ping input node that could not be queued because its receiver closed.
 #[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
 #[error("the discovered-node ping input receiver is closed")]
@@ -109,12 +126,30 @@ impl DhtDiscoveredNodePingInput {
     /// Wait until the unique ping-route receiver closes or is dropped.
     ///
     /// This crate-private lifecycle hook does not consume queue capacity.
-    #[expect(
-        dead_code,
-        reason = "reserved for the periodic oldest-node ping producer"
-    )]
     pub(crate) async fn closed(&self) {
         self.sender.closed().await;
+    }
+
+    /// Wait for and reserve one slot in the existing shared ping route.
+    ///
+    /// Cancelling this future reserves nothing and loses its place among
+    /// capacity waiters. The returned permit keeps the route sender alive
+    /// until it is delivered or dropped.
+    pub(crate) async fn reserve(
+        &self,
+    ) -> Result<DhtDiscoveredNodePingPermit, DhtDiscoveredNodePingReserveError> {
+        self.sender
+            .clone()
+            .reserve_owned()
+            .await
+            .map(|permit| DhtDiscoveredNodePingPermit { permit })
+            .map_err(|_closed| DhtDiscoveredNodePingReserveError::ReceiverClosed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel(capacity: usize) -> (Self, DhtDiscoveredNodeRouteReceiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (Self { sender }, DhtDiscoveredNodeRouteReceiver { receiver })
     }
 
     /// Wait for shared route capacity and queue one node.
@@ -130,6 +165,16 @@ impl DhtDiscoveredNodePingInput {
             .send(node)
             .await
             .map_err(|error| DhtDiscoveredNodePingInputClosed { node: error.0 })
+    }
+}
+
+impl DhtDiscoveredNodePingPermit {
+    /// Commit one node through the reserved slot.
+    ///
+    /// The sender returned by Tokio is deliberately dropped so consuming this
+    /// permit does not extend route EOF.
+    pub(crate) fn deliver(self, node: RoutingNode) {
+        drop(self.permit.send(node));
     }
 }
 
@@ -958,6 +1003,110 @@ mod tests {
 
         drop(routes.ping);
         assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
+    }
+
+    #[tokio::test]
+    async fn ping_reserve_waiters_are_fifo_and_cancelling_one_commits_nothing() {
+        let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+        let sentinel = v4(9, 9009);
+        input.send(sentinel).await.unwrap();
+
+        let cancelled_input = input.clone();
+        let first_input = input.clone();
+        let second_input = input.clone();
+        let mut cancelled = Box::pin(cancelled_input.reserve());
+        let mut first = Box::pin(first_input.reserve());
+        let mut second = Box::pin(second_input.reserve());
+        poll_once_pending(cancelled.as_mut()).await;
+        poll_once_pending(first.as_mut()).await;
+        poll_once_pending(second.as_mut()).await;
+        drop(cancelled);
+
+        assert_eq!(receiver.recv().await, Some(sentinel));
+        let first_permit = first.await.unwrap();
+        let first_delivered = v4(1, 1001);
+        first_permit.deliver(first_delivered);
+        assert_eq!(receiver.recv().await, Some(first_delivered));
+        let second_permit = second.await.unwrap();
+        let second_delivered = v4(2, 1002);
+        second_permit.deliver(second_delivered);
+        assert_eq!(receiver.recv().await, Some(second_delivered));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn acquired_ping_permit_holds_capacity_and_eof_until_drop_or_delivery() {
+        let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+        let first = input.reserve().await.unwrap();
+        let waiting_input = input.clone();
+        let mut waiting = Box::pin(waiting_input.reserve());
+        poll_once_pending(waiting.as_mut()).await;
+
+        drop(first);
+        let second = waiting.await.unwrap();
+        drop(waiting_input);
+        drop(input);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let delivered = v4(1, 1001);
+        second.deliver(delivered);
+        assert_eq!(receiver.recv().await, Some(delivered));
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unused_final_ping_permit_releases_capacity_and_allows_eof() {
+        let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+        let permit = input.reserve().await.unwrap();
+        drop(input);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(permit);
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn closing_ping_receiver_resolves_a_pending_reservation_typed() {
+        let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+        let sentinel = v4(9, 9009);
+        input.send(sentinel).await.unwrap();
+        let waiting_input = input.clone();
+        let mut waiting = Box::pin(waiting_input.reserve());
+        poll_once_pending(waiting.as_mut()).await;
+
+        receiver.close();
+        assert!(matches!(
+            waiting.await,
+            Err(DhtDiscoveredNodePingReserveError::ReceiverClosed)
+        ));
+        assert_eq!(receiver.recv().await, Some(sentinel));
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn acquired_ping_permit_commits_after_close_but_new_reservations_fail_typed() {
+        let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+        let permit = input.reserve().await.unwrap();
+        receiver.close();
+        assert!(matches!(
+            input.reserve().await,
+            Err(DhtDiscoveredNodePingReserveError::ReceiverClosed)
+        ));
+
+        let delivered = v4(1, 1001);
+        permit.deliver(delivered);
+        drop(input);
+        assert_eq!(receiver.recv().await, Some(delivered));
+        assert_eq!(receiver.recv().await, None);
     }
 
     #[tokio::test]
