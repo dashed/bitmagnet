@@ -68,6 +68,71 @@ pub struct DhtDiscoveredNodeRoutes {
     pub sample_infohashes: DhtDiscoveredNodeRouteReceiver,
 }
 
+/// Cloneable producer capability for the bounded ping work route.
+///
+/// Every clone shares the scheduler's single configured ping capacity;
+/// cloning does not create another queue. [`Self::send`] waits for that shared
+/// capacity and starts no task. Sequential awaited sends from one producer
+/// preserve program order. Competing send or reserve futures enter Tokio's
+/// FIFO waiter queue by runtime registration, with no source priority or
+/// deterministic cross-producer or cross-source order promised.
+///
+/// Each blocked `send` future owns one pending node outside the bounded queue.
+/// Every live capability clone also delays receiver EOF. Dropping the final
+/// clone releases that ownership, while closing or dropping the unique route
+/// receiver wakes blocked sends with [`DhtDiscoveredNodePingInputClosed`].
+/// Direct sends bypass scheduler batching, deduplication, and KTable filtering.
+/// This seam records no external-producer counters: `routed_ping` remains
+/// specific to scheduler-origin commits, and any producer must own its own
+/// stats.
+#[derive(Clone)]
+pub struct DhtDiscoveredNodePingInput {
+    sender: mpsc::Sender<RoutingNode>,
+}
+
+/// A ping input node that could not be queued because its receiver closed.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the discovered-node ping input receiver is closed")]
+pub struct DhtDiscoveredNodePingInputClosed {
+    node: RoutingNode,
+}
+
+impl DhtDiscoveredNodePingInputClosed {
+    /// Recover the exact node that was not queued.
+    #[must_use]
+    pub fn into_node(self) -> RoutingNode {
+        self.node
+    }
+}
+
+impl DhtDiscoveredNodePingInput {
+    /// Wait until the unique ping-route receiver closes or is dropped.
+    ///
+    /// This crate-private lifecycle hook does not consume queue capacity.
+    #[expect(
+        dead_code,
+        reason = "reserved for the periodic oldest-node ping producer"
+    )]
+    pub(crate) async fn closed(&self) {
+        self.sender.closed().await;
+    }
+
+    /// Wait for shared route capacity and queue one node.
+    ///
+    /// Dropping this future before it completes commits no node, drops that
+    /// future-owned node, and loses its place among capacity waiters. A caller
+    /// that needs to retry must retain a copy separately. A successful return
+    /// means the node was committed to the queue, not that the worker consumed
+    /// it. Receiver closure before capacity is acquired returns the exact
+    /// unsent node.
+    pub async fn send(&self, node: RoutingNode) -> Result<(), DhtDiscoveredNodePingInputClosed> {
+        self.sender
+            .send(node)
+            .await
+            .map_err(|error| DhtDiscoveredNodePingInputClosed { node: error.0 })
+    }
+}
+
 /// Cloneable producer capability for the bounded `find_node` work route.
 ///
 /// Every clone shares the scheduler's single configured `find_node` capacity;
@@ -201,6 +266,8 @@ pub struct DhtDiscoveredNodeSchedulerStats {
     pub filter_calls: u64,
     /// Nodes that reached downstream route-capacity selection.
     pub route_attempts: u64,
+    /// Nodes committed by the scheduler itself, excluding direct commits made
+    /// through [`DhtDiscoveredNodePingInput`].
     pub routed_ping: u64,
     /// Nodes committed by the scheduler itself, excluding direct commits made
     /// through [`DhtDiscoveredNodeFindInput`].
@@ -324,6 +391,18 @@ impl DhtDiscoveredNodeScheduler {
     pub fn find_node_input(&self) -> DhtDiscoveredNodeFindInput {
         DhtDiscoveredNodeFindInput {
             sender: self.routes.find_node.clone(),
+        }
+    }
+
+    /// Clone a producer capability for the scheduler's existing ping route.
+    ///
+    /// The handle is created only when requested. Retaining it after the
+    /// scheduler exits keeps the ping receiver open until the handle and all
+    /// of its clones are dropped or the receiver is explicitly closed.
+    #[must_use]
+    pub fn ping_input(&self) -> DhtDiscoveredNodePingInput {
+        DhtDiscoveredNodePingInput {
+            sender: self.routes.ping.clone(),
         }
     }
 
@@ -628,7 +707,8 @@ mod tests {
     use super::*;
     use crate::{
         dht_discovery_channel, DhtCrawlerTarget, DhtDiscoveredNodeFindStats,
-        DhtDiscoveredNodeFindWorker, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveryOffer,
+        DhtDiscoveredNodeFindWorker, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingStats,
+        DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit, DhtDiscoveryOffer,
         DhtRuntime, DhtRuntimeConfig, Id20,
     };
 
@@ -704,7 +784,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_without_requested_find_input_preserves_scheduler_owned_eof() {
+    async fn default_without_requested_route_inputs_preserves_scheduler_owned_eof() {
         let (sender, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
         let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
             receiver,
@@ -721,6 +801,163 @@ mod tests {
         assert_eq!(routes.ping.recv().await, None);
         assert_eq!(routes.find_node.recv().await, None);
         assert_eq!(routes.sample_infohashes.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn ping_input_clones_delay_only_ping_eof_until_the_last_clone_drops() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        let last_input = input.clone();
+        drop(scheduler);
+        drop(discovery);
+
+        assert_eq!(routes.find_node.recv().await, None);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+        assert!(matches!(
+            routes.ping.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let queued = v4(1, 1001);
+        input.send(queued).await.unwrap();
+        assert_eq!(routes.ping.recv().await, Some(queued));
+        drop(input);
+        assert!(matches!(
+            routes.ping.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(last_input);
+        assert_eq!(routes.ping.recv().await, None);
+    }
+
+    #[test]
+    fn public_ping_input_is_send_sync_and_closed_error_round_trips_its_node() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<DhtDiscoveredNodePingInput>();
+        assert_send_sync::<DhtDiscoveredNodePingInputClosed>();
+        let node = v4(1, 1001);
+        assert_eq!(DhtDiscoveredNodePingInputClosed { node }.into_node(), node);
+    }
+
+    #[tokio::test]
+    async fn immediately_closed_ping_input_returns_the_exact_unsent_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        routes.ping.close();
+
+        let node = v4(1, 1001);
+        assert_eq!(input.send(node).await.unwrap_err().into_node(), node);
+    }
+
+    #[tokio::test]
+    async fn ping_input_shares_capacity_and_sequential_sends_preserve_fifo() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        drop(scheduler);
+
+        let first = v4(1, 1001);
+        let second = v4(2, 1002);
+        input.send(first).await.unwrap();
+        let mut blocked = Box::pin(input.send(second));
+        poll_once_pending(blocked.as_mut()).await;
+
+        assert_eq!(routes.ping.recv().await, Some(first));
+        assert_eq!(blocked.await, Ok(()));
+        assert_eq!(routes.ping.recv().await, Some(second));
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_pending_ping_input_send_commits_nothing_and_loses_its_waiter_position() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        drop(scheduler);
+
+        let first = v4(1, 1001);
+        let cancelled = v4(2, 1002);
+        let later = v4(3, 1003);
+        input.send(first).await.unwrap();
+        let mut blocked = Box::pin(input.send(cancelled));
+        poll_once_pending(blocked.as_mut()).await;
+        drop(blocked);
+
+        assert_eq!(routes.ping.recv().await, Some(first));
+        input.send(later).await.unwrap();
+        assert_eq!(routes.ping.recv().await, Some(later));
+        assert!(matches!(
+            routes.ping.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn closing_ping_receiver_unblocks_pending_send_with_the_exact_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        drop(scheduler);
+
+        let queued = v4(1, 1001);
+        let rejected = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected));
+        poll_once_pending(blocked.as_mut()).await;
+
+        routes.ping.close();
+        assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
+        assert_eq!(routes.ping.recv().await, Some(queued));
+        assert_eq!(routes.ping.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn dropping_ping_receiver_unblocks_a_registered_waiter_with_the_exact_node() {
+        let (_discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, routes, _stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        let input = scheduler.ping_input();
+        drop(scheduler);
+
+        let queued = v4(1, 1001);
+        let rejected = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected));
+        poll_once_pending(blocked.as_mut()).await;
+
+        drop(routes.ping);
+        assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
     }
 
     #[tokio::test]
@@ -937,6 +1174,169 @@ mod tests {
         );
 
         drop(scheduler);
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            crate::DhtRuntimeExit::Shutdown
+        ));
+    }
+
+    #[tokio::test]
+    async fn ping_worker_shutdown_rejects_pending_input_without_counting_it_as_queued() {
+        let (_discovery_ingress, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, _scheduler_stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        routes.find_node.close();
+        routes.sample_infohashes.close();
+        let input = scheduler.ping_input();
+
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            sample_infohashes_interval: 10,
+        })
+        .await
+        .unwrap();
+        let (worker, worker_stats) = DhtDiscoveredNodePingWorker::new(
+            routes.ping,
+            runtime.client(),
+            KTable::new(Id20::ZERO),
+        );
+
+        let queued = v4(1, 1001);
+        let pending = v4(2, 1002);
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(pending));
+        poll_once_pending(blocked.as_mut()).await;
+
+        assert_eq!(
+            worker.run(std::future::ready(())).await,
+            DhtDiscoveredNodePingWorkerExit::Shutdown {
+                queued_dropped: 1,
+                queries_cancelled: 0,
+            }
+        );
+        assert_eq!(blocked.await.unwrap_err().into_node(), pending);
+        assert_eq!(
+            worker_stats.snapshot(),
+            DhtDiscoveredNodePingStats {
+                shutdown_queued_dropped: 1,
+                ..DhtDiscoveredNodePingStats::default()
+            }
+        );
+
+        drop(scheduler);
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            crate::DhtRuntimeExit::Shutdown
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_and_ping_input_contend_for_one_shared_capacity() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, stats) = DhtDiscoveredNodeScheduler::with_config(
+            receiver,
+            KTable::new(Id20::ZERO),
+            config(1, 1),
+        )
+        .unwrap();
+        routes.find_node.close();
+        routes.sample_infohashes.close();
+        let input = scheduler.ping_input();
+        let external = v4(1, 1001);
+        let discovered = v4(2, 1002);
+        input.send(external).await.unwrap();
+        assert_eq!(discovery.offer(discovered), DhtDiscoveryOffer::Queued);
+        drop(discovery);
+
+        let task = tokio::spawn(scheduler.run(std::future::pending()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = stats.snapshot();
+                if snapshot.route_attempts == 1 {
+                    assert_eq!(snapshot.routed_ping, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the discovered node must block behind direct ping input");
+        assert!(!task.is_finished());
+
+        assert_eq!(routes.ping.recv().await, Some(external));
+        assert_eq!(
+            task.await.unwrap(),
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(routes.ping.recv().await, Some(discovered));
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.received, 1);
+        assert_eq!(snapshot.batches, 1);
+        assert_eq!(snapshot.filter_calls, 1);
+        assert_eq!(snapshot.route_attempts, 1);
+        assert_eq!(snapshot.routed_ping, 1);
+        assert_eq!(snapshot.routed_find_node, 0);
+        assert_eq!(snapshot.routed_sample_infohashes, 0);
+        drop(input);
+        assert_eq!(routes.ping.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn known_direct_ping_bypasses_scheduler_and_is_counted_only_by_the_worker() {
+        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            sample_infohashes_interval: 10,
+        })
+        .await
+        .unwrap();
+        let table = KTable::new(Id20::ZERO);
+        let known = RoutingNode {
+            id: runtime.local_id(),
+            addr: SocketAddr::V4(runtime.local_addr()),
+        };
+        assert_eq!(table.put_node(known), crate::RoutingPutResult::Accepted);
+
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let (scheduler, mut routes, scheduler_stats) =
+            DhtDiscoveredNodeScheduler::with_config(receiver, table.clone(), config(1, 1)).unwrap();
+        let input = scheduler.ping_input();
+        input.send(known).await.unwrap();
+        drop(discovery);
+        assert_eq!(
+            scheduler.run(std::future::pending()).await,
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        assert_eq!(
+            scheduler_stats.snapshot(),
+            DhtDiscoveredNodeSchedulerStats::default()
+        );
+        assert_eq!(routes.find_node.recv().await, None);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+        drop(input);
+
+        let (worker, worker_stats) =
+            DhtDiscoveredNodePingWorker::new(routes.ping, runtime.client(), table);
+        assert_eq!(
+            worker.run(std::future::pending()).await,
+            DhtDiscoveredNodePingWorkerExit::InputClosed
+        );
+        assert_eq!(
+            worker_stats.snapshot(),
+            DhtDiscoveredNodePingStats {
+                dequeued: 1,
+                queries_started: 1,
+                queries_succeeded: 1,
+                put_commands: 1,
+                ..DhtDiscoveredNodePingStats::default()
+            }
+        );
+
         assert!(matches!(
             runtime.shutdown().await.unwrap(),
             crate::DhtRuntimeExit::Shutdown
