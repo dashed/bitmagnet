@@ -538,6 +538,77 @@ that current-state core without adding a runtime:
 - this layer uses only the existing standard library and crate graph. No Cargo
   manifest dependency or `Cargo.lock` change belongs to this milestone.
 
+The eighteenth bounded source-only slice extends only the outbound typed client
+with production Go's `get_peers`, BEP-33 scrape, and `sample_infohashes`
+adapter projections:
+
+- `DhtClient` is the common five-method client over the existing
+  register/send/wait boundary. The original borrowed `PingFindNodeClient<'a,
+  I>` remains a true two-method compatibility wrapper with its const
+  constructor, and `PingFindNodeClientError` retains its prior variants and
+  display text. Existing lifetime annotations, calls, error matches, and error
+  rendering therefore remain compatible while the wrapper delegates the
+  shared ping/find-node behavior. This slice adds no socket, receive loop, rate
+  limiter, retry, scheduler, responder ownership, or table mutation;
+- ordinary peer lookup sends raw method `get_peers` with only local `id` and
+  `info_hash`. Scrape uses that same method and arguments plus the exact signed
+  integer `scrape=1`; it does not invent a `scrape` method, `want`, or `noseed`.
+  Sampling sends raw method `sample_infohashes` with only local `id` and
+  `target`. Zero info-hash and target values reach the codec and are omitted
+  there exactly like Go rather than being rejected by the client;
+- peer lookup projects only responder ID, ordered peer values, and ordered
+  IPv4 `nodes`. Scrape projects those fields and maps `BFpe` to the peer filter
+  and `BFsd` to the seeder filter. Sampling projects responder ID, signed
+  64-bit `num` and `interval`, ordered samples, and ordered IPv4 `nodes`.
+  Duplicates and port boundaries are retained. `nodes6`, token, and all valid
+  unrelated extension fields are ignored after the complete return dictionary
+  has passed the existing inbound validation boundary;
+- absent and present-empty peer/node collections both become owned empty
+  vectors. Sampling deliberately retains the pointer-sensitive distinction:
+  absent `samples` is `None`, while an advertised zero-length field is
+  `Some(empty)`. Missing `num` and `interval` are successful signed zeroes;
+  zero, negative, and both signed extremes are not range-validated against
+  sample count or scheduling policy;
+- scrape alone adds a post-transaction semantic check. Both bloom fields must
+  be present, but two present all-zero 256-byte filters are valid. Missing one
+  or both returns `MissingScrapeBloomFilters`, retaining the accepted source,
+  complete response envelope, and separate missing-peer/missing-seeder flags.
+  The pending transaction has already completed and is removed before this
+  semantic error is returned. Transport, remote-error, and missing-envelope
+  outcomes still take precedence;
+- a checked client-package Go oracle invokes the actual unexported
+  `serverAdapter` through the sealed scripted-server seam. Its fixture locks
+  exact destination, method, typed arguments, canonical query bytes, zero-ID
+  omission, nil/empty presence, ordered and duplicate address/sample
+  projection, ignored valid fields, signed boundaries, distinct bloom mapping,
+  the three missing-bloom combinations, pointer-identical query errors,
+  pre-cancelled calls, and Go's typed-nil error result. The checked runtime
+  metadata requires a 64-bit Go `int`, making the `int64`-to-`int` projection
+  deterministic for zero, negative, minimum, and maximum fixture values;
+- Rust-only no-socket gates additionally lock response delivery during sender
+  backpressure, transport-error precedence over an already buffered response,
+  unpolled and polled future drop, task abort during send and wait, timeout
+  start after send, exact zero timeout, wrong-source timeout, registry close,
+  remote and missing-body errors, and two mixed methods delivered out of order
+  through one registry. Every terminal path ends with no pending transaction;
+  and
+- a raw receive/client composition proves that malformed `nodes6` remains a
+  decode rejection even for peer lookup, which does not project that field.
+  The rejected datagram does not consume the pending transaction; its client
+  waits until the configured timeout and then cleans up. This preserves the
+  general rule that method-level projection never bypasses validation of known
+  return fields.
+
+The real-Go adapter oracle is intentionally not a socket oracle. Its
+pre-cancelled context proves that the adapter invokes `Server.Query`; it does
+not claim that production's outer IP-keyed limiter sends a datagram. Rust uses
+future drop or task abort for caller cancellation and exposes registry closure
+as a typed result. The existing inbound hardenings also remain in force:
+non-6/18-byte peer addresses, non-256-byte blooms, over-limit structures, and
+unsupported BEP-44 `v` can make a response time out even when the selected
+adapter method would not project that field. None of these deliberate deltas
+is relaxed by the typed client.
+
 Excluded from this milestone: production socket construction or runtime
 wiring, external-network traffic, and unbounded receive loops; message-method
 or dispatch validation beyond the two explicitly owned methods, live query
@@ -545,8 +616,8 @@ wiring, hash removal/expiry, peer expiry, hash options, discovered-at clocks,
 drop-reason payloads, time/random eviction policy, metrics,
 concurrent handler fan-out, send retry/timeout/queueing policy, socket lifecycle,
 production looping or spawning policy, logging and runtime wiring,
-full responder routing and runtime wrappers, a BEP-33
-scrape client or scheduler, BEP-44 value interpretation/storage/signing,
+full responder routing and runtime wrappers, a BEP-33 scrape scheduler,
+BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension
 values other than the explicitly unsupported BEP-44 `v` are syntax-validated

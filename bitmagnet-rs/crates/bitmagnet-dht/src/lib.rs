@@ -1,13 +1,13 @@
 //! Pure BitTorrent DHT wire contracts.
 
 mod compact;
+mod dht_client;
 mod inbound;
 mod krpc;
 mod ktable;
 mod ktable_core;
 mod node_table;
 mod ping_find_node;
-mod ping_find_node_client;
 mod ping_find_node_dispatch;
 mod ping_find_node_driver;
 mod ping_find_node_send;
@@ -20,6 +20,10 @@ mod tokio_ipv4_udp;
 mod transaction;
 
 pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
+pub use dht_client::{
+    DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
+    PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
+};
 pub use inbound::{
     InboundError, InboundLimitKind, InboundShapeKind, InboundSyntaxKind,
     MAX_INBOUND_DATAGRAM_BYTES, MAX_INBOUND_NESTING_DEPTH, MAX_INBOUND_VALUES,
@@ -35,9 +39,6 @@ pub use ktable_core::{
 };
 pub use node_table::{NodeTable, RoutingNode, NODE_TABLE_CAPACITY, NODE_TABLE_CLOSEST_LIMIT};
 pub use ping_find_node::{PingFindNodeError, PingFindNodeResponder};
-pub use ping_find_node_client::{
-    FindNodeResult, PingFindNodeClient, PingFindNodeClientError, PingResult,
-};
 pub use ping_find_node_dispatch::{
     PingFindNodeDispatchOutcome, PingFindNodeDispatcher, PingFindNodeReply,
 };
