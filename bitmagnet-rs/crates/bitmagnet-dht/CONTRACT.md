@@ -1171,3 +1171,81 @@ context or deadline abstraction, new runtime configuration, retry, responder
 timeout, discovery, metrics, health, crawler or persistence scheduling,
 application wiring, deployment wiring, external traffic, or production
 rollout.
+
+The twenty-seventh slice adds the responder-to-runtime node-discovery handoff:
+
+- At the shared responder seam, Rust and Go agree on the discovery success
+  predicate and event payload. A successful call for `ping`, `find_node`,
+  `get_peers`, `announce_peer`, or `sample_infohashes` offers the requester's
+  exact ID and source address. A zero requester ID is still offered, duplicate
+  successes produce duplicate offers, and read-only requests are not excluded.
+  Representative protocol failures produce no event. The checked real-Go
+  responder oracle covers those successes and failures, exact IPv4,
+  IPv4-mapped IPv6, native IPv6, and scoped-IPv6 source values, and the Go-only
+  defaults and evidence boundaries recorded by its fixture. Separate Go
+  responder-limiter and rate fixtures establish that limiter denial does not
+  reach the responder. Rust gates establish discovery silence for its shared
+  per-IP/global denial path and its capacity-first denial; the latter is Rust
+  hardening with no direct Go capacity-denial counterpart;
+- only the fixed ingress capacity is a queue-configuration parity claim. Rust
+  uses 1,000 slots, matching Go's `100 * ScalingFactor` with the Go code default
+  scaling factor of ten. Go starts a detached goroutine after each
+  successful responder call; that goroutine can wait for queue capacity for up
+  to one second, so a full queue can accumulate blocked producers. Rust starts
+  no task or timer: the discovery-enabled dispatcher performs one synchronous
+  `try_send` and immediately drops the newest event when the queue is full or
+  closed. This is deliberate bounded-runtime hardening, not Go queue-behavior
+  parity;
+- Go's crawler drains at most ten nodes per batch or every ten milliseconds,
+  and its channel behavior can backpressure the detached producers. That
+  batching and backpressure behavior is not implemented in this slice. Rust
+  exposes one unbatched, take-once receiver; any reference here to a downstream
+  consumer means explicitly future work, not a crawler implementation;
+- Rust offers the event after the responder has completed any table mutation
+  and before reply composition returns to the send boundary. An accepted event
+  therefore deterministically survives a later reply encode or transport-send
+  failure. Go launches its enqueue goroutine before the wrapper returns to
+  reply encoding and sending, so enqueue-versus-send ordering is scheduler
+  dependent. Rust also suppresses discovery when the responder returns its
+  typed native-IPv6 compact-node failure. At Go's direct responder seam, the
+  wrapper source ordering permits discovery to launch after core success,
+  while separate dispatch evidence shows that later compact-node encoding can
+  panic. This is a source-derived composition rather than one combined-oracle
+  result. The fixture's native and scoped IPv6 requester-source rows are
+  direct-seam evidence because the production Go server receives on an IPv4
+  socket; that socket caveat does not apply to the separate native-IPv6 node
+  returned by a table;
+- `DhtDiscoverySender` is cloneable and offers without awaiting. Its saturating
+  monotonic counters classify every attempt as `offered` and exactly one of
+  `queued`, `full_dropped`, or `receiver_closed_dropped`. Snapshots use
+  independent relaxed loads and are not transactional across fields. A full
+  open queue drops newest and accepts again after a drain; a closed receiver
+  rejects immediately while preserving already queued items for draining;
+- `DhtRuntime::start` always wires a discovery sender into its dispatcher with
+  the fixed 1,000-slot capacity. `take_discovered_nodes` transfers the sole
+  receiver at most once, while `discovery_stats` returns a cloneable read-only
+  handle that owns no sender and cannot delay EOF. Graceful shutdown and
+  runtime drop close a taken receiver after owned dispatcher tasks and sender
+  clones are gone, while the stats handle remains readable. Go instead shares
+  one responder/crawler multi-producer batching service; it has no corresponding
+  server-runtime take-once receiver or coordinated server-shutdown EOF
+  boundary; and
+- deterministic dispatcher, supervisor, driver, and raw IPv4 UDP gates cover
+  exact payloads, duplicates, protocol and native-IPv6 failures, full and
+  closed queues, cloned dispatchers, capacity and rate denial silence, event
+  survival across transport failure, take-once ownership, graceful and drop
+  EOF, and port rebind. In particular, the capacity-one supervisor gate proves
+  that the first admitted query offers once, the capacity-rejected query adds
+  no offer, and the later admitted query offers the second exact event. The raw
+  runtime gate directly proves per-IP denial silence; global denial silence is
+  composed from the same shared pre-dispatch denial branch and the separate
+  typed global-denial gates rather than a discovery-attached global-denial
+  runtime case.
+
+This slice does not add crawler batching, IP deduplication or filtering, random
+routing among ping/find-node/sample workers, crawler-driven KTable mutation,
+triage, database persistence, Prometheus or other external metrics integration
+or export, application or deployment wiring, external bootstrap traffic, or
+production rollout. It supersedes the twenty-sixth slice only where that slice
+lists discovery as excluded; the older statement remains as the historical
+boundary of that earlier slice.
