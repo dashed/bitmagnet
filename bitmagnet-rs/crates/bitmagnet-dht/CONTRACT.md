@@ -2637,3 +2637,109 @@ In particular, slice thirty-nine's exact supervisor wiring and lack of a
 bootstrap child remain authoritative. Every custom-configuration, broader
 runtime, sample, higher-pipeline, application, deployment, production, and
 rollout boundary remains in force.
+
+The forty-first slice, implemented by
+`fe9af1015cc36b436d031f5f360596fb5a4ade24`, joins the bootstrap-node ping
+producer from slice forty to the partial crawler maintenance supervisor. The
+fixed composition expands from six children to seven in exact child-identity,
+run-factory, spawn, and complete-record order: scheduler, ping worker,
+`find_node` worker, oldest-node `find_node` producer, oldest-node ping
+producer, bootstrap-node ping producer, and target rotator.
+
+The public
+`DhtCrawlerMaintenanceSupervisor::new(discovery, client, table)` signature,
+initial target-entropy boundary, and
+`DhtCrawlerMaintenanceStartError::{DiscoveryClosed, TargetEntropy}` behavior
+remain unchanged. Construction obtains one additional sender capability from
+the scheduler's existing shared ping input and passes it to
+`DhtBootstrapPingProducer::new`; it creates no new route, buffer, worker, or
+network client. The private generic construction core admits a bootstrap
+factory only for internal composition and tests. The bootstrap-node override
+and the producer's `with_bootstrap_nodes` constructor are `#[cfg(test)]`
+crate-private surfaces over a private helper, not application configuration or
+a public Rust API.
+
+`DhtCrawlerMaintenanceStatsHandle` adds `bootstrap_ping` for the producer's
+seven local counters. The existing `ping` handle now aggregates worker
+activity from three possible sources after queue commit: scheduler,
+oldest-node producer, and bootstrap producer. Scheduler `routed_ping` remains
+scheduler-origin only and excludes both direct producers. The oldest-ping and
+bootstrap-ping handles retain their separate source-local accounting; no
+source label is added to queued nodes or worker counters.
+
+`DhtCrawlerMaintenanceChild`, the private child-exit identity, and
+`DhtCrawlerMaintenanceChildExits` add `BootstrapPing` and its typed
+`DhtBootstrapPingProducerExit`. The fixed factory array, spawn loop, complete
+collector, duplicate and missing-child guards, first-exit reporting, common
+shutdown, sibling cleanup, task-cancellation handling, panic resumption, and
+drop abort behavior all cover seven children. A pre-ready external shutdown
+still invokes no child factory and polls or spawns no child. After start, an
+external shutdown or the first child terminal result signals every sibling and
+fully joins every component-owned task before returning or resuming a panic.
+
+The composition still has exactly three route-level EOF cycles, not one cycle
+per producer. Recursive discovery retains scheduler ingress; the oldest-node
+`find_node` producer retains the shared find route; and the oldest-node plus
+bootstrap ping producers jointly retain the shared ping route. Tests prove
+that dropping either ping-producer capability first leaves ping EOF pending
+and that EOF appears only after the other capability is dropped. Explicit
+shutdown, child failure, or dropping the supervisor or its run future releases
+all three route-level cycles together. The bootstrap producer owns no detached
+task, but a Tokio blocking operating-system DNS lookup already dispatched by
+`lookup_host` may continue internally after the producer future exits; this
+does not weaken the supervisor's complete join guarantee for its seven owned
+child tasks.
+
+All tests that start the real supervisor use a test-only bootstrap list that is
+empty or contains numeric `SocketAddr` text. The helper rejects every nonempty
+endpoint that does not parse as a socket address, so these tests cannot resolve
+the six public defaults. Tests of the public default constructor stop at a
+pre-ready shutdown or construction error before the bootstrap producer is
+polled. The empty-list path starts one immediate empty bootstrap round and
+therefore reports `rounds_started=1` with every other bootstrap counter zero;
+that is producer behavior, not fabricated supervisor activity.
+
+A real-constructor numeric provenance gate injects only
+`127.0.0.1:19091`. Before shutdown it observes exact bootstrap stats
+`rounds_started=1`, `selected=1`, `resolution_attempts=1`, and `queued=1`,
+with every failure or drop counter zero. The shared ping worker reports one
+dequeued node, scheduler `routed_ping` remains zero, and the oldest-node ping
+producer remains at its initial counters. Complete shutdown retains
+`DhtBootstrapPingProducerExit::Shutdown { selected_dropped: 0 }`. This proves
+numeric resolver selection, direct commit to the existing shared route, worker
+dequeue, and counter provenance. It does not prove query admission, UDP
+transmission, response, KTable mutation, public DNS, or an external DHT result.
+
+This composition adds no Go oracle or fixture. Slice forty's strict producer
+fixture at
+`0616d53feb443d481d8d286d9c0d38ee14823b514c9075d0a4b367b938767cb4`
+remains authoritative only for the isolated producer contract. The seven-task
+ownership, three-cycle lifecycle, complete collector, and real Rust shared
+route proof are composition evidence rather than an exact Go combined-
+lifecycle claim.
+
+Rust still fixes the six default bootstrap endpoints in its public producer
+and supervisor construction while Go honors configured `BootstrapNodes`.
+This slice adds no custom bootstrap-node, reseed-interval, application,
+process, or deployment configuration. The supervisor still neither owns nor
+observes `DhtRuntime`; its weak client cannot keep the UDP runtime alive, and
+an outer owner must coordinate runtime termination with supervisor shutdown.
+It adds no sample-infohashes worker or producer, higher crawler pipeline,
+info-hash triage, get-peers, scrape, metainfo request, persistence, database
+integration, external traffic, live deployment, production readiness, or
+rollout.
+
+This slice supersedes slice thirty-nine only where that slice fixes six child
+factories, identities, exits, cleanup counts, and stats fields; describes the
+shared ping route as retained only by the oldest-node producer; or excludes a
+bootstrap child from supervisor composition. Slice thirty-nine's public
+constructor, start errors, target-entropy boundary, biased outer lifecycle,
+cleanup and panic semantics, recursive-discovery and find-route cycles, weak
+runtime boundary, partial sample closure, and remaining exclusions stay in
+force. It supersedes slice forty only where that slice says the producer is not
+joined to the supervisor and the supervisor remains a fixed six-child
+composition. Slice forty's producer parity, defaults, timing, resolver,
+cancellation, queue, stats, terminal conservation, fixture, and custom-
+configuration exclusions remain exact. Every broader runtime, sample,
+higher-pipeline, application, deployment, production, and rollout boundary
+remains in force.
