@@ -15,7 +15,8 @@ use crate::{
     DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeScheduler,
     DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStatsHandle, DhtDiscoveryReceiver,
     DhtDiscoveryStatsHandle, DhtOldestNodeFindProducer, DhtOldestNodeFindProducerExit,
-    DhtOldestNodeFindProducerStatsHandle, DhtRuntimeClient, KTable,
+    DhtOldestNodeFindProducerStatsHandle, DhtOldestNodePingProducer, DhtOldestNodePingProducerExit,
+    DhtOldestNodePingProducerStatsHandle, DhtRuntimeClient, KTable,
 };
 
 /// Failure to construct the partial crawler maintenance composition.
@@ -84,16 +85,20 @@ pub struct DhtCrawlerMaintenanceStatsHandle {
     /// Exact channel-global discovery counters shared with the runtime
     /// responder and every recursive-discovery sender clone.
     pub discovery: DhtDiscoveryStatsHandle,
-    /// Scheduler-only counters. In particular, `routed_find_node` excludes
-    /// direct commits made by the oldest-node producer.
+    /// Scheduler-only counters. In particular, `routed_ping` and
+    /// `routed_find_node` exclude direct commits made by the corresponding
+    /// oldest-node producers.
     pub scheduler: DhtDiscoveredNodeSchedulerStatsHandle,
-    /// Counters local to the discovered-node ping worker.
+    /// Ping-worker counters aggregated across scheduler and oldest-producer
+    /// nodes after either source commits to the shared route.
     pub ping: DhtDiscoveredNodePingStatsHandle,
     /// Find-worker counters aggregated across scheduler and oldest-producer
     /// nodes after either source commits to the shared route.
     pub find_node: DhtDiscoveredNodeFindStatsHandle,
     /// Counters local to the periodic oldest-node find producer.
     pub oldest_find: DhtOldestNodeFindProducerStatsHandle,
+    /// Counters local to the periodic oldest-node ping producer.
+    pub oldest_ping: DhtOldestNodePingProducerStatsHandle,
 }
 
 /// Stable identity of one owned maintenance child.
@@ -103,10 +108,11 @@ pub enum DhtCrawlerMaintenanceChild {
     Ping,
     FindNode,
     OldestFind,
+    OldestPing,
     Target,
 }
 
-/// One complete, fixed-shape terminal record for all five children.
+/// One complete, fixed-shape terminal record for all six children.
 ///
 /// An outer shutdown remains the primary supervisor cause even if a child had
 /// already completed before the shared shutdown signal. The concrete child
@@ -117,6 +123,7 @@ pub struct DhtCrawlerMaintenanceChildExits {
     pub ping: DhtDiscoveredNodePingWorkerExit,
     pub find_node: DhtDiscoveredNodeFindWorkerExit,
     pub oldest_find: DhtOldestNodeFindProducerExit,
+    pub oldest_ping: DhtOldestNodePingProducerExit,
     pub target: Result<(), DhtCrawlerTargetError>,
 }
 
@@ -142,7 +149,7 @@ pub enum DhtCrawlerMaintenanceSupervisorExit {
 /// Owned partial DHT crawler maintenance composition.
 ///
 /// This slice owns the discovered-node scheduler, ping and `find_node`
-/// workers, oldest-node `find_node` producer, and target rotator. It
+/// workers, oldest-node `find_node` and ping producers, and target rotator. It
 /// deliberately closes and discards the unsupported `sample_infohashes` route.
 /// It does not own or observe [`crate::DhtRuntime`]: its cloned weak client does
 /// not keep the UDP runtime alive, and an outer owner must propagate runtime
@@ -150,14 +157,16 @@ pub enum DhtCrawlerMaintenanceSupervisorExit {
 ///
 /// The recovered recursive-discovery sender intentionally keeps scheduler
 /// ingress from reaching EOF, while the oldest-node producer intentionally
-/// keeps the shared find route from reaching EOF. Explicit shutdown or a child
-/// failure breaks both cycles. Dropping this value or its run future aborts all
-/// owned child tasks; nothing is detached.
+/// keeps the shared find route from reaching EOF. The oldest-node ping producer
+/// likewise keeps the shared ping route from reaching EOF. Explicit shutdown
+/// or a child failure breaks all three cycles. Dropping this value or its run
+/// future aborts all owned child tasks; nothing is detached.
 pub struct DhtCrawlerMaintenanceSupervisor {
     scheduler: DhtDiscoveredNodeScheduler,
     ping: DhtDiscoveredNodePingWorker,
     find_node: DhtDiscoveredNodeFindWorker,
     oldest_find: DhtOldestNodeFindProducer,
+    oldest_ping: DhtOldestNodePingProducer,
     target_rotator: DhtCrawlerTargetRotator,
 }
 
@@ -202,6 +211,7 @@ impl DhtCrawlerMaintenanceSupervisor {
 
         let (scheduler, routes, scheduler_stats) =
             DhtDiscoveredNodeScheduler::new(discovery, table.clone());
+        let oldest_ping_input = scheduler.ping_input();
         let oldest_find_input = scheduler.find_node_input();
         let crate::DhtDiscoveredNodeRoutes {
             ping,
@@ -222,6 +232,8 @@ impl DhtCrawlerMaintenanceSupervisor {
         );
         let (oldest_find, oldest_find_stats) =
             DhtOldestNodeFindProducer::new(table.clone(), oldest_find_input);
+        let (oldest_ping, oldest_ping_stats) =
+            DhtOldestNodePingProducer::new(table.clone(), oldest_ping_input);
 
         Ok((
             Self {
@@ -229,6 +241,7 @@ impl DhtCrawlerMaintenanceSupervisor {
                 ping,
                 find_node,
                 oldest_find,
+                oldest_ping,
                 target_rotator,
             },
             DhtCrawlerMaintenanceStatsHandle {
@@ -237,6 +250,7 @@ impl DhtCrawlerMaintenanceSupervisor {
                 ping: ping_stats,
                 find_node: find_node_stats,
                 oldest_find: oldest_find_stats,
+                oldest_ping: oldest_ping_stats,
             },
         ))
     }
@@ -244,7 +258,7 @@ impl DhtCrawlerMaintenanceSupervisor {
     /// Run until explicit shutdown or the first child terminal result.
     ///
     /// A pre-ready shutdown returns before any child factory is invoked or any
-    /// child task is spawned. Once started, all five children receive one
+    /// child task is spawned. Once started, all six children receive one
     /// shared shutdown broadcast and are fully joined. A child panic is resumed
     /// with its exact payload after sibling cleanup; an unexpected task
     /// cancellation likewise cleans siblings and then panics.
@@ -257,6 +271,7 @@ impl DhtCrawlerMaintenanceSupervisor {
             ping,
             find_node,
             oldest_find,
+            oldest_ping,
             target_rotator,
         } = self;
         run_child_factories(
@@ -284,6 +299,11 @@ impl DhtCrawlerMaintenanceSupervisor {
                 }),
                 Box::new(move |stop| {
                     Box::pin(async move {
+                        ChildExit::OldestPing(oldest_ping.run(wait_for_shutdown(stop)).await)
+                    })
+                }),
+                Box::new(move |stop| {
+                    Box::pin(async move {
                         ChildExit::Target(target_rotator.run(wait_for_shutdown(stop)).await)
                     })
                 }),
@@ -301,12 +321,13 @@ enum ChildExit {
     Ping(DhtDiscoveredNodePingWorkerExit),
     FindNode(DhtDiscoveredNodeFindWorkerExit),
     OldestFind(DhtOldestNodeFindProducerExit),
+    OldestPing(DhtOldestNodePingProducerExit),
     Target(Result<(), DhtCrawlerTargetError>),
 }
 
 async fn run_child_factories<F>(
     shutdown: F,
-    factories: [ChildFactory; 5],
+    factories: [ChildFactory; 6],
 ) -> DhtCrawlerMaintenanceSupervisorExit
 where
     F: Future<Output = ()>,
@@ -337,7 +358,7 @@ where
         biased;
         () = &mut shutdown => First::Shutdown,
         child = tasks.join_next() => {
-            First::Child(child.expect("five maintenance children were spawned"))
+            First::Child(child.expect("six maintenance children were spawned"))
         }
     };
     if let First::Child(child) = first {
@@ -365,6 +386,7 @@ struct ChildCollector {
     ping: Option<DhtDiscoveredNodePingWorkerExit>,
     find_node: Option<DhtDiscoveredNodeFindWorkerExit>,
     oldest_find: Option<DhtOldestNodeFindProducerExit>,
+    oldest_ping: Option<DhtOldestNodePingProducerExit>,
     target: Option<Result<(), DhtCrawlerTargetError>>,
 }
 
@@ -420,6 +442,12 @@ impl ChildCollector {
                 }
                 DhtCrawlerMaintenanceChild::OldestFind
             }
+            ChildExit::OldestPing(exit) => {
+                if self.oldest_ping.replace(exit).is_some() {
+                    self.duplicate_child = Some(DhtCrawlerMaintenanceChild::OldestPing);
+                }
+                DhtCrawlerMaintenanceChild::OldestPing
+            }
             ChildExit::Target(exit) => {
                 if self.target.replace(exit).is_some() {
                     self.duplicate_child = Some(DhtCrawlerMaintenanceChild::Target);
@@ -452,6 +480,7 @@ impl ChildCollector {
             ping: self.ping.expect("ping child exit is present"),
             find_node: self.find_node.expect("find-node child exit is present"),
             oldest_find: self.oldest_find.expect("oldest-find child exit is present"),
+            oldest_ping: self.oldest_ping.expect("oldest-ping child exit is present"),
             target: self.target.expect("target child exit is present"),
         }
     }
@@ -484,8 +513,8 @@ mod tests {
     use crate::{
         dht_discovery_channel, DhtDiscoveredNodeFindStats, DhtDiscoveredNodePingStats,
         DhtDiscoveredNodeSchedulerStats, DhtDiscoveryOffer, DhtDiscoveryStats,
-        DhtOldestNodeFindProducerStats, DhtRuntime, DhtRuntimeConfig, Id20, RoutingNode,
-        RoutingPutResult,
+        DhtOldestNodeFindProducerStats, DhtOldestNodePingProducerStats, DhtRuntime,
+        DhtRuntimeConfig, Id20, RoutingNode, RoutingPutResult,
     };
 
     fn child_factory<F, Fut>(factory: F) -> ChildFactory
@@ -496,11 +525,12 @@ mod tests {
         Box::new(move |shutdown| Box::pin(factory(shutdown)))
     }
 
-    fn cooperative_factories(stopped: Arc<AtomicUsize>) -> [ChildFactory; 5] {
+    fn cooperative_factories(stopped: Arc<AtomicUsize>) -> [ChildFactory; 6] {
         let scheduler_stopped = stopped.clone();
         let ping_stopped = stopped.clone();
         let find_stopped = stopped.clone();
-        let oldest_stopped = stopped.clone();
+        let oldest_find_stopped = stopped.clone();
+        let oldest_ping_stopped = stopped.clone();
         [
             child_factory(move |shutdown| async move {
                 wait_for_shutdown(shutdown).await;
@@ -528,9 +558,16 @@ mod tests {
             }),
             child_factory(move |shutdown| async move {
                 wait_for_shutdown(shutdown).await;
-                oldest_stopped.fetch_add(1, Ordering::SeqCst);
+                oldest_find_stopped.fetch_add(1, Ordering::SeqCst);
                 ChildExit::OldestFind(DhtOldestNodeFindProducerExit::Shutdown {
                     selected_dropped: 17,
+                })
+            }),
+            child_factory(move |shutdown| async move {
+                wait_for_shutdown(shutdown).await;
+                oldest_ping_stopped.fetch_add(1, Ordering::SeqCst);
+                ChildExit::OldestPing(DhtOldestNodePingProducerExit::Shutdown {
+                    selected_dropped: 18,
                 })
             }),
             child_factory(move |shutdown| async move {
@@ -608,6 +645,10 @@ mod tests {
             stats.oldest_find.snapshot(),
             DhtOldestNodeFindProducerStats::default()
         );
+        assert_eq!(
+            stats.oldest_ping.snapshot(),
+            DhtOldestNodePingProducerStats::default()
+        );
 
         for value in 1..=10 {
             assert_eq!(sender.offer(node(value)), DhtDiscoveryOffer::Queued);
@@ -631,6 +672,60 @@ mod tests {
             run.await.unwrap(),
             DhtCrawlerMaintenanceSupervisorExit::Shutdown { .. }
         ));
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_constructor_routes_oldest_ping_directly_to_the_ping_worker() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let table = KTable::new(Id20::ZERO);
+        let oldest = node(99);
+        assert_eq!(table.put_node(oldest), RoutingPutResult::Accepted);
+        let (_sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let (supervisor, stats) =
+            DhtCrawlerMaintenanceSupervisor::new(discovery, &client, &table).unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut run = Box::pin(supervisor.run(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        poll_once_pending(run.as_mut()).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        assert_eq!(
+            stats.oldest_ping.snapshot(),
+            DhtOldestNodePingProducerStats::default()
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        wait_for(
+            || stats.oldest_ping.snapshot().queued == 1 && stats.ping.snapshot().dequeued == 1,
+            "the oldest-ping producer and ping worker to exchange one node",
+        )
+        .await;
+        assert_eq!(
+            stats.oldest_ping.snapshot(),
+            DhtOldestNodePingProducerStats {
+                table_queries: 1,
+                selected: 1,
+                queued: 1,
+                ..DhtOldestNodePingProducerStats::default()
+            }
+        );
+        assert_eq!(stats.ping.snapshot().dequeued, 1);
+        assert_eq!(stats.scheduler.snapshot().routed_ping, 0);
+
+        shutdown_tx.send(()).unwrap();
+        let DhtCrawlerMaintenanceSupervisorExit::Shutdown { children } = run.await else {
+            panic!("explicit shutdown remains the primary supervisor cause");
+        };
+        assert_eq!(
+            children.oldest_ping,
+            DhtOldestNodePingProducerExit::Shutdown {
+                selected_dropped: 0,
+            }
+        );
         runtime.shutdown().await.unwrap();
     }
 
@@ -669,7 +764,14 @@ mod tests {
             stats.scheduler.snapshot(),
             DhtDiscoveredNodeSchedulerStats::default()
         );
-        assert_eq!(stats.oldest_find.snapshot().table_queries, 0);
+        assert_eq!(
+            stats.oldest_find.snapshot(),
+            DhtOldestNodeFindProducerStats::default()
+        );
+        assert_eq!(
+            stats.oldest_ping.snapshot(),
+            DhtOldestNodePingProducerStats::default()
+        );
         assert_eq!(stats.ping.snapshot(), DhtDiscoveredNodePingStats::default());
         assert_eq!(
             stats.find_node.snapshot(),
@@ -718,15 +820,59 @@ mod tests {
                 selected_dropped: 17,
             }
         );
+        assert_eq!(
+            children.oldest_ping,
+            DhtOldestNodePingProducerExit::Shutdown {
+                selected_dropped: 18,
+            }
+        );
         assert!(children.target.is_ok());
-        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn oldest_ping_typed_exit_is_first_cause_and_all_siblings_finish_shutdown() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut factories = cooperative_factories(stopped.clone());
+        factories[4] = child_factory(|_| async {
+            ChildExit::OldestPing(DhtOldestNodePingProducerExit::InputClosed {
+                selected_dropped: 19,
+            })
+        });
+
+        let DhtCrawlerMaintenanceSupervisorExit::Failed { first, children } =
+            run_child_factories(pending(), factories).await
+        else {
+            panic!("oldest-ping input closure must be the primary failure");
+        };
+        assert_eq!(first, DhtCrawlerMaintenanceChild::OldestPing);
+        assert_eq!(
+            children.oldest_ping,
+            DhtOldestNodePingProducerExit::InputClosed {
+                selected_dropped: 19,
+            }
+        );
+        assert_eq!(
+            children.scheduler,
+            DhtDiscoveredNodeSchedulerExit::Shutdown {
+                pending_dropped: 11,
+            }
+        );
+        assert_eq!(
+            children.oldest_find,
+            DhtOldestNodeFindProducerExit::Shutdown {
+                selected_dropped: 17,
+            }
+        );
+        assert!(children.target.is_ok());
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
     async fn target_entropy_is_typed_and_all_siblings_finish_shutdown() {
         let stopped = Arc::new(AtomicUsize::new(0));
         let mut factories = cooperative_factories(stopped.clone());
-        factories[4] = child_factory(|_| async {
+        factories[5] = child_factory(|_| async {
             ChildExit::Target(Err(DhtCrawlerTargetError::Entropy(
                 getrandom::Error::UNEXPECTED,
             )))
@@ -743,7 +889,7 @@ mod tests {
             Err(DhtCrawlerTargetError::Entropy(error))
                 if error == getrandom::Error::UNEXPECTED
         ));
-        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
@@ -767,11 +913,11 @@ mod tests {
                 .as_str(),
             "maintenance child panic"
         );
-        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
     }
 
     #[tokio::test]
-    async fn external_shutdown_joins_five_complete_structured_exits() {
+    async fn external_shutdown_joins_six_complete_structured_exits() {
         let stopped = Arc::new(AtomicUsize::new(0));
         let factories = cooperative_factories(stopped.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -814,8 +960,14 @@ mod tests {
                 selected_dropped: 17,
             }
         );
+        assert_eq!(
+            children.oldest_ping,
+            DhtOldestNodePingProducerExit::Shutdown {
+                selected_dropped: 18,
+            }
+        );
         assert!(children.target.is_ok());
-        assert_eq!(stopped.load(Ordering::SeqCst), 5);
+        assert_eq!(stopped.load(Ordering::SeqCst), 6);
     }
 
     struct ReadyAfter(Arc<AtomicBool>);
@@ -859,8 +1011,28 @@ mod tests {
                 queries_cancelled: 13,
             }
         );
+        assert_eq!(
+            children.find_node,
+            DhtDiscoveredNodeFindWorkerExit::Shutdown {
+                queued_dropped: 14,
+                tasks_cancelled: 15,
+                recursive_nodes_dropped: 16,
+            }
+        );
+        assert_eq!(
+            children.oldest_find,
+            DhtOldestNodeFindProducerExit::Shutdown {
+                selected_dropped: 17,
+            }
+        );
+        assert_eq!(
+            children.oldest_ping,
+            DhtOldestNodePingProducerExit::Shutdown {
+                selected_dropped: 18,
+            }
+        );
         assert!(children.target.is_ok());
-        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+        assert_eq!(stopped.load(Ordering::SeqCst), 5);
     }
 
     struct DropFlag(Arc<AtomicUsize>);
@@ -888,27 +1060,27 @@ mod tests {
         let mut run = Box::pin(run_child_factories(pending(), factories));
         poll_once_pending(run.as_mut()).await;
         wait_for(
-            || polled.load(Ordering::SeqCst) == 5,
+            || polled.load(Ordering::SeqCst) == 6,
             "all child tasks to be polled",
         )
         .await;
         drop(run);
         wait_for(
-            || dropped.load(Ordering::SeqCst) == 5,
+            || dropped.load(Ordering::SeqCst) == 6,
             "all aborted child tasks to be dropped",
         )
         .await;
     }
 
     #[tokio::test]
-    async fn recovered_discovery_and_oldest_find_capabilities_form_intentional_eof_cycles() {
+    async fn recovered_discovery_and_oldest_producer_capabilities_form_intentional_eof_cycles() {
         let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
         let recursive = discovery.try_sender().expect("original sender is live");
         drop(sender);
         let table = KTable::new(Id20::ZERO);
         let (scheduler, mut routes, _stats) = DhtDiscoveredNodeScheduler::new(discovery, table);
+        let oldest_ping = scheduler.ping_input();
         let oldest_find = scheduler.find_node_input();
-        routes.ping.close();
         routes.sample_infohashes.close();
         let mut scheduler_run = Box::pin(scheduler.run(pending()));
 
@@ -918,9 +1090,14 @@ mod tests {
             scheduler_run.await,
             DhtDiscoveredNodeSchedulerExit::InputClosed
         );
+        let mut ping_eof = Box::pin(routes.ping.recv());
+        poll_once_pending(ping_eof.as_mut()).await;
+        drop(ping_eof);
         let mut find_eof = Box::pin(routes.find_node.recv());
         poll_once_pending(find_eof.as_mut()).await;
         drop(find_eof);
+        drop(oldest_ping);
+        assert_eq!(routes.ping.recv().await, None);
         drop(oldest_find);
         assert_eq!(routes.find_node.recv().await, None);
     }
