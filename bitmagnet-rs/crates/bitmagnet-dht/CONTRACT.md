@@ -2743,3 +2743,110 @@ cancellation, queue, stats, terminal conservation, fixture, and custom-
 configuration exclusions remain exact. Every broader runtime, sample,
 higher-pipeline, application, deployment, production, and rollout boundary
 remains in force.
+
+The forty-second slice, landed by
+`e0fdd622f5869d092ff4322433d72bd17f783d11`, adds only a retained-handle
+producer capability for the existing bounded `sample_infohashes` route while
+preserving the source distinction required by Go's future sampling worker.
+
+The route still owns one queue with the scheduler's existing configured
+capacity, whose production default remains one hundred. Internally each queue
+item is exactly one of `Discovered(RoutingNode)` or
+`Retained(KTableNodeHandle)`. Scheduler-origin routing always commits the
+immutable `Discovered` form. The new direct input accepts only the `Retained`
+form, preserving the exact generation-specific live handle across capacity
+wait, queue commit, and dequeue. It creates no second queue, capacity, task,
+worker, eligibility check, or node snapshot.
+
+`DhtDiscoveredNodeScheduler::sample_infohashes_input(&self)` lazily clones the
+existing sample-route sender and returns a public, cloneable, `Send + Sync`
+`DhtDiscoveredNodeSampleInfoHashesInput`. Merely constructing a scheduler does
+not create this external capability. Each live input or clone delays only the
+sample route's drain-then-EOF boundary after the scheduler-owned sender is
+gone. Dropping the last direct capability permits EOF; closing or dropping the
+unique receiver wakes current and later sends.
+
+`DhtDiscoveredNodeSampleInfoHashesInput::send(&self, handle)` waits for the
+shared queue capacity and returns
+`Result<(), DhtDiscoveredNodeSampleInfoHashesInputClosed>`. A successful
+return means the exact retained handle was committed, not that a worker
+dequeued it, rechecked it, projected its address, admitted a query, or sent a
+datagram. Receiver closure before commit returns the exact uncommitted handle,
+including its generation identity, through `into_node`. The crate-private
+`closed` waiter observes receiver closure without acquiring capacity and is
+reserved for the next periodic producer. Its temporary non-test
+`expect(dead_code)` must be removed when that producer begins using it.
+
+Sequential awaited direct sends preserve commit order. Competing scheduler and
+direct sends share Tokio's one FIFO capacity-waiter queue in registration
+order, but this seam assigns no source priority or deterministic cross-source
+registration order. Each pending send owns one retained handle outside the
+bounded queue. Dropping a pending future commits nothing, drops that clone,
+and loses its waiter position; callers that need to retry must retain a
+separate clone. Once committed, cancellation cannot retract the queue item.
+
+The sample field of `DhtDiscoveredNodeRoutes` now has the specialized public
+type `DhtDiscoveredNodeSampleInfoHashesReceiver`. Its public `recv`,
+`try_recv`, and `close` method shapes remain those of the prior generic route
+receiver. Public receives project either internal variant to one
+`RoutingNode`; a retained handle is snapshotted at that receive call, so
+updates before receive are visible. This method-shape continuity is not Rust
+source compatibility: code that explicitly names the prior
+`DhtDiscoveredNodeRouteReceiver` type for the public sample field must adapt to
+the new nominal receiver type.
+
+The receiver's crate-private `recv_work` instead preserves the internal
+variant and exact retained handle for the future worker. A retained old
+generation remains that same object even if its KTable entry is dropped and
+the same ID is re-added as a distinct clean generation. This is the seam that
+will permit a future worker to reproduce Go's post-dequeue
+`IsSampleInfoHashesCandidate` call. This slice does not perform that check,
+specify how the worker accounts for an ineligible item, or expose source
+provenance outside the crate.
+
+Direct retained-handle sends bypass scheduler discovery batching, address
+deduplication and projection, KTable known-address filtering, and unbiased
+route selection. They bypass every scheduler counter. In particular,
+`routed_sample_infohashes` remains scheduler-origin only, while the future
+worker will consume a single mixed-source stream. The scheduler still wraps
+only its own commits as `Discovered` and increments that counter only after
+the same irrevocable queue-commit boundary as before.
+
+Focused gates preserve default lazy EOF, sample-only clone-extended EOF,
+public `Send + Sync`, exact-handle error recovery, receiver-close and receiver-
+drop wakeup, FIFO waiters, pending-send cancellation, shared mixed-source
+capacity and order, scheduler-only counter provenance, receive-time public
+projection, and exact old-generation retention after drop and replacement.
+The capacity-free `closed` waiter is first proven pending, then wakes when the
+receiver closes while the committed prefix remains drainable and a blocked
+send recovers its exact retained handle.
+
+This slice adds no Go oracle or fixture. The scheduler fixture from slice
+twenty-eight remains authoritative for scheduler-origin routing after its
+strict consumer wraps sample deliveries as `Discovered`; it does not claim
+Go's periodic sample-candidate production or worker lifecycle. The next
+producer-only oracle must separately freeze Go's immediate limit-sixty KTable
+query, exact retained-handle identity, sequential sends, and one-second post-
+round delay before a Rust producer is implemented.
+
+The seven-child maintenance supervisor from slice forty-one still requests no
+sample input, closes and discards the unique sample receiver during
+construction, and adds no fourth route-level EOF cycle or sample child. This
+slice adds no periodic KTable candidate query, limit, cadence, producer stats,
+producer exit, dequeue-time eligibility check, BEP-51 request, rotating-target
+read, response handling, Bloom deduplication, info-hash triage, KTable update,
+recursive discovery fanout, sample worker, supervisor wiring, application or
+process configuration, external traffic, deployment, production readiness,
+or rollout.
+
+This slice supersedes slice twenty-eight only where that slice fixes the
+sample field's nominal receiver type, requires every sample queue item to be a
+state-free `RoutingNode`, makes scheduler ownership the only possible sample-
+route sender, or makes scheduler exit alone sufficient for sample EOF. The
+prior receiver projection, bounded capacity, scheduler routing and counter,
+and all scheduler lifecycle contracts remain exact when no direct sample
+input survives. It parallels slices thirty-two and thirty-seven's shared find
+and ping capacity, cancellation, direct-bypass, and EOF-extension contracts,
+but adds the retained-versus-discovered representation required only by the
+sample worker. It does not supersede their independent routes or any producer,
+worker, supervisor, runtime, application, deployment, or rollout contract.
