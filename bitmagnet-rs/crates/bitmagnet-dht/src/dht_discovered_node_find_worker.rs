@@ -503,6 +503,10 @@ fn add_saturating_usize(counter: &AtomicUsize, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_discovered_node_find_worker_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::future::{pending, poll_fn, ready};
