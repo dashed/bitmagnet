@@ -2062,3 +2062,88 @@ were not jointly owned, slice twenty-nine only where the ping worker was not
 jointly owned, and slice twenty-eight only where the scheduler had no crawler
 maintenance supervisor. Every remaining sample, bootstrap, higher-pipeline,
 runtime, application, deployment, and rollout exclusion stays in force.
+
+The thirty-seventh slice, landed by
+`e709e9153a1584fce9ab2ff2b3cdaac9c13e18d7`, adds only a shared producer
+capability for the existing bounded ping route:
+
+- `DhtDiscoveredNodeScheduler::ping_input(&self)` lazily clones the
+  scheduler's existing ping-route sender and returns a public, cloneable,
+  `Send + Sync` `DhtDiscoveredNodePingInput`. Merely constructing the scheduler
+  creates no external ping handle. The capability adds no task, queue, or
+  capacity: scheduler-origin and directly supplied nodes share the one
+  configured ping queue, whose default capacity remains ten;
+- `DhtDiscoveredNodePingInput::send(&self, node)` asynchronously waits for that
+  shared capacity and returns
+  `Result<(), DhtDiscoveredNodePingInputClosed>`. A successful return means the
+  node was committed to the queue, not that the ping worker dequeued it,
+  admitted its query, or sent a datagram. Receiver closure returns the exact
+  uncommitted `RoutingNode`, recoverable through
+  `DhtDiscoveredNodePingInputClosed::into_node`. The crate-private `closed`
+  waiter observes route closure without consuming capacity and is reserved for
+  a future periodic old-node ping producer;
+- sequential awaited sends by one producer preserve program order. Competing
+  send or reserve futures enter Tokio's FIFO waiter queue in runtime
+  registration order. This seam assigns no source priority and promises no
+  deterministic cross-producer or scheduler-versus-direct source order;
+- each pending `send` future owns one node outside the bounded queue. The seam
+  does not bound how many such futures callers may create, so the queue's
+  capacity is not a whole-composition retention bound. Dropping a pending
+  future commits nothing, drops its future-owned node, and loses its waiter
+  position; a caller that needs to retry must retain a separate copy. Once a
+  send succeeds, cancellation cannot retract the queued node;
+- without a requested ping-input handle, scheduler return or drop retains the
+  prior drain-then-EOF behavior for all three routes. A live ping-input handle
+  or clone intentionally keeps only the ping route open after the
+  scheduler-owned sender is gone; dropping the final external clone then
+  permits drain-then-EOF. Explicitly closing or dropping the unique ping-route
+  receiver wakes registered and later sends with the typed closed error. The
+  owned ping worker's shutdown closes that receiver before draining already
+  queued work: a node from a pending direct send is returned as uncommitted and
+  is absent from the worker's queued-drop accounting, while a previously
+  committed item remains worker-owned and is drained and counted under slice
+  twenty-nine;
+- direct ping-input sends bypass scheduler discovery batching, address
+  deduplication, address projection, KTable known-address filtering, and route
+  selection. They also bypass every scheduler counter. In particular,
+  `routed_ping` continues to count only scheduler-origin commits. The ping
+  worker consumes one source-free `RoutingNode` stream, so its dequeued, query,
+  table-command, mismatch, and terminal counters aggregate committed work from
+  every source without producer attribution; and
+- focused Rust gates preserve the lazy default EOF, clone-extended ping-only
+  EOF, shared scheduler-versus-direct capacity, sequential order, registered-
+  send cancellation, receiver close and drop recovery, exact pending-send
+  rejection during ping-worker shutdown, public `Send + Sync`, and the split
+  between direct work and scheduler-origin counters. A known KTable node sent
+  directly through the capability reaches the real ping worker, proving that
+  this seam does not silently reapply scheduler filtering.
+
+This slice adds no periodic old-node ping producer, KTable oldest-node
+selection, dropped-handle or recentness recheck, fifteen-minute threshold,
+producer cadence, producer task, producer shutdown policy, or producer
+counters. It adds and consumes no Go oracle row or fixture; slice twenty-nine's
+dropped and recent live-handle rows remain deferred producer evidence rather
+than behavior of this state-free input seam. It adds no configuration or
+source-provenance field to the scheduler, route, ping worker, or stats.
+
+The partial `DhtCrawlerMaintenanceSupervisor` from slice thirty-six does not
+request `ping_input`, does not construct an old-node ping producer, and remains
+the same fixed five-child composition. Its scheduler-owned ping sender and ping
+worker therefore retain their existing supervisor shutdown and EOF behavior.
+This seam is not wired into `DhtRuntime`, an application worker, or a process
+lifecycle, and it adds no sample-infohashes work, bootstrap or reseed work,
+higher crawler pipeline, retry or restart policy, external metrics, health or
+logging integration, deployment configuration, external DHT traffic, live
+deployment, or production rollout.
+
+This slice supersedes slice twenty-eight only where that slice says the ping
+route necessarily reaches EOF when the scheduler returns or is dropped: that
+remains exact when no ping-input clone survives. It supersedes slice
+twenty-nine only where scheduler-origin routing was the ping worker's sole
+possible queue provenance and a second ping-route producer capability was
+absent. All ping query, table, lifecycle, concurrency, and statistics semantics
+remain unchanged. It parallels but does not supersede slice thirty-two's
+independent find-input contract, and it does not supersede slice thirty-five's
+periodic oldest-node find producer or slice thirty-six's fixed supervisor
+wiring. Every periodic ping-producer, sample, bootstrap, higher-pipeline,
+runtime, application, deployment, and rollout exclusion remains in force.
