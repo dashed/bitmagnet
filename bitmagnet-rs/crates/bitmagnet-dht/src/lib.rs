@@ -6,6 +6,7 @@ mod dht_client;
 mod dht_dispatch;
 mod dht_driver;
 mod dht_responder;
+mod dht_runtime;
 mod dht_send;
 mod dht_supervisor;
 mod inbound;
@@ -36,6 +37,10 @@ pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
 pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
+};
+pub use dht_runtime::{
+    DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig, DhtRuntimeDriverError,
+    DhtRuntimeExit, DhtRuntimeStartError,
 };
 pub use dht_send::{send_dht_reply, DhtSendError};
 pub use dht_supervisor::{DhtSupervisor, DhtSupervisorExit};
@@ -73,6 +78,7 @@ pub use routing_tree::{RoutingPutResult, RoutingTree, ROUTING_ID_BITS};
 pub use scrape::{ScrapeBloomError, ScrapeBloomFilter, SCRAPE_BLOOM_BYTES};
 pub use tokio_ipv4_udp::{
     TokioIpv4UdpError, TokioIpv4UdpReceiver, TokioIpv4UdpSender, TokioIpv4UdpTransport,
+    TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender,
 };
 pub use transaction::{
     CryptoTransactionIdIssuer, DeliveryOutcome, PendingTransaction, RegisterError,

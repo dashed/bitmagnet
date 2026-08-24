@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure BitTorrent DHT KRPC codecs and transaction correlation."
+description = "BitTorrent DHT KRPC contracts and owned Tokio runtime."
 
 [dependencies]
 bendy.workspace = true

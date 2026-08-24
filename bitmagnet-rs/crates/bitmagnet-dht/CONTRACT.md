@@ -1,9 +1,10 @@
-# Pure KRPC wire, scrape-bloom, and transaction-correlation parity
+# KRPC, scrape-bloom, transaction, and owned-runtime parity
 
-This crate owns only the offline byte boundary needed before a Rust DHT runtime
-can be designed. Go remains the production implementation and the source of
-truth. `internal/parity/dht_krpc_gen_test.go` runs the real Go bencode codec and
-writes the checked fixture consumed by the Rust differential test.
+This crate began with the offline byte boundary needed to design a Rust DHT
+runtime and now also owns its initial Tokio IPv4 runtime composition. Go remains
+the production implementation and the source of truth.
+`internal/parity/dht_krpc_gen_test.go` runs the real Go bencode codec and writes
+the checked fixture consumed by the Rust differential test.
 
 The bounded contract includes:
 
@@ -924,3 +925,48 @@ yet enforced on inbound dispatch and outbound waits are not yet consulted by
 loop, responder timeout, metrics, health, logging, discovery, crawler
 scheduling, socket binding, configuration, deployment wiring, or external
 network behavior.
+
+The twenty-third slice adds the first owned Tokio DHT runtime composition:
+
+- `DhtRuntimeConfig::default` locks Go's `0.0.0.0:3334` bind policy,
+  four-second post-send query timeout, and responder BEP-51 interval ten.
+  `DhtRuntime::start` generates a cryptographic 20-byte node ID whose final
+  eight bytes are `-BM0001-`, creates the shared production `KTable`, responder,
+  transaction registry, dispatcher, driver, and supervisor, eagerly binds one
+  IPv4 UDP socket, and spawns one owned receive task;
+- the task repeatedly drives finite 255-datagram supervisor batches but owns
+  the overall continuous lifetime. Each batch remains sequential and retains
+  its typed receive and reply-send failure. Eager typed bind and task exit are
+  deliberate hardenings over Go's lazy server construction, detached read
+  goroutine, swallowed reply-send errors, and live receive panic;
+- `DhtRuntimeClient` mirrors all five typed outbound query methods. Clones
+  share the transaction registry and production outbound per-IP limiter, and
+  every query waits for limiter admission before registration and send. The
+  client owns only `TokioIpv4UdpWeakSender`; one per-send upgrade is retained
+  until that send settles, but retained client clones cannot extend the bound
+  socket's lifetime;
+- consuming `shutdown` requests graceful task completion, while consuming
+  `wait` observes a natural typed task exit. Dropping either the handle or one
+  of those futures closes the registry and aborts rather than detaching the
+  task. A task-local drop guard also closes every pending query on normal
+  shutdown, driver failure, panic, or abort. Graceful shutdown drops the final
+  strong socket owners before returning, so the exact address can be rebound
+  even while weak client handles remain; and
+- a fully typed, unknown-field-denying Rust consumer locks the checked Go
+  lifecycle fixture's public defaults, 64 real suffixed-ID observations, and
+  source-derived lazy construction, task ownership, stop, error-policy, and
+  pending-query gaps. The fixture explicitly records that it opens no socket,
+  starts no goroutine, and makes no timing or detached-completion-order claim;
+  and
+- focused release gates cover the production defaults and suffix, an actual
+  self-ping through the shared loopback socket, graceful shutdown, pending
+  registry closure, retained-client failure, task Drop, and exact port release.
+
+This initial runtime deliberately does not yet add bounded concurrent handler
+fan-out. A backpressured inbound reply can therefore delay delivery of a later
+query response until the send settles. The inbound limiter, five-second Go
+responder deadline, responder discovery notifications, metrics, health,
+logging, crawler scheduling and persistence, application configuration/Fx
+wiring, deployment wiring, and external bootstrap traffic also remain outside
+this slice. Those are subsequent runtime milestones, not claims made by this
+checkpoint.
