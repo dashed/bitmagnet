@@ -1087,3 +1087,87 @@ This slice still excludes Go's five-second responder timeout, configurable
 handler or rejection capacities, reply-send logging, Prometheus integration,
 responder discovery, crawler scheduling, persistence, external bootstrap
 traffic, application/Fx or deployment wiring, and any production rollout.
+
+The twenty-sixth slice adds caller-controlled outbound admission to the owned
+runtime client without changing its existing convenience surface:
+
+- `DhtRuntimeClient` now exposes additive `ping_with_admission`,
+  `find_node_with_admission`, `get_peers_with_admission`,
+  `get_peers_scrape_with_admission`, and
+  `sample_infohashes_with_admission` methods. Each accepts the existing typed
+  query arguments followed by an optional Tokio admission deadline and an
+  arbitrary `Future<Output = ()>` admission cancellation. The original five
+  methods, their unbounded production admission, and the
+  `DhtRuntimeClientError` alias are unchanged;
+- controlled calls return the exhaustive
+  `DhtRuntimeControlledQueryError::{Admission, Query}` boundary.
+  `Admission` retains the exact typed `DhtRateLimitWaitError`; `Query` retains
+  the existing concrete `DhtRuntimeClientError`, including registration,
+  encode, weak-transport, remote-envelope, semantic, timeout, and registry-close
+  data and sources. No admission variant was added to the closed generic
+  `DhtClientError` or either legacy ping/find-node error;
+- every client clone continues to share the runtime's production outbound
+  limiter: one token per second per exact IP identity, burst four, a
+  1,000-key access-recency bound, and strict twenty-second TTL. A controlled
+  method first awaits `wait_with`. Only successful admission clones the weak
+  sender and immediately enters the selected `DhtClient` method. That method
+  issues and registers its two-byte TID before encode and send, and starts the
+  configured response timeout only after the send succeeds. Admission failure
+  therefore creates no sender clone or future, registration, TID, encoding,
+  send, or response timer;
+- the supplied deadline and cancellation govern only the outbound admission
+  wait. Pre-ready cancellation wins before deadline validation or cache access;
+  an expired deadline and a reservation scheduled strictly after its future
+  deadline both project to Rust's typed `WouldExceedDeadline`, while an action
+  exactly at the deadline is admitted. Once admission succeeds, its token is
+  committed and the supplied cancellation future is dropped. It cannot cancel
+  registration, send, or response waiting, and the admission deadline is not a
+  total-operation deadline. Dropping or selecting away the complete controlled
+  method remains the whole-operation cancellation mechanism: during admission
+  it cancels the eligible reservation without registration, while after
+  admission it drops the exact registration guard without refunding the
+  committed token;
+- Go's production `queryLimiter` obtains or refreshes the keyed limiter before
+  `rate.Limiter.Wait` observes a pre-cancelled or already-expired context. Rust
+  deliberately detects those two decided conditions before keyed-cache lookup,
+  so their error outcomes short-circuit equally but their cache-touch behavior
+  is not a parity claim. A future deadline that cannot accommodate the next
+  reservation reaches the keyed limiter in both implementations; Go reports
+  its `rate: Wait(n=1) would exceed context deadline` string, while Rust groups
+  that case with the already-expired case under `WouldExceedDeadline`;
+- Go passes the same context through its limiter wrapper into the delegated
+  server query, so that context remains able to cancel response waiting. Rust's
+  caller-supplied admission future is intentionally phase-local and is dropped
+  at admission; callers that need cancellation across both phases select or
+  drop the complete controlled method instead. Similarly, shutting down the
+  runtime closes the transaction registry and socket owners but does not cancel
+  a caller-owned future still blocked solely in the shared limiter. If it later
+  becomes admitted, the existing query path observes the closed registry before
+  send. This combined queued-admission shutdown behavior is source-derived from
+  the independently gated limiter and runtime-ownership boundaries; no current
+  gate directly holds admission pending across runtime shutdown; and
+- this slice intentionally exposes no detachable admission permit. The current
+  limiter commits a token when `wait_with` returns, so retaining many completed
+  permits could defeat the burst bound by sending them together, while dropping
+  an unused permit would waste a committed token. Keeping admission and query
+  in one future preserves the deployed pacing boundary.
+
+Focused source gates lock pre-cancellation and expired-deadline precedence over
+an already-closed registry, exact nested closed-registry and stopped-weak-sender
+query errors, zero registrations throughout a blocked admission, in-flight
+cancellation rollback to the exact next one-second action, dropping the
+admission cancellation after success, whole-query registration cleanup without
+token refund, all five typed forwarding paths, and exhaustive error matching.
+The seven strictly consumed real-Go `query_limiter.jsonl` rows remain the
+oracle for wait-before-delegate ordering, decided contexts, insufficient future
+deadline text, exact IP keys, and production defaults. Existing client,
+query-send, peer/sample, and runtime lifecycle gates retain exact wire,
+projection, sender, timeout, registry, drop, abort, and shutdown evidence; this
+slice composes those checked boundaries rather than claiming a new Go runtime
+wire oracle.
+
+This slice adds no reservation-guard or detachable-permit API, total-operation
+context or deadline abstraction, new runtime configuration, retry, responder
+timeout, discovery, metrics, health, crawler or persistence scheduling,
+application wiring, deployment wiring, external traffic, or production
+rollout.
