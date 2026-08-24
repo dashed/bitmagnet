@@ -2,7 +2,7 @@ use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio::net::UdpSocket;
 
@@ -37,6 +37,17 @@ pub enum TokioIpv4UdpError {
     ShortSend { sent: usize, expected: usize },
 }
 
+/// Errors from a non-owning IPv4 UDP send handle.
+#[derive(Debug, thiserror::Error)]
+pub enum TokioIpv4UdpWeakSendError {
+    /// Every strong owner of the bound socket has been dropped.
+    #[error("IPv4 UDP transport has stopped")]
+    Stopped,
+    /// The live transport rejected or failed the send.
+    #[error("IPv4 UDP weak send failed: {0}")]
+    Transport(#[source] TokioIpv4UdpError),
+}
+
 /// An unopened ownership split over one bound IPv4-only UDP socket.
 ///
 /// Consuming this value produces one non-cloneable receive owner and a
@@ -60,6 +71,17 @@ pub struct TokioIpv4UdpReceiver {
 #[derive(Clone, Debug)]
 pub struct TokioIpv4UdpSender {
     socket: Arc<UdpSocket>,
+    local_addr: SocketAddrV4,
+}
+
+/// A cloneable send handle that does not keep the bound socket alive.
+///
+/// Each send upgrades the socket weak reference once and retains that strong
+/// reference until the send settles. Runtime clients can therefore retain and
+/// clone this handle without extending the transport's bound-port lifetime.
+#[derive(Clone, Debug)]
+pub struct TokioIpv4UdpWeakSender {
+    socket: Weak<UdpSocket>,
     local_addr: SocketAddrV4,
 }
 
@@ -118,6 +140,26 @@ impl TokioIpv4UdpSender {
     pub const fn local_addr(&self) -> SocketAddrV4 {
         self.local_addr
     }
+
+    /// Create a cloneable sender that does not own the bound socket.
+    #[must_use]
+    pub fn downgrade(&self) -> TokioIpv4UdpWeakSender {
+        TokioIpv4UdpWeakSender {
+            socket: Arc::downgrade(&self.socket),
+            local_addr: self.local_addr,
+        }
+    }
+}
+
+impl TokioIpv4UdpWeakSender {
+    /// The cached address of the socket from which this handle was created.
+    ///
+    /// This remains available after the transport stops and is not a liveness
+    /// check.
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddrV4 {
+        self.local_addr
+    }
 }
 
 impl DatagramReceiver for TokioIpv4UdpReceiver {
@@ -155,31 +197,146 @@ impl DatagramSender for TokioIpv4UdpSender {
         destination: SocketAddr,
         datagram: &'a [u8],
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
+        Box::pin(async move { send_datagram(&self.socket, destination, datagram).await })
+    }
+}
+
+impl DatagramSender for TokioIpv4UdpWeakSender {
+    type Error = TokioIpv4UdpWeakSendError;
+
+    fn send<'a>(
+        &'a mut self,
+        destination: SocketAddr,
+        datagram: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
         Box::pin(async move {
-            let SocketAddr::V4(destination) = destination else {
-                return Err(TokioIpv4UdpError::UnsupportedDestinationFamily(destination));
-            };
-            if datagram.len() > MAX_INBOUND_DATAGRAM_BYTES {
-                return Err(TokioIpv4UdpError::DatagramTooLarge {
-                    actual: datagram.len(),
-                    maximum: MAX_INBOUND_DATAGRAM_BYTES,
-                });
-            }
-            let sent = self
+            let socket = self
                 .socket
-                .send_to(datagram, destination)
+                .upgrade()
+                .ok_or(TokioIpv4UdpWeakSendError::Stopped)?;
+            send_datagram(&socket, destination, datagram)
                 .await
-                .map_err(|source| TokioIpv4UdpError::SendIo {
-                    destination,
-                    source,
-                })?;
-            if sent != datagram.len() {
-                return Err(TokioIpv4UdpError::ShortSend {
-                    sent,
-                    expected: datagram.len(),
-                });
-            }
-            Ok(())
+                .map_err(TokioIpv4UdpWeakSendError::Transport)
         })
+    }
+}
+
+async fn send_datagram(
+    socket: &UdpSocket,
+    destination: SocketAddr,
+    datagram: &[u8],
+) -> Result<(), TokioIpv4UdpError> {
+    let SocketAddr::V4(destination) = destination else {
+        return Err(TokioIpv4UdpError::UnsupportedDestinationFamily(destination));
+    };
+    if datagram.len() > MAX_INBOUND_DATAGRAM_BYTES {
+        return Err(TokioIpv4UdpError::DatagramTooLarge {
+            actual: datagram.len(),
+            maximum: MAX_INBOUND_DATAGRAM_BYTES,
+        });
+    }
+    let sent = socket
+        .send_to(datagram, destination)
+        .await
+        .map_err(|source| TokioIpv4UdpError::SendIo {
+            destination,
+            source,
+        })?;
+    if sent != datagram.len() {
+        return Err(TokioIpv4UdpError::ShortSend {
+            sent,
+            expected: datagram.len(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv6Addr, SocketAddrV6};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn weak_sender_sends_while_a_strong_socket_owner_is_alive() {
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let source = transport.local_addr();
+        let (receiver, sender) = transport.into_parts();
+        let mut weak = sender.downgrade();
+        drop(sender);
+
+        let peer = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let destination = peer.local_addr();
+        let (mut peer_receiver, _peer_sender) = peer.into_parts();
+
+        let payload = b"weak sender remains usable";
+        weak.send(SocketAddr::V4(destination), payload)
+            .await
+            .unwrap();
+
+        let mut buffer = vec![0; MAX_INBOUND_DATAGRAM_BYTES];
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            peer_receiver.receive(&mut buffer),
+        )
+        .await
+        .expect("loopback receive completes")
+        .unwrap();
+        assert_eq!(received.source, SocketAddr::V4(source));
+        assert_eq!(&buffer[..received.length], payload);
+
+        drop(receiver);
+    }
+
+    #[tokio::test]
+    async fn weak_sender_clones_stop_and_release_the_port_after_strong_owners_drop() {
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let local_addr = transport.local_addr();
+        let (receiver, sender) = transport.into_parts();
+        let mut weak = sender.downgrade();
+        let mut weak_clone = weak.clone();
+        assert_eq!(weak.socket.strong_count(), 2);
+
+        drop(receiver);
+        drop(sender);
+        assert_eq!(weak.socket.strong_count(), 0);
+        assert!(matches!(
+            weak.send(SocketAddr::V4(local_addr), b"stopped").await,
+            Err(TokioIpv4UdpWeakSendError::Stopped)
+        ));
+        assert!(matches!(
+            weak_clone
+                .send(SocketAddr::V4(local_addr), b"also stopped")
+                .await,
+            Err(TokioIpv4UdpWeakSendError::Stopped)
+        ));
+
+        let rebound = TokioIpv4UdpTransport::bind(local_addr).await.unwrap();
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn weak_sender_upgrades_when_polled_and_wraps_live_transport_errors() {
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let (receiver, sender) = transport.into_parts();
+        let mut weak = sender.downgrade();
+        assert_eq!(weak.local_addr(), sender.local_addr());
+
+        let destination = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 6_881, 0, 0));
+        assert!(matches!(
+            weak.send(destination, b"unsupported").await,
+            Err(TokioIpv4UdpWeakSendError::Transport(
+                TokioIpv4UdpError::UnsupportedDestinationFamily(actual)
+            )) if actual == destination
+        ));
+
+        let stopped_destination = SocketAddr::V4(sender.local_addr());
+        let send = weak.send(stopped_destination, b"upgrade on poll");
+        drop(receiver);
+        drop(sender);
+        assert!(matches!(
+            send.await,
+            Err(TokioIpv4UdpWeakSendError::Stopped)
+        ));
     }
 }
