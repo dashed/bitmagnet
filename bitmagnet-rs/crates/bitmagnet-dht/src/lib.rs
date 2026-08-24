@@ -68,9 +68,11 @@ pub use dht_discovered_node_ping_worker::{
 pub use dht_discovered_node_scheduler::{
     DhtDiscoveredNodeFindInput, DhtDiscoveredNodeFindInputClosed, DhtDiscoveredNodePingInput,
     DhtDiscoveredNodePingInputClosed, DhtDiscoveredNodeRouteReceiver, DhtDiscoveredNodeRoutes,
-    DhtDiscoveredNodeScheduler, DhtDiscoveredNodeSchedulerConfig,
-    DhtDiscoveredNodeSchedulerConfigError, DhtDiscoveredNodeSchedulerExit,
-    DhtDiscoveredNodeSchedulerStats, DhtDiscoveredNodeSchedulerStatsHandle,
+    DhtDiscoveredNodeSampleInfoHashesInput, DhtDiscoveredNodeSampleInfoHashesInputClosed,
+    DhtDiscoveredNodeSampleInfoHashesReceiver, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeSchedulerConfig, DhtDiscoveredNodeSchedulerConfigError,
+    DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStats,
+    DhtDiscoveredNodeSchedulerStatsHandle,
 };
 pub use dht_discovery::{
     dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,

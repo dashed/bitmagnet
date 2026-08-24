@@ -737,7 +737,10 @@ fn prefill_all_routes(routes: &RouteSenders) -> Vec<RoutingNode> {
     let nodes = vec![dummy_node(240), dummy_node(241), dummy_node(242)];
     routes.ping.try_send(nodes[0]).unwrap();
     routes.find_node.try_send(nodes[1]).unwrap();
-    routes.sample_infohashes.try_send(nodes[2]).unwrap();
+    routes
+        .sample_infohashes
+        .try_send(DhtDiscoveredNodeSampleInfoHashesWork::Discovered(nodes[2]))
+        .unwrap();
     nodes
 }
 

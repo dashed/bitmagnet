@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-use crate::{DhtDiscoveryReceiver, KTable, RoutingNode};
+use crate::{DhtDiscoveryReceiver, KTable, KTableNodeHandle, RoutingNode};
 
 const DEFAULT_MAX_BATCH_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 const DEFAULT_PING_CAPACITY: NonZeroUsize = NonZeroUsize::new(10).unwrap();
@@ -65,7 +65,7 @@ pub enum DhtDiscoveredNodeSchedulerExit {
 pub struct DhtDiscoveredNodeRoutes {
     pub ping: DhtDiscoveredNodeRouteReceiver,
     pub find_node: DhtDiscoveredNodeRouteReceiver,
-    pub sample_infohashes: DhtDiscoveredNodeRouteReceiver,
+    pub sample_infohashes: DhtDiscoveredNodeSampleInfoHashesReceiver,
 }
 
 /// Cloneable producer capability for the bounded ping work route.
@@ -246,6 +246,143 @@ impl DhtDiscoveredNodeFindInput {
     }
 }
 
+/// One sample-route item with the Go distinction needed by the future
+/// `sample_infohashes` worker.
+///
+/// Scheduler-origin nodes are immutable discovery snapshots. Periodic table
+/// candidates retain their generation-specific live handle so the consumer
+/// can recheck eligibility and observe later updates after queueing.
+pub(crate) enum DhtDiscoveredNodeSampleInfoHashesWork {
+    Discovered(RoutingNode),
+    Retained(KTableNodeHandle),
+}
+
+impl DhtDiscoveredNodeSampleInfoHashesWork {
+    fn routing_node(&self) -> RoutingNode {
+        match self {
+            Self::Discovered(node) => *node,
+            Self::Retained(handle) => handle.routing_node(),
+        }
+    }
+}
+
+/// Cloneable producer capability for retained KTable candidates on the
+/// existing bounded `sample_infohashes` work route.
+///
+/// Every clone shares the scheduler's single configured sample capacity;
+/// cloning creates no queue or task. Sequential awaited sends preserve FIFO
+/// commit order. A queued handle remains live rather than becoming an
+/// immutable node snapshot. Scheduler-origin snapshots and retained handles
+/// compete for the same capacity without source priority, while scheduler
+/// `routed_sample_infohashes` counts only scheduler-origin commits.
+///
+/// Each blocked send owns one retained handle outside the bounded queue. Every
+/// live capability also delays sample-route EOF until it is dropped or the
+/// unique receiver closes.
+#[derive(Clone)]
+pub struct DhtDiscoveredNodeSampleInfoHashesInput {
+    sender: mpsc::Sender<DhtDiscoveredNodeSampleInfoHashesWork>,
+}
+
+/// A retained sample candidate that could not be queued because the unique
+/// route receiver closed.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the discovered-node sample_infohashes input receiver is closed")]
+pub struct DhtDiscoveredNodeSampleInfoHashesInputClosed {
+    node: KTableNodeHandle,
+}
+
+impl DhtDiscoveredNodeSampleInfoHashesInputClosed {
+    /// Recover the exact generation-specific handle that was not queued.
+    #[must_use]
+    pub fn into_node(self) -> KTableNodeHandle {
+        self.node
+    }
+}
+
+impl DhtDiscoveredNodeSampleInfoHashesInput {
+    /// Wait until the unique sample-route receiver closes or is dropped.
+    ///
+    /// This crate-private lifecycle hook consumes no queue capacity.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved for the periodic sample-infohashes producer"
+        )
+    )]
+    pub(crate) async fn closed(&self) {
+        self.sender.closed().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        capacity: usize,
+    ) -> (Self, DhtDiscoveredNodeSampleInfoHashesReceiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (
+            Self { sender },
+            DhtDiscoveredNodeSampleInfoHashesReceiver { receiver },
+        )
+    }
+
+    /// Wait for shared route capacity and queue one retained KTable handle.
+    ///
+    /// Cancellation before completion commits nothing. Success means the
+    /// handle entered the shared queue, not that a consumer inspected it.
+    /// Receiver closure recovers the exact unsent handle.
+    pub async fn send(
+        &self,
+        node: KTableNodeHandle,
+    ) -> Result<(), DhtDiscoveredNodeSampleInfoHashesInputClosed> {
+        self.sender
+            .send(DhtDiscoveredNodeSampleInfoHashesWork::Retained(node))
+            .await
+            .map_err(|error| match error.0 {
+                DhtDiscoveredNodeSampleInfoHashesWork::Retained(node) => {
+                    DhtDiscoveredNodeSampleInfoHashesInputClosed { node }
+                }
+                DhtDiscoveredNodeSampleInfoHashesWork::Discovered(_) => {
+                    unreachable!("the public sample input sends only retained handles")
+                }
+            })
+    }
+}
+
+/// Unique consumer for the bounded `sample_infohashes` work route.
+///
+/// Public receives preserve the route's existing [`RoutingNode`] projection.
+/// A retained handle is snapshotted only when that receive completes. The
+/// future worker uses the crate-private work receive to preserve whether the
+/// queue item was an immutable discovery snapshot or a live table handle.
+pub struct DhtDiscoveredNodeSampleInfoHashesReceiver {
+    receiver: mpsc::Receiver<DhtDiscoveredNodeSampleInfoHashesWork>,
+}
+
+impl DhtDiscoveredNodeSampleInfoHashesReceiver {
+    /// Receive the next routed node projection.
+    ///
+    /// Returns `None` only after every scheduler and retained-handle producer
+    /// is gone, or after closure and draining.
+    pub async fn recv(&mut self) -> Option<RoutingNode> {
+        self.recv_work().await.map(|work| work.routing_node())
+    }
+
+    /// Receive one currently queued node projection without waiting.
+    pub fn try_recv(&mut self) -> Result<RoutingNode, mpsc::error::TryRecvError> {
+        self.receiver.try_recv().map(|work| work.routing_node())
+    }
+
+    /// Reject later routing while retaining already queued work to drain.
+    pub fn close(&mut self) {
+        self.receiver.close();
+    }
+
+    pub(crate) async fn recv_work(&mut self) -> Option<DhtDiscoveredNodeSampleInfoHashesWork> {
+        self.receiver.recv().await
+    }
+}
+
 /// Unique consumer for one bounded discovered-node work route.
 pub struct DhtDiscoveredNodeRouteReceiver {
     receiver: mpsc::Receiver<RoutingNode>,
@@ -317,6 +454,8 @@ pub struct DhtDiscoveredNodeSchedulerStats {
     /// Nodes committed by the scheduler itself, excluding direct commits made
     /// through [`DhtDiscoveredNodeFindInput`].
     pub routed_find_node: u64,
+    /// Nodes committed by the scheduler itself, excluding retained-handle
+    /// commits made through [`DhtDiscoveredNodeSampleInfoHashesInput`].
     pub routed_sample_infohashes: u64,
     pub shutdown_dropped: u64,
     pub routes_closed_dropped: u64,
@@ -355,7 +494,7 @@ pub struct DhtDiscoveredNodeScheduler {
 struct RouteSenders {
     ping: mpsc::Sender<RoutingNode>,
     find_node: mpsc::Sender<RoutingNode>,
-    sample_infohashes: mpsc::Sender<RoutingNode>,
+    sample_infohashes: mpsc::Sender<DhtDiscoveredNodeSampleInfoHashesWork>,
 }
 
 impl DhtDiscoveredNodeScheduler {
@@ -418,7 +557,7 @@ impl DhtDiscoveredNodeScheduler {
                 find_node: DhtDiscoveredNodeRouteReceiver {
                     receiver: find_node_receiver,
                 },
-                sample_infohashes: DhtDiscoveredNodeRouteReceiver {
+                sample_infohashes: DhtDiscoveredNodeSampleInfoHashesReceiver {
                     receiver: sample_infohashes_receiver,
                 },
             },
@@ -448,6 +587,20 @@ impl DhtDiscoveredNodeScheduler {
     pub fn ping_input(&self) -> DhtDiscoveredNodePingInput {
         DhtDiscoveredNodePingInput {
             sender: self.routes.ping.clone(),
+        }
+    }
+
+    /// Clone a retained-handle producer capability for the scheduler's
+    /// existing `sample_infohashes` route.
+    ///
+    /// The handle is created only when requested. Retaining it after the
+    /// scheduler exits keeps the sample receiver open until it and every clone
+    /// are dropped or the receiver closes. Direct handles share capacity with
+    /// scheduler-origin snapshots but bypass scheduler counters.
+    #[must_use]
+    pub fn sample_infohashes_input(&self) -> DhtDiscoveredNodeSampleInfoHashesInput {
+        DhtDiscoveredNodeSampleInfoHashesInput {
+            sender: self.routes.sample_infohashes.clone(),
         }
     }
 
@@ -682,14 +835,19 @@ async fn route_one_unbiased(
         }
 
         let selected = tokio::select! {
-            permit = routes.ping.reserve(), if open[0] => (0, permit),
-            permit = routes.find_node.reserve(), if open[1] => (1, permit),
-            permit = routes.sample_infohashes.reserve(), if open[2] => (2, permit),
-        };
-        let (route, permit) = selected;
-        match permit {
-            Ok(permit) => {
+            permit = routes.ping.reserve(), if open[0] => (0, permit.map(|permit| {
                 permit.send(node);
+            })),
+            permit = routes.find_node.reserve(), if open[1] => (1, permit.map(|permit| {
+                permit.send(node);
+            })),
+            permit = routes.sample_infohashes.reserve(), if open[2] => (2, permit.map(|permit| {
+                permit.send(DhtDiscoveredNodeSampleInfoHashesWork::Discovered(node));
+            })),
+        };
+        let (route, committed) = selected;
+        match committed {
+            Ok(()) => {
                 return match route {
                     0 => RouteOneResult::Ping,
                     1 => RouteOneResult::FindNode,
@@ -773,6 +931,25 @@ mod tests {
         )
     }
 
+    fn retained(table: &KTable, node: RoutingNode) -> KTableNodeHandle {
+        assert_eq!(table.put_node(node), crate::RoutingPutResult::Accepted);
+        table.node_handle(node.id).unwrap()
+    }
+
+    fn assert_retained_work(
+        work: DhtDiscoveredNodeSampleInfoHashesWork,
+        expected: &KTableNodeHandle,
+    ) {
+        match work {
+            DhtDiscoveredNodeSampleInfoHashesWork::Retained(actual) => {
+                assert_eq!(&actual, expected);
+            }
+            DhtDiscoveredNodeSampleInfoHashesWork::Discovered(node) => {
+                panic!("expected retained sample work, got discovered {node:?}");
+            }
+        }
+    }
+
     fn config(max_batch_size: usize, route_capacity: usize) -> DhtDiscoveredNodeSchedulerConfig {
         DhtDiscoveredNodeSchedulerConfig {
             max_batch_size: NonZeroUsize::new(max_batch_size).unwrap(),
@@ -845,6 +1022,223 @@ mod tests {
         );
         assert_eq!(routes.ping.recv().await, None);
         assert_eq!(routes.find_node.recv().await, None);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn sample_input_clones_delay_only_sample_eof_until_the_last_clone_drops() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let table = KTable::new(Id20::ZERO);
+        let queued = v4(1, 1001);
+        let handle = retained(&table, queued);
+        let (scheduler, mut routes, _stats) =
+            DhtDiscoveredNodeScheduler::with_config(receiver, table, config(1, 1)).unwrap();
+        let input = scheduler.sample_infohashes_input();
+        let last_input = input.clone();
+        drop(scheduler);
+        drop(discovery);
+
+        assert_eq!(routes.ping.recv().await, None);
+        assert_eq!(routes.find_node.recv().await, None);
+        assert!(matches!(
+            routes.sample_infohashes.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        input.send(handle).await.unwrap();
+        assert_eq!(routes.sample_infohashes.recv().await, Some(queued));
+        drop(input);
+        assert!(matches!(
+            routes.sample_infohashes.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        drop(last_input);
+        assert_eq!(routes.sample_infohashes.recv().await, None);
+    }
+
+    #[test]
+    fn public_sample_types_are_send_sync_and_closed_error_recovers_exact_handle() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<DhtDiscoveredNodeSampleInfoHashesInput>();
+        assert_send_sync::<DhtDiscoveredNodeSampleInfoHashesInputClosed>();
+        assert_send_sync::<DhtDiscoveredNodeSampleInfoHashesReceiver>();
+
+        let table = KTable::new(Id20::ZERO);
+        let handle = retained(&table, v4(1, 1001));
+        let recovered = DhtDiscoveredNodeSampleInfoHashesInputClosed {
+            node: handle.clone(),
+        }
+        .into_node();
+        assert_eq!(recovered, handle);
+    }
+
+    #[tokio::test]
+    async fn closed_sample_receiver_returns_exact_unsent_handle_and_drains_prefix() {
+        let (input, mut receiver) = DhtDiscoveredNodeSampleInfoHashesInput::test_channel(1);
+        let table = KTable::new(Id20::ZERO);
+        let queued = retained(&table, v4(1, 1001));
+        let rejected = retained(&table, v4(2, 1002));
+        input.send(queued.clone()).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected.clone()));
+        poll_once_pending(blocked.as_mut()).await;
+        let mut closed = Box::pin(input.closed());
+        poll_once_pending(closed.as_mut()).await;
+
+        receiver.close();
+        closed.await;
+        assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
+        assert_retained_work(receiver.recv_work().await.unwrap(), &queued);
+        assert!(receiver.recv_work().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_sample_receiver_unblocks_pending_send_with_exact_handle() {
+        let (input, receiver) = DhtDiscoveredNodeSampleInfoHashesInput::test_channel(1);
+        let table = KTable::new(Id20::ZERO);
+        let queued = retained(&table, v4(1, 1001));
+        let rejected = retained(&table, v4(2, 1002));
+        input.send(queued).await.unwrap();
+        let mut blocked = Box::pin(input.send(rejected.clone()));
+        poll_once_pending(blocked.as_mut()).await;
+
+        drop(receiver);
+        assert_eq!(blocked.await.unwrap_err().into_node(), rejected);
+    }
+
+    #[tokio::test]
+    async fn sample_input_waiters_are_fifo_and_cancellation_commits_nothing() {
+        let (input, mut receiver) = DhtDiscoveredNodeSampleInfoHashesInput::test_channel(1);
+        let table = KTable::new(Id20::ZERO);
+        let sentinel = retained(&table, v4(9, 9009));
+        let cancelled = retained(&table, v4(1, 1001));
+        let first = retained(&table, v4(2, 1002));
+        let second = retained(&table, v4(3, 1003));
+        input.send(sentinel.clone()).await.unwrap();
+
+        let cancelled_input = input.clone();
+        let first_input = input.clone();
+        let second_input = input.clone();
+        let mut cancelled_send = Box::pin(cancelled_input.send(cancelled));
+        let mut first_send = Box::pin(first_input.send(first.clone()));
+        let mut second_send = Box::pin(second_input.send(second.clone()));
+        poll_once_pending(cancelled_send.as_mut()).await;
+        poll_once_pending(first_send.as_mut()).await;
+        poll_once_pending(second_send.as_mut()).await;
+        drop(cancelled_send);
+
+        assert_retained_work(receiver.recv_work().await.unwrap(), &sentinel);
+        first_send.await.unwrap();
+        assert_retained_work(receiver.recv_work().await.unwrap(), &first);
+        second_send.await.unwrap();
+        assert_retained_work(receiver.recv_work().await.unwrap(), &second);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_sample_projection_snapshots_a_retained_handle_at_receive_time() {
+        let (input, mut receiver) = DhtDiscoveredNodeSampleInfoHashesInput::test_channel(1);
+        let table = KTable::new(Id20::ZERO);
+        let original = v4(1, 1001);
+        let updated = v4(1, 2002);
+        let handle = retained(&table, original);
+        input.send(handle).await.unwrap();
+        assert_eq!(
+            table.put_node(updated),
+            crate::RoutingPutResult::AlreadyExists
+        );
+
+        assert_eq!(receiver.try_recv().unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn private_sample_work_preserves_an_old_generation_after_drop_and_replacement() {
+        let (input, mut receiver) = DhtDiscoveredNodeSampleInfoHashesInput::test_channel(1);
+        let table = KTable::new(Id20::ZERO);
+        let original = v4(1, 1001);
+        let replacement = v4(1, 2002);
+        let old = retained(&table, original);
+        input.send(old.clone()).await.unwrap();
+
+        assert!(table.drop_node(original.id));
+        assert_eq!(
+            table.put_node(replacement),
+            crate::RoutingPutResult::Accepted
+        );
+        let new = table.node_handle(original.id).unwrap();
+        assert_ne!(old, new);
+        assert!(old.dropped());
+        assert!(!new.dropped());
+
+        let work = receiver.recv_work().await.unwrap();
+        match work {
+            DhtDiscoveredNodeSampleInfoHashesWork::Retained(queued) => {
+                assert_eq!(queued, old);
+                assert!(queued.dropped());
+                assert_eq!(queued.routing_node(), original);
+            }
+            DhtDiscoveredNodeSampleInfoHashesWork::Discovered(node) => {
+                panic!("expected retained sample work, got discovered {node:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_and_sample_input_share_capacity_fifo_but_not_scheduler_counters() {
+        let (discovery, receiver) = dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+        let table = KTable::new(Id20::ZERO);
+        let direct = v4(1, 1001);
+        let direct_handle = retained(&table, direct);
+        let discovered = v4(2, 1002);
+        let (scheduler, mut routes, stats) =
+            DhtDiscoveredNodeScheduler::with_config(receiver, table, config(1, 1)).unwrap();
+        routes.ping.close();
+        routes.find_node.close();
+        let input = scheduler.sample_infohashes_input();
+        input.send(direct_handle).await.unwrap();
+        assert_eq!(discovery.offer(discovered), DhtDiscoveryOffer::Queued);
+        drop(discovery);
+
+        let task = tokio::spawn(scheduler.run(std::future::pending()));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = stats.snapshot();
+                if snapshot.route_attempts == 1 {
+                    assert_eq!(snapshot.routed_sample_infohashes, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the scheduler-origin node must wait behind direct sample work");
+        assert!(!task.is_finished());
+
+        assert_eq!(routes.sample_infohashes.recv().await, Some(direct));
+        assert_eq!(
+            task.await.unwrap(),
+            DhtDiscoveredNodeSchedulerExit::InputClosed
+        );
+        let work = routes.sample_infohashes.recv_work().await.unwrap();
+        assert!(matches!(
+            work,
+            DhtDiscoveredNodeSampleInfoHashesWork::Discovered(node) if node == discovered
+        ));
+        assert_eq!(
+            stats.snapshot(),
+            DhtDiscoveredNodeSchedulerStats {
+                received: 1,
+                batches: 1,
+                filter_calls: 1,
+                route_attempts: 1,
+                routed_sample_infohashes: 1,
+                ..DhtDiscoveredNodeSchedulerStats::default()
+            }
+        );
+        drop(input);
         assert_eq!(routes.sample_infohashes.recv().await, None);
     }
 
