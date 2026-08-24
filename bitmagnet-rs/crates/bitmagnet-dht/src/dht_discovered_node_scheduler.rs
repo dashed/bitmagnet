@@ -88,6 +88,14 @@ impl DhtDiscoveredNodeRouteReceiver {
     pub fn close(&mut self) {
         self.receiver.close();
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        capacity: usize,
+    ) -> (mpsc::Sender<RoutingNode>, DhtDiscoveredNodeRouteReceiver) {
+        let (sender, receiver) = mpsc::channel(capacity);
+        (sender, DhtDiscoveredNodeRouteReceiver { receiver })
+    }
 }
 
 #[derive(Default)]
