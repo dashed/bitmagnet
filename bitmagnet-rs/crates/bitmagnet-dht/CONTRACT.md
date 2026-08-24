@@ -1762,3 +1762,154 @@ describes scheduler-produced nodes as the route's only provenance. All worker
 query semantics and statistics remain unchanged, and every periodic-producer,
 oracle, recursive-composition, runtime, application, deployment, and rollout
 exclusion remains in force.
+
+The thirty-fifth slice freezes the periodic oldest-node `find_node` producer
+through the Go oracle at `4dfd19bc3aa71e2028e5944cab56568697671126`, the
+Rust implementation at `fd89b31ba0c2c2dc772ccdbcd49e6c63cfa1deeb`, and
+the strict consumer at `8b888c8751bd7696ebbde4c3630570b51d3bbbb0`:
+
+- `DhtOldestNodeFindProducer::new` consumes the shared `KTable` and one
+  `DhtDiscoveredNodeFindInput`, and returns the producer with a sender-free
+  `DhtOldestNodeFindProducerStatsHandle`. The public surface has no
+  configuration variant: it fixes the oldest-node age at five seconds, query
+  limit at ten, and post-batch delay at one second. The consuming `run` future
+  starts and spawns no task. Its owned find-input sender delays find-route EOF
+  until the producer or its `run` future exits or is dropped;
+- the first KTable query is immediate only when neither pre-ready caller
+  shutdown nor preclosed find input wins first. The production clock is
+  monotonic `Instant::now`; only the private deterministic test seam injects a
+  replacement clock. Subtracting the fixed age floors nonpanickingly at the
+  oldest representable instant. A winning query branch synchronously calls
+  `KTable::get_oldest_nodes(cutoff, Some(10))`, increments the completed-query
+  and selected-occurrence counters, and cannot be interrupted after that
+  branch has won. The actual KTable gate fixes the strict boundary: a handle
+  timestamped exactly at the cutoff is excluded, as is a newer handle, while a
+  handle one nanosecond older is selected. Returned order is preserved;
+- selected live handles are processed sequentially. Before each snapshot,
+  ready shutdown wins, followed by input closure; no KTable membership,
+  dropped-state, eligibility, or recentness recheck occurs. Rust projects each
+  handle to one immutable `RoutingNode` immediately before constructing that
+  item's capacity-waiting send. A mutation before a later handle's snapshot is
+  visible, while a mutation after an earlier snapshot cannot change its
+  pending value. Go instead sends the same live interface handles returned by
+  `GetOldestNodes` and performs no node accessor call in the producer. The
+  immutable projection is therefore an explicit Rust delta rather than a
+  claim about Go consumer-time state;
+- each awaited send uses slice thirty-two's shared find-route capacity
+  directly. It bypasses scheduler batching, deduplication, address projection,
+  known-node filtering, routing choice, and scheduler counters. A successful
+  return means queue commit, not find-worker consumption. One producer's
+  sequential commits preserve order, but this slice adds no priority or
+  deterministic ordering across the producer, scheduler, or other find-input
+  clones. During a blocked send, ready shutdown wins a tie with newly
+  available capacity or route closure. An already committed prefix is never
+  retracted; the current node and remaining selected suffix are classified as
+  unqueued by the terminal cause;
+- only after the complete selected batch is queued does Rust construct a fresh,
+  cancellation-aware one-second sleep. Delayed polling cannot cause catch-up,
+  and the focused clock gates fix both the 999-millisecond pending boundary and
+  progress at the following millisecond. Shutdown or input closure during this
+  sleep exits with a zero selected suffix. Go instead executes an unconditional
+  `time.After(time.Second)` receive after every batch. Its timer timing was not
+  executed by the runtime oracle, and when every query returns an empty table
+  its context is never checked, so the source loop can continue querying and
+  sleeping after cancellation. Those remain source facts, not Rust runtime
+  parity claims;
+- the exhaustive public exits are
+  `DhtOldestNodeFindProducerExit::Shutdown { selected_dropped }` and
+  `InputClosed { selected_dropped }`. The count is the exact current selected
+  occurrence plus later selected occurrences that were not queued. Receiver
+  closure is typed even for an empty table; Go's production lane has no
+  corresponding closed-channel lifecycle. A pre-ready Rust shutdown beats
+  both a ready query and preclosed input and performs zero queries, while the
+  actual Go pre-cancelled row performs one query, calls `In` once, then returns.
+  Dropping a pending Rust run detaches nothing and releases its sender, but is
+  not a normal terminal return and makes no suffix-accounting promise; and
+- `DhtOldestNodeFindProducerStats` exposes five saturating monotonic counters:
+  completed `table_queries`, returned `selected` occurrences, committed
+  `queued` occurrences, `input_closed_dropped`, and `shutdown_dropped`.
+  Snapshots load fields independently with relaxed ordering and are not
+  transactional. After normal terminal return,
+  `selected == queued.saturating_add(input_closed_dropped).saturating_add(
+  shutdown_dropped)`. The exit's `selected_dropped` is the per-run suffix
+  applied to the corresponding terminal counter. The shared route still
+  attributes no producer provenance: find-worker counters aggregate every
+  committed source, and `routed_find_node` remains scheduler-origin only.
+
+The strict child-module consumer denies unknown fields at every fixture level
+and freezes the three ordered rows as `SOURCE_ONLY`, `RUNTIME_EXACT`, and
+`RUNTIME_EXACT`, with fixture SHA-256
+`06e2ac78f73418038c946fdc5f3562654e130623fcf88e907c1c4e07112505cc`.
+It consumes every source, oracle, input, output, accessor, event, and optional
+field; binds the fixed Rust cutoff, limit, delay, scheduler find capacity 100,
+and find-worker concurrency 100; and checks these six embedded Go sources:
+
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/find_node.go`:
+  `cd5fab8aa078ad40ed82331dbbfd141a38badc018287dd13211d221b230087bb`;
+  and
+- `internal/protocol/dht/ktable/table.go`:
+  `68e3caf4394b2692fd9358224cce2b70ae3d90d920097bd28885b6b3bb77848f`.
+
+The source row retains Go's exact factory, detached-producer, capacity,
+concurrency, cutoff, order, cancellation-select, and unconditional-delay
+shapes. Its cutoff clock is runtime-bracketed, but its post-batch delay and
+forever-empty cancellation behavior are explicitly unobserved. The first
+actual Go row proves query-before-cancellation at an unbuffered first send;
+the Rust replay instead fixes the pre-ready shutdown delta, all-zero stats,
+unchanged table handle, and route EOF. The second actual Go row commits the
+same live A and B handles through a capacity-two manual lane, enters the third
+`In`, then abandons C and D after cancellation. The real Rust producer replay
+uses a positive capacity-two Tokio route and a fixed query clock. A through D
+are timestamped six seconds old, while a fifth hard-coded ID/address sentinel
+timestamped exactly at `query_now - OLDEST_AGE` is excluded, fixing the strict
+five-second boundary and `selected=4`. The replay commits immutable A and B in
+order and records the private pre-snapshot indices exactly as `[0, 1, 2]`: A
+and B were snapshotted and queued, C was snapshotted and pending on the full
+route, and D was never snapshotted. It then returns
+`Shutdown { selected_dropped: 2 }` with complete terminal stats
+`table_queries=1`, `selected=4`, `queued=2`,
+`input_closed_dropped=0`, and `shutdown_dropped=2`.
+
+The consumer also freezes eight deliberate Rust deltas: pre-ready shutdown
+before the first query; positive Tokio capacity in place of Go's unbuffered
+lane; biased query, snapshot, send, and delay boundaries; a privately
+injectable monotonic clock; cancellation-aware fresh delay without catch-up;
+typed empty-table input closure; one immutable `RoutingNode` per live-handle
+snapshot; and an owned, taskless run future without detached work. Go's
+production capacity and concurrency values are surrounding factory evidence,
+not producer-owned configuration, while its live-handle identity and zero
+accessor counts are Go-only metadata rather than Rust accessor parity.
+
+This slice adds no public producer configuration, clock, delay, or hook; no
+periodic old-node ping producer, bootstrap or reseed injection,
+sample-infohashes producer or worker, info-hash triage, get-peers, scrape,
+metainfo request, torrent or source persistence, retry, restart, or backoff.
+It does not compose the scheduler, ping or find worker, target rotator,
+producer, or recursive discovery into one supervisor, `DhtRuntime`,
+application, or process lifecycle. It exposes no producer counters through
+Prometheus or other external metrics and adds no health, logging, application
+or deployment configuration, external DHT traffic, live deployment, or
+production rollout.
+
+This slice supersedes slice thirty-two only where that slice excludes this
+periodic producer, KTable oldest-node selection, five-second cutoff, ten-node
+limit, immediate query, one-second cadence, shutdown policy, counters, and
+oracle consumption. Slice thirty-two's shared-capacity, EOF-extension, direct
+bypass, and cross-source-order contracts remain unchanged, and its exclusion
+of a producer task remains exact because this producer owns only a caller-
+polled future. It supersedes slice thirty-one only where the Rust producer is
+absent and all Go producer facts are source-only: the two actual Go method rows
+now have strict runtime bindings, while Go timer execution and forever-empty
+cancellation remain source-only. It supersedes slices twenty-nine and thirty
+only for this periodic oldest-node find-route producer. Periodic ping
+maintenance, sample-infohashes production, bootstrap work, broader recursive
+composition, runtime, application, deployment, and rollout boundaries remain
+in force.
