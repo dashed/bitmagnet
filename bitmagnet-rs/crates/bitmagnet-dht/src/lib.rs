@@ -3,7 +3,9 @@
 mod announce_token;
 mod compact;
 mod dht_client;
+mod dht_dispatch;
 mod dht_responder;
+mod dht_send;
 mod inbound;
 mod krpc;
 mod ktable;
@@ -16,6 +18,7 @@ mod ping_find_node_send;
 mod ping_find_node_supervisor;
 mod query_send;
 mod receive;
+mod reply;
 mod routing_tree;
 mod scrape;
 mod tokio_ipv4_udp;
@@ -26,9 +29,11 @@ pub use dht_client::{
     DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
     PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
 };
+pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
+pub use dht_send::{send_dht_reply, DhtSendError};
 pub use inbound::{
     InboundError, InboundLimitKind, InboundShapeKind, InboundSyntaxKind,
     MAX_INBOUND_DATAGRAM_BYTES, MAX_INBOUND_NESTING_DEPTH, MAX_INBOUND_VALUES,
@@ -57,6 +62,7 @@ pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,
 };
+pub use reply::DhtReply;
 pub use routing_tree::{RoutingPutResult, RoutingTree, ROUTING_ID_BITS};
 pub use scrape::{ScrapeBloomError, ScrapeBloomFilter, SCRAPE_BLOOM_BYTES};
 pub use tokio_ipv4_udp::{

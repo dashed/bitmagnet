@@ -699,3 +699,77 @@ PostgreSQL, queues, images, and deployment. Unknown and excluded extension
 values other than the explicitly unsupported BEP-44 `v` are syntax-validated
 and discarded. Neither the pure registry nor the new parser is connected to
 production, so no live DHT behavior changes.
+
+The twentieth bounded source-only slice composes the full pure responder with
+one offline response envelope and one fakeable datagram send:
+
+- `DhtDispatcher` owns one `DhtResponder` and therefore owns all five exact raw
+  methods plus the method-unknown response. It does not compose or call the
+  partial ping/find-node dispatcher. Each call invokes the responder at most
+  once, so an `announce_peer` request can perform at most one table mutation;
+- dispatch assumes that an outer server has already classified the envelope as
+  a query. Like Go's `handleQuery`, it deliberately ignores the supplied `y`
+  value and unrelated mixed request fields. Calling it directly on an
+  unclassified response or error envelope is outside this contract and could
+  execute a valid embedded `announce_peer`; receive routing is not added here;
+- every reply is rebuilt from scratch at the exact supplied `SocketAddr`. It
+  echoes the transaction byte string without a UTF-8 or two-byte restriction,
+  emits `y=r`, clears query, arguments, observed address, read-only, client ID,
+  and all other request bodies, and contains exactly one of `r` or `e`. Go's
+  unusual protocol-error shape remains `y=r` with `e`, not `y=e`;
+- responder protocol errors become peer-visible error replies and discard the
+  responder's prospective partial return. The native-IPv6 projection failure
+  remains a typed local cause paired with a clean generic `202`, `server error`
+  reply. Actual Go panics while encoding that native compact-IPv4 result and
+  sends nothing; the Rust `202` is the existing explicit hardening, not a claim
+  that Go emitted those fallback bytes;
+- the prepared-reply helper borrows the reply, fully encodes it, then constructs
+  and awaits exactly one `DatagramSender` future. Encoding failure creates no
+  sender future, while a transport failure preserves the sender's exact typed
+  value. Destination normalization, datagram size admission, retry, timeout,
+  queueing, and cancellation safety remain sender or caller policy. In
+  particular, an oversized but encodable reply reaches the sender for its own
+  rejection;
+- dispatch is synchronous. A valid announce mutation is complete before the
+  prepared send is created and is never rolled back after an unpolled send,
+  encode failure, pending-send drop, task abort, sender-construction or
+  sender-poll panic, or typed transport failure. Panics unwind rather than
+  becoming a send error, and neither cancellation nor failure triggers a retry;
+- the exact fake-seam destination retains IPv4-mapped form, native IPv6 scope,
+  and Rust-visible flowinfo. This is not a production IPv6 transport claim:
+  the current Tokio production adapter is IPv4-only. The responder separately
+  retains its established token and announce-address rules;
+- a checked same-package Go oracle exercises 25 actual `handleQuery` paths plus
+  one direct `server.send` encoder-error path. Rust exactly replays the five
+  concrete-responder-compatible envelope rows for ping, populated find-node,
+  populated and empty sampling, and method-unknown, including empty, binary,
+  and 257-byte transaction IDs and exact IPv4-mapped, native, and scoped
+  destinations. Arbitrary scripted peer tokens, non-production present-empty
+  find-node output, injected error provenance, context state, logging and
+  swallowed send failures, and Go panics remain explicitly classified as outer
+  runtime evidence rather than Rust behavior. The direct-send row records Go's
+  returned `*bencode.MarshalTypeError` for unsupported argument
+  `dht.MsgArgs.V` metadata and zero socket calls. `handleQuery` clears `A`
+  before sending, so this direct-send encode error is not a swallowed
+  `handleQuery` outcome;
+- independently, Rust composes all 40 production-responder oracle rows through
+  fresh full dispatchers and scripted tables, checking canonical wire,
+  destination, field exclusivity, arbitrary transaction widths, exact table
+  calls and effects, partial-return discard, and protocol/local outcomes.
+  Rust-only deterministic lifecycle gates cover backpressure, cancellation,
+  abort, panic, exact one-call behavior, sender-owned oversize rejection,
+  retained local causes, and mutation-without-rollback; and
+- all legacy ping/find-node responder, dispatcher, reply, send, driver, client,
+  and error surfaces remain unchanged. Exhaustive enum matches and const
+  constructor gates prevent the new full types from widening or aliasing those
+  compatibility contracts.
+
+This slice still adds no receive call, receive loop, combined driver,
+supervisor, limiter, handler task, responder context or timeout, logger,
+metrics, node-discovery wrapper, production socket wiring, shutdown policy, or
+external-network behavior. Go's outer `handleQuery` logs and swallows a send
+failure, whereas the bounded Rust helper returns it; this slice compares that
+helper to Go's lower `server.send` boundary and makes no runtime error-policy
+claim. `DatagramSender::Error` remains value-preserving without requiring a
+standard error source, so encode errors have their typed wire-error source
+while transport source chaining remains implementation-independent.
