@@ -37,6 +37,16 @@ pub struct DhtInboundRateLimiter {
     global: Arc<TokenBucket>,
 }
 
+/// The production inbound policy boundary that denied one query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DhtInboundRateLimitDenial {
+    /// The source-IP bucket had no token available.
+    PerIp,
+    /// The shared global bucket had no token available after the source-IP
+    /// token was consumed.
+    Global,
+}
+
 impl DhtInboundRateLimiter {
     /// Construct the deployed inbound policy with initially full buckets.
     #[must_use]
@@ -57,7 +67,15 @@ impl DhtInboundRateLimiter {
     /// A per-address token remains consumed when the later global check rejects
     /// the request. A per-address rejection does not touch the global bucket.
     pub fn allow(&self, addr: SocketAddr) -> bool {
-        self.allow_at(addr, Instant::now())
+        self.admit(addr).is_ok()
+    }
+
+    /// Consume one inbound admission or identify the exact denying policy.
+    ///
+    /// This is the typed form of [`Self::allow`]. It retains the same single
+    /// clock observation and per-address-before-global consumption order.
+    pub fn admit(&self, addr: SocketAddr) -> Result<(), DhtInboundRateLimitDenial> {
+        self.admit_at(addr, Instant::now())
     }
 
     fn with_policy(
@@ -75,9 +93,20 @@ impl DhtInboundRateLimiter {
         }
     }
 
+    #[cfg(test)]
     fn allow_at(&self, addr: SocketAddr, now: Instant) -> bool {
+        self.admit_at(addr, now).is_ok()
+    }
+
+    fn admit_at(&self, addr: SocketAddr, now: Instant) -> Result<(), DhtInboundRateLimitDenial> {
         let key = rate_limit_key(addr);
-        self.per_ip.get_at(key, now).allow_at(now) && self.global.allow_at(now)
+        if !self.per_ip.get_at(key, now).allow_at(now) {
+            return Err(DhtInboundRateLimitDenial::PerIp);
+        }
+        if !self.global.allow_at(now) {
+            return Err(DhtInboundRateLimitDenial::Global);
+        }
+        Ok(())
     }
 }
 

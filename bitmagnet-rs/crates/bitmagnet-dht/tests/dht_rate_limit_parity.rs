@@ -9,7 +9,9 @@ use std::task::Poll;
 use std::thread;
 use std::time::Duration;
 
-use bitmagnet_dht::{DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError};
+use bitmagnet_dht::{
+    DhtInboundRateLimitDenial, DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
@@ -859,13 +861,16 @@ async fn inbound_defaults_lock_bursts_refill_and_per_ip_before_global_consumptio
     let limiter = DhtInboundRateLimiter::new();
 
     allow_exactly(&limiter, ADDR_A, 10);
-    assert!(!limiter.allow(ADDR_A));
+    assert_eq!(limiter.admit(ADDR_A), Err(DhtInboundRateLimitDenial::PerIp));
     allow_exactly(&limiter, ADDR_B, 10);
-    assert!(!limiter.allow(ADDR_B));
+    assert_eq!(limiter.admit(ADDR_B), Err(DhtInboundRateLimitDenial::PerIp));
 
     // The global burst is now empty. Go's short-circuit order still consumes
     // one fresh C token before rejecting on the global bucket.
-    assert!(!limiter.allow(ADDR_C));
+    assert_eq!(
+        limiter.admit(ADDR_C),
+        Err(DhtInboundRateLimitDenial::Global)
+    );
     tokio::time::advance(Duration::from_millis(200)).await;
 
     // Ten global tokens refilled, but C has only nine whole tokens because its

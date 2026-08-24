@@ -1,3 +1,6 @@
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+use bitmagnet_dht::{ByteString, DhtReply};
 use serde::Deserialize;
 
 const FIXTURE: &str =
@@ -274,8 +277,9 @@ fn assert_blocked_query_row(fixture: Fixture) {
     assert!(!denial_error_identity_exact);
     assert_eq!(denial_error_source, "");
     let mut sends = sends.into_iter();
+    let send = sends.next().expect("blocked reply send");
     assert_send(
-        sends.next().expect("blocked reply send"),
+        &send,
         ("192.0.2.1", 6_881, 0),
         BLOCKED_REPLY_WIRE,
         "5131",
@@ -384,8 +388,9 @@ fn assert_limiter_denial_row(fixture: Fixture) {
     assert!(denial_error_identity_exact);
     assert_eq!(denial_error_source, "responder.ErrTooManyRequests");
     let mut sends = sends.into_iter();
+    let send = sends.next().expect("limiter denial send");
     assert_send(
-        sends.next().expect("limiter denial send"),
+        &send,
         ("203.0.113.9", 6_999, 0),
         DENIAL_REPLY_WIRE,
         "4c31",
@@ -394,6 +399,7 @@ fn assert_limiter_denial_row(fixture: Fixture) {
         "",
         (true, 201, "746f6f206d616e79207265717565737473"),
     );
+    assert_denial_replay(&send);
     assert!(sends.next().is_none(), "limiter row send count");
     assert_eq!(terminal, "handle_query_returned_after_send");
 }
@@ -474,7 +480,7 @@ fn assert_limiter(
 
 #[allow(clippy::too_many_arguments)]
 fn assert_send(
-    send: Send,
+    send: &Send,
     expected_destination: (&str, u16, u32),
     expected_wire: &str,
     expected_tid_hex: &str,
@@ -488,12 +494,10 @@ fn assert_send(
         wire_hex,
         envelope,
     } = send;
-    assert_addr(
-        destination,
-        expected_destination.0,
-        expected_destination.1,
-        expected_destination.2,
-    );
+    let Addr { ip, port, scope } = destination;
+    assert_eq!(ip, expected_destination.0);
+    assert_eq!(*port, expected_destination.1);
+    assert_eq!(*scope, expected_destination.2);
     assert_eq!(wire_hex, expected_wire);
     let Envelope {
         tid_hex,
@@ -516,25 +520,74 @@ fn assert_send(
         read_only,
         client_id,
     } = presence;
-    assert!(!query);
-    assert!(!arguments);
-    assert_eq!(returned, expected_return_presence);
-    assert_eq!(error_present, expected_error_presence);
-    assert!(!ip);
-    assert!(!read_only);
-    assert!(!client_id);
+    assert!(!*query);
+    assert!(!*arguments);
+    assert_eq!(*returned, expected_return_presence);
+    assert_eq!(*error_present, expected_error_presence);
+    assert!(!*ip);
+    assert!(!*read_only);
+    assert!(!*client_id);
     assert_eq!(return_id_hex, expected_return_id_hex);
     let WireError {
         present,
         code,
         message_hex,
     } = error;
-    assert_eq!(present, expected_error.0);
-    assert_eq!(code, expected_error.1);
+    assert_eq!(*present, expected_error.0);
+    assert_eq!(*code, expected_error.1);
     assert_eq!(message_hex, expected_error.2);
-    assert!(canonical);
-    assert!(tid_echoed);
-    assert!(request_fields_cleared);
+    assert!(*canonical);
+    assert!(*tid_echoed);
+    assert!(*request_fields_cleared);
+}
+
+fn assert_denial_replay(send: &Send) {
+    let destination = fixture_addr(&send.destination);
+    let transaction_id = hex::decode(&send.envelope.tid_hex).expect("fixture TID hex");
+    let reply = DhtReply::too_many_requests(destination, ByteString::new(transaction_id));
+    let message = &reply.message;
+
+    assert_eq!(reply.destination, destination);
+    assert_eq!(hex::encode(reply.wire().unwrap()), send.wire_hex);
+    assert_eq!(
+        hex::encode(message.transaction_id.as_bytes()),
+        send.envelope.tid_hex
+    );
+    assert_eq!(
+        hex::encode(message.message_type.as_bytes()),
+        send.envelope.type_hex
+    );
+    assert_eq!(!message.query.is_empty(), send.envelope.presence.query);
+    assert_eq!(message.args.is_some(), send.envelope.presence.arguments);
+    assert_eq!(message.response.is_some(), send.envelope.presence.returned);
+    assert_eq!(message.error.is_some(), send.envelope.presence.error);
+    assert_eq!(message.observed_addr.is_some(), send.envelope.presence.ip);
+    assert_eq!(message.read_only, send.envelope.presence.read_only);
+    assert_eq!(
+        !message.client_id.is_empty(),
+        send.envelope.presence.client_id
+    );
+    assert_eq!(send.envelope.return_id_hex, "");
+    let error = message.error.as_ref().expect("rate rejection error");
+    assert_eq!(error.code, send.envelope.error.code);
+    assert_eq!(
+        hex::encode(error.message.as_bytes()),
+        send.envelope.error.message_hex
+    );
+    assert_eq!(message.response.is_none(), send.envelope.error.present);
+    assert!(send.envelope.canonical);
+    assert!(send.envelope.tid_echoed);
+    assert!(send.envelope.request_fields_cleared);
+}
+
+fn fixture_addr(addr: &Addr) -> SocketAddr {
+    match addr.ip.parse::<IpAddr>().expect("fixture IP") {
+        IpAddr::V4(ip) => {
+            assert_eq!(addr.scope, 0, "IPv4 fixture address cannot carry scope");
+            SocketAddr::V4(SocketAddrV4::new(ip, addr.port))
+        }
+        IpAddr::V6(ip) => SocketAddr::V6(SocketAddrV6::new(ip, addr.port, 0, addr.scope)),
+    }
 }
 
 fn assert_addr(addr: Addr, expected_ip: &str, expected_port: u16, expected_scope: u32) {

@@ -70,7 +70,9 @@ pub use ping_find_node_driver::{
 pub use ping_find_node_send::{send_ping_find_node_reply, DatagramSender, PingFindNodeSendError};
 pub use ping_find_node_supervisor::{PingFindNodeSupervisor, PingFindNodeSupervisorExit};
 pub use query_send::{register_and_send_query, QuerySendError};
-pub use rate_limit::{DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError};
+pub use rate_limit::{
+    DhtInboundRateLimitDenial, DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError,
+};
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
     ReceivedDatagram,
