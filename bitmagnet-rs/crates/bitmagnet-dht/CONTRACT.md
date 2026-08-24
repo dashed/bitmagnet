@@ -1421,3 +1421,79 @@ change application or deployment configuration, contact external DHT nodes,
 or roll out to production. It supersedes slice twenty-eight only where that
 slice says the discovered-node ping query worker is absent; all other scheduler,
 crawler, application, and deployment exclusions remain in force.
+
+The thirtieth slice adds only the shared crawler node-ID target and its owned
+rotation prerequisite for future find-node and sample-infohashes workers:
+
+- `DhtCrawlerTarget` is a public, cloneable, `Send + Sync` read handle over one
+  `Arc<RwLock<Id20>>`. Its explicit `new` constructor accepts any complete ID,
+  including zero, while `current` returns one stable whole-value snapshot.
+  Module-owned replacement is private. Read and write poison is recovered
+  because the protected invariant is exactly one copyable ID; no lock guard is
+  retained across an await. Constructing this handle alone performs no entropy
+  read, starts no timer or task, and does not imply that a rotator exists;
+- `DhtCrawlerTargetRotator::new` synchronously fills a fresh raw twenty-byte
+  candidate with `getrandom`, applies no Bitmagnet client suffix, and returns
+  the `(target, rotator)` pair only after that initial fill succeeds. Zero and a
+  repeat of the prior ID remain valid random outcomes and are neither rejected
+  nor retried. An initial partial-fill failure discards the local candidate and
+  returns `DhtCrawlerTargetError::Entropy` without publishing either component.
+  The rotator is deliberately non-cloneable and is the only public construction
+  path that carries the private replacement capability for its paired target;
+- the rotator's consuming `run` future owns and spawns no task. It creates a
+  fresh ten-second sleep for each iteration only after the preceding
+  replacement has completed, so there is no immediate rotation, periodic-timer
+  catch-up, or promised strict wall-clock cadence. An already-ready shutdown is
+  biased ahead of a ready sleep and returns `Ok(())`. Once the sleep wins,
+  entropy generation and replacement are synchronous and cancellation-unaware:
+  shutdown becoming ready during a successful fill does not suppress that
+  completed replacement and wins on the next loop. A rotation entropy failure
+  publishes no partial candidate, preserves the last successful target, and
+  returns the typed error without retry. Dropping a pending `run` future drops
+  its armed delay and detaches no work; surviving target handles remain readable
+  at their last published value after either shutdown or failure;
+- Go stores the corresponding value in one shared
+  `*concurrency.AtomicValue[protocol.ID]`, whose read and exclusive write locks
+  return and replace the complete array. The production factory initializes it
+  with `RandomNodeID` before starting the crawler, and the exact find-node and
+  sample-infohashes call sites each read that same field at client-call time.
+  Those two consumer bindings are source evidence, not a claim that the Rust
+  workers are present. Go starts rotation as a detached, unjoined goroutine,
+  uses a fresh `time.After(10 * time.Second)` after each set, and leaves a
+  simultaneously ready timer/cancellation winner unspecified. Rust instead
+  owns the future and fixes the ready tie in favor of shutdown;
+- both implementations use twenty raw target bytes without a client suffix and
+  do not guarantee a nonzero or changing value. Go ignores both results from
+  `crypto/rand.Read`; if that call returns an error, it can install a new ID
+  containing any written prefix and a zero-initialized remainder, replacing the
+  previous target. Rust deliberately requires a complete fill before either
+  initial publication or rotation and exposes failure while retaining the last
+  successfully published target. Neither implementation can cancel its
+  synchronous entropy call after the timer branch has won; and
+- the strict Rust consumer freezes all five ordered sought-target oracle rows,
+  fixture SHA-256
+  `683162fe0da0c9fe8f39b80fffaaa3aae4f98683a0c1579b521eeb69f9aa1ea4`,
+  every nested schema field, the seven explicit Rust hardening classifications,
+  and six embedded Go source digests. It replays the four actual Go
+  `AtomicValue` rows against the real Rust holder: explicit zero, exact set/get,
+  shared-alias A-to-B replacement, and channel-gated cross-thread handoff. Its
+  mandatory total `Get`/`current` counts are exactly `[0, 1, 1, 3, 3]` across
+  the source row and four runtime rows, including the cross-thread final read.
+  The remaining row freezes factory, shared-consumer, delay, lifecycle, and
+  random source shapes through exact Go AST and source freshness; it explicitly
+  marks Go wall-clock and entropy execution as unobserved. Separate
+  deterministic Rust unit gates use injected fills and delays plus paused Tokio time to cover
+  raw and zero initialization, the exact first delay, no catch-up, biased ready
+  ties, shutdown during generation, partial-fill retention, and pending-future
+  drop, while a compile-fail doctest freezes the non-cloneable writer surface.
+
+This slice does not implement or compose the find-node or sample-infohashes
+workers, periodic oldest-node producers, recursive discovery, crawler-driven
+KTable response mutation, scheduler or `DhtRuntime` ownership, application
+supervision, entropy retry, backoff or restart, configurable rotation cadence,
+change notifications, rotation counters, Prometheus or other external metrics,
+health or logging integration, application or deployment configuration,
+external DHT traffic, or production rollout. It supersedes slice twenty-nine
+only where that slice excludes rotating a find target; the exclusions of both
+query workers and all crawler, runtime, application, and deployment composition
+remain in force.
