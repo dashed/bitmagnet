@@ -1913,3 +1913,152 @@ only for this periodic oldest-node find-route producer. Periodic ping
 maintenance, sample-infohashes production, bootstrap work, broader recursive
 composition, runtime, application, deployment, and rollout boundaries remain
 in force.
+
+The thirty-sixth slice, landed by
+`e9510862353fcac3c75b0059e67b1dffcbb9b6db`, adds the first owned partial
+crawler maintenance composition over the already-frozen scheduler, shared
+target, ping and `find_node` workers, recursive discovery, shared find input,
+and periodic oldest-node producer:
+
+- `DhtCrawlerMaintenanceSupervisor::new(discovery, client, table)` consumes the
+  unique `DhtDiscoveryReceiver` and borrows the `DhtRuntimeClient` and `KTable`,
+  cloning the latter two handles internally. The receiver's new crate-private
+  weak-sender seam upgrades only while at least one strong producer for that
+  exact discovery channel remains. Storing the weak sender does not itself
+  delay queue EOF. A successful upgrade is moved into the `find_node` worker
+  and intentionally extends scheduler-ingress EOF for recursive discovery;
+- construction is typed and starts no task. If the exact discovery sender can
+  no longer be recovered,
+  `DhtCrawlerMaintenanceStartError::DiscoveryClosed` retains the supplied
+  receiver. If initial target entropy fails,
+  `DhtCrawlerMaintenanceStartError::TargetEntropy` retains both the receiver
+  and exact `DhtCrawlerTargetError` source. `into_discovery` recovers the unique
+  receiver from either variant. Target initialization occurs during
+  construction, before `run`'s shutdown preflight, while no scheduler, worker,
+  producer, or rotator child has started;
+- after target initialization, the fixed wiring constructs the default
+  discovered-node scheduler, clones its existing shared find-route input for
+  the oldest-node producer, and then consumes each unique route receiver. The
+  sample-infohashes receiver is explicitly closed and dropped, so this
+  composition can route scheduler work only to ping or `find_node`; it creates
+  no sample worker or producer and
+  increments no successful `routed_sample_infohashes` count. The ping worker
+  receives the ping route plus cloned weak client and table handles. The
+  `find_node` worker receives the find route, the same client and table, the
+  exact recovered discovery sender, and a clone of the initialized shared
+  target. The target rotator retains the unique writer, while the periodic
+  oldest-node producer receives the table and the scheduler's shared find
+  input. All component capacities, concurrency limits, table behavior, query
+  semantics, target cadence, producer cadence, and per-component terminal
+  accounting remain those frozen by their earlier slices;
+- `DhtCrawlerMaintenanceStatsHandle` is a cloneable sender-free bundle. Its
+  `discovery` handle observes exact channel-global counters, including any
+  runtime responder that owns an original sender and every recursive sender,
+  rather than supervisor-local provenance. `scheduler` remains scheduler-only
+  and its `routed_find_node` excludes direct oldest-producer commits. `ping`
+  and `oldest_find` are local to those children, while `find_node` aggregates
+  every node consumed after
+  either the scheduler or producer commits to their shared route. The bundle
+  adds no target counters, transactional aggregate snapshot, source labels, or
+  external metrics export;
+- consuming `run` single-polls caller shutdown before invoking any child
+  factory or spawning any child task. A ready shutdown returns
+  `DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart`, performs no
+  scheduler, worker, producer, or rotation work, and drops the constructed
+  components. This is not a claim of zero entropy: the initial target was
+  already obtained by `new`. Once the preflight remains pending, exactly five
+  tasks are spawned into one owned `JoinSet`: scheduler, ping worker,
+  `find_node` worker, oldest-node producer, and target rotator;
+- the five tasks wait on clones of one internal watch receiver. Caller
+  shutdown is the first biased outer branch ahead of the next observed child
+  join. When caller shutdown wins, including a ready tie with a child result,
+  it remains the primary `DhtCrawlerMaintenanceSupervisorExit::Shutdown`
+  cause. A concrete normal child result that was already complete is still
+  retained during cleanup. When a child result wins first,
+  `DhtCrawlerMaintenanceSupervisorExit::Failed { first, children }` identifies
+  that first observed child through one of the exact `Scheduler`, `Ping`,
+  `FindNode`, `OldestFind`, or `Target` identities. No deterministic priority
+  is promised among simultaneously ready children.
+  Both paths broadcast shutdown once and then fully join every remaining
+  child. Signalling all children before awaiting any one of them breaks the
+  intentional discovery-sender and find-input EOF cycles without imposing a
+  fragile sequential cleanup order;
+- `DhtCrawlerMaintenanceChildExits` is a fixed complete record of the exact
+  scheduler, ping, `find_node`, oldest-producer, and target-rotator results.
+  Cleanup does not coerce an already-completed result into fabricated shutdown
+  counts. The supervisor resumes the first observed child-panic payload only
+  after draining all siblings. Unexpected child cancellation, another join
+  failure, a duplicate child result, or a missing fixed child result is an
+  invariant panic after cleanup rather than a fabricated typed exit. Dropping
+  a started `run` future drops its `JoinSet`, aborting all owned child tasks
+  instead of detaching them; that cancellation is not a normal terminal return
+  and provides no five-child exit record; and
+- the recovered discovery sender keeps scheduler ingress open even after the
+  original producer, including a runtime responder, disappears, and the oldest
+  producer's find-input sender keeps the find route open while the producer
+  remains live. Those cycles are deliberate within this composition and are
+  released on common shutdown, first-child failure cleanup, or drop. They do
+  not establish
+  ownership or liveness observation of the UDP runtime.
+
+This composition adds no new Go oracle or fixture. It binds the existing
+strict component evidence at these exact fixture SHA-256 values:
+
+- shared sought target:
+  `683162fe0da0c9fe8f39b80fffaaa3aae4f98683a0c1579b521eeb69f9aa1ea4`;
+- discovered-node scheduler:
+  `ae6d867378a227284aa0cd93e9120d70afbec1c5e3b19a9f64e09edace4190e0`;
+- ping worker:
+  `26d403becff0caeb0a27ec9027a366d51e19cdb7129ff05715cf24a6d2e1b040`;
+- `find_node` worker:
+  `e126ad26fd342b14ae0416b3610d991f927dbe9381ac11609ebeba96d67870b7`;
+  and
+- periodic oldest-node producer:
+  `06e2ac78f73418038c946fdc5f3562654e130623fcf88e907c1c4e07112505cc`.
+
+Those fixtures and their strict Rust consumers remain authoritative only for
+their bounded component contracts. The Go lifecycle evidence in
+`internal/dhtcrawler/crawler.go` at
+`ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`
+and `internal/dhtcrawler/factory.go` at
+`ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`
+shows a materially broader crawler: the factory detaches `go c.start()`,
+`start` detaches its worker goroutines, waits only for `stopped`, and cancels
+their shared context on return without joining those goroutines. Rust's fixed
+five-task ownership, biased preflight, complete joins, panic propagation, and
+drop-abort behavior are deliberate lifecycle hardening, not a claim of exact
+Go composition parity. The sought-target source row already freezes the
+relevant Go start and factory shapes; no new runtime row measures or proves the
+combined Go lifecycle.
+
+`DhtCrawlerMaintenanceSupervisor` deliberately does not own or observe
+`DhtRuntime`. Its cloned `DhtRuntimeClient` is weak and cannot keep the UDP
+socket or runtime task alive. Runtime termination is not automatically a
+maintenance-child exit, while maintenance failure does not stop the runtime;
+an outer owner must propagate the desired joint lifecycle through `run`'s
+shutdown future and the runtime's consuming shutdown or wait API. This slice
+adds no runtime-plus-maintenance supervisor, application or process worker,
+active flag, health signal, restart, retry, or backoff policy.
+
+This slice also adds no sample-infohashes worker or producer, periodic old-node
+ping producer, bootstrap or reseed injection, info-hash triage, get-peers,
+scrape, metainfo request, torrent or source persistence, database integration,
+Prometheus registration, external logging or health integration, application
+or deployment configuration, external DHT traffic, live deployment, or
+production rollout. Closing the sample route is a deliberate partial boundary,
+not evidence for Go's full crawler topology or higher pipeline.
+
+This slice supersedes slice thirty-five only where that slice excludes
+composition of the scheduler, ping and `find_node` workers, target rotator,
+oldest-node producer, and recursive discovery in one supervisor. All producer
+semantics and exclusions unrelated to that composition remain unchanged. It
+supersedes slice thirty-two only where that slice excludes a composed shared
+find-input producer lifecycle, while preserving its shared-capacity, direct-
+bypass, EOF-extension, and cross-source-order contracts. It supersedes slice
+thirty-one only where that slice says recursive offers are not composed back
+through the scheduler and no recursive crawler feedback loop exists. It
+supersedes slice thirty only where the target rotator and `find_node` consumer
+were not jointly owned, slice twenty-nine only where the ping worker was not
+jointly owned, and slice twenty-eight only where the scheduler had no crawler
+maintenance supervisor. Every remaining sample, bootstrap, higher-pipeline,
+runtime, application, deployment, and rollout exclusion stays in force.
