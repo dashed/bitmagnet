@@ -475,12 +475,74 @@ or a runtime:
   node, hash, and reverse state is sorted after every mutation before the Rust
   differential compares it.
 
+The seventeenth bounded source-only slice layers a shared, clocked KTable over
+that current-state core without adding a runtime:
+
+- cloneable `KTable` values share one `Arc<RwLock<State>>` and one
+  `Arc<dyn KTableClock>`. `new` uses `SystemKTableClock`; `with_clock` admits a
+  deterministic fake. Every public table mutation or query takes one short
+  synchronous lock, and there is no async work in this layer. The facade
+  delegates origin and all counts, reverse lookup, node handle lookup,
+  node/hash put and lookup, node/address drop, closest nodes, hash-or-closest,
+  and known-address filtering;
+- the short-lock guarantee depends on the `KTableClock` safety contract:
+  `now` must be monotonic, fast, nonblocking, non-panicking, and non-reentrant
+  into any table, clone, or handle sharing that clock. `SystemKTableClock`
+  satisfies this contract. A violating clock panic poisons the top-level lock
+  and any node lock held at that instant; all later access to affected state
+  deliberately panics instead of recovering potentially mismatched indexes.
+  This is fail-closed unusability, not transactional rollback: a completed
+  command or batch prefix may already have mutated otherwise inaccessible
+  state;
+- each current node has one generation-specific live handle. Duplicate puts
+  update all clones, dropping marks retained clones, and re-adding the same ID
+  creates a distinct clean generation. The core remains the current
+  node/hash/reverse index; its only new seams are crate-private reverse-ID and
+  sorted-hash enumeration helpers;
+- node options represent Go operations: `Responded`, last-write-wins BEP-51
+  support, and a signed sample response with a supplied next time. Accepted and
+  duplicate puts apply options in slice order; rejected puts apply none and
+  consume no clock reads. `Responded` reads the clock once. A productive sample
+  reads no clock and stores its supplied next time; an empty sample reads once
+  at its exact option position and stores `max(next, now) + 5 minutes`;
+- sampled, last-discovered, and total counters are `i64`. Accumulation uses
+  explicit `wrapping_add`, matching deployed 64-bit Go `int` overflow and
+  preserving negative inputs. The empty-response time addition saturates at
+  the greatest representable `Instant` within the five-minute interval, so
+  neither build profile exposes a time-arithmetic overflow panic;
+- oldest eligibility is strictly before the cutoff, with never-responded nodes
+  oldest. Candidate eligibility requires support other than `No`, a next time
+  strictly before now, and a response strictly more than five seconds old.
+  Each visited candidate consumes its own clock read until the positive limit
+  is filled, as Go does. A retained dropped handle's standalone predicate still
+  ignores dropped state, while table queries enumerate only current handles;
+- equal-time oldest order and Go candidate map traversal are undefined, so Rust
+  normalizes them by ID. `Option<NonZeroUsize>` expresses uncapped versus
+  positive oldest limits, and candidate queries require `NonZeroUsize`; Go's
+  surprising zero/negative candidate-limit behavior remains excluded;
+- `KTableCommand` covers node put/drop, address drop, and hash put. A void
+  `batch_command` holds one write lock across the complete sequence, matching
+  Go `BatchCommand`; a barrier-backed concurrency test proves table observers
+  cannot acquire a partial batch view;
+- `sample_hashes_and_nodes` implements Go's actual policy: take up to 20 hashes,
+  then take up to `40 - selected_hashes` live nodes, and return the exact total
+  hash count. Go chooses arbitrary map prefixes; Rust deterministically takes
+  ID-sorted hash snapshots and generation-live node handles. A same-package Go
+  oracle verifies the exact cardinalities plus uniqueness/current-subset
+  invariants rather than pinning undefined members or order;
+- the same oracle drives real Go node options, signed counter wrapping, drops,
+  strict oldest and candidate queries, actual mixed `BatchCommand`, capacity
+  rejection, duplicate updates at capacity, and both small and over-20 hash
+  samples. Scripted Rust clocks additionally lock clock call order, rejected
+  no-consumption, strict time boundaries, and near-limit time saturation; and
+- this layer uses only the existing standard library and crate graph. No Cargo
+  manifest dependency or `Cargo.lock` change belongs to this milestone.
+
 Excluded from this milestone: production socket construction or runtime
 wiring, external-network traffic, and unbounded receive loops; message-method
 or dispatch validation beyond the two explicitly owned methods, live query
-wiring, hash removal/expiry, peer expiry, response clocks and node/hash options,
-BEP-51 eligibility/scheduling, synchronized batch commands, time/random eviction policy,
-metrics,
+wiring, hash removal/expiry, peer expiry, hash options, discovered-at clocks,
+drop-reason payloads, time/random eviction policy, metrics,
 concurrent handler fan-out, send retry/timeout/queueing policy, socket lifecycle,
 production looping or spawning policy, logging and runtime wiring,
 full responder routing and runtime wrappers, a BEP-33

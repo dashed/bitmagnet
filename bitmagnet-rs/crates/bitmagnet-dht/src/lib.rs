@@ -3,6 +3,7 @@
 mod compact;
 mod inbound;
 mod krpc;
+mod ktable;
 mod ktable_core;
 mod node_table;
 mod ping_find_node;
@@ -24,6 +25,10 @@ pub use inbound::{
     MAX_INBOUND_DATAGRAM_BYTES, MAX_INBOUND_NESTING_DEPTH, MAX_INBOUND_VALUES,
 };
 pub use krpc::{ByteString, KrpcError, KrpcMessage, MessageArgs, MessageReturn, WireError};
+pub use ktable::{
+    KTable, KTableBep51Support, KTableClock, KTableCommand, KTableLookup, KTableNodeHandle,
+    KTableNodeOption, KTableSampleHashesAndNodes, SystemKTableClock,
+};
 pub use ktable_core::{
     KTableCore, KTableHash, KTableHashLookup, KTableHashPeer, KTableReverseInfo,
     HASH_TABLE_CAPACITY,

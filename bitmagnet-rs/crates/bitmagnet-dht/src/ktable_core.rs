@@ -189,6 +189,21 @@ impl KTableCore {
         self.drop_node(peer_id)
     }
 
+    #[must_use]
+    pub(crate) fn node_id_for_addr(&self, addr: SocketAddr) -> Option<Id20> {
+        let peer_id = self
+            .reverse
+            .get(&ReverseAddress::from_socket_addr(addr))?
+            .peer_id;
+        (peer_id != Id20::ZERO).then_some(peer_id)
+    }
+
+    pub(crate) fn hashes_by_id(&self) -> Vec<KTableHash> {
+        let mut ids = self.hashes.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.into_iter().filter_map(|id| self.hash(id)).collect()
+    }
+
     pub fn put_hash(&mut self, id: Id20, peers: &[KTableHashPeer]) -> RoutingPutResult {
         let result = self.hash_routing.put(id);
         match result {
