@@ -4,6 +4,7 @@ mod announce_token;
 mod compact;
 mod dht_client;
 mod dht_concurrent_supervisor;
+mod dht_discovered_node_scheduler;
 mod dht_discovery;
 mod dht_dispatch;
 mod dht_driver;
@@ -38,6 +39,12 @@ pub use dht_client::{
 };
 pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
+};
+pub use dht_discovered_node_scheduler::{
+    DhtDiscoveredNodeRouteReceiver, DhtDiscoveredNodeRoutes, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeSchedulerConfig, DhtDiscoveredNodeSchedulerConfigError,
+    DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStats,
+    DhtDiscoveredNodeSchedulerStatsHandle,
 };
 pub use dht_discovery::{
     dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,
