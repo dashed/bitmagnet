@@ -609,14 +609,90 @@ unsupported BEP-44 `v` can make a response time out even when the selected
 adapter method would not project that field. None of these deliberate deltas
 is relaxed by the typed client.
 
+The nineteenth bounded source-only slice extends only the pure responder over
+the shared KTable with `get_peers`, `announce_peer`, and
+`sample_infohashes`:
+
+- `DhtResponder` is the full five-method pure router. It owns exact raw `ping`,
+  `find_node`, `get_peers`, `announce_peer`, and `sample_infohashes`; every other
+  raw method receives Go's protocol error `204`, `method Unknown`. Global
+  argument presence is checked before method dispatch, so a missing dictionary
+  receives `203`, `missing arguments` even for an unknown method. Peer lookup
+  and announce additionally require a present nonzero info hash; find-node
+  requires a present nonzero target; sampling deliberately does not require or
+  inspect its target. Envelope type, transaction ID, requester ID, `want`,
+  `noseed`, scrape, and unrelated arguments are not revalidated;
+- peer lookup performs exactly one hash-or-closest query. A found hash returns
+  a present peer-value list even when empty, while an absent hash leaves values
+  absent and returns the existing closest-node projection. Every successful
+  lookup returns a present announce token. Rust preserves KTable peer and
+  closest-node order; the KTable's deterministic ID order is a normalization
+  of production Go map iteration, so exact members and order from a populated
+  real Go map are deliberately not claimed;
+- announce validation is ordered: nonzero info hash, exact token, then one
+  synchronous hash put containing the source IP and selected port. The token is
+  the exact lowercase MD5 hex of Go's concatenated secret, local ID, info hash,
+  requester ID, and textual source IP. It binds neither source port nor time,
+  has no rotation or expiry in this slice, and is compared as an exact byte
+  string. An absent explicit port falls back to the datagram source port,
+  `implied_port` always selects that source port, and every explicit signed
+  value otherwise wraps modulo 65,536 as Go's 64-bit `int` to `uint16` cast;
+- announce returns success after attempting the void put even when KTable
+  capacity rejects a new hash. Invalid arguments or token leave the table
+  unchanged. A successful put retains the existing KTable semantics: peers are
+  identified by IP, the last port wins, and a later deterministic projection
+  may sort the resulting membership without changing it;
+- sampling performs exactly one read-only KTable sample. It always returns
+  present `samples`, `num`, and `interval` fields, including a present empty
+  sample. The KTable chooses up to 20 hashes and enough nodes to target 40
+  combined results; its signed interval is returned unchanged and its
+  nonnegative native total is projected to `i64`. Signed fixture extremes are
+  covered at the responder's injected sample-result seam without changing KTable
+  storage or scheduling semantics;
+- compact output remains in `nodes`, never `nodes6`. Mapped IPv4 is accepted as
+  IPv4. Native or scoped native IPv6 in a node result returns the existing typed
+  local hardening instead of reproducing Go's compact-IPv4 encoder panic. Peer
+  values may still contain either IPv4 or IPv6 because they use the compact
+  peer-address representation;
+- the narrow synchronous `DhtResponderTable` trait mirrors only the five table
+  operations used by Go's injected responder dependency. `KTable` implements
+  it, and the production constructor clones that shared table. The explicit
+  backend-and-secret constructor admits deterministic oracle replay, including
+  duplicate ordered results and signed totals that a real KTable cannot
+  represent, without widening KTable itself;
+- a same-package checked Go oracle drives the production responder with injected,
+  deterministic table results and records exact partial returns, protocol
+  errors, field presence, token bytes and input sensitivity, port selection,
+  ignored arguments, ordered table call traces, and before/after table state.
+  All 40 checked rows explicitly require no normalization; three native/scoped
+  IPv6 rows additionally lock Go's zone-losing return projection and Rust's
+  typed local hardening. The Rust integration replays every row. A seven-party
+  barrier releases two lookup, two sample, and two announce workers immediately
+  before their first responder call; the cloned-KTable concurrency gate then
+  requires every worker to finish and verifies final hash/peer/count invariants;
+  and
+- the original `PingFindNodeResponder`, `PingFindNodeClient`, and
+  `PingFindNodeClientError` remain separate compatibility surfaces. Their
+  existing exhaustive public compile and behavioral gates remain authoritative;
+  the full responder does not compose or borrow the legacy responder, and this
+  slice neither widens legacy method ownership nor its error enums.
+
+This pure responder is not connected to dispatch, reply construction, a UDP
+transport, or production runtime wiring. In particular, the slice makes no
+claim about Go's unusual `y=r` server-error envelope, limiter precedence,
+metrics, logging, asynchronous node discovery, handler cancellation or
+timeouts, send failure and retry policy, or mutation rollback after a failed
+send. BEP-33 scrape arguments remain ignored exactly as in the current Go core;
+no bloom generation or scrape scheduler is added.
+
 Excluded from this milestone: production socket construction or runtime
-wiring, external-network traffic, and unbounded receive loops; message-method
-or dispatch validation beyond the two explicitly owned methods, live query
+wiring, external-network traffic, and unbounded receive loops; server envelope
+or dispatch validation beyond the five exact pure-responder methods, live query
 wiring, hash removal/expiry, peer expiry, hash options, discovered-at clocks,
 drop-reason payloads, time/random eviction policy, metrics,
 concurrent handler fan-out, send retry/timeout/queueing policy, socket lifecycle,
 production looping or spawning policy, logging and runtime wiring,
-full responder routing and runtime wrappers, a BEP-33 scrape scheduler,
+responder server/runtime wrappers, a BEP-33 scrape scheduler,
 BEP-44 value interpretation/storage/signing,
 BEP-9/10 metadata transfer, crawler orchestration,
 PostgreSQL, queues, images, and deployment. Unknown and excluded extension

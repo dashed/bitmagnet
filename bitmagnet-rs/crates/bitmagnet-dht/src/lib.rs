@@ -1,7 +1,9 @@
 //! Pure BitTorrent DHT wire contracts.
 
+mod announce_token;
 mod compact;
 mod dht_client;
+mod dht_responder;
 mod inbound;
 mod krpc;
 mod ktable;
@@ -23,6 +25,9 @@ pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
 pub use dht_client::{
     DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
     PingFindNodeClient, PingFindNodeClientError, PingResult, SampleInfoHashesResult,
+};
+pub use dht_responder::{
+    DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
 pub use inbound::{
     InboundError, InboundLimitKind, InboundShapeKind, InboundSyntaxKind,

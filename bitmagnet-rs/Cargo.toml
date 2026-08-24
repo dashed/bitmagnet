@@ -152,6 +152,9 @@ bendy = "=0.6.1"
 # SHA-1 for BEP-33's two scrape-bloom bit indexes. This is protocol hashing,
 # not a password or signature primitive.
 sha1 = "0.10"
+# MD5 for the deployed BEP-5 announce-token derivation. This is compatibility
+# hashing, not a password or signature primitive.
+md-5 = { version = "0.11", default-features = false }
 # OS entropy for unpredictable two-byte DHT transaction IDs.
 getrandom = "0.3"
 

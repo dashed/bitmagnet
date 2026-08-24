@@ -11,6 +11,7 @@ description = "Pure BitTorrent DHT KRPC codecs and transaction correlation."
 bendy.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+md-5.workspace = true
 serde.workspace = true
 sha1.workspace = true
 thiserror.workspace = true
