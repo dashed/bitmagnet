@@ -2459,3 +2459,181 @@ producer parity, hardening, timing, live-handle, snapshot, terminal, counter,
 and exclusion contracts remain unchanged. Every broader runtime, sample,
 bootstrap, higher-pipeline, application, deployment, and rollout boundary
 remains in force.
+
+The fortieth slice freezes bootstrap-node ping production through the Go
+oracle introduced by
+`c61847aa9b17e4a60e078321460020121d183ad1`, strengthened by
+`8625a6ee434fe7d7001d0df6725dbadf1cb61268` and
+`43f10f6466efb9da692c75e5642fcf7f2f38dfe0`, the Rust implementation at
+`933f05e86efc2970ad3a283075a5f57ee1d86c44`, and the strict consumer at
+`d91c4c421d6d7819338758c210836951a7c5b7be`:
+
+- `DhtBootstrapPingProducer::new(input)` consumes one existing
+  `DhtDiscoveredNodePingInput` and returns an owned producer plus a sender-free
+  `DhtBootstrapPingProducerStatsHandle`. Its private endpoint storage is
+  immutable. The public constructor fixes the exact six Go default strings in
+  order: `router.utorrent.com:6881`, `router.bittorrent.com:6881`,
+  `dht.transmissionbt.com:6881`, `dht.aelitis.com:6881`,
+  `router.silotis.us:6881`, and `dht.libtorrent.org:25401`;
+- the first round is immediate only after a biased gate in which ready
+  shutdown wins, input closure is second, and the immediate branch is last. A
+  winning terminal branch starts no round, selects no endpoints, and invokes
+  no resolver. This deterministic Rust ordering replaces Go's nondeterministic
+  tie between an already-cancelled context and `time.After(0)`;
+- after that gate wins, `rounds_started` advances once and `selected` advances
+  by the complete configured occurrence count. Endpoints are processed
+  sequentially without sorting, deduplication, or fanout. Each configured
+  occurrence queues at most one resolved address;
+- each resolution boundary is biased shutdown, input closure, then resolver.
+  Resolver invocation is lazy inside the last branch, so a ready
+  higher-priority event produces neither a resolver call nor a
+  `resolution_attempts` increment. Once the branch is polled, the attempt is
+  counted immediately before constructing and polling its resolver future.
+  Later cancellation therefore overlaps the current occurrence's terminal
+  drop;
+- production resolution uses Tokio's asynchronous `lookup_host`. Shutdown or
+  input closure stops awaiting it and lets the producer return, but an
+  already-dispatched blocking operating-system lookup may continue internally
+  after its Tokio future is dropped. The producer itself owns and detaches no
+  task, and this is not a claim that the underlying OS lookup is cancelled;
+- address choice mirrors `net.ResolveUDPAddr("udp", endpoint)` over
+  resolver-order results. An endpoint containing `[` prefers the first
+  non-IPv4-compatible address; every other endpoint prefers the first
+  IPv4-compatible address; either case falls back to the first result. Native
+  IPv4 and IPv4-mapped IPv6 are canonicalized to `SocketAddr::V4`, while
+  native IPv6 is retained. This preserves one result and resolver order
+  without claiming identical Go and Rust DNS answers;
+- a resolver error or empty successful result increments `resolution_failed`
+  and continues to later occurrences. Rust exposes that counter rather than
+  reproducing Go's warning text or adding a logging surface;
+- after successful address selection, shutdown wins, input closure is second,
+  and reservation of one slot in slice thirty-seven's existing shared ping
+  capacity is last. Cancellation before acquisition commits nothing and
+  classifies the current occurrence plus its suffix. Once acquired, the permit
+  synchronously commits one immutable zero-ID `RoutingNode`; receiver closure
+  cannot revoke that authority;
+- these direct commits bypass scheduler batching, deduplication, KTable
+  filtering, route selection, and every scheduler counter. `routed_ping`
+  remains scheduler-origin only. Producer `queued` means queue commit, not
+  worker dequeue, query admission, datagram transmission, response, or table
+  mutation; and
+- only after the complete endpoint list is classified or committed does the
+  producer construct a fresh ten-minute delay. Missed time never causes
+  catch-up rounds. Shutdown or input closure during that delay returns with
+  `selected_dropped: 0`. Dropping an unpolled producer or a polled pending run
+  releases its sender and local futures without fabricated terminal
+  accounting.
+
+The exhaustive exits are `DhtBootstrapPingProducerExit::Shutdown {
+selected_dropped }` and `InputClosed { selected_dropped }`. During resolution
+or capacity wait, the count is the exact current selected occurrence plus its
+unprocessed suffix. A classified or committed prefix is retained.
+
+`DhtBootstrapPingProducerStats` exposes exactly seven saturating monotonic
+counters: `rounds_started`, `selected`, `resolution_attempts`,
+`resolution_failed`, `queued`, `input_closed_dropped`, and
+`shutdown_dropped`. Snapshots load each field independently with relaxed
+ordering and are not transactional. After normal terminal return,
+`selected == resolution_failed.saturating_add(queued).saturating_add(
+input_closed_dropped).saturating_add(shutdown_dropped)`.
+`resolution_attempts` deliberately overlaps those outcomes and is excluded
+from conservation. Dropping the run future is not a normal return and carries
+no cross-counter promise.
+
+The strict child-module consumer denies unknown fields throughout and freezes
+the exact ordered row IDs
+`production_source_factory_defaults_and_lifecycle_contract`,
+`ordered_numeric_ipv4_ipv6_delivery_then_cancel_before_second_round`,
+`malformed_address_warns_and_continues_to_later_valid_address`, and
+`ordered_prefix_then_cancel_at_blocked_third_ping_send`, with classifications
+`SOURCE_ONLY`, `RUNTIME_EXACT`, `RUNTIME_EXACT`, and `RUNTIME_EXACT`. The final
+fixture SHA-256 is
+`0616d53feb443d481d8d286d9c0d38ee14823b514c9075d0a4b367b938767cb4`.
+It consumes every fixture field, fixes the Rust execution partition and the
+Go-only metadata partition, binds the six Rust defaults and fixed 600-second
+delay, checks scheduler ping capacity ten and ping-worker concurrency ten as
+surrounding evidence, and verifies these seven embedded Go sources:
+
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/bootstrap.go`:
+  `43c7f2d8bfb12b530c68a82dab270294cc500cc14ee64b459ad5db60b170a2a4`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/ping.go`:
+  `45561d97a79060e6b96bc81f7d83491195e4ff60fbdc9460d9973675547804a2`;
+  and
+- `internal/protocol/dht/ktable/node.go`:
+  `93ed9a76a7cd0f50ee3ad255c6e77a8d19e5fe17081edc6238c5efab4983b3c3`.
+
+The source-only row freezes Go's synchronous single-result UDP resolver,
+sequential configured order, failure-and-continue behavior, zero-ID node
+construction, cancellation-aware sends, fresh post-round delay, detached and
+unjoined producer, exact defaults, production ping capacity and concurrency,
+and shared lane with `runPing`. It also freezes the configuration asymmetry:
+`NewDefaultConfig` advertises a one-minute reseed interval, the factory ignores
+that field and uses ten minutes, and the factory does honor configured
+`BootstrapNodes`. Public DNS, the factory timer, synchronous resolver
+cancellation, and equal-ready Go select outcomes remain source evidence rather
+than runtime observations.
+
+The first runtime replay uses the actual Rust numeric resolver path and queues
+hard-coded IPv4 then native IPv6 zero-ID nodes in order. Mapped Go IPv4 text is
+deliberately canonicalized to Rust `SocketAddr::V4`. It returns
+`Shutdown { selected_dropped: 0 }` with `rounds_started=1`, `selected=2`,
+`resolution_attempts=2`, `resolution_failed=0`, `queued=2`, and zero terminal
+drops. The malformed-address replay locally rejects `not-an-address`,
+continues to one numeric IPv4 occurrence, and returns the same zero-drop exit
+with `rounds_started=1`, `selected=2`, `resolution_attempts=2`,
+`resolution_failed=1`, and `queued=1`.
+
+The capacity-two ordered-prefix replay uses a ready numeric parser rather than
+public DNS. Before shutdown, it proves resolver calls for only the first three
+of four occurrences, permit acquisition for indices `[0, 1]`, no constructed
+post-round delay, `rounds_started=1`, `selected=4`,
+`resolution_attempts=3`, and `queued=2`. Biased shutdown abandons the blocked
+third occurrence and untouched fourth suffix, returns
+`Shutdown { selected_dropped: 2 }`, drains exactly the first two IPv4 nodes,
+and finishes with `shutdown_dropped=2` and all other outcome counters zero.
+
+The consumer classifies Go's runtime interval overrides, lane `In` call
+counts, node `Time`, `Dropped`, and sample-candidate state, warning and event
+text, and harness return and cancellation flags as Go-only metadata. The Rust
+contract instead fixes biased ready ordering; producer-level asynchronous
+cancellation without claiming OS lookup cancellation; family choice over
+resolver order without DNS-answer parity; IPv4 canonicalization; the fixed
+fresh delay; counted failures; positive Tokio capacity, typed closure, and
+irrevocable permits; owned taskless lifecycle and typed exits; immutable
+zero-ID nodes; and seven saturating producer-local counters with terminal
+conservation.
+
+Go's factory honors configured bootstrap nodes, while Rust's public
+constructor currently fixes only the six defaults. This slice therefore
+establishes default-node and effective-cadence parity, not custom
+`BootstrapNodes` application configuration. The private test constructor is
+not a public, application, or deployment configuration surface. No custom
+node configuration, producer logger, Prometheus export, health signal,
+restart, retry, or backoff is added.
+
+All runtime rows use numeric addresses or one locally rejected malformed
+value. They perform no public DNS lookup and establish no external DHT query,
+combined maintenance-supervisor lifecycle, `DhtRuntime` ownership,
+application or process wiring, deployment configuration, live traffic,
+production readiness, or rollout. The fixed six-child
+`DhtCrawlerMaintenanceSupervisor` from slice thirty-nine remains unchanged
+and does not construct or run this producer. The sample route and higher
+crawler pipeline remain outside this slice.
+
+This slice supersedes slices thirty-seven through thirty-nine only where they
+globally exclude the existence of bootstrap or reseed production. Slice
+thirty-seven's shared-capacity, direct-bypass, EOF-extension, waiter, and
+cross-source-order contracts remain exact. Slices thirty-eight and thirty-nine
+continue to govern oldest-node ping production and its six-child composition.
+In particular, slice thirty-nine's exact supervisor wiring and lack of a
+bootstrap child remain authoritative. Every custom-configuration, broader
+runtime, sample, higher-pipeline, application, deployment, production, and
+rollout boundary remains in force.
