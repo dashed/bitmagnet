@@ -1249,3 +1249,93 @@ or export, application or deployment wiring, external bootstrap traffic, or
 production rollout. It supersedes the twenty-sixth slice only where that slice
 lists discovery as excluded; the older statement remains as the historical
 boundary of that earlier slice.
+
+The twenty-eighth slice consumes that take-once discovery receiver in an owned,
+bounded scheduler and freezes its relationship to the real Go crawler:
+
+- `DhtDiscoveredNodeScheduler` is taskless until its consuming `run` future is
+  polled. Its fixed constructor defaults retain Go's maximum batch size ten,
+  nominal ten-millisecond tick, and downstream
+  ping/find-node/sample-infohashes queue capacities 10/100/100. The first tick
+  is anchored when the scheduler is
+  constructed, input-versus-tick selection is unbiased, an empty tick emits no
+  batch, and both a size flush and nonempty tick reset the interval before any
+  downstream wait. Tokio's missed-tick policy is `Skip`; neither implementation
+  promises a strict per-item ten-millisecond deadline or a deterministic winner
+  at an exact input/tick tie. Zero and monotonic-clock-out-of-range intervals
+  fail construction through typed configuration errors;
+- Go implements batching in a detached goroutine with a 1,000-slot input, one
+  queued output batch, and one additional batch that can be held by the blocked
+  output send. Rust deliberately keeps batching and routing in one owned future
+  and adds no second batch channel or task. When explicitly composed with slice
+  twenty-seven's fixed 1,000-slot runtime discovery receiver, Rust stops
+  draining that ingress while one node waits for downstream capacity; the
+  responder handoff would therefore reach its documented drop-newest bound
+  earlier than Go's extra output-stage buffering. The frozen Go batching row
+  remains source behavior and backpressure evidence, not a claim that Rust
+  reproduces its intermediate-buffer choreography;
+- each nonempty Rust batch preserves input order and keeps the first full
+  `RoutingNode` for each structural address key. IPv4 and IPv4-mapped IPv6 stay
+  distinct; native IPv6 retains its numeric scope ID. Node ID, port, and IPv6
+  flow information do not participate in deduplication. Before filtering, Rust
+  projects the winners to port zero and IPv6 flowinfo zero, matching Go's
+  `netip.Addr` input. It calls the real shared `KTable::filter_known_addrs`
+  synchronously exactly once, retains its returned order, maps each result back
+  to the original first-winning node, and never holds a table lock across an
+  await. The scheduler performs no table mutation and does not recheck table
+  state after filtering;
+- each unknown node is routed sequentially to exactly one open bounded lane.
+  Selection among simultaneously available ping, find-node, and
+  sample-infohashes permits is unbiased. A winning reserved permit commits its
+  node synchronously, so cancellation cannot land between capacity acquisition
+  and enqueue. A full lane remains eligible but pending, an individually closed
+  lane is disabled, and closing all three lanes is a typed terminal state even
+  while the scheduler is idle. This replaces Go's selected-send-to-closed-worker
+  panic with explicit ownership and closure handling. The queues in this slice
+  contain work only; Go's concurrent query workers are not yet implemented;
+- at each asynchronous selection point, a ready caller shutdown is polled
+  before intake/timer or route-capacity progress; synchronous deduplication,
+  filtering, and reserved-permit commit are not preempted. A winning shutdown
+  preserves every already committed delivery, abandons the exact unfiltered
+  local partial batch or remaining filtered routing suffix, closes the ingress,
+  synchronously drains accepted queued ingress nodes, and reports their
+  combined `pending_dropped` count.
+  All-route closure performs the same bounded close-and-drain accounting.
+  Absent competing shutdown or all-route closure, producer EOF routes the final
+  partial batch and returns `InputClosed`. That coordinated flush-and-EOF
+  behavior is deliberate hardening over Go's unlabelled closed-input `break`,
+  which can spin and leaves partial-buffer and output-close behavior
+  unspecified. `run` spawns no work; every route receiver reaches drain-then-EOF
+  when the consuming scheduler future returns or is dropped;
+- sender-free scheduler stats expose saturating monotonic `received`, `batches`,
+  `duplicate_dropped`, `known_filtered`, completed `filter_calls`, entered
+  `route_attempts`, the three committed route counts, and exact shutdown and
+  all-route-close drop counts. `route_attempts` means a filtered node entered
+  shutdown-or-capacity selection; it does not claim a permit was acquired.
+  Snapshots use independent relaxed loads and are not transactional across
+  fields. These counters are downstream of, and distinct from, the discovery
+  sender's offered/queued/full/closed counters; and
+- a strict Rust consumer locks the ten ordered real-Go oracle rows, fixture
+  SHA-256, every nested schema field, optional branch, factory/source fact, and
+  five embedded Go source digests. It executes all eight crawler rows against
+  the real Rust scheduler and KTable, including first-IP wins, the first-put
+  reverse-map quirk, hash-peer filtering, cross-batch dedupe reset, all-known
+  continuation, forced and multiple-ready lanes, full-route ping release, and
+  both cancellation barriers. Private unit-test prefill makes the full-route
+  barriers observable; completed filter and entered-route counters prove that
+  cancellation occurs only after the fixture's required phase. Go's output
+  capacity one, worker concurrency values, broken close loops, and cancellation
+  tie outcomes remain explicitly classified as Go source evidence or known
+  deltas rather than Rust runtime claims.
+
+This slice does not wire the scheduler into `DhtRuntime` or an application
+supervisor, start ping/find-node/sample-infohashes query workers, recursively
+feed their discoveries back into the ingress, mutate the KTable from crawler
+responses, manage bootstrap or oldest-node work, triage info hashes, run
+get-peers/scrape/metainfo stages, persist torrents or sources, export these
+counters through Prometheus, add health or logging integration, change
+application/deployment configuration, contact external DHT nodes, or roll out
+to production. It supersedes slice twenty-seven only where that slice lists
+crawler batching, deduplication, filtering, and routing among the
+ping/find-node/sample-infohashes lanes as wholly absent; all later crawler and
+deployment exclusions remain in force.
