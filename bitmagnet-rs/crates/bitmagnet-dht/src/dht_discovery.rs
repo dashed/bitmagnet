@@ -14,11 +14,11 @@ use crate::RoutingNode;
 #[must_use]
 pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, DhtDiscoveryReceiver) {
     let (sender, receiver) = mpsc::channel(capacity.get());
-    let stats = Arc::new(DhtDiscoveryStatsInner::default());
+    let stats = DhtDiscoveryStatsHandle::default();
     (
         DhtDiscoverySender {
             sender,
-            stats: Arc::clone(&stats),
+            stats: stats.clone(),
         },
         DhtDiscoveryReceiver { receiver },
     )
@@ -28,7 +28,7 @@ pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, Dht
 #[derive(Clone)]
 pub struct DhtDiscoverySender {
     sender: mpsc::Sender<RoutingNode>,
-    stats: Arc<DhtDiscoveryStatsInner>,
+    stats: DhtDiscoveryStatsHandle,
 }
 
 /// Unique consumer for nodes accepted by [`DhtDiscoverySender`].
@@ -52,6 +52,14 @@ struct DhtDiscoveryStatsInner {
     receiver_closed_dropped: AtomicU64,
 }
 
+/// Cloneable read-only handle to the discovery counters.
+///
+/// This handle owns no queue sender and therefore cannot delay receiver EOF.
+#[derive(Clone, Default)]
+pub struct DhtDiscoveryStatsHandle {
+    inner: Arc<DhtDiscoveryStatsInner>,
+}
+
 /// One non-transactional snapshot of monotonic discovery counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DhtDiscoveryStats {
@@ -64,18 +72,18 @@ pub struct DhtDiscoveryStats {
 impl DhtDiscoverySender {
     /// Offer one node without waiting for queue capacity or receiver work.
     pub fn offer(&self, node: RoutingNode) -> DhtDiscoveryOffer {
-        increment_saturating(&self.stats.offered);
+        increment_saturating(&self.stats.inner.offered);
         match self.sender.try_send(node) {
             Ok(()) => {
-                increment_saturating(&self.stats.queued);
+                increment_saturating(&self.stats.inner.queued);
                 DhtDiscoveryOffer::Queued
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                increment_saturating(&self.stats.full_dropped);
+                increment_saturating(&self.stats.inner.full_dropped);
                 DhtDiscoveryOffer::FullDropped
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                increment_saturating(&self.stats.receiver_closed_dropped);
+                increment_saturating(&self.stats.inner.receiver_closed_dropped);
                 DhtDiscoveryOffer::ReceiverClosed
             }
         }
@@ -87,11 +95,28 @@ impl DhtDiscoverySender {
     /// snapshot is not an atomic point-in-time view across fields.
     #[must_use]
     pub fn stats(&self) -> DhtDiscoveryStats {
+        self.stats.snapshot()
+    }
+
+    /// Clone a read-only counter handle that does not own a queue sender.
+    #[must_use]
+    pub fn stats_handle(&self) -> DhtDiscoveryStatsHandle {
+        self.stats.clone()
+    }
+}
+
+impl DhtDiscoveryStatsHandle {
+    /// Read each monotonic counter independently with relaxed ordering.
+    ///
+    /// Concurrent offers can become visible between field loads, so the
+    /// snapshot is not an atomic point-in-time view across fields.
+    #[must_use]
+    pub fn snapshot(&self) -> DhtDiscoveryStats {
         DhtDiscoveryStats {
-            offered: self.stats.offered.load(Ordering::Relaxed),
-            queued: self.stats.queued.load(Ordering::Relaxed),
-            full_dropped: self.stats.full_dropped.load(Ordering::Relaxed),
-            receiver_closed_dropped: self.stats.receiver_closed_dropped.load(Ordering::Relaxed),
+            offered: self.inner.offered.load(Ordering::Relaxed),
+            queued: self.inner.queued.load(Ordering::Relaxed),
+            full_dropped: self.inner.full_dropped.load(Ordering::Relaxed),
+            receiver_closed_dropped: self.inner.receiver_closed_dropped.load(Ordering::Relaxed),
         }
     }
 }
@@ -167,6 +192,7 @@ mod tests {
     async fn clones_share_order_stats_and_receiver_lifecycle() {
         let (sender, mut receiver) = dht_discovery_channel(NonZeroUsize::new(3).expect("nonzero"));
         let clone = sender.clone();
+        let stats = sender.stats_handle();
 
         assert_eq!(sender.offer(node(1)), DhtDiscoveryOffer::Queued);
         assert_eq!(clone.offer(node(2)), DhtDiscoveryOffer::Queued);
@@ -179,6 +205,7 @@ mod tests {
         drop(clone);
         assert_eq!(receiver.recv().await, Some(node(3)));
         assert_eq!(receiver.recv().await, None);
+        assert_eq!(stats.snapshot().queued, 3);
     }
 
     #[test]
@@ -186,7 +213,11 @@ mod tests {
         let (sender, receiver) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
         drop(receiver);
 
-        sender.stats.offered.store(u64::MAX - 1, Ordering::Relaxed);
+        sender
+            .stats
+            .inner
+            .offered
+            .store(u64::MAX - 1, Ordering::Relaxed);
         assert_eq!(sender.offer(node(1)), DhtDiscoveryOffer::ReceiverClosed);
         assert_eq!(sender.offer(node(2)), DhtDiscoveryOffer::ReceiverClosed);
         assert_eq!(

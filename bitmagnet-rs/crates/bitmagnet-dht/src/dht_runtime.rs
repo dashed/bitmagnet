@@ -7,17 +7,20 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::{
-    CryptoTransactionIdIssuer, DhtClient, DhtClientError, DhtConcurrentSupervisor,
-    DhtConcurrentSupervisorExit, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter,
-    DhtInboundStats, DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, FindNodeResult,
-    GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult,
-    TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender,
-    TransactionRegistry,
+    dht_discovery_channel, CryptoTransactionIdIssuer, DhtClient, DhtClientError,
+    DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtDiscoveryReceiver,
+    DhtDiscoveryStatsHandle, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter, DhtInboundStats,
+    DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, FindNodeResult, GetPeersResult,
+    GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult, TokioIpv4UdpError,
+    TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender, TransactionRegistry,
 };
 
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
 const MAX_INFLIGHT_QUERIES: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const MAX_OUTSTANDING_REJECTIONS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+/// Fixed production discovery ingress capacity, matching Go's default
+/// `100 * ScalingFactor` with its default scaling factor of ten.
+pub const DHT_DISCOVERY_QUEUE_CAPACITY: usize = 1_000;
 
 /// Configuration for the initial owned IPv4 DHT runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +310,11 @@ impl DhtRuntimeClient {
 /// active-plus-queued rejections. A saturated lane drops the newest rejection.
 /// Response and error envelopes bypass both query lanes and are delivered inline
 /// to the transaction registry even while sends are backpressured.
+/// Successful responder calls offer their exact requester node to a fixed
+/// 1,000-item discovery queue. The offer owns no task and never waits for queue
+/// capacity; saturation or a dropped receiver discards the newest event without
+/// changing the reply. The take-once receiver is intentionally not a crawler:
+/// batching, known-node filtering, and query scheduling remain downstream.
 ///
 /// Unlike Go's swallowed query-reply send errors, an admitted or rejection send
 /// failure terminates this owned task through its typed driver error. No outer
@@ -318,6 +326,8 @@ pub struct DhtRuntime {
     client: DhtRuntimeClient,
     registry: TransactionRegistry<CryptoTransactionIdIssuer>,
     inbound_stats: DhtInboundStats,
+    discovery_stats: DhtDiscoveryStatsHandle,
+    discovered_nodes: Option<DhtDiscoveryReceiver>,
     shutdown_tx: watch::Sender<bool>,
     task: Option<JoinHandle<DhtRuntimeExit>>,
 }
@@ -332,7 +342,12 @@ impl DhtRuntime {
         let registry = TransactionRegistry::default();
         let responder = DhtResponder::new(&table, config.sample_infohashes_interval)
             .map_err(DhtRuntimeStartError::TokenSecret)?;
-        let dispatcher = DhtDispatcher::from_responder(responder);
+        let (discovery, discovered_nodes) = dht_discovery_channel(
+            NonZeroUsize::new(DHT_DISCOVERY_QUEUE_CAPACITY)
+                .expect("production discovery capacity is nonzero"),
+        );
+        let discovery_stats = discovery.stats_handle();
+        let dispatcher = DhtDispatcher::from_responder(responder).with_discovery(discovery);
 
         let transport = TokioIpv4UdpTransport::bind(config.bind_addr)
             .await
@@ -369,6 +384,8 @@ impl DhtRuntime {
             client,
             registry,
             inbound_stats,
+            discovery_stats,
+            discovered_nodes: Some(discovered_nodes),
             shutdown_tx,
             task: Some(task),
         })
@@ -399,6 +416,21 @@ impl DhtRuntime {
     #[must_use]
     pub fn inbound_stats(&self) -> DhtInboundStats {
         self.inbound_stats.clone()
+    }
+
+    /// Clone live discovery counters without retaining a queue sender.
+    #[must_use]
+    pub fn discovery_stats(&self) -> DhtDiscoveryStatsHandle {
+        self.discovery_stats.clone()
+    }
+
+    /// Take exclusive ownership of the production discovered-node stream.
+    ///
+    /// The first call returns the receiver; later calls return `None`. Once the
+    /// runtime task exits, the receiver drains any queued nodes and then reaches
+    /// EOF even while a discovery-stats handle remains alive.
+    pub fn take_discovered_nodes(&mut self) -> Option<DhtDiscoveryReceiver> {
+        self.discovered_nodes.take()
     }
 
     /// Clone a non-owning typed query handle.
@@ -482,8 +514,9 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::{
-        ByteString, DhtInboundStatsSnapshot, KrpcMessage, MessageArgs, QuerySendError,
-        RegisterError, TokioIpv4UdpWeakSendError, TransactionRegistry, MAX_INBOUND_DATAGRAM_BYTES,
+        ByteString, DhtDiscoveryStats, DhtInboundStatsSnapshot, KrpcMessage, MessageArgs,
+        QuerySendError, RegisterError, RoutingNode, TokioIpv4UdpWeakSendError, TransactionRegistry,
+        MAX_INBOUND_DATAGRAM_BYTES,
     };
 
     use super::*;
@@ -499,6 +532,7 @@ mod tests {
         assert_eq!(config.sample_infohashes_interval, 10);
         assert_eq!(MAX_INFLIGHT_QUERIES.get(), 64);
         assert_eq!(MAX_OUTSTANDING_REJECTIONS.get(), 64);
+        assert_eq!(DHT_DISCOVERY_QUEUE_CAPACITY, 1_000);
 
         let first = random_local_id().unwrap();
         assert_eq!(&first.as_bytes()[12..], CLIENT_SUFFIX);
@@ -724,7 +758,7 @@ mod tests {
         ];
         const DENIAL_WIRE: &[u8] = b"d1:eli201e17:too many requestse1:t2:L11:y1:re";
 
-        let runtime = DhtRuntime::start(DhtRuntimeConfig {
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
             bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             query_timeout: Duration::from_secs(1),
             ..DhtRuntimeConfig::default()
@@ -734,7 +768,13 @@ mod tests {
         let local_addr = runtime.local_addr();
         let local_id = runtime.local_id();
         let stats = runtime.inbound_stats();
+        let discovery_stats = runtime.discovery_stats();
+        let mut discovered = runtime
+            .take_discovered_nodes()
+            .expect("production discovery receiver");
+        assert!(runtime.take_discovered_nodes().is_none());
         let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
 
         // Freeze only the Tokio clock. The raw nonblocking receive helper below
         // uses a wall-clock deadline, so this gate cannot accidentally refill
@@ -769,6 +809,24 @@ mod tests {
                 ..DhtInboundStatsSnapshot::default()
             }
         );
+        for _ in ALLOWED_TIDS {
+            assert_eq!(
+                discovered.recv().await,
+                Some(RoutingNode {
+                    id: Id20::from_hex("0000000000000000000000000000000000000044").unwrap(),
+                    addr: peer_addr,
+                })
+            );
+        }
+        assert_eq!(
+            discovery_stats.snapshot(),
+            DhtDiscoveryStats {
+                offered: 10,
+                queued: 10,
+                full_dropped: 0,
+                receiver_closed_dropped: 0,
+            }
+        );
 
         let denied_query = fixed_ping_query(b"L1");
         assert_eq!(
@@ -789,12 +847,27 @@ mod tests {
                 ..DhtInboundStatsSnapshot::default()
             }
         );
+        assert_eq!(
+            discovered.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+        assert_eq!(
+            discovery_stats.snapshot(),
+            DhtDiscoveryStats {
+                offered: 10,
+                queued: 10,
+                full_dropped: 0,
+                receiver_closed_dropped: 0,
+            }
+        );
 
         tokio::time::resume();
         assert!(matches!(
             runtime.shutdown().await.unwrap(),
             DhtRuntimeExit::Shutdown
         ));
+        assert_eq!(discovered.recv().await, None);
+        assert_eq!(discovery_stats.snapshot().queued, 10);
         let rebound = rebind_after_task_drop(local_addr).await;
         assert_eq!(rebound.local_addr(), local_addr);
     }
@@ -833,6 +906,74 @@ mod tests {
         ));
 
         let rebound = TokioIpv4UdpTransport::bind(local_addr).await.unwrap();
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn dropping_discovery_receiver_never_terminates_or_changes_runtime_replies() {
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let local_addr = runtime.local_addr();
+        let client = runtime.client();
+        let discovery_stats = runtime.discovery_stats();
+        drop(
+            runtime
+                .take_discovered_nodes()
+                .expect("production discovery receiver"),
+        );
+
+        assert_eq!(
+            client.ping(SocketAddr::V4(local_addr)).await.unwrap(),
+            PingResult {
+                id: runtime.local_id()
+            }
+        );
+        assert_eq!(
+            discovery_stats.snapshot(),
+            DhtDiscoveryStats {
+                offered: 1,
+                queued: 0,
+                full_dropped: 0,
+                receiver_closed_dropped: 1,
+            }
+        );
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            DhtRuntimeExit::Shutdown
+        ));
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn runtime_drop_closes_taken_discovery_receiver_while_stats_remain_readable() {
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let local_addr = runtime.local_addr();
+        let stats = runtime.discovery_stats();
+        let mut discovered = runtime
+            .take_discovered_nodes()
+            .expect("production discovery receiver");
+
+        drop(runtime);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), discovered.recv())
+                .await
+                .expect("runtime abort closes discovery promptly"),
+            None
+        );
+        assert_eq!(stats.snapshot(), DhtDiscoveryStats::default());
+        let rebound = rebind_after_task_drop(local_addr).await;
         assert_eq!(rebound.local_addr(), local_addr);
     }
 
@@ -965,6 +1106,7 @@ mod tests {
             let _ = &socket_owners;
             panic!("synthetic DHT runtime task panic");
         });
+        let (discovery_stats, discovered_nodes) = empty_discovery_state();
         let runtime = DhtRuntime {
             local_addr,
             local_id,
@@ -972,6 +1114,8 @@ mod tests {
             client: client.clone(),
             registry: registry.clone(),
             inbound_stats: DhtInboundStats::new(),
+            discovery_stats,
+            discovered_nodes,
             shutdown_tx,
             task: Some(task),
         };
@@ -1215,6 +1359,13 @@ mod tests {
         .expect("runtime task releases its socket promptly")
     }
 
+    fn empty_discovery_state() -> (DhtDiscoveryStatsHandle, Option<DhtDiscoveryReceiver>) {
+        let (sender, receiver) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let stats = sender.stats_handle();
+        drop(sender);
+        (stats, Some(receiver))
+    }
+
     async fn stubborn_runtime() -> (DhtRuntime, DhtRuntimeClient, SocketAddrV4) {
         let local_id = Id20::ZERO;
         let table = KTable::new(local_id);
@@ -1235,6 +1386,7 @@ mod tests {
             drop(socket_owners);
             DhtRuntimeExit::Shutdown
         });
+        let (discovery_stats, discovered_nodes) = empty_discovery_state();
 
         (
             DhtRuntime {
@@ -1244,6 +1396,8 @@ mod tests {
                 client: client.clone(),
                 registry,
                 inbound_stats: DhtInboundStats::new(),
+                discovery_stats,
+                discovered_nodes,
                 shutdown_tx,
                 task: Some(task),
             },

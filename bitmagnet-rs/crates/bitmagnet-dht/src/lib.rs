@@ -41,7 +41,7 @@ pub use dht_concurrent_supervisor::{
 };
 pub use dht_discovery::{
     dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,
-    DhtDiscoveryStats,
+    DhtDiscoveryStats, DhtDiscoveryStatsHandle,
 };
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
@@ -52,6 +52,7 @@ pub use dht_responder::{
 pub use dht_runtime::{
     DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig,
     DhtRuntimeControlledQueryError, DhtRuntimeDriverError, DhtRuntimeExit, DhtRuntimeStartError,
+    DHT_DISCOVERY_QUEUE_CAPACITY,
 };
 pub use dht_send::{send_dht_reply, DhtSendError};
 pub use dht_supervisor::{DhtSupervisor, DhtSupervisorExit};
