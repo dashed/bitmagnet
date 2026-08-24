@@ -8,9 +8,9 @@ use crate::RoutingNode;
 
 /// Construct a bounded, single-consumer node-discovery handoff.
 ///
-/// Offering a node never waits and never starts a task. When the fixed queue is
-/// full or its receiver is gone, the newest node is dropped and classified by
-/// both the return value and shared counters.
+/// Offering a node does not await or block on queue capacity and never starts a
+/// task. When the fixed queue is full or its receiver is gone, the newest node
+/// is dropped and classified by both the return value and shared counters.
 #[must_use]
 pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, DhtDiscoveryReceiver) {
     let (sender, receiver) = mpsc::channel(capacity.get());
