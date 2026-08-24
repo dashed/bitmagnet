@@ -1497,3 +1497,197 @@ external DHT traffic, or production rollout. It supersedes slice twenty-nine
 only where that slice excludes rotating a find target; the exclusions of both
 query workers and all crawler, runtime, application, and deployment composition
 remain in force.
+
+The thirty-first slice, landed by `2c7ce48a` and strictly consumed by
+`36de3a8b`, adds only the owned discovered-node `find_node` worker:
+
+- `DhtDiscoveredNodeFindWorker::new` owns the scheduler route receiver, the
+  supplied production `DhtRuntimeClient`, shared `KTable`, cloneable
+  `DhtDiscoverySender`, and cloneable `DhtCrawlerTarget`. It returns the worker
+  together with a sender-free `DhtDiscoveredNodeFindStatsHandle`.
+  `DhtDiscoveredNodeFindWorkerConfig` exposes only a nonzero `max_inflight`;
+  `new` fixes it at 100, while `with_config` changes only that bound. The
+  scheduler's distinct find-node route capacity remains 100. The controller
+  does not poll or dequeue that route at capacity, so the worker and its input
+  route retain at most 100 accepted tasks plus 100 queued nodes, without Go's
+  extra item dequeued before semaphore acquisition. Nodes or a filtered suffix
+  still held by the scheduler, upstream discovery ingress, and other future
+  producers are outside this worker-local bound;
+- after each route dequeue, the controller reads `DhtCrawlerTarget::current`
+  exactly once, immediately before constructing the query future and spawning
+  its owned task. It performs no target read for work still queued at capacity.
+  Once accepted, Rust performs no KTable lookup, scheduler-eligibility recheck,
+  or other table-state guard before constructing that query. The exact Go
+  source likewise performs no eligibility recheck inside `runFindNode`; its
+  callback queries the supplied live node directly. This shared fact does not
+  implement Go's separate oldest-node producer or its selection policy.
+  Go instead reads the shared target inside each concurrently spawned callback
+  at the `FindNode` client call. Both obtain one target per accepted query, but
+  their controller-versus-callback scheduling point is an explicit delta: no
+  cross-query ordering is inferred from the shared holder or its ten-second
+  rotator;
+- the accepted `RoutingNode` is one immutable ID/address snapshot. Rust queries
+  that exact address and, on success, issues exactly one put of the same
+  advertised ID and address with exactly `Responded`. Go holds a live
+  `ktable.Node`, calls `Addr` for the query, and calls it again for the put; the
+  oracle's mutable A-to-B row proves that Go can query A and store B. Rust
+  deliberately queries and attempts to store A. A query error attempts exactly
+  one drop of the advertised ID. Rust's typed
+  `Result` cannot retain the response ID and nodes alongside an error, and its
+  KTable command has no Go reason or wrapped-error-identity field. On success,
+  the response ID is deliberately ignored: it is never used to select a table
+  operation, and the fixture's distinct response IDs remain absent. Only the
+  advertised ID is supplied to the responded put. There is no await between
+  the completed query result and its table command;
+- after the successful synchronous put, Rust preserves the response-node
+  sequence, duplicates, exact addresses, and numeric IPv6 scope IDs. It awaits
+  one `DhtDiscoverySender::reserve` at a time and synchronously commits each
+  acquired permit before reserving the next. Full live discovery therefore
+  backpressures the same owned query task rather than dropping newest. EOF also
+  waits through that backpressure. Shutdown can preserve an already committed
+  prefix and abandon the exact blocked suffix. A first receiver-closed result
+  classifies the whole remaining worker suffix as
+  `recursive_nodes_closed_dropped`, including nodes for which no discovery
+  delivery was attempted. The channel-global `DhtDiscoveryStats`, by contrast,
+  counts only actual offer or reserved-delivery attempts and aggregates every
+  sender clone; it does not inherit the worker's unattempted suffix count. A
+  permit acquired before explicit receiver close retains the discovery seam's
+  documented synchronous-commit behavior, while receiver destruction can
+  still reject that commit;
+- route EOF stops intake, joins every accepted query and fanout task, and
+  returns `DhtDiscoveredNodeFindWorkerExit::InputClosed`. A ready caller
+  shutdown is biased ahead of another join or receive, closes and synchronously
+  drains queued route work, marks cancellation as shutdown-caused, aborts the
+  complete task set, and joins it before returning `Shutdown` with exact
+  `queued_dropped`, observed `tasks_cancelled`, and
+  `recursive_nodes_dropped`. The query future and its successful completion
+  code are one task poll: if the query makes shutdown ready immediately before
+  returning success, the advertised put still completes synchronously before
+  the first capacity wait, after which shutdown can cancel the fanout. A
+  successful query can therefore increment success and put counters while its
+  unfinished fanout task is later counted as cancelled. Ordinary worker or
+  `run`-future drop before caller shutdown has won closes route intake and
+  aborts the owned task set without setting graceful-shutdown counters. A child
+  panic observed through the non-shutdown join path stops intake, aborts and
+  drains its siblings, leaves those graceful-shutdown counters at zero, and
+  resumes the original panic payload. Dropping the `run` future after shutdown
+  has already set its cause marker is not a normal terminal exit and does not
+  carry a zero-counter promise. No query or fanout is deliberately detached;
+- `DhtDiscoveredNodeFindStatsHandle` snapshots thirteen saturating monotonic
+  counters: dequeued nodes; started and completed tasks; successful and failed
+  queries; attempted put and drop commands; total, queued, and receiver-closed
+  recursive nodes; and shutdown-queued, shutdown-task, and shutdown-recursive
+  drops. Command counters include table rejection or no-op. A started task spans
+  both its query and any recursive fanout, so `shutdown_tasks_cancelled` is not
+  a claim that the client query itself remained unresolved. Each live snapshot
+  is a set of independent relaxed loads. Every terminal sum below uses
+  `saturating_add`, matching the counters rather than assuming mathematical
+  overflow. After normal `InputClosed`, the invariants are
+  `dequeued == queries_started`, `put_commands == queries_succeeded`,
+  `drop_commands == queries_failed`, `queries_started == tasks_completed`,
+  `tasks_completed ==
+  queries_succeeded.saturating_add(queries_failed)`, and `recursive_nodes ==
+  recursive_nodes_queued.saturating_add(recursive_nodes_closed_dropped)`, with
+  all shutdown counters zero. After normal `Shutdown`, the same common
+  equalities are explicit: `dequeued == queries_started`,
+  `put_commands == queries_succeeded`, and
+  `drop_commands == queries_failed`. In addition, `queries_started ==
+  tasks_completed.saturating_add(shutdown_tasks_cancelled)` and
+  `recursive_nodes == recursive_nodes_queued.saturating_add(
+  recursive_nodes_closed_dropped).saturating_add(
+  shutdown_recursive_nodes_dropped)`. The exit's `queued_dropped`,
+  `tasks_cancelled`, and `recursive_nodes_dropped` are the same per-worker
+  amounts applied as saturating increments to `shutdown_queued_dropped`,
+  `shutdown_tasks_cancelled`, and `shutdown_recursive_nodes_dropped`,
+  respectively. The same-poll success/cancellation oracle deliberately
+  exercises the shutdown invariant with one success and put, zero completed
+  tasks, one cancelled task, four returned nodes, and four
+  shutdown-abandoned nodes; and
+- the strict child-module consumer freezes all eight ordered real-Go rows and
+  fixture SHA-256
+  `e126ad26fd342b14ae0416b3610d991f927dbe9381ac11609ebeba96d67870b7`.
+  Their classifications, in order, are `SOURCE_ONLY`, `RUNTIME_EXACT`,
+  `RUNTIME_WITH_IMMUTABLE_ADDR_DELTA`, `RUNTIME_EXACT`,
+  `RUNTIME_WITH_SHUTDOWN_BACKPRESSURE_DELTA`,
+  `RUNTIME_WITH_SHUTDOWN_BACKPRESSURE_DELTA`, `RUNTIME_EXACT`, and
+  `GO_ONLY_LANE`. Every nested schema rejects unknown fields. Runtime rows bind
+  independently hard-coded exits, complete worker and channel-global stats,
+  query calls, target-read adjacency, exact table admission and retained-handle
+  state, response-ID absence, put-before-fanout ordering, ordered duplicate and
+  scoped discovery, same-poll success/shutdown overlap, and one-prefix/three-
+  suffix cancellation. The Go runtime rows use a manual unbuffered discovery
+  input with capacity zero. Rust's deterministic backpressure harness instead
+  uses a capacity-one Tokio discovery channel and, where the first reservation
+  must remain pending, prefills its one slot with a sentinel. That sentinel is
+  included explicitly in channel-global stats. Capacity one plus prefill is a
+  test-harness delta, not unbuffered-channel or production-buffer choreography
+  parity. The swallowed Go lane-error row remains Go-only; a
+  separate Rust gate proves typed empty-route EOF rather than pretending that
+  EOF replays a Go lane error. Go accessor counts and mutable returns,
+  unbuffered capacity zero, callback context identity, exact batch and option
+  traces, reasons and error identity, discovery-node temporal/candidate state,
+  and an error result's otherwise populated response payload remain explicitly
+  Go-only metadata.
+
+The consumer also binds each fixture source entry and the current embedded Go
+source to these thirteen independent SHA-256 anchors:
+
+- `internal/concurrency/atomic.go`:
+  `09cc4842dbdf516f8574f26b411130daba526f69dbf217e1f2867e829f781a4f`;
+- `internal/concurrency/batching_channel.go`:
+  `72b3c9fd5fbc8ecbfb0ba2bc2ed5e6c1d45de01f03d3e015b2467f114ec70975`;
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/discovered_nodes.go`:
+  `22806cabf39173df71010a54d874a4319458f1715308834be828dbdb99767027`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/find_node.go`:
+  `cd5fab8aa078ad40ed82331dbbfd141a38badc018287dd13211d221b230087bb`;
+- `internal/protocol/dht/client/interface.go`:
+  `477139d727ea685538bccfb0be114ab4fa43556cbdb70d5492a074f24482389f`;
+- `internal/protocol/dht/ktable/command.go`:
+  `575e58a01856db0746281c3a66a95d6d5483452fb8ab20dc6379ffbc45cedf11`;
+- `internal/protocol/dht/ktable/node.go`:
+  `93ed9a76a7cd0f50ee3ad255c6e77a8d19e5fe17081edc6238c5efab4983b3c3`;
+- `internal/protocol/dht/ktable/query.go`:
+  `103ec27a7904bdbbbd91f3ea1dae1f4d6ea3b3d6652757a6ab8ddbf598a7060e`;
+  and
+- `internal/protocol/dht/ktable/table.go`:
+  `68e3caf4394b2692fd9358224cce2b70ae3d90d920097bd28885b6b3bb77848f`.
+
+The source row remains source and exact-AST evidence rather than Rust runtime
+execution. In particular, Go's default scaling factor ten, buffered concurrent
+lane capacity and concurrency 100, dequeue-before-acquire extra waiter,
+unjoined callbacks, repeated closed-input receive, shared context, production
+discovery input 1,000 with batch size ten, ten-millisecond interval and output
+capacity one, and target factory/rotation call sites are not reclassified as
+combined runtime parity. The Go oldest-node producer performs its first query
+before delay, asks for at most ten nodes older than five seconds, sends them in
+order, then waits on a cancellation-unaware one-second `time.After`; with an
+empty table it can continue querying and sleeping after cancellation. Those
+producer facts are digest and AST evidence only. Slice thirty remains the
+runtime contract for the Rust target holder and rotator; this slice consumes
+the holder but does not widen the rotator's ownership or timing claims.
+
+This slice does not implement the periodic oldest-node producer, a second or
+multi-producer find-route sender seam, bootstrap injection, or the
+sample-infohashes worker. It does not compose the scheduler, find worker,
+target rotator, discovery feedback, or ping worker into one crawler supervisor,
+`DhtRuntime`, application, or process lifecycle. It adds no restart policy,
+database persistence, torrent or source ingestion, Prometheus or other
+external metrics export, health or logging integration, application or
+deployment configuration, external DHT traffic, live deployment, or production
+rollout. It supersedes slice thirty where that slice says the Rust find-node
+worker is absent, its find-node target read is source evidence only, recursive
+discovery is wholly absent, and no crawler-driven KTable response mutation
+exists. The new scope is only this worker's advertised-node put/drop and its
+ordered response-node offers to discovery. It does not compose those offers
+back through the scheduler or establish a recursive crawler feedback loop. All
+shared-target, rotation, sample-infohashes, producer, broader recursive
+composition, runtime, application, deployment, and rollout boundaries remain
+in force.
