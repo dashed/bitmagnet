@@ -2330,3 +2330,132 @@ existence of a periodic old-node ping producer; the supervisor's exact fixed
 five-child wiring and lack of a ping-input EOF cycle remain authoritative.
 Every remaining sample, bootstrap, higher-pipeline, runtime, application,
 deployment, and rollout boundary remains in force.
+
+The thirty-ninth slice, implemented by
+`2f9f3a35e0e20d27c0e44d5c2d89e68eccdefa83` and test-stabilized by
+`9267c7e1c289099c7ece607f0de6975da0847e1d`, expands the owned partial crawler
+maintenance composition to include the already-frozen periodic oldest-node
+ping producer:
+
+- `DhtCrawlerMaintenanceSupervisor::new(discovery, client, table)` retains its
+  public signature and typed start errors. It first recovers the exact
+  recursive-discovery sender and obtains initial target entropy as in slice
+  thirty-six. Only after those fallible steps does it construct the default
+  discovered-node scheduler. It clones both `ping_input()` and
+  `find_node_input()` from that scheduler before consuming the unique route
+  receivers, then explicitly closes and drops the unsupported
+  `sample_infohashes` receiver;
+- construction wires the ping route, cloned weak runtime client, and shared
+  table into the existing ping worker; wires the find route, client, table,
+  recovered discovery sender, and initialized target into the existing
+  `find_node` worker; passes the shared find input and table to
+  `DhtOldestNodeFindProducer`; and passes the shared ping input and table to
+  `DhtOldestNodePingProducer`. The target rotator retains the target writer.
+  Construction still starts no task, and adding the infallible ping producer
+  adds no start-error variant or new entropy boundary;
+- `DhtCrawlerMaintenanceStatsHandle` adds one sender-free `oldest_ping` handle
+  for producer-local counters. Its `scheduler` handle remains scheduler-origin
+  only: `routed_ping` excludes direct oldest-ping commits and
+  `routed_find_node` excludes direct oldest-find commits. The `ping` worker
+  handle aggregates scheduler and oldest-ping nodes after either source
+  commits to their shared route, while `find_node` analogously aggregates
+  scheduler and oldest-find nodes. `oldest_find` and `oldest_ping` remain local
+  to their respective producers, and `discovery` remains the exact
+  channel-global surface rather than supervisor-local provenance;
+- a ready shutdown at the preflight boundary invokes and polls none of six
+  child factories. Once started, the fixed factory and spawn order is `Scheduler`,
+  `Ping`, `FindNode`, `OldestFind`, `OldestPing`, and `Target`. This order is
+  construction evidence, not a completion-priority promise. Each owned task
+  receives one clone of the same internal watch receiver;
+- `DhtCrawlerMaintenanceChild` adds the exact `OldestPing` identity, and
+  `DhtCrawlerMaintenanceChildExits` adds the complete
+  `DhtOldestNodePingProducerExit` beside the other five concrete results.
+  External shutdown remains the first biased outer branch ahead of the next
+  observed child join. When shutdown wins a ready tie, it remains the primary
+  `Shutdown` cause while cleanup retains any already-completed concrete child
+  result. When a child wins first, `Failed { first, children }` can now name
+  any of the six identities, including `OldestPing`; no deterministic order is
+  promised among simultaneously ready child tasks;
+- both normal outer paths broadcast the common stop signal before awaiting any
+  remaining child and then drain the entire `JoinSet`. The collector requires
+  exactly one scheduler, ping-worker, find-worker, oldest-find,
+  oldest-ping, and target result. It does not fabricate shutdown counts for a
+  child that completed independently. The first observed child panic is
+  resumed with its exact payload only after sibling cleanup; unexpected child
+  cancellation or join failure, a duplicate identity, or a missing fixed
+  result remains an invariant panic after cleanup;
+- dropping a started supervisor run still drops its owned `JoinSet`, aborting
+  and releasing all six child futures without detached work or a fabricated
+  terminal record. Focused gates poll and then drop all six tasks, prove a
+  typed oldest-ping `InputClosed` result can be the first cause while all five
+  siblings finish common shutdown, retain the full six-result record on
+  external shutdown, and preserve external shutdown across a ready tie with a
+  precompleted child; and
+- the composition now intentionally contains three EOF cycles. The recovered
+  recursive-discovery sender keeps scheduler ingress open; the oldest-find
+  producer's shared input keeps the find route open; and the oldest-ping
+  producer's shared input keeps the ping route open. A scheduler exit alone
+  therefore cannot produce find- or ping-route EOF while the corresponding
+  producer remains live. Explicit outer shutdown, first-child cleanup, or
+  dropping the supervisor releases all three cycles together rather than
+  relying on sequential EOF cleanup.
+
+A paused-time real-constructor gate supplies one eligible node through the
+shared table without scheduler discovery input. At 9,999 milliseconds the
+oldest-ping counters remain zero. The following millisecond produces exact
+producer stats `table_queries=1`, `selected=1`, and `queued=1`; the real ping
+worker has dequeued that node, while scheduler `routed_ping` remains zero.
+This proves the constructor connects the producer to the worker's existing
+shared route and preserves counter provenance. It does not claim that the
+network ping completed. Explicit shutdown retains
+`DhtOldestNodePingProducerExit::Shutdown { selected_dropped: 0 }` in the
+complete record's `oldest_ping` field. The follow-up test commit changes only
+this paused harness's runtime query timeout to sixty seconds, preventing the
+immediate oldest-find query from timing out and mutating the shared node before
+the ten-second ping boundary; it does not change any production default or
+supervisor wiring.
+
+This composition adds no new Go oracle or fixture. Slice thirty-eight's strict
+producer fixture at
+`d300e4606f9811f402af6d835748d09dbc59434f733a28079ac0df5e2f99ae5a`
+remains authoritative only for the producer component, while the existing
+scheduler and ping-worker fixtures remain authoritative for their own bounded
+contracts. The six-task supervisor ownership, common watch signal, complete
+collector, three EOF cycles, and real Rust route proof are lifecycle hardening
+and composition evidence rather than an exact Go combined-lifecycle claim.
+
+Initial target entropy still occurs during `new`, before `run`'s preflight.
+`DhtCrawlerMaintenanceStartError::DiscoveryClosed` and `TargetEntropy` still
+retain the unique discovery receiver, and `into_discovery` remains unchanged.
+The supervisor still neither owns nor observes `DhtRuntime`; its cloned weak
+client cannot keep the UDP runtime alive. Runtime termination does not become
+a seventh child exit, maintenance failure does not stop the runtime, and an
+outer owner must continue to coordinate their joint lifecycle explicitly.
+
+This slice does not alter scheduler capacities or routing, either producer's
+selection, timing, guard, snapshot, cancellation, or stats contract, either
+worker's query or table-mutation semantics, target rotation, or recursive
+discovery behavior. It adds no transactional aggregate snapshot, source
+labels, external metrics export, active flag, health signal, retry, restart,
+or backoff. The sample route remains deliberately closed; no
+sample-infohashes worker or producer, bootstrap or reseed injection, higher
+crawler pipeline, info-hash triage, get-peers, scrape, metainfo request,
+persistence, database integration, application or deployment configuration,
+external DHT traffic, live deployment, or production rollout is included.
+
+This slice supersedes slice thirty-six only where that slice fixes five child
+factories, identities, complete exits, cleanup counts, stats fields, and two
+existing EOF cycles, or excludes the oldest-ping producer from the
+composition. Slice thirty-six's constructor errors, target-entropy boundary,
+biased outer lifecycle, all-at-once cleanup, panic and drop behavior, weak
+runtime boundary, partial sample closure, and remaining exclusions stay in
+force. It supersedes slice thirty-seven only where that slice says the
+supervisor does not request `ping_input`, keeps scheduler-only ping EOF, and
+remains a fixed five-child composition; every shared-capacity, direct-bypass,
+waiter, public-send, counter, and cross-source-order contract remains exact.
+It supersedes slice thirty-eight only where that slice says the producer is not
+joined to the maintenance supervisor and no ping-input EOF cycle exists. All
+producer parity, hardening, timing, live-handle, snapshot, terminal, counter,
+and exclusion contracts remain unchanged. Every broader runtime, sample,
+bootstrap, higher-pipeline, application, deployment, and rollout boundary
+remains in force.
