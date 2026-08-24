@@ -6,6 +6,7 @@ mod dht_client;
 mod dht_concurrent_supervisor;
 mod dht_dispatch;
 mod dht_driver;
+mod dht_inbound_stats;
 mod dht_responder;
 mod dht_runtime;
 mod dht_send;
@@ -37,6 +38,7 @@ pub use dht_client::{
 pub use dht_concurrent_supervisor::{DhtConcurrentSupervisor, DhtConcurrentSupervisorExit};
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
+pub use dht_inbound_stats::{DhtInboundStats, DhtInboundStatsSnapshot};
 pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
