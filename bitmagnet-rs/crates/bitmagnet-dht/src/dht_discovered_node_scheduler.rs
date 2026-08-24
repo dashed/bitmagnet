@@ -96,6 +96,8 @@ struct DhtDiscoveredNodeSchedulerStatsInner {
     batches: AtomicU64,
     duplicate_dropped: AtomicU64,
     known_filtered: AtomicU64,
+    filter_calls: AtomicU64,
+    route_attempts: AtomicU64,
     routed_ping: AtomicU64,
     routed_find_node: AtomicU64,
     routed_sample_infohashes: AtomicU64,
@@ -116,6 +118,10 @@ pub struct DhtDiscoveredNodeSchedulerStats {
     pub batches: u64,
     pub duplicate_dropped: u64,
     pub known_filtered: u64,
+    /// Completed calls to the synchronous KTable filter.
+    pub filter_calls: u64,
+    /// Nodes that reached downstream route-capacity selection.
+    pub route_attempts: u64,
     pub routed_ping: u64,
     pub routed_find_node: u64,
     pub routed_sample_infohashes: u64,
@@ -132,6 +138,8 @@ impl DhtDiscoveredNodeSchedulerStatsHandle {
             batches: self.inner.batches.load(Ordering::Relaxed),
             duplicate_dropped: self.inner.duplicate_dropped.load(Ordering::Relaxed),
             known_filtered: self.inner.known_filtered.load(Ordering::Relaxed),
+            filter_calls: self.inner.filter_calls.load(Ordering::Relaxed),
+            route_attempts: self.inner.route_attempts.load(Ordering::Relaxed),
             routed_ping: self.inner.routed_ping.load(Ordering::Relaxed),
             routed_find_node: self.inner.routed_find_node.load(Ordering::Relaxed),
             routed_sample_infohashes: self.inner.routed_sample_infohashes.load(Ordering::Relaxed),
@@ -355,6 +363,7 @@ impl DhtDiscoveredNodeScheduler {
             .map(|key| key.filter_addr())
             .collect::<Vec<_>>();
         let unknown_addrs = self.table.filter_known_addrs(&addrs);
+        increment_saturating(&self.stats.inner.filter_calls);
         increment_saturating_by(
             &self.stats.inner.known_filtered,
             addrs.len().saturating_sub(unknown_addrs.len()),
@@ -372,6 +381,7 @@ impl DhtDiscoveredNodeScheduler {
 
         for (index, node) in unknown.by_ref().enumerate() {
             let remaining = total_unknown - index;
+            increment_saturating(&self.stats.inner.route_attempts);
             let routed = tokio::select! {
                 biased;
                 () = shutdown.as_mut() => RouteOneResult::Shutdown,
@@ -514,6 +524,10 @@ fn increment_saturating_by(counter: &AtomicU64, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_discovered_node_scheduler_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
@@ -630,6 +644,8 @@ mod tests {
         assert_eq!(snapshot.batches, 1);
         assert_eq!(snapshot.duplicate_dropped, 1);
         assert_eq!(snapshot.known_filtered, 1);
+        assert_eq!(snapshot.filter_calls, 1);
+        assert_eq!(snapshot.route_attempts, 2);
         assert_eq!(snapshot.shutdown_dropped, 0);
         assert_eq!(snapshot.routes_closed_dropped, 0);
         assert_eq!(
@@ -900,6 +916,8 @@ mod tests {
         assert_eq!(routes.ping.try_recv().unwrap(), v4(1, 1));
         assert_eq!(routes.ping.recv().await, None);
         assert_eq!(stats.snapshot().shutdown_dropped, 2);
+        assert_eq!(stats.snapshot().filter_calls, 1);
+        assert_eq!(stats.snapshot().route_attempts, 2);
         drop(sender);
     }
 
