@@ -28,7 +28,7 @@ var updateDHTCrawlerBootstrapPingProducerParity = flag.Bool(
 	"rewrite the Rust DHT crawler bootstrap-ping-producer parity fixture",
 )
 
-const crawlerBootstrapPingProducerFixtureSHA256 = "663339a94b6efaaa626c97f5dfb357d3343d51e5c00f2841d638804590fdefbe"
+const crawlerBootstrapPingProducerFixtureSHA256 = "58f1a27775f035b6ce68ae43962ce4a3677bb2eaa68917959db12b8fd528dcde"
 
 var crawlerBootstrapPingProducerFixtureIDs = [...]string{
 	"production_source_factory_defaults_and_lifecycle_contract",
@@ -631,6 +631,7 @@ func crawlerBootstrapPingProducerSourceDigests(t *testing.T) map[string]string {
 		"internal/dhtcrawler/config.go",
 		"internal/dhtcrawler/crawler.go",
 		"internal/dhtcrawler/factory.go",
+		"internal/dhtcrawler/ping.go",
 		"internal/protocol/dht/ktable/node.go",
 	}
 	digests := make(map[string]string, len(paths))
