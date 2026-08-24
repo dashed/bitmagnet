@@ -147,10 +147,6 @@ impl DhtDiscoverySender {
     ///
     /// Once acquired, [`DhtDiscoveryPermit::deliver`] commits synchronously,
     /// including if the receiver was explicitly closed after the reservation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the next find-node worker slice")
-    )]
     pub(crate) async fn reserve(&self) -> Result<DhtDiscoveryPermit, DhtDiscoveryReserveError> {
         let permit = self
             .sender
@@ -189,10 +185,6 @@ impl DhtDiscoveryPermit {
     /// still drain a delivery from a permit acquired before it closed. Receiver
     /// destruction is synchronized with this commit so a node is never counted
     /// as queued when the receiver was already gone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the next find-node worker slice")
-    )]
     pub(crate) fn deliver(self, node: RoutingNode) -> DhtDiscoveryOffer {
         let Self {
             permit,
