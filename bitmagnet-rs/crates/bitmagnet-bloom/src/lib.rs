@@ -632,6 +632,10 @@ impl<'a> SliceCursor<'a> {
 }
 
 #[cfg(test)]
+#[path = "block_filter_parity.rs"]
+mod block_filter_parity;
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::io::Cursor;
