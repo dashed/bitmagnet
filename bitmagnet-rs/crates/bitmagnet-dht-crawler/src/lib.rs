@@ -28,6 +28,9 @@ mod request_meta_info_route;
 mod scrape;
 
 #[cfg(test)]
+mod composition_parity;
+
+#[cfg(test)]
 mod get_peers_parity;
 
 #[cfg(test)]
