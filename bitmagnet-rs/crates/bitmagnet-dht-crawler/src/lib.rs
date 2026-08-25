@@ -67,7 +67,7 @@ pub use info_hash_triage::{
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
 };
 pub use peer_wire_meta_info_requester::{
-    DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
+    random_metainfo_peer_id, DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
     DhtPeerWireMetaInfoRequesterError, DhtPeerWireMetaInfoRequesterStage,
     DHT_PEER_WIRE_CONNECT_TIMEOUT, DHT_PEER_WIRE_LOCAL_UT_METADATA_ID,
     DHT_PEER_WIRE_MAX_METADATA_SIZE, DHT_PEER_WIRE_METADATA_PIECE_SIZE,

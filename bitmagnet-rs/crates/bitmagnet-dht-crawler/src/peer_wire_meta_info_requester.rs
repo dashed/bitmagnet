@@ -30,6 +30,7 @@ pub const DHT_PEER_WIRE_METADATA_PIECE_SIZE: usize = 16 * 1024;
 /// Locally advertised extension-message ID for incoming `ut_metadata` responses.
 pub const DHT_PEER_WIRE_LOCAL_UT_METADATA_ID: u8 = 1;
 
+const METAINFO_PEER_ID_CLIENT_PREFIX: &[u8; 8] = b"-BM0001-";
 pub(super) const HANDSHAKE_SIZE: usize = 68;
 const MAX_BENCODE_NESTING_DEPTH: usize = 64;
 const EXTENDED_MESSAGE_ID: u8 = 20;
@@ -38,6 +39,23 @@ const PROTOCOL: &[u8; 20] = b"\x13BitTorrent protocol";
 pub(super) const ADVERTISED_EXTENSION_BITS: [u8; 8] = [0, 0, 0, 0, 0, 0x10, 0, 0x01];
 pub(super) const EXTENSION_HANDSHAKE_REQUEST: &[u8] =
     b"\x00\x00\x00\x1a\x14\x00d1:md11:ut_metadatai1eee";
+
+/// Generates the process-local peer ID used by the metainfo requester.
+///
+/// The Azureus-style client marker is a prefix for this peer-wire identity,
+/// unlike the suffix used by Bitmagnet's distinct DHT node identity.
+/// Application composition should call this once and reuse the result for the
+/// requester's full lifetime; each call intentionally creates a new identity.
+pub fn random_metainfo_peer_id() -> Result<Id20, getrandom::Error> {
+    let mut bytes = [0; 20];
+    getrandom::fill(&mut bytes)?;
+    Ok(metainfo_peer_id_from_random_bytes(bytes))
+}
+
+fn metainfo_peer_id_from_random_bytes(mut bytes: [u8; 20]) -> Id20 {
+    bytes[..METAINFO_PEER_ID_CLIENT_PREFIX.len()].copy_from_slice(METAINFO_PEER_ID_CLIENT_PREFIX);
+    Id20::from_slice(&bytes).expect("a 20-byte peer ID always has valid length")
+}
 
 /// Requester time limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -720,6 +738,25 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<DhtPeerWireMetaInfoRequester>();
         assert_send_sync::<DhtPeerWireMetaInfoRequesterError>();
+    }
+
+    #[test]
+    fn metainfo_peer_id_prefix_and_random_tail_are_exact() {
+        let random_bytes = std::array::from_fn(|index| index as u8);
+        let peer_id = metainfo_peer_id_from_random_bytes(random_bytes);
+        assert_eq!(
+            peer_id.as_bytes(),
+            b"-BM0001-\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13"
+        );
+
+        let generated = random_metainfo_peer_id().expect("OS entropy is available");
+        assert_eq!(
+            &generated.as_bytes()[..METAINFO_PEER_ID_CLIENT_PREFIX.len()],
+            METAINFO_PEER_ID_CLIENT_PREFIX
+        );
+        let generator: fn() -> Result<Id20, getrandom::Error> = random_metainfo_peer_id;
+        fn assert_send_sync<T: Send + Sync>(_: T) {}
+        assert_send_sync(generator);
     }
 
     #[tokio::test]
