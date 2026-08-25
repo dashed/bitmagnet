@@ -47,6 +47,11 @@ pub enum QueuePgError {
         field: &'static str,
         microseconds: u128,
     },
+    #[error("producer duration '{field}' has sub-microsecond precision that PostgreSQL interval cannot represent: {submicro_nanoseconds} nanoseconds")]
+    InvalidProducerDurationPrecision {
+        field: &'static str,
+        submicro_nanoseconds: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,7 +434,7 @@ impl Default for MirrorConfig {
 /// supported-subset predicate.
 ///
 /// The variants are ordered exactly as the predicate's conjuncts are written in
-/// SQL, so [`MirrorEligibility::ineligible_reason`] reports the *first* failing
+/// SQL, so `MirrorEligibility::ineligible_reason` reports the *first* failing
 /// conjunct and every scanned candidate is attributed to at most one reason.
 /// The set is fixed and small: it bounds the `reason` label cardinality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
