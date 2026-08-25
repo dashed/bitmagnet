@@ -17,12 +17,12 @@ The get-peers worker publishes successful nonempty peer vectors through the
 metainfo-request handoff. The scrape worker publishes successful raw BEP-33
 Bloom filters through the scraped-source handoff. The request-metainfo worker
 publishes allowed verified metainfo through the torrent-persistence handoff.
-No concrete peer-wire metainfo requester or Rust production application
-composition exists yet. `BlockingManager` already implements both the triage
-filter and request-stage blocker boundaries, but no production application
-constructs, shares, flushes, or supervises it for this pipeline. The PostgreSQL
-adapters are not wired into an application or validated against live
-PostgreSQL. This is not a live-database integration.
+The crate now contains a concrete bounded IPv4 peer-wire metainfo requester,
+but no Rust production application constructs or supervises it. `BlockingManager`
+already implements both the triage filter and request-stage blocker boundaries,
+but no production application constructs, shares, flushes, or supervises it for
+this pipeline. The PostgreSQL adapters are not wired into an application or
+validated against live PostgreSQL. This is not a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -59,6 +59,10 @@ checkpoint is `6f45f7b6eeb29b0c3d41c327246d9a27df0f5ac5`.
 The frozen Go request-metainfo oracle checkpoint is
 `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`, and its fixture SHA-256 is
 `03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5`.
+The executable Go peer-wire requester oracle checkpoint is
+`7fa9c4ad6da0aa2188b185a0f02c2501b73facee`, and
+`testdata/parity/dht/metainfo_requester.jsonl` has SHA-256
+`990f4d503065ed08689df37881817386874f12cda2fdaeaeb56c05e12bbcc80e`.
 The frozen Go source-persistence oracle checkpoint is
 `445385c62be25e221dfb8b8f3efe9a25abd0b364`, and its fixture SHA-256 is
 `01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
@@ -806,10 +810,12 @@ sender-free `DhtRequestMetaInfoWorkerStatsHandle`. The requester returns one
 already verified `ParsedInfo`; the checker is synchronous and side-effect-free;
 the blocker receives an ordered hash slice and explicit flush flag.
 `DefaultDhtMetaInfoBanningChecker` adapts the default policy from
-`bitmagnet-metainfo` without blocking as a side effect. No concrete peer-wire
-requester is implied by these seams. Separately, the existing direct
-`BlockingManager` implementation supplies `DhtInfoHashBlocker`; production
-construction, sharing, final flush, and failure policy remain deferred.
+`bitmagnet-metainfo` without blocking as a side effect. The separate
+`DhtPeerWireMetaInfoRequester` now concretely implements the requester seam;
+tests may continue to inject other implementations. Separately, the existing
+direct `BlockingManager` implementation supplies `DhtInfoHashBlocker`;
+production construction, sharing, final flush, and failure policy remain
+deferred.
 
 `with_config` accepts a `DhtRequestMetaInfoWorkerConfig`; its nonzero
 `max_inflight` defaults to 400, matching Go's configured callback concurrency
@@ -895,6 +901,77 @@ tests passed 100 consecutive runs. Release all-target and all-feature checks,
 strict Clippy, rustdoc, formatting, and diff checks passed. These are scripted
 collaborator and in-memory route tests; they open no TCP, UDP, DNS, PostgreSQL,
 or other live service.
+
+### Concrete peer-wire metainfo requester
+
+`DhtPeerWireMetaInfoRequester::new` accepts one stable `Id20` peer ID and
+implements the existing boxed `DhtMetaInfoRequester` boundary. `with_config`
+accepts `DhtPeerWireMetaInfoRequesterConfig`; the exact defaults are a
+three-second `DHT_PEER_WIRE_CONNECT_TIMEOUT` and a six-second
+`DHT_PEER_WIRE_REQUEST_TIMEOUT`. The request timeout budget encloses socket
+creation, the independently bounded connect, both handshakes, every framed
+write/read, piece assembly, and final parse, but Tokio enforces it only at
+asynchronous yield points. Bounded synchronous decode, assembly, or final
+parsing already executing in one poll cannot be preempted and may finish after
+the wall-clock budget. Dropping the request future cancels its in-flight
+connect or I/O and starts no retry or detached task.
+
+The requester accepts only `SocketAddr::V4`; IPv6 is rejected before socket
+construction. It creates `TcpSocket::new_v4`, enables `TCP_NODELAY`, enables
+zero linger with `set_zero_linger`, and only then starts the timed connect. It
+does not resolve DNS. Every wire write uses `write_all`, so partial writes are
+completed and actual I/O failure is typed without reproducing Go's controlled
+short-writer panic.
+
+The exact 68-byte BitTorrent handshake advertises DHT and LTEP, the requested
+20-byte hash, and the injected peer ID. Response validation precedence is
+protocol prefix, peer LTEP support, then returned info hash. The requester
+sends a canonical extension handshake advertising local `ut_metadata` ID 1,
+ignores irrelevant non-extension frames while waiting for the first extension
+message, and requires that message to be extension handshake ID 0. A peer's
+advertised `ut_metadata` ID must be 1 through 254 and is used only for outbound
+piece requests. Incoming metadata responses are filtered on the requester's
+locally advertised ID 1; these IDs are directional, not interchangeable.
+
+Framed message bodies have an inclusive ten-MiB maximum and lengths above it
+are rejected before allocation. Negotiated metadata size must be positive and
+strictly below ten MiB. Requests use 16-KiB piece boundaries. Responses may
+arrive out of order, but each index must be in range, unique, and exactly
+16 KiB except for the exact final remainder. Reject messages fail the request;
+irrelevant frames and message types are ignored. A supplied `total_size` must
+equal the negotiated size. Completion is based on unique piece coverage, so
+Go's controlled duplicate-byte aggregate and zero-filled-hole behavior is
+rejected.
+
+Extension and metadata headers use Bendy with a nesting limit of 64. Canonical
+dictionary ordering, duplicate keys, integer syntax and type, missing fields,
+bounds, and trailing extension-handshake objects fail closed. Unknown values
+are completely consumed and must themselves be valid bounded bencode. After
+exact assembly, `bitmagnet_metainfo::parse_info_bytes` verifies the requested
+identity against the raw dictionary before returning `ParsedInfo`.
+
+The strict test-only consumer pins the seven-row, 35,547-byte LF JSONL oracle
+at SHA-256
+`990f4d503065ed08689df37881817386874f12cda2fdaeaeb56c05e12bbcc80e`.
+It recursively rejects unknown fields, rejects duplicate structural and map
+keys, requires explicit nullable branch keys, and pins the seven IDs,
+classifications, executions, five source digests, two dependency digests,
+twelve normalized AST digests, dependency lines, wire patterns, and ordered
+nonclaims. Runtime replay covers exact handshakes and validation precedence,
+metadata-size and extension-ID bounds, peer-ID-254 outbound requests versus
+local-ID-1 inbound responses, one/16,384/16,385-byte request grouping, the
+inclusive framed maximum, irrelevant and out-of-order piece traffic, malformed
+piece classifications, final requested-hash parsing, and the three controlled
+Go hazards. The source row is inspection-only; it is not upgraded to Rust
+runtime execution.
+
+The implementation and tests make no claim of retry, requester factories,
+concurrency limiters, logging, metrics, DNS or hostname support, application
+construction, worker supervision, deployment, or production readiness. Tests
+use deterministic in-memory streams and no external peer. The fixture does not
+prove integrated Go forwarding from extension negotiation into piece requests,
+v2/hybrid parse identity, transport fragmentation scheduling, or acceptance of
+Go's duplicate-piece hole by the full request path.
 
 ### PostgreSQL lookup adapter
 
@@ -1690,8 +1767,13 @@ Rust planner; the planner's own tests replay the fixture's parsed models,
 deduplication matrix, and classifier job evidence without upgrading the Go
 oracle's runtime nonclaims.
 
-They also do not claim a live metainfo TCP handshake, extension negotiation,
-piece transfer, requester, or end-to-end requester hash verification;
+The request-metainfo worker fixture and worker consumer do not themselves
+execute the separate concrete peer-wire requester. The peer-wire requester's
+own strict consumer uses deterministic in-memory streams and likewise does not
+claim a live remote-peer TCP exchange, production connection success, or
+application wiring. It does execute final requested-hash verification;
+neither fixture upgrades that bounded replay into a deployment claim. They
+also do not claim
 production banning behavior beyond the frozen default-checker row; real
 blocking-manager buffering, Bloom state, policy flush, database, or durability;
 `runPersistTorrents` batching, deduplication, model conversion, or database
@@ -1730,9 +1812,9 @@ The following remain deliberately outside this checkpoint:
   `PgDhtSourceBatchWriter`; ownership of the unique scraped-source receiver;
   and live schema, codec, transaction, rollback, query-plan, observability, and
   durability validation for that adapter;
-- a concrete peer-wire `DhtMetaInfoRequester` implementing TCP, BEP-10/BEP-9
-  extension negotiation and piece transfer, plus end-to-end requested-hash
-  verification;
+- production construction, supervision, configuration loading, concurrency
+  limiting, metrics, logging, retry/operator policy, and live-peer validation
+  for the existing concrete `DhtPeerWireMetaInfoRequester`;
 - production construction and sharing of the existing direct
   `DhtInfoHashBlocker` implementation for `BlockingManager`, including final
   flush and failure policy;
@@ -1766,8 +1848,9 @@ supervises the triage, get-peers, scrape, and source-persistence workers as a
 pipeline. The request-metainfo route has the get-peers worker as a producer and
 the owned Rust request-metainfo worker as its consumer; allowed results flow
 through the typed torrent-persistence route. No production application
-constructs or supervises either worker, no concrete peer-wire requester or
-production persistent-blocker construction supplies the request stage, and no
-production application supplies the owned persistence worker with the existing
-concrete PostgreSQL atomic writer. Its concrete blocker adapter, writer, and
-read-only full-v2 lookup are not application-wired.
+constructs or supervises either worker, no production application construction
+of the concrete peer-wire requester or persistent blocker supplies the request
+stage, and no production application supplies the owned persistence worker with
+the existing concrete PostgreSQL atomic writer. The concrete peer-wire requester,
+blocking-manager adapter, writer, and read-only full-v2 lookup are not
+application-wired.

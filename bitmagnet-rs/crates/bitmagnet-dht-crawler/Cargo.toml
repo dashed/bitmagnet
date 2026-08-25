@@ -15,7 +15,9 @@ bitmagnet-metainfo = { path = "../bitmagnet-metainfo" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-queue = { path = "../bitmagnet-queue" }
 async-trait.workspace = true
+bendy.workspace = true
 sqlx.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

@@ -10,6 +10,7 @@
 mod blocking_manager_filter;
 mod get_peers;
 mod info_hash_triage;
+mod peer_wire_meta_info_requester;
 mod persist_source;
 mod persist_source_route;
 mod persist_torrent;
@@ -25,6 +26,9 @@ mod scrape;
 
 #[cfg(test)]
 mod get_peers_parity;
+
+#[cfg(test)]
+mod peer_wire_meta_info_requester_parity;
 
 #[cfg(test)]
 mod request_meta_info_parity;
@@ -49,6 +53,13 @@ pub use info_hash_triage::{
     SystemDhtInfoHashTriageClock, TriageCollaboratorError, DHT_INFO_HASH_TRIAGE_BATCH_INTERVAL,
     DHT_INFO_HASH_TRIAGE_BATCH_LIMIT, DHT_INFO_HASH_TRIAGE_RESCRAPE_THRESHOLD,
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
+};
+pub use peer_wire_meta_info_requester::{
+    DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
+    DhtPeerWireMetaInfoRequesterError, DhtPeerWireMetaInfoRequesterStage,
+    DHT_PEER_WIRE_CONNECT_TIMEOUT, DHT_PEER_WIRE_LOCAL_UT_METADATA_ID,
+    DHT_PEER_WIRE_MAX_METADATA_SIZE, DHT_PEER_WIRE_METADATA_PIECE_SIZE,
+    DHT_PEER_WIRE_REQUEST_TIMEOUT,
 };
 pub use persist_source::{
     DhtPersistSourceWorker, DhtPersistSourceWorkerConfig, DhtPersistSourceWorkerExit,
