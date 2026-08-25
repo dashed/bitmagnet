@@ -13,6 +13,9 @@ mod info_hash_triage;
 mod pg_torrent_triage_lookup;
 mod request_meta_info_route;
 
+#[cfg(test)]
+mod get_peers_parity;
+
 pub use get_peers::{
     DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,
     DhtGetPeersWorkerStatsHandle,
