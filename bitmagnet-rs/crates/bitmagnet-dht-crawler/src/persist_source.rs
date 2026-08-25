@@ -40,13 +40,18 @@ pub struct DhtSourceWrite {
 
 /// Persistence boundary for one ordered, info-hash-unique DHT source batch.
 ///
-/// A completed call is a logical all-or-error unit: `Ok(())` accepts every
-/// supplied record and `Err` accepts none. Concrete writers may chunk their SQL
-/// internally, but must preserve that contract (for example with a transaction).
-/// This is an intentional Rust hardening delta: Go writes nontransactional
-/// 100-row chunks, so a later chunk error can leave an earlier prefix committed.
-/// Dropping the future is different: cancellation stops awaiting the call and
-/// does not prove that a remote database stopped or rolled back its work.
+/// A call is an atomic no-proper-subset unit: `Ok(())` confirms every supplied
+/// record, while `Err` confirms no acceptance outcome. Concrete writers may
+/// chunk their SQL internally, but must prevent a proper subset from committing
+/// (for example with one transaction). This is an intentional Rust hardening
+/// delta: Go writes nontransactional 100-row chunks, so a later chunk error can
+/// leave an earlier prefix committed.
+///
+/// A remote `COMMIT` can succeed before its acknowledgement is lost, so an
+/// error may mean either none or the whole batch committed. Likewise, dropping
+/// the future stops awaiting the call but does not prove that a remote database
+/// stopped or rolled back its work. Callers must not retry either ambiguous
+/// outcome as if rejection were certain.
 #[async_trait]
 pub trait DhtSourceBatchWriter: Send + Sync {
     /// Persist one nonempty batch in slice order.
@@ -103,9 +108,12 @@ pub struct DhtPersistSourceWorkerStatsHandle {
 /// one of `input_duplicates_dropped`, `sources_persisted`,
 /// `writer_failure_dropped`, `shutdown_batch_dropped`, or
 /// `shutdown_write_abandoned`. Queued shutdown drops were never dequeued and are
-/// tracked separately. Persisted counts are logical records in successful
-/// writer calls, matching Go's metric; they do not claim PostgreSQL rows affected
-/// after a parent-existence predicate.
+/// tracked separately. This is worker-pipeline disposition accounting, not a
+/// database-state partition: a writer error removes a batch from the pipeline
+/// without retry, but a lost commit acknowledgement can leave its whole backend
+/// outcome unknown. Persisted counts are records in confirmed-success writer
+/// calls, matching Go's logical metric; they do not claim PostgreSQL rows
+/// affected after a parent-existence predicate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DhtPersistSourceWorkerStats {
     /// Raw input occurrences removed from the route.
@@ -122,9 +130,12 @@ pub struct DhtPersistSourceWorkerStats {
     pub writer_failures: u64,
     /// Unique projected records supplied across all writer calls.
     pub writer_sources_submitted: u64,
-    /// Logical records in writer calls that completed successfully.
+    /// Records in writer calls whose whole-batch success was confirmed.
     pub sources_persisted: u64,
-    /// Unique records rejected by writer calls that returned an error.
+    /// Unique records dropped from the worker pipeline after a writer error.
+    ///
+    /// This does not prove backend rejection: a lost commit acknowledgement may
+    /// leave the whole transaction committed but unconfirmed.
     pub writer_failure_dropped: u64,
     /// Still-queued raw occurrences drained after shutdown won.
     pub shutdown_queued_dropped: u64,
@@ -342,7 +353,10 @@ impl DhtPersistSourceWorker {
                     &self.stats.inner.writer_failure_dropped,
                     count_u64(writes.len()),
                 );
-                tracing::warn!(%error, "DHT source batch writer failed; dropping batch");
+                tracing::warn!(
+                    %error,
+                    "DHT source batch writer failed; not retrying batch with possibly unknown backend outcome"
+                );
             }
         }
         BatchResult::Complete
