@@ -3148,3 +3148,172 @@ claims. A future worker slice must define ownership and cancellation across
 the mixed sample-work input, periodic producer, typed triage route, and any
 later deduper rather than treating this taskless channel as live pipeline
 parity.
+
+The forty-fifth slice, implemented by
+`accec9e0c0f89a3e5b64e8a60bb3f29393c13b52`, adds the isolated stable
+info-hash deduper and its strict consumer for the existing ignore-hashes
+oracle. The crate publicly re-exports exactly one new type,
+`DhtInfoHashDeduper`. Its public operations are `new`, `Default`, `Clone`, and
+`test_and_add(&self, info_hash: Id20) -> bool`; the observation result is
+`must_use`. There is no public geometry, false-positive-rate, seed, membership-
+only test, reset, cell, serialization, stats, or lifecycle configuration.
+
+Every `new` or `default` value owns one fresh, zeroed, process-local filter.
+Clones share that same logical filter through one `Arc<Mutex<_>>`; they do not
+copy its cells or start an independent random stream. Separately constructed
+values do not share state. The capability is `Send + Sync`, performs only
+synchronous in-memory work, starts no task, and performs no I/O.
+
+The geometry is fixed at 10,000,000 cells, two bits per cell, five membership
+indexes, forty-nine decrement cells per observation, and maximum cell value
+three. Four packed cells occupy each byte, so the cell payload is exactly
+2,500,000 bytes. The filter also owns a five-element `usize` index buffer, one
+random generator, the mutex and `Arc`, and ordinary allocation metadata. The
+packed payload size is therefore not the filter's total heap, resident-memory,
+serialized, allocator, or process footprint.
+
+The five indexes and forty-nine decrements are the exact BoomFilters-derived
+outputs for 10,000,000 cells, two bits per cell, and target false-positive rate
+0.001. Rust fixes those derived integers directly rather than recomputing them
+from floating-point formulas at construction. The target remains source
+configuration evidence, not a measured or guaranteed runtime rate.
+
+Rust hashes all twenty `Id20` bytes with 64-bit FNV-1, multiplying by
+`0x00000100000001b3` before XORing each byte from offset basis
+`0xcbf29ce484222325`. It splits the final sum into `low32` and `high32` and
+computes each index as `(low32 + high32 * i) % 10_000_000` for `i` from zero
+through four. Both halves are widened before multiplication and addition; the
+calculation neither uses FNV-1a nor permits intermediate 32-bit wraparound.
+
+`test_and_add` first caches all five indexes and reports `true` only when every
+corresponding cell was nonzero immediately before stable eviction. It then
+chooses one start cell, saturating-decrements that cell and the next forty-eight
+adjacent cells with modulo wrap, and finally sets all five cached membership
+cells to three. The stable-eviction/add transition runs for both `true` and
+`false` results. Repeated membership indexes are harmless, and a transition is
+not claimed to change the packed bytes when all effective writes reproduce
+their prior values.
+
+The returned Boolean is probabilistic observation state, not exact set
+membership. A false positive can classify a hash never previously observed as
+already present; stable eviction can make a previously observed hash return
+false. Every call adds its hash again after the pre-decrement membership test.
+No exact false-positive or false-negative rate, retention age, eviction order,
+or long-run membership sequence follows from the fixed geometry alone.
+
+One blocking mutex owns the packed cells, index buffer, and decrement-start
+source. The lock covers the complete hash/index, membership, decrement, and
+max-set transition, so calls through all clones are serialized into one atomic
+logical order. Mutex poisoning is deliberately fatal through `lock().expect`.
+A panic can interrupt a partially applied stable-filter transition; recovering
+the poisoned state would incorrectly expose it as valid. This is a Rust fail-
+fast delta from Go's mutex, not a claim about mutex fairness, throughput,
+which contending caller wins, or cross-thread completion order.
+
+The workspace adds a direct `fastrand = "2.4.1"` dependency, and
+`bitmagnet-dht` opts into that workspace pin. The version and checksum were
+already present transitively in `Cargo.lock`; this slice adds only `fastrand`
+to the DHT package's dependency list. Each fresh deduper constructs one
+`fastrand::Rng`, stores it under the same mutex as the filter state, and uses
+it only to choose a start in `0..10_000_000`. Clones share that one stream.
+Rust does not reuse Go's process-global `math/rand` stream and claims no exact
+Go seed, offset, cell, or random sequence.
+
+A private `cfg(test)` decrement-start source can replace the random source with
+an ordered script. It freezes cell-level transition tests without becoming a
+public seed, production configuration, fastrand seed, or claim about Go
+randomness. Production builds retain only the per-instance fastrand variant;
+the implementation adds no home-grown PRNG and does not use the DHT crate's
+independent `getrandom` dependency for stable eviction.
+
+The strict consumer reads the existing two-row fixture
+`testdata/parity/dht/dht_crawler_ignore_hashes.jsonl`, generated in
+`684aedf68d9c07b96a362c470ec3619c0290b4f5`, and pins its SHA-256 as
+`7900b4046d10037b9c7541d36d79370a92ceb3135f9c81be0adef985ac1f4621`.
+Every fixture, oracle, input, operation, contention, expected-result,
+expected-contention, and source object denies unknown fields. The consumer
+requires exactly these ordered row IDs and classifications:
+
+- `production_source_filter_and_probabilistic_scope_contract`: `SOURCE_ONLY`;
+  and
+- `fresh_production_filter_adjacent_duplicates`: `RUNTIME_EXACT`.
+
+The source-only row consumes all thirty-four source fields. It binds the Go
+wrapper's one mutex around the full twenty-byte `TestAndAdd`, test-before-
+decrement order, every-call add, process-local and non-persisted state, exact
+geometry and derived values, FNV-1 double-hash kernel, global-random adjacent
+decrement shape, probabilistic scope, module identity and sums, Go module and
+sum lines, adjacent-duplicate scope, evidence, and all sixteen Go nonclaims.
+The consumer also binds the Go-derived serialized length 2,500,091 as source
+metadata without implementing or claiming that serialization format in Rust.
+
+The source row fixes these seven path digests:
+
+- `github.com/tylertreat/BoomFilters@v0.0.0-20210315201527-1a82519a3e43/boom.go`:
+  `ce56167cde8bce69243cc48358184cba85b5848edd3b1143b763b3a95edccfe2`;
+- `github.com/tylertreat/BoomFilters@v0.0.0-20210315201527-1a82519a3e43/buckets.go`:
+  `a9903d73dd69456f30230146a41cc3698acb65d63014f5758739881388b5b80a`;
+- `github.com/tylertreat/BoomFilters@v0.0.0-20210315201527-1a82519a3e43/stable.go`:
+  `b2cf136135f9675441b887a552723815d806d58dba24ae2650c3c73469abfa48`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/sample_infohashes.go`:
+  `483b9037673dce82f9026f2aec9448812f804c13484fd0bd2f55fcfc70a52983`;
+  and
+- `internal/protocol/id.go`:
+  `e1947e2b4af4cc008f5bb8cf5000ebfe784a82e119cb0418c2a74c3ed5f8c26f`.
+
+Rust recomputes the four repository-local digests and checks the live
+`go.mod`/`go.sum` requirement and sum lines. It binds the three external
+BoomFilters digests from the fixture but deliberately does not locate or hash
+the non-vendored Go module cache during Rust tests. This preserves hermetic
+Rust test execution without weakening the fixture's pinned Go-source
+evidence; it does not make BoomFilters a Rust dependency.
+
+The runtime row calls the actual public Rust deduper. On one fresh filter it
+replays A as false then true and B as false then true. It then synchronizes
+eight cloned callers observing C and requires the order-independent aggregate
+of exactly one false and seven true, followed by a sequential true. Independent
+hash vectors prove that the A, B, and C five-index sets are pairwise disjoint,
+so the deterministic runtime prefix does not rely on an accidental cross-ID
+false positive. Neither the Go nor Rust gate claims which contending caller
+returns the single false.
+
+Eleven focused tests cover the two strict-consumer rows plus fixed geometry,
+`Default`, `Send + Sync`, exact FNV-1 sums and double-hash indexes, pairwise
+runtime-vector separation, packed-cell neighbor preservation, saturating
+decrement, modulo wrap, membership-before-decrement, restore-to-maximum,
+adjacent duplicates, scripted stable eviction, clone sharing, fresh-instance
+separation, and eight-thread atomicity. The checkpoint passed the eleven-test
+focus, that focus one hundred consecutive times, formatting, strict all-target
+and all-feature Clippy with warnings denied, and diff whitespace checks.
+
+This slice adds no BoomFilters serialization or deserialization, public
+configuration, public constants, public seed, reset, membership-only test,
+stats, metrics, task, timer, async operation, persistence, restart recovery,
+database state, KTable state, response parsing, triage message, queue,
+callback, retry, worker, producer change, supervisor child, runtime or
+application wiring, external traffic, deployment, production readiness, or
+rollout. The deduper is a standalone, publicly constructible prerequisite but
+is not used by a production path in this slice.
+
+No exact random decrement offsets, Go `math/rand` seed or sequence, exact-set
+semantics, measured or guaranteed false-positive or false-negative rate,
+long-run membership trace, exact eviction age, mutex scheduling, total heap
+footprint, serialized contents, restart persistence, end-to-end sample worker,
+triage, query, KTable, recursive fanout, supervisor, application, or live
+behavior is claimed. Fixed algorithm parity and the exact runtime prefix do
+not promote those probabilistic or higher-pipeline behaviors to strict parity.
+
+This slice supersedes slice forty-four only where it excludes a stable Bloom
+deduper or refers to one solely as a later prerequisite. Slice forty-four's
+typed triage route, taskless lifecycle, capacity contract, Go batching
+nonclaims, and lack of production composition remain unchanged. It does not
+alter the immutable Go oracle: that fixture still makes no Rust implementation
+or public-API claim, while this slice's strict consumer records the Rust
+capability and deliberate deltas separately. Slices forty-two and forty-three
+remain authoritative for the mixed sample-work input and periodic producer;
+the worker and every supervisor, runtime, application, deployment, production,
+and rollout boundary remain deferred.
