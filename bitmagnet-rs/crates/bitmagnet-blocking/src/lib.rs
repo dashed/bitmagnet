@@ -58,6 +58,33 @@ pub enum BlockingError {
     Store(#[source] BoxError),
 }
 
+/// The observable result of one caller-driven blocking finalization attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockingFinalizeOutcome {
+    /// No hashes were buffered at the serialized observation point, so the
+    /// store was not consulted. Another manager clone may enqueue work later.
+    NothingPending,
+    /// One non-empty atomic store commit succeeded.
+    Flushed {
+        /// Number of unique hashes in the committed in-memory buffer.
+        unique_hash_count: usize,
+    },
+}
+
+/// Object-safe seam for a caller-owned blocking-manager finalization hook.
+///
+/// One call makes at most one atomic store commit attempt and owns no retry,
+/// deadline, or background task. Store failure or cancellation retains the
+/// local buffer and last published filter/time. The decrement-start source may
+/// already have advanced, and either condition can have an ambiguous remote
+/// commit outcome. A later caller-chosen retry may therefore repeat a commit
+/// that the server accepted; this interface makes no exactly-once claim.
+#[async_trait]
+pub trait BlockingFinalizer: Send + Sync {
+    /// Finalize the currently buffered hashes once, if any.
+    async fn finalize(&self) -> Result<BlockingFinalizeOutcome, BlockingError>;
+}
+
 struct CommittedFilter {
     filter: StableBloomFilter,
     /// Sampled after the filter write and before metadata work and commit.
@@ -178,14 +205,13 @@ impl BlockingManager {
         Ok(())
     }
 
-    /// Persist a non-empty buffer. An empty public flush is deliberately a
-    /// no-op and does not initialize or reload the filter.
+    /// Persist a non-empty buffer, discarding the typed finalization outcome.
+    /// An empty public flush is deliberately a no-op and does not initialize or
+    /// reload the filter.
     pub async fn flush(&self) -> Result<(), BlockingError> {
-        let mut inner = self.inner.lock().await;
-        if inner.buffer.is_empty() {
-            return Ok(());
-        }
-        flush_locked(&mut inner).await
+        <Self as BlockingFinalizer>::finalize(self)
+            .await
+            .map(|_| ())
     }
 
     #[cfg(test)]
@@ -206,6 +232,20 @@ impl BlockingManager {
             })),
             config,
         }
+    }
+}
+
+#[async_trait]
+impl BlockingFinalizer for BlockingManager {
+    async fn finalize(&self) -> Result<BlockingFinalizeOutcome, BlockingError> {
+        let mut inner = self.inner.lock().await;
+        let unique_hash_count = inner.buffer.len();
+        if unique_hash_count == 0 {
+            return Ok(BlockingFinalizeOutcome::NothingPending);
+        }
+
+        flush_locked(&mut inner).await?;
+        Ok(BlockingFinalizeOutcome::Flushed { unique_hash_count })
     }
 }
 

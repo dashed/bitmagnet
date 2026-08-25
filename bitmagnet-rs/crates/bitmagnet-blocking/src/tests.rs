@@ -258,6 +258,149 @@ async fn defaults_empty_public_flush_traits_and_drop_are_taskless() {
 }
 
 #[tokio::test]
+async fn finalizer_trait_object_reports_empty_without_a_store_attempt() {
+    assert_send_sync::<Box<dyn BlockingFinalizer>>();
+    assert_send_sync::<BlockingFinalizeOutcome>();
+
+    let (manager, store, _, starts) = manager(Instant::now(), BlockingConfig::default());
+    let finalizer: &dyn BlockingFinalizer = &manager;
+    assert_eq!(
+        finalizer.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::NothingPending
+    );
+    assert!(store.calls().is_empty());
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn finalizer_reports_unique_nonempty_count_and_makes_exactly_one_attempt() {
+    let a = test_hash(80);
+    let b = test_hash(81);
+    let (manager, store, _, _) = manager(Instant::now(), BlockingConfig::default());
+    manager.filter(&[]).await.unwrap();
+    manager.block(&[a, a, b], false).await.unwrap();
+    let calls_before = store.calls().len();
+
+    let finalizer: &dyn BlockingFinalizer = &manager;
+    assert_eq!(
+        finalizer.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 2,
+        }
+    );
+    let calls = store.calls();
+    assert_eq!(calls.len(), calls_before + 1);
+    assert_eq!(
+        calls
+            .last()
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>(),
+        HashSet::from([a, b])
+    );
+    assert!(manager.inner.lock().await.buffer.is_empty());
+}
+
+#[tokio::test]
+async fn finalizer_count_excludes_a_suffix_blocked_behind_the_commit_mutex() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let a = test_hash(85);
+    let b = test_hash(86);
+    let (manager, store, _, _) = manager(Instant::now(), BlockingConfig::default());
+    manager.filter(&[]).await.unwrap();
+    manager.block(&[a], false).await.unwrap();
+    store.push_outcome(StoreOutcome::PauseThenSuccess {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+
+    let finalization = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.finalize().await }
+    });
+    entered.notified().await;
+    let mut suffix = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.block(&[b], false).await }
+    });
+    assert!(timeout(Duration::from_millis(20), &mut suffix)
+        .await
+        .is_err());
+
+    release.notify_one();
+    assert_eq!(
+        finalization.await.unwrap().unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 1,
+        }
+    );
+    suffix.await.unwrap().unwrap();
+    let inner = manager.inner.lock().await;
+    assert_eq!(inner.buffer, HashSet::from([b]));
+}
+
+#[tokio::test]
+async fn failed_finalization_retains_buffer_for_caller_chosen_single_retry() {
+    let a = test_hash(82);
+    let b = test_hash(83);
+    let (manager, store, _, _) = manager(Instant::now(), BlockingConfig::default());
+    manager.filter(&[]).await.unwrap();
+    manager.block(&[a, b], false).await.unwrap();
+    let calls_before = store.calls().len();
+    store.push_outcome(StoreOutcome::FailAfterAdd);
+
+    let error = manager.finalize().await.unwrap_err();
+    match error {
+        BlockingError::Store(source) => assert_eq!(source.to_string(), "after add"),
+    }
+    assert_eq!(store.calls().len(), calls_before + 1);
+    assert_eq!(manager.inner.lock().await.buffer.len(), 2);
+
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 2,
+        }
+    );
+    assert_eq!(store.calls().len(), calls_before + 2);
+    assert!(manager.inner.lock().await.buffer.is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_finalization_retains_buffer_without_an_internal_retry() {
+    let entered = Arc::new(Notify::new());
+    let a = test_hash(84);
+    let (manager, store, _, _) = manager(Instant::now(), BlockingConfig::default());
+    manager.filter(&[]).await.unwrap();
+    manager.block(&[a], false).await.unwrap();
+    let calls_before = store.calls().len();
+    store.push_outcome(StoreOutcome::PauseThenSuccess {
+        entered: entered.clone(),
+        release: Arc::new(Notify::new()),
+    });
+
+    let task = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.finalize().await }
+    });
+    entered.notified().await;
+    assert_eq!(store.calls().len(), calls_before + 1);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(manager.inner.lock().await.buffer.contains(&a));
+
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 1,
+        }
+    );
+    assert_eq!(store.calls().len(), calls_before + 2);
+}
+
+#[tokio::test]
 async fn first_filter_and_first_block_checkpoint_but_later_empty_block_waits() {
     let now = Instant::now();
     let (filter_manager, filter_store, _, _) = manager(now, BlockingConfig::default());
