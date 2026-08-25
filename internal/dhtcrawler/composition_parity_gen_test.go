@@ -13,10 +13,12 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,7 +29,7 @@ var updateDHTCrawlerCompositionParity = flag.Bool(
 	"rewrite the Rust DHT crawler composition source fixture",
 )
 
-const crawlerCompositionFixtureSHA256 = "a9c142630681d76ca95c67c96b8338804c67429b096708f6a1176b0b0ee2b31c"
+const crawlerCompositionFixtureSHA256 = "fc1dfd4e28f0cd32aeef424af5f4b8aa65f18c0a663589e31daa174010bb0474"
 
 const crawlerCompositionFixtureID = "production_construction_and_lifecycle_source_contract"
 
@@ -58,6 +60,7 @@ type crawlerCompositionInput struct {
 
 type crawlerCompositionExpected struct {
 	Config                    crawlerCompositionConfig      `json:"config"`
+	Scaling                   crawlerCompositionScaling     `json:"scaling"`
 	Routes                    []crawlerCompositionRoute     `json:"routes"`
 	CrawlerLaunches           []crawlerCompositionLaunch    `json:"crawlerLaunches"`
 	Lifecycle                 crawlerCompositionLifecycle   `json:"lifecycle"`
@@ -81,6 +84,36 @@ type crawlerCompositionConfig struct {
 	SavePieces                           bool   `json:"savePieces"`
 	RescrapeThresholdSeconds             int64  `json:"rescrapeThresholdSeconds"`
 	SoughtNodeRotationSeconds            int64  `json:"soughtNodeRotationSeconds"`
+}
+
+type crawlerCompositionScaling struct {
+	Arithmetic string                             `json:"arithmetic"`
+	Formulas   []crawlerCompositionScalingFormula `json:"formulas"`
+	Vectors    []crawlerCompositionScalingVector  `json:"vectors"`
+}
+
+type crawlerCompositionScalingFormula struct {
+	Name                  string `json:"name"`
+	CapacityExpression    string `json:"capacityExpression"`
+	ConcurrencyExpression string `json:"concurrencyExpression"`
+}
+
+type crawlerCompositionScalingVector struct {
+	ScalingFactor               uint64 `json:"scalingFactor"`
+	DiscoveryCapacity           int64  `json:"discoveryCapacity"`
+	PingCapacity                int64  `json:"pingCapacity"`
+	PingConcurrency             int64  `json:"pingConcurrency"`
+	FindNodeCapacity            int64  `json:"findNodeCapacity"`
+	FindNodeConcurrency         int64  `json:"findNodeConcurrency"`
+	SampleInfohashesCapacity    int64  `json:"sampleInfohashesCapacity"`
+	SampleInfohashesConcurrency int64  `json:"sampleInfohashesConcurrency"`
+	InfoHashTriageCapacity      int64  `json:"infoHashTriageCapacity"`
+	GetPeersCapacity            int64  `json:"getPeersCapacity"`
+	GetPeersConcurrency         int64  `json:"getPeersConcurrency"`
+	ScrapeCapacity              int64  `json:"scrapeCapacity"`
+	ScrapeConcurrency           int64  `json:"scrapeConcurrency"`
+	RequestMetaInfoCapacity     int64  `json:"requestMetaInfoCapacity"`
+	RequestMetaInfoConcurrency  int64  `json:"requestMetaInfoConcurrency"`
 }
 
 type crawlerCompositionRoute struct {
@@ -179,6 +212,9 @@ func TestGenerateDHTCrawlerCompositionParity(t *testing.T) {
 
 func crawlerCompositionSourceFixture(t *testing.T) crawlerCompositionFixture {
 	t.Helper()
+	if strconv.IntSize != 64 {
+		t.Fatalf("composition scaling vectors require 64-bit int, got %d", strconv.IntSize)
+	}
 	return crawlerCompositionFixture{
 		ID:             crawlerCompositionFixtureID,
 		Subsystem:      "dht_crawler_composition",
@@ -210,6 +246,20 @@ func crawlerCompositionSourceFixture(t *testing.T) crawlerCompositionFixture {
 				OldestNodeScanSeconds: 10, OldPeerThresholdSeconds: 900,
 				SaveFilesThreshold: 100, SavePieces: false,
 				RescrapeThresholdSeconds: 30 * 24 * 60 * 60, SoughtNodeRotationSeconds: 10,
+			},
+			Scaling: crawlerCompositionScaling{
+				Arithmetic: "64_bit_source_expression_evaluation_without_channel_allocation",
+				Formulas: []crawlerCompositionScalingFormula{
+					{Name: "discovered_nodes", CapacityExpression: "int(100*ScalingFactor)"},
+					{Name: "nodes_for_ping", CapacityExpression: "int(ScalingFactor)", ConcurrencyExpression: "int(ScalingFactor)"},
+					{Name: "nodes_for_find_node", CapacityExpression: "10*int(ScalingFactor)", ConcurrencyExpression: "10*int(ScalingFactor)"},
+					{Name: "nodes_for_sample_infohashes", CapacityExpression: "10*int(ScalingFactor)", ConcurrencyExpression: "10*int(ScalingFactor)"},
+					{Name: "info_hash_triage", CapacityExpression: "10*int(ScalingFactor)"},
+					{Name: "get_peers", CapacityExpression: "10*int(ScalingFactor)", ConcurrencyExpression: "20*int(ScalingFactor)"},
+					{Name: "scrape", CapacityExpression: "10*int(ScalingFactor)", ConcurrencyExpression: "20*int(ScalingFactor)"},
+					{Name: "request_meta_info", CapacityExpression: "10*int(ScalingFactor)", ConcurrencyExpression: "40*int(ScalingFactor)"},
+				},
+				Vectors: crawlerCompositionScalingVectors(),
 			},
 			Routes: []crawlerCompositionRoute{
 				{Name: "discovered_nodes", Capacity: 1000, BatchSize: 10, BatchIntervalMilliseconds: 10, Implementation: "BatchingChannel"},
@@ -270,6 +320,39 @@ func crawlerCompositionSourceFixture(t *testing.T) crawlerCompositionFixture {
 				"no_Rust_supervisor_application_deployment_or_production_readiness_claim",
 			},
 		},
+	}
+}
+
+func crawlerCompositionScalingVectors() []crawlerCompositionScalingVector {
+	maxNonnegativeDiscovery := uint(math.MaxInt64 / 100)
+	return []crawlerCompositionScalingVector{
+		crawlerCompositionScalingVectorFor(0),
+		crawlerCompositionScalingVectorFor(2),
+		crawlerCompositionScalingVectorFor(10),
+		crawlerCompositionScalingVectorFor(maxNonnegativeDiscovery),
+		crawlerCompositionScalingVectorFor(maxNonnegativeDiscovery + 1),
+		crawlerCompositionScalingVectorFor(^uint(0)),
+	}
+}
+
+func crawlerCompositionScalingVectorFor(scalingFactor uint) crawlerCompositionScalingVector {
+	scaling := int(scalingFactor)
+	return crawlerCompositionScalingVector{
+		ScalingFactor:               uint64(scalingFactor),
+		DiscoveryCapacity:           int64(int(100 * scalingFactor)),
+		PingCapacity:                int64(scaling),
+		PingConcurrency:             int64(scaling),
+		FindNodeCapacity:            int64(10 * scaling),
+		FindNodeConcurrency:         int64(10 * scaling),
+		SampleInfohashesCapacity:    int64(10 * scaling),
+		SampleInfohashesConcurrency: int64(10 * scaling),
+		InfoHashTriageCapacity:      int64(10 * scaling),
+		GetPeersCapacity:            int64(10 * scaling),
+		GetPeersConcurrency:         int64(20 * scaling),
+		ScrapeCapacity:              int64(10 * scaling),
+		ScrapeConcurrency:           int64(20 * scaling),
+		RequestMetaInfoCapacity:     int64(10 * scaling),
+		RequestMetaInfoConcurrency:  int64(40 * scaling),
 	}
 }
 
@@ -619,9 +702,15 @@ func TestDHTCrawlerCompositionSchemaIsExact(t *testing.T) {
 		{name: "unknown nested key", mutate: func(value map[string]any) {
 			value["expected"].(map[string]any)["routes"].([]any)[0].(map[string]any)["unknown"] = true
 		}},
+		{name: "unknown scaling key", mutate: func(value map[string]any) {
+			value["expected"].(map[string]any)["scaling"].(map[string]any)["unknown"] = true
+		}},
 		{name: "missing required scalar", mutate: func(value map[string]any) { delete(value, "id") }},
 		{name: "missing nested scalar", mutate: func(value map[string]any) {
 			delete(value["expected"].(map[string]any)["config"].(map[string]any), "scalingFactor")
+		}},
+		{name: "missing scaling vectors", mutate: func(value map[string]any) {
+			delete(value["expected"].(map[string]any)["scaling"].(map[string]any), "vectors")
 		}},
 		{name: "null object", mutate: func(value map[string]any) { value["oracle"] = nil }},
 		{name: "null scalar", mutate: func(value map[string]any) { value["subsystem"] = nil }},

@@ -15,8 +15,8 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_composition.jsonl"
 ));
-const FIXTURE_SHA256: &str = "a9c142630681d76ca95c67c96b8338804c67429b096708f6a1176b0b0ee2b31c";
-const FIXTURE_BYTE_LENGTH: usize = 10_951;
+const FIXTURE_SHA256: &str = "fc1dfd4e28f0cd32aeef424af5f4b8aa65f18c0a663589e31daa174010bb0474";
+const FIXTURE_BYTE_LENGTH: usize = 14_725;
 const FIXTURE_ID: &str = "production_construction_and_lifecycle_source_contract";
 
 const SOURCE_FUNCTIONS: [&str; 16] = [
@@ -149,6 +149,33 @@ const ROUTES: [ExpectedRoute; 10] = [
     },
 ];
 
+const SCALING_FORMULAS: [(&str, &str, &str); 8] = [
+    ("discovered_nodes", "int(100*ScalingFactor)", ""),
+    ("nodes_for_ping", "int(ScalingFactor)", "int(ScalingFactor)"),
+    (
+        "nodes_for_find_node",
+        "10*int(ScalingFactor)",
+        "10*int(ScalingFactor)",
+    ),
+    (
+        "nodes_for_sample_infohashes",
+        "10*int(ScalingFactor)",
+        "10*int(ScalingFactor)",
+    ),
+    ("info_hash_triage", "10*int(ScalingFactor)", ""),
+    (
+        "get_peers",
+        "10*int(ScalingFactor)",
+        "20*int(ScalingFactor)",
+    ),
+    ("scrape", "10*int(ScalingFactor)", "20*int(ScalingFactor)"),
+    (
+        "request_meta_info",
+        "10*int(ScalingFactor)",
+        "40*int(ScalingFactor)",
+    ),
+];
+
 const GO_NONCLAIMS: [&str; 6] = [
     "no_production_function_channel_goroutine_Fx_hook_DNS_network_database_limiter_clock_logger_or_metric_execution",
     "no_runtime_goroutine_start_completion_or_map_iteration_order",
@@ -163,15 +190,16 @@ const RUST_EXECUTION_PARTITION: [(&str, &str); 1] = [(
     "GO_SOURCE_INSPECTION_ONLY_NO_RUST_COMPOSITION_RUNTIME_REPLAY",
 )];
 
-const RUST_OWNED_HARDENINGS: [&str; 4] = [
+const RUST_OWNED_HARDENINGS: [&str; 5] = [
     "Rust_injected_stable_peer_ID_is_not_Go_random_factory_parity",
     "Rust_does_not_implement_the_Go_request_limiter_logger_or_Prometheus_wrapper_stack",
     "Rust_joined_staged_drain_and_blocking_finalization_are_hardening_not_Go_OnStop_parity",
     "Rust_source_writer_whole_transaction_contract_differs_from_Go_possible_prior_chunk_commits",
+    "Rust_rejects_zero_overflowing_and_Tokio_out_of_range_scaling_before_graph_construction",
 ];
 
 const RUST_NONCLAIMS: [&str; 6] = [
-    "no_Go_scaling_factor_runtime_application_integration_claim",
+    "no_Go_unchecked_zero_or_native_width_overflow_acceptance_claim",
     "no_Go_map_or_goroutine_runtime_order_claim",
     "no_whole_crawler_lossless_shutdown_claim",
     "no_live_DNS_network_database_limiter_logger_metrics_or_clock_execution",
@@ -470,6 +498,7 @@ struct Input {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Expected {
     config: Config,
+    scaling: Scaling,
     routes: Vec<Route>,
     crawler_launches: Vec<Launch>,
     lifecycle: Lifecycle,
@@ -496,6 +525,147 @@ struct Config {
     rescrape_threshold_seconds: i64,
     sought_node_rotation_seconds: i64,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Scaling {
+    arithmetic: String,
+    formulas: Vec<ScalingFormula>,
+    vectors: Vec<ScalingVector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScalingFormula {
+    name: String,
+    capacity_expression: String,
+    concurrency_expression: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScalingVector {
+    scaling_factor: u64,
+    discovery_capacity: i64,
+    ping_capacity: i64,
+    ping_concurrency: i64,
+    find_node_capacity: i64,
+    find_node_concurrency: i64,
+    sample_infohashes_capacity: i64,
+    sample_infohashes_concurrency: i64,
+    info_hash_triage_capacity: i64,
+    get_peers_capacity: i64,
+    get_peers_concurrency: i64,
+    scrape_capacity: i64,
+    scrape_concurrency: i64,
+    request_meta_info_capacity: i64,
+    request_meta_info_concurrency: i64,
+}
+
+const SCALING_VECTORS: [ScalingVector; 6] = [
+    ScalingVector {
+        scaling_factor: 0,
+        discovery_capacity: 0,
+        ping_capacity: 0,
+        ping_concurrency: 0,
+        find_node_capacity: 0,
+        find_node_concurrency: 0,
+        sample_infohashes_capacity: 0,
+        sample_infohashes_concurrency: 0,
+        info_hash_triage_capacity: 0,
+        get_peers_capacity: 0,
+        get_peers_concurrency: 0,
+        scrape_capacity: 0,
+        scrape_concurrency: 0,
+        request_meta_info_capacity: 0,
+        request_meta_info_concurrency: 0,
+    },
+    ScalingVector {
+        scaling_factor: 2,
+        discovery_capacity: 200,
+        ping_capacity: 2,
+        ping_concurrency: 2,
+        find_node_capacity: 20,
+        find_node_concurrency: 20,
+        sample_infohashes_capacity: 20,
+        sample_infohashes_concurrency: 20,
+        info_hash_triage_capacity: 20,
+        get_peers_capacity: 20,
+        get_peers_concurrency: 40,
+        scrape_capacity: 20,
+        scrape_concurrency: 40,
+        request_meta_info_capacity: 20,
+        request_meta_info_concurrency: 80,
+    },
+    ScalingVector {
+        scaling_factor: 10,
+        discovery_capacity: 1_000,
+        ping_capacity: 10,
+        ping_concurrency: 10,
+        find_node_capacity: 100,
+        find_node_concurrency: 100,
+        sample_infohashes_capacity: 100,
+        sample_infohashes_concurrency: 100,
+        info_hash_triage_capacity: 100,
+        get_peers_capacity: 100,
+        get_peers_concurrency: 200,
+        scrape_capacity: 100,
+        scrape_concurrency: 200,
+        request_meta_info_capacity: 100,
+        request_meta_info_concurrency: 400,
+    },
+    ScalingVector {
+        scaling_factor: 92_233_720_368_547_758,
+        discovery_capacity: 9_223_372_036_854_775_800,
+        ping_capacity: 92_233_720_368_547_758,
+        ping_concurrency: 92_233_720_368_547_758,
+        find_node_capacity: 922_337_203_685_477_580,
+        find_node_concurrency: 922_337_203_685_477_580,
+        sample_infohashes_capacity: 922_337_203_685_477_580,
+        sample_infohashes_concurrency: 922_337_203_685_477_580,
+        info_hash_triage_capacity: 922_337_203_685_477_580,
+        get_peers_capacity: 922_337_203_685_477_580,
+        get_peers_concurrency: 1_844_674_407_370_955_160,
+        scrape_capacity: 922_337_203_685_477_580,
+        scrape_concurrency: 1_844_674_407_370_955_160,
+        request_meta_info_capacity: 922_337_203_685_477_580,
+        request_meta_info_concurrency: 3_689_348_814_741_910_320,
+    },
+    ScalingVector {
+        scaling_factor: 92_233_720_368_547_759,
+        discovery_capacity: -9_223_372_036_854_775_716,
+        ping_capacity: 92_233_720_368_547_759,
+        ping_concurrency: 92_233_720_368_547_759,
+        find_node_capacity: 922_337_203_685_477_590,
+        find_node_concurrency: 922_337_203_685_477_590,
+        sample_infohashes_capacity: 922_337_203_685_477_590,
+        sample_infohashes_concurrency: 922_337_203_685_477_590,
+        info_hash_triage_capacity: 922_337_203_685_477_590,
+        get_peers_capacity: 922_337_203_685_477_590,
+        get_peers_concurrency: 1_844_674_407_370_955_180,
+        scrape_capacity: 922_337_203_685_477_590,
+        scrape_concurrency: 1_844_674_407_370_955_180,
+        request_meta_info_capacity: 922_337_203_685_477_590,
+        request_meta_info_concurrency: 3_689_348_814_741_910_360,
+    },
+    ScalingVector {
+        scaling_factor: u64::MAX,
+        discovery_capacity: -100,
+        ping_capacity: -1,
+        ping_concurrency: -1,
+        find_node_capacity: -10,
+        find_node_concurrency: -10,
+        sample_infohashes_capacity: -10,
+        sample_infohashes_concurrency: -10,
+        info_hash_triage_capacity: -10,
+        get_peers_capacity: -10,
+        get_peers_concurrency: -20,
+        scrape_capacity: -10,
+        scrape_concurrency: -20,
+        request_meta_info_capacity: -10,
+        request_meta_info_concurrency: -40,
+    },
+];
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -690,6 +860,28 @@ fn validate_frozen_row(row: &Fixture) -> Result<(), String> {
         "config"
     );
 
+    let scaling = &row.expected.scaling;
+    require_contract!(
+        scaling.arithmetic == "64_bit_source_expression_evaluation_without_channel_allocation",
+        "scaling.arithmetic"
+    );
+    require_contract!(
+        scaling.formulas.len() == SCALING_FORMULAS.len(),
+        "scaling formula count"
+    );
+    for (formula, expected) in scaling.formulas.iter().zip(SCALING_FORMULAS) {
+        require_contract!(
+            formula.name == expected.0
+                && formula.capacity_expression == expected.1
+                && formula.concurrency_expression == expected.2,
+            "ordered scaling formula"
+        );
+    }
+    require_contract!(
+        scaling.vectors == SCALING_VECTORS,
+        "ordered scaling vectors"
+    );
+
     require_contract!(row.expected.routes.len() == ROUTES.len(), "route count");
     for (route, expected) in row.expected.routes.iter().zip(ROUTES) {
         require_contract!(
@@ -872,6 +1064,7 @@ fn fixture() -> Fixture {
 
 #[cfg(test)]
 mod tests {
+    use clap::{CommandFactory, FromArgMatches};
     use serde_json::{Map, Number};
 
     use super::*;
@@ -912,6 +1105,22 @@ mod tests {
         output
     }
 
+    fn app_config(scaling_factor: u64) -> crate::DhtCrawlerAppConfig {
+        let command = crate::DhtCrawlerAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None));
+        let matches = command
+            .try_get_matches_from([
+                "bitmagnet-dht-crawler".to_owned(),
+                "--expected-goose-version".to_owned(),
+                "29".to_owned(),
+                "--dht-crawler-scaling-factor".to_owned(),
+                scaling_factor.to_string(),
+            ])
+            .expect("parse scaling fixture input without ambient environment");
+        crate::DhtCrawlerAppConfig::from_arg_matches(&matches)
+            .expect("build typed scaling fixture input")
+    }
+
     #[test]
     fn frozen_envelope_execution_partition_and_every_semantic_fact_are_exact() {
         let row = fixture();
@@ -922,6 +1131,8 @@ mod tests {
         );
         assert_eq!(row.id, FIXTURE_ID);
         assert_eq!(row.oracle.source_pinned_functions.len(), 16);
+        assert_eq!(row.expected.scaling.formulas.len(), 8);
+        assert_eq!(row.expected.scaling.vectors.len(), 6);
         assert_eq!(row.expected.routes.len(), 10);
         assert_eq!(row.expected.crawler_launches.len(), 15);
         assert!(row.oracle.actual_functions_executed.is_empty());
@@ -971,6 +1182,111 @@ mod tests {
     }
 
     #[test]
+    fn safe_go_scaling_vectors_replay_on_the_atomic_rust_projection() {
+        let row = fixture();
+        for vector in row
+            .expected
+            .scaling
+            .vectors
+            .iter()
+            .filter(|vector| matches!(vector.scaling_factor, 2 | 10))
+        {
+            let projection = app_config(vector.scaling_factor)
+                .projection()
+                .expect("safe Go vector projects into the Rust graph");
+            assert_eq!(
+                i64::try_from(projection.runtime.discovery_capacity.get()).unwrap(),
+                vector.discovery_capacity
+            );
+            assert_eq!(
+                i64::try_from(projection.maintenance.ping_capacity.get()).unwrap(),
+                vector.ping_capacity
+            );
+            assert_eq!(vector.ping_capacity, vector.ping_concurrency);
+            assert_eq!(
+                i64::try_from(projection.maintenance.find_node_capacity.get()).unwrap(),
+                vector.find_node_capacity
+            );
+            assert_eq!(vector.find_node_capacity, vector.find_node_concurrency);
+            assert_eq!(
+                i64::try_from(projection.maintenance.sample_infohashes_capacity.get()).unwrap(),
+                vector.sample_infohashes_capacity
+            );
+            assert_eq!(
+                vector.sample_infohashes_capacity,
+                vector.sample_infohashes_concurrency
+            );
+            assert_eq!(
+                i64::try_from(projection.downstream.root_triage_capacity.get()).unwrap(),
+                vector.info_hash_triage_capacity
+            );
+            assert_eq!(
+                i64::try_from(projection.downstream.get_peers_lane.route_capacity.get()).unwrap(),
+                vector.get_peers_capacity
+            );
+            assert_eq!(
+                i64::try_from(
+                    projection
+                        .downstream
+                        .get_peers_lane
+                        .worker_max_inflight
+                        .get()
+                )
+                .unwrap(),
+                vector.get_peers_concurrency
+            );
+            assert_eq!(
+                i64::try_from(projection.downstream.scrape_lane.route_capacity.get()).unwrap(),
+                vector.scrape_capacity
+            );
+            assert_eq!(
+                i64::try_from(projection.downstream.scrape_lane.worker_max_inflight.get()).unwrap(),
+                vector.scrape_concurrency
+            );
+            assert_eq!(
+                i64::try_from(
+                    projection
+                        .downstream
+                        .request_meta_info_lane
+                        .route_capacity
+                        .get()
+                )
+                .unwrap(),
+                vector.request_meta_info_capacity
+            );
+            assert_eq!(
+                i64::try_from(
+                    projection
+                        .downstream
+                        .request_meta_info_lane
+                        .worker_max_inflight
+                        .get()
+                )
+                .unwrap(),
+                vector.request_meta_info_concurrency
+            );
+            assert_eq!(
+                projection.downstream.persist_torrent,
+                crate::DhtPersistTorrentWorkerConfig::default(),
+                "ScalingFactor must not change persistence policy"
+            );
+        }
+
+        let zero = row
+            .expected
+            .scaling
+            .vectors
+            .first()
+            .expect("Go zero vector is present");
+        assert_eq!(zero.scaling_factor, 0);
+        assert_eq!(zero.discovery_capacity, 0);
+        assert_eq!(
+            app_config(0).projection().unwrap_err().into_kind(),
+            crate::DhtCrawlerAppConfigErrorKind::ScalingFactorZero
+        );
+    }
+
+    #[test]
     fn rust_owned_hardenings_and_nonclaims_do_not_become_go_runtime_parity() {
         fn assert_send<T: Send>() {}
         assert_send::<crate::DhtCrawlerPipelineSupervisor>();
@@ -980,11 +1296,12 @@ mod tests {
             "Rust_does_not_implement_the_Go_request_limiter_logger_or_Prometheus_wrapper_stack",
             "Rust_joined_staged_drain_and_blocking_finalization_are_hardening_not_Go_OnStop_parity",
             "Rust_source_writer_whole_transaction_contract_differs_from_Go_possible_prior_chunk_commits",
+            "Rust_rejects_zero_overflowing_and_Tokio_out_of_range_scaling_before_graph_construction",
         ]);
         assert_eq!(
             RUST_NONCLAIMS,
             [
-                "no_Go_scaling_factor_runtime_application_integration_claim",
+                "no_Go_unchecked_zero_or_native_width_overflow_acceptance_claim",
                 "no_Go_map_or_goroutine_runtime_order_claim",
                 "no_whole_crawler_lossless_shutdown_claim",
                 "no_live_DNS_network_database_limiter_logger_metrics_or_clock_execution",
@@ -1002,6 +1319,9 @@ mod tests {
             "/input",
             "/expected",
             "/expected/config",
+            "/expected/scaling",
+            "/expected/scaling/formulas/0",
+            "/expected/scaling/vectors/0",
             "/expected/routes/0",
             "/expected/crawlerLaunches/0",
             "/expected/lifecycle",
@@ -1019,6 +1339,9 @@ mod tests {
         });
         assert_mutation_rejected(|value| {
             object_mut(value, "/expected/config").remove("scalingFactor");
+        });
+        assert_mutation_rejected(|value| {
+            object_mut(value, "/expected/scaling").remove("vectors");
         });
         assert_mutation_rejected(|value| value["oracle"] = Value::Null);
         assert_mutation_rejected(|value| value["expected"]["routes"][0]["name"] = Value::Null);
