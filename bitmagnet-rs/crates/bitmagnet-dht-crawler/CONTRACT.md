@@ -3,24 +3,26 @@
 This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
-The bounded published checkpoint contains owned Rust info-hash-triage,
+The bounded current checkpoint contains owned Rust info-hash-triage,
 get-peers, scrape, request-metainfo, and scraped-source-persistence workers;
 strict differential consumers for all five stages; concrete PostgreSQL triage
 and torrent full-v2 lookup adapters; one concrete PostgreSQL scraped-source
-writer; and a thin adapter for the persistent blocking manager, plus one offline
-concrete triage composition test and taskless typed metainfo-request,
-scraped-source, and torrent-persistence handoffs, a pure torrent-persistence
-planner, and an owned torrent-persistence worker behind injected lookup and
-atomic-writer boundaries.
+writer; one concrete atomic six-collection PostgreSQL torrent writer; and a
+thin adapter for the persistent blocking manager, plus one offline concrete
+triage composition test and taskless typed metainfo-request, scraped-source,
+and torrent-persistence handoffs, a pure torrent-persistence planner, and an
+owned torrent-persistence worker behind injected lookup and atomic-writer
+boundaries.
 The get-peers worker publishes successful nonempty peer vectors through the
 metainfo-request handoff. The scrape worker publishes successful raw BEP-33
 Bloom filters through the scraped-source handoff. The request-metainfo worker
 publishes allowed verified metainfo through the torrent-persistence handoff.
-No concrete peer-wire metainfo requester, request-stage persistent-blocking
-adapter, torrent-persistence PostgreSQL writer, or Rust production application
-composition exists yet. The PostgreSQL adapters are not wired into an
-application or validated against live PostgreSQL. This is not a live-database
-integration.
+No concrete peer-wire metainfo requester or Rust production application
+composition exists yet. `BlockingManager` already implements both the triage
+filter and request-stage blocker boundaries, but no production application
+constructs, shares, flushes, or supervises it for this pipeline. The PostgreSQL
+adapters are not wired into an application or validated against live
+PostgreSQL. This is not a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -31,9 +33,10 @@ side-effect-free banning policy. This crate owns the higher-level batching and
 routing decision, the owned get-peers, scrape, request-metainfo, and
 scraped-source-persistence stages, their taskless downstream handoffs, the
 blocking-policy and database-projection seams, and the concrete SQLx lookup,
-scraped-source writer, and triage blocking-manager adapters. It does not make
-the protocol or metainfo crate depend on PostgreSQL, the persistent blocking
-manager, crawler application state, or deployment configuration.
+scraped-source writer, atomic torrent writer, and triage blocking-manager
+adapters. It does not make the protocol or metainfo crate depend on PostgreSQL,
+the persistent blocking manager, crawler application state, or deployment
+configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
@@ -67,6 +70,8 @@ The initial honest outcome-contract clarification is
 `e711650c3af1d75ae08cda0c33f1419e2bcd8821`, the typed rejection-versus-unknown
 outcome checkpoint is `12ce96b3802cd0baf883c5e0a7aacbce4d547681`, and the PostgreSQL
 source-writer checkpoint is `f5a00d2f0bc1d19ce3cb852f498e519c8558da19`.
+The transaction-neutral PostgreSQL queue-value preparation consumed by the
+atomic torrent writer is checkpoint `3e91974b`.
 The Rust metainfo parser, normalized-file projection, and default banning
 policy checkpoints are respectively
 `96b0fcafd846ac6458e01407d50de7487eea2bff`,
@@ -122,23 +127,27 @@ can inject an alternate clock.
 
 ### Persistent blocking-manager adapter
 
-`BlockingManager` directly implements `DhtInfoHashBlockFilter`. A public
-wrapper would add no ownership or lifecycle semantics because this crate owns
-the collaborator trait, so the direct implementation is the smallest public
-surface. An application can share one manager as
-`Arc<dyn DhtInfoHashBlockFilter>` while retaining a typed clone for blocking
-and flush operations.
+`BlockingManager` directly implements both `DhtInfoHashBlockFilter` and
+`DhtInfoHashBlocker`. A public wrapper would add no ownership or lifecycle
+semantics because this crate owns both collaborator traits, so the direct
+implementations are the smallest public surface. An application can share one
+manager through both trait objects while retaining a typed clone for final
+flush operations.
 
 The adapter converts `Id20` to `InfoHash` byte-for-byte, delegates exactly once
 to `BlockingManager::filter`, boxes `BlockingError` behind
 `TriageCollaboratorError`, and converts the result byte-for-byte back to
-`Id20`. It does not sort, deduplicate, validate against the input, retry, or
-flush independently; returned order and duplicates are preserved for the
-worker's existing contract validation. Its deterministic tests use a private
-single-use delegate seam and a lazy pool solely for construction, without
-polling a manager operation or acquiring a PostgreSQL connection.
+`Id20`. The blocker projection converts the ordered hash slice byte-for-byte,
+forwards the exact `flush` flag once to `BlockingManager::block`, and boxes its
+error behind `RequestMetaInfoCollaboratorError`. Neither projection retries or
+adds a flush. The filter does not sort, deduplicate, or validate against the
+input; returned order and duplicates are preserved for the worker's existing
+contract validation. Deterministic tests use private single-use delegate seams
+and a lazy pool solely for construction, without polling a manager operation or
+acquiring a PostgreSQL connection.
 
-At the adapter checkpoint, all four focused adapter tests and all 34 crawler
+The current adapter module has six focused tests covering both trait surfaces.
+At its initial filter checkpoint, all four focused adapter tests and all 34 crawler
 release tests passed. Release all-target checking, Clippy with warnings denied,
 rustdoc with warnings denied, formatting, and diff checks also passed. These
 are offline source and compile gates, not live PostgreSQL evidence.
@@ -268,9 +277,9 @@ The planner performs no lookup, route receive, clock read, database transaction,
 queue insertion, scrape send, retry, metric, logging, lifecycle, or shutdown
 work. Its deterministic scrape order is a Rust hardening over Go's unspecified
 map iteration. The owned worker described next coordinates injected lookup,
-batching, typed writer outcomes, fanout, and shutdown accounting; a future
-concrete writer remains responsible for timestamps and atomic transaction
-execution.
+batching, typed writer outcomes, fanout, and shutdown accounting; the concrete
+PostgreSQL writer described below separately owns timestamps and atomic
+transaction execution.
 
 ### Owned torrent-persistence worker
 
@@ -341,6 +350,79 @@ PostgreSQL array codecs, schema or index state, query plans, result order,
 server-side cancellation, or production readiness. The adapter creates and
 closes no pool, starts no task, retries nothing, and is not application-wired in
 this checkpoint.
+
+### Atomic PostgreSQL torrent persistence
+
+`PgDhtTorrentBatchWriter` wraps a cheap clone of an application-owned `PgPool`
+and implements `DhtTorrentBatchWriter`. Before acquiring a connection it
+validates the complete six-collection `DhtTorrentTransactionPlan`. It then
+always executes `BEGIN` and `COMMIT`, including for an empty plan. It neither
+owns nor closes the pool, retries a call, uses `QueueStore`, nor opens an
+independent queue transaction.
+
+One transaction executes these stages in exact order: `torrents`,
+`torrent_files`, `torrent_file_summary`, `torrents_torrent_sources`,
+`torrent_pieces`, then `queue_jobs`. Torrents, files, summaries, and sources use
+at most 100 rows per dynamic non-persistent statement; pieces and queue jobs use
+at most 10. Every stage preserves planner order and each chunk restarts its bind
+numbers. A statement result's affected-row count is deliberately ignored.
+
+The SQL conflict policy is source-derived from Go:
+
+- `torrents` conflicts on `info_hash` and updates only `name`, `files_status`,
+  `files_count`, `updated_at`, `files_data`, and `file_extensions`;
+- `torrent_files`, `torrents_torrent_sources`, and `torrent_pieces` use
+  targetless `ON CONFLICT DO NOTHING`;
+- `torrent_file_summary` conflicts on `info_hash` and updates exactly
+  `file_count`, `total_size`, `largest_file_size`, `extensions`, `has_video`,
+  `has_subtitle`, `has_audio`, `compressed_bytes`, and `updated_at`, preserving
+  `created_at`; and
+- `queue_jobs` is a plain insert with no conflict suppression, so an active
+  fingerprint conflict fails and rolls back the whole transaction.
+
+Hashes are bound directly as 20- or 32-byte `bytea`. `files_data = None` binds
+SQL `NULL`. Blob and extension presence must agree: `None`/`None` is the
+blob-unavailable state, and `Some`/`Some` is the blob-available state. Both a
+missing and a present-empty `file_extensions` vector encode as JSON `[]`, while
+nonempty values encode as a JSON array and never JSON null.
+Queue jobs reuse `prepare_pg_queue_job_values` for generic JSON, NUL,
+fingerprint, status, seven-day archival, retry, and exact-microsecond duration
+validation. The writer binds pending status and zero retries, computes
+`run_after = CURRENT_TIMESTAMP + delay`, and inserts the checked archival
+interval and priority. It does not impose a classifier queue name, priority,
+delay, payload/group, or source provenance policy.
+
+Prevalidation additionally checks PostgreSQL signed integer bounds, rejects
+negative summary sizes and piece lengths, rejects NUL in writer-owned text and
+extension arrays, and requires both extension arrays to contain only nonempty
+lowercase ASCII letters or digits in strictly sorted unique order. It requires
+meta version 1 or 2 with a primary matching either the v1 identity or truncated
+v2 identity as appropriate, and rejects duplicate torrent and summary primary
+keys. It deliberately does not require child rows
+to have a parent in this plan, require the source key to be `dht`, or eliminate
+duplicate files, source links, pieces, or queue jobs; PostgreSQL constraints and
+the queue's plain insert remain authoritative.
+
+All row timestamps and queue eligibility arithmetic use PostgreSQL's
+transaction-stable `CURRENT_TIMESTAMP`. Go samples its application clock before
+the transaction and lets GORM materialize timestamps and queue `RunAfter`.
+Database clock authority and capture instant are therefore an intentional Rust
+delta; the offline SQL shape does not claim exact Go timestamp equality.
+
+Validation and `BEGIN` failure are `Rejected`. On statement failure, an explicit
+successful rollback is `Rejected`; rollback failure preserves both errors and
+is `OutcomeUnknown`. A commit error is also `OutcomeUnknown`. Execute errors
+retain the exact stage, zero-based chunk index, row offset, and row count. The
+worker separately owns dropped-future abandonment and scrape-fanout policy.
+
+Offline tests freeze all six SQL shapes, bind counts and PostgreSQL types,
+non-persistent dynamic statements, stage and chunk order, conflict/update
+lists, nullable blob and JSON-array normalization, queue defaults, validation
+and deliberate nonvalidation boundaries, error context, type traits, and
+closed-pool `BEGIN` behavior for both empty and nonempty valid plans. They do
+not execute live PostgreSQL and therefore do not establish schema, foreign-key
+or enum compatibility, triggers, codecs, query plans, locks, rollback, commit
+acknowledgement, durability, cancellation, timestamp values, or affected rows.
 
 ### Scraped-source handoff route
 
@@ -725,7 +807,9 @@ already verified `ParsedInfo`; the checker is synchronous and side-effect-free;
 the blocker receives an ordered hash slice and explicit flush flag.
 `DefaultDhtMetaInfoBanningChecker` adapts the default policy from
 `bitmagnet-metainfo` without blocking as a side effect. No concrete peer-wire
-requester or persistent blocking-manager adapter is implied by these seams.
+requester is implied by these seams. Separately, the existing direct
+`BlockingManager` implementation supplies `DhtInfoHashBlocker`; production
+construction, sharing, final flush, and failure policy remain deferred.
 
 `with_config` accepts a `DhtRequestMetaInfoWorkerConfig`; its nonzero
 `max_inflight` defaults to 400, matching Go's configured callback concurrency
@@ -1464,8 +1548,9 @@ The banned row's scripted parsed v1 hash
 requested hash ending in `00cc`. It proves worker routing and blocking identity,
 not end-to-end requester hash verification. Go's `U+FFFD` is only the lossy
 JSON display projection; Rust retains the original raw `0xff` name byte.
-Passing `flush = false` proves the worker argument, not that a future concrete
-blocking-manager adapter cannot flush under its own policy.
+Passing `flush = false` proves the worker argument and the existing direct
+blocking-manager adapter's exact forwarding, not a production final-flush or
+failure policy.
 
 The nine focused strict-consumer tests passed in 100 consecutive runs. The
 current Go generator freshness test regenerated the same fixture SHA, and the
@@ -1648,12 +1733,13 @@ The following remain deliberately outside this checkpoint:
 - a concrete peer-wire `DhtMetaInfoRequester` implementing TCP, BEP-10/BEP-9
   extension negotiation and piece transfer, plus end-to-end requested-hash
   verification;
-- a concrete `DhtInfoHashBlocker` adapter to the persistent blocking manager,
-  including production flush and failure policy;
-- a concrete PostgreSQL implementation of the torrent worker's atomic six-table
-  writer, including transaction-bound queue-job insertion, timestamp policy,
-  and live schema, codec, rollback, commit, query-plan, observability, and
-  durability validation; the read-only full-v2 lookup adapter exists offline;
+- production construction and sharing of the existing direct
+  `DhtInfoHashBlocker` implementation for `BlockingManager`, including final
+  flush and failure policy;
+- application construction of the concrete atomic torrent writer with a
+  configured pool, plus live schema, enum, codec, trigger, rollback, commit,
+  query-plan, observability, and durability validation; both the atomic writer
+  and read-only full-v2 lookup adapter exist offline;
 - production construction and supervision of the owned torrent-persistence
   worker, ownership transfer of the unique receiver, scrape-route close order,
   shutdown wiring, metrics export, retry/operator policy, and health reporting;
@@ -1681,6 +1767,7 @@ pipeline. The request-metainfo route has the get-peers worker as a producer and
 the owned Rust request-metainfo worker as its consumer; allowed results flow
 through the typed torrent-persistence route. No production application
 constructs or supervises either worker, no concrete peer-wire requester or
-persistent blocker adapter supplies the request stage, and no concrete
-PostgreSQL atomic writer supplies the owned persistence worker in this
-checkpoint. Its concrete read-only full-v2 lookup is not application-wired.
+production persistent-blocker construction supplies the request stage, and no
+production application supplies the owned persistence worker with the existing
+concrete PostgreSQL atomic writer. Its concrete blocker adapter, writer, and
+read-only full-v2 lookup are not application-wired.

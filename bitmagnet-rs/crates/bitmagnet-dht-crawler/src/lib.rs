@@ -16,6 +16,7 @@ mod persist_torrent;
 mod persist_torrent_route;
 mod persist_torrent_worker;
 mod pg_source_batch_writer;
+mod pg_torrent_batch_writer;
 mod pg_torrent_triage_lookup;
 mod pg_torrent_v2_lookup;
 mod request_meta_info;
@@ -80,6 +81,10 @@ pub use persist_torrent_worker::{
 };
 pub use pg_source_batch_writer::{
     PgDhtSourceBatchWriter, PgDhtSourceBatchWriterError, PG_DHT_SOURCE_WRITE_CHUNK_LIMIT,
+};
+pub use pg_torrent_batch_writer::{
+    PgDhtTorrentBatchWriteStage, PgDhtTorrentBatchWriter, PgDhtTorrentBatchWriterError,
+    PG_DHT_TORRENT_SMALL_WRITE_CHUNK_LIMIT, PG_DHT_TORRENT_WRITE_CHUNK_LIMIT,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
 pub use pg_torrent_v2_lookup::PgDhtTorrentV2Lookup;
