@@ -819,6 +819,8 @@ dependencies = [
  "async-trait",
  "bitmagnet-bloom",
  "bitmagnet-model",
+ "chrono",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
 ]

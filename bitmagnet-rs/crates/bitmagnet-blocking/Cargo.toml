@@ -11,6 +11,8 @@ description = "Buffered persistent info-hash blocking policy for bitmagnet."
 async-trait.workspace = true
 bitmagnet-bloom = { path = "../bitmagnet-bloom" }
 bitmagnet-model = { path = "../bitmagnet-model" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

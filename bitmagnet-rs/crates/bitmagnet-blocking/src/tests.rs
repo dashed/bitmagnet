@@ -10,6 +10,7 @@ use bitmagnet_bloom::{
     DecrementStartSource, StableBloomFilter, StableBloomGeometry, StableBloomGeometryError,
 };
 use bitmagnet_model::InfoHash;
+use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -24,21 +25,24 @@ const SAFE_START: usize = 9_999;
 
 #[derive(Debug)]
 struct ManualClock {
-    now: StdMutex<Instant>,
+    now: StdMutex<ClockSample>,
     reads: AtomicUsize,
 }
 
 impl ManualClock {
     fn new(now: Instant) -> Self {
         Self {
-            now: StdMutex::new(now),
+            now: StdMutex::new(ClockSample {
+                monotonic: now,
+                wall: DateTime::<Utc>::UNIX_EPOCH,
+            }),
             reads: AtomicUsize::new(0),
         }
     }
 
     fn advance(&self, duration: Duration) {
         let mut now = self.now.lock().unwrap();
-        *now += duration;
+        now.monotonic += duration;
     }
 
     fn read_count(&self) -> usize {
@@ -47,7 +51,7 @@ impl ManualClock {
 }
 
 impl BlockingClock for ManualClock {
-    fn now(&self) -> Instant {
+    fn now(&self) -> ClockSample {
         self.reads.fetch_add(1, Ordering::SeqCst);
         *self.now.lock().unwrap()
     }
@@ -144,7 +148,7 @@ impl AtomicBlockingStore for FakeStore {
 
         let mut encoded = Vec::with_capacity(geometry.encoded_bytes());
         filter.write_to(&mut encoded)?;
-        let flushed_at = self.clock.now();
+        let flushed_at = self.clock.now().monotonic;
 
         if let StoreOutcome::PauseThenSuccess { entered, release } = outcome {
             entered.notify_one();
