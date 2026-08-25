@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-use crate::{DhtDiscoveryReceiver, KTable, KTableNodeHandle, RoutingNode};
+use crate::{
+    DhtDiscoveryReceiver, KTable, KTableNodeHandle, RoutingNode, DHT_CHANNEL_MAX_CAPACITY,
+};
 
 const DEFAULT_MAX_BATCH_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 const DEFAULT_PING_CAPACITY: NonZeroUsize = NonZeroUsize::new(10).unwrap();
@@ -39,6 +41,47 @@ impl Default for DhtDiscoveredNodeSchedulerConfig {
     }
 }
 
+impl DhtDiscoveredNodeSchedulerConfig {
+    /// Validate timer and route-capacity policy without constructing queues.
+    pub fn validate(&self) -> Result<(), DhtDiscoveredNodeSchedulerConfigError> {
+        self.validated_first_tick_at().map(|_| ())
+    }
+
+    fn validated_first_tick_at(&self) -> Result<Instant, DhtDiscoveredNodeSchedulerConfigError> {
+        if self.batch_interval.is_zero() {
+            return Err(DhtDiscoveredNodeSchedulerConfigError::ZeroBatchInterval);
+        }
+        let first_tick_at = Instant::now()
+            .checked_add(self.batch_interval)
+            .ok_or(DhtDiscoveredNodeSchedulerConfigError::BatchIntervalOutOfRange)?;
+        if self.ping_capacity.get() > DHT_CHANNEL_MAX_CAPACITY {
+            return Err(
+                DhtDiscoveredNodeSchedulerConfigError::PingCapacityOutOfRange {
+                    capacity: self.ping_capacity,
+                    maximum: DHT_CHANNEL_MAX_CAPACITY,
+                },
+            );
+        }
+        if self.find_node_capacity.get() > DHT_CHANNEL_MAX_CAPACITY {
+            return Err(
+                DhtDiscoveredNodeSchedulerConfigError::FindNodeCapacityOutOfRange {
+                    capacity: self.find_node_capacity,
+                    maximum: DHT_CHANNEL_MAX_CAPACITY,
+                },
+            );
+        }
+        if self.sample_infohashes_capacity.get() > DHT_CHANNEL_MAX_CAPACITY {
+            return Err(
+                DhtDiscoveredNodeSchedulerConfigError::SampleInfoHashesCapacityOutOfRange {
+                    capacity: self.sample_infohashes_capacity,
+                    maximum: DHT_CHANNEL_MAX_CAPACITY,
+                },
+            );
+        }
+        Ok(first_tick_at)
+    }
+}
+
 /// Invalid discovered-node scheduler configuration.
 #[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DhtDiscoveredNodeSchedulerConfigError {
@@ -46,6 +89,25 @@ pub enum DhtDiscoveredNodeSchedulerConfigError {
     ZeroBatchInterval,
     #[error("the discovered-node batch interval exceeds the monotonic clock range")]
     BatchIntervalOutOfRange,
+    #[error("the discovered-node ping capacity {capacity} exceeds Tokio's maximum of {maximum}")]
+    PingCapacityOutOfRange {
+        capacity: NonZeroUsize,
+        maximum: usize,
+    },
+    #[error(
+        "the discovered-node find-node capacity {capacity} exceeds Tokio's maximum of {maximum}"
+    )]
+    FindNodeCapacityOutOfRange {
+        capacity: NonZeroUsize,
+        maximum: usize,
+    },
+    #[error(
+        "the discovered-node sample-infohashes capacity {capacity} exceeds Tokio's maximum of {maximum}"
+    )]
+    SampleInfoHashesCapacityOutOfRange {
+        capacity: NonZeroUsize,
+        maximum: usize,
+    },
 }
 
 /// The terminal state of the owned discovered-node scheduler.
@@ -491,7 +553,7 @@ struct RouteSenders {
 }
 
 impl DhtDiscoveredNodeScheduler {
-    /// Construct the production-compatible fixed-capacity scheduler.
+    /// Construct the production-compatible default-capacity scheduler.
     #[must_use]
     pub fn new(
         input: DhtDiscoveryReceiver,
@@ -502,7 +564,7 @@ impl DhtDiscoveredNodeScheduler {
         DhtDiscoveredNodeSchedulerStatsHandle,
     ) {
         Self::with_config(input, table, DhtDiscoveredNodeSchedulerConfig::default())
-            .expect("the fixed scheduler defaults are valid")
+            .expect("the scheduler defaults are valid")
     }
 
     /// Construct a scheduler with explicit batching and route capacities.
@@ -518,12 +580,7 @@ impl DhtDiscoveredNodeScheduler {
         ),
         DhtDiscoveredNodeSchedulerConfigError,
     > {
-        if config.batch_interval.is_zero() {
-            return Err(DhtDiscoveredNodeSchedulerConfigError::ZeroBatchInterval);
-        }
-        let first_tick_at = Instant::now()
-            .checked_add(config.batch_interval)
-            .ok_or(DhtDiscoveredNodeSchedulerConfigError::BatchIntervalOutOfRange)?;
+        let first_tick_at = config.validated_first_tick_at()?;
 
         let (ping, ping_receiver) = mpsc::channel(config.ping_capacity.get());
         let (find_node, find_node_receiver) = mpsc::channel(config.find_node_capacity.get());
@@ -556,6 +613,11 @@ impl DhtDiscoveredNodeScheduler {
             },
             stats,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtDiscoveredNodeSchedulerConfig {
+        self.config
     }
 
     /// Clone a producer capability for the scheduler's existing `find_node`
@@ -966,6 +1028,17 @@ mod tests {
 
     #[test]
     fn defaults_and_validation_are_fixed() {
+        fn construction_error(
+            config: DhtDiscoveredNodeSchedulerConfig,
+        ) -> DhtDiscoveredNodeSchedulerConfigError {
+            let (_sender, receiver) = dht_discovery_channel(NonZeroUsize::MIN);
+            match DhtDiscoveredNodeScheduler::with_config(receiver, KTable::new(Id20::ZERO), config)
+            {
+                Ok(_) => panic!("invalid scheduler policy must fail before construction"),
+                Err(error) => error,
+            }
+        }
+
         assert_eq!(
             DhtDiscoveredNodeSchedulerConfig::default(),
             DhtDiscoveredNodeSchedulerConfig {
@@ -996,6 +1069,57 @@ mod tests {
             DhtDiscoveredNodeScheduler::with_config(receiver, KTable::new(Id20::ZERO), invalid),
             Err(DhtDiscoveredNodeSchedulerConfigError::BatchIntervalOutOfRange)
         ));
+
+        let maximum = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY).unwrap();
+        assert_eq!(
+            DhtDiscoveredNodeSchedulerConfig {
+                ping_capacity: maximum,
+                find_node_capacity: maximum,
+                sample_infohashes_capacity: maximum,
+                ..DhtDiscoveredNodeSchedulerConfig::default()
+            }
+            .validate(),
+            Ok(())
+        );
+
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let invalid = DhtDiscoveredNodeSchedulerConfig {
+            ping_capacity: over_max,
+            find_node_capacity: over_max,
+            sample_infohashes_capacity: over_max,
+            ..DhtDiscoveredNodeSchedulerConfig::default()
+        };
+        assert_eq!(
+            construction_error(invalid),
+            DhtDiscoveredNodeSchedulerConfigError::PingCapacityOutOfRange {
+                capacity: over_max,
+                maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+            }
+        );
+
+        let invalid = DhtDiscoveredNodeSchedulerConfig {
+            find_node_capacity: over_max,
+            ..DhtDiscoveredNodeSchedulerConfig::default()
+        };
+        assert_eq!(
+            construction_error(invalid),
+            DhtDiscoveredNodeSchedulerConfigError::FindNodeCapacityOutOfRange {
+                capacity: over_max,
+                maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+            }
+        );
+
+        let invalid = DhtDiscoveredNodeSchedulerConfig {
+            sample_infohashes_capacity: over_max,
+            ..DhtDiscoveredNodeSchedulerConfig::default()
+        };
+        assert_eq!(
+            construction_error(invalid),
+            DhtDiscoveredNodeSchedulerConfigError::SampleInfoHashesCapacityOutOfRange {
+                capacity: over_max,
+                maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+            }
+        );
     }
 
     #[tokio::test]

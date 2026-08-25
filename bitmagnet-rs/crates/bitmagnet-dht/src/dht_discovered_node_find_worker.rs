@@ -191,6 +191,13 @@ impl DhtDiscoveredNodeFindWorker {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtDiscoveredNodeFindWorkerConfig {
+        DhtDiscoveredNodeFindWorkerConfig {
+            max_inflight: self.core.max_inflight,
+        }
+    }
+
     /// Run until route EOF or caller shutdown.
     ///
     /// EOF stops intake and joins every accepted task. Shutdown is biased ahead

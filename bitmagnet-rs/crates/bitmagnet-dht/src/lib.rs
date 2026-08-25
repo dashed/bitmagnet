@@ -75,10 +75,10 @@ pub use dht_concurrent_supervisor::{
 };
 pub use dht_crawler_maintenance_supervisor::{
     DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceConfig,
-    DhtCrawlerMaintenanceNotification, DhtCrawlerMaintenanceRunNotifications,
-    DhtCrawlerMaintenanceStartError, DhtCrawlerMaintenanceStatsHandle,
-    DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit,
-    DhtCrawlerMaintenanceWithConfigError,
+    DhtCrawlerMaintenanceConfigError, DhtCrawlerMaintenanceNotification,
+    DhtCrawlerMaintenanceRunNotifications, DhtCrawlerMaintenanceStartError,
+    DhtCrawlerMaintenanceStatsHandle, DhtCrawlerMaintenanceSupervisor,
+    DhtCrawlerMaintenanceSupervisorExit, DhtCrawlerMaintenanceWithConfigError,
 };
 pub use dht_crawler_target::{DhtCrawlerTarget, DhtCrawlerTargetError, DhtCrawlerTargetRotator};
 pub use dht_discovered_node_find_worker::{

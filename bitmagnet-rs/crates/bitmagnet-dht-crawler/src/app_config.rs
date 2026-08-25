@@ -193,6 +193,7 @@ impl DhtCrawlerAppConfig {
                 bootstrap_nodes: self.bootstrap_nodes.clone(),
                 reseed_interval: self.reseed_bootstrap_nodes_interval,
             },
+            ..DhtCrawlerMaintenanceConfig::default()
         })
     }
 
@@ -697,6 +698,7 @@ mod tests {
                 ],
                 reseed_interval: Duration::from_millis(90_500),
             },
+            ..DhtCrawlerMaintenanceConfig::default()
         };
         assert_eq!(config.maintenance_config().unwrap(), expected);
         assert_eq!(

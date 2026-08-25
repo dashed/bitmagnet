@@ -232,6 +232,13 @@ impl DhtSampleInfoHashesWorker {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtSampleInfoHashesWorkerConfig {
+        DhtSampleInfoHashesWorkerConfig {
+            max_inflight: self.core.max_inflight,
+        }
+    }
+
     /// Run until route EOF or caller shutdown.
     ///
     /// Shutdown is biased ahead of a ready task join and receive. Cancelling an

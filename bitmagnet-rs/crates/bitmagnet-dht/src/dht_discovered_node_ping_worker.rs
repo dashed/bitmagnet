@@ -160,6 +160,13 @@ impl DhtDiscoveredNodePingWorker {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtDiscoveredNodePingWorkerConfig {
+        DhtDiscoveredNodePingWorkerConfig {
+            max_inflight: self.core.max_inflight,
+        }
+    }
+
     /// Run until route EOF or caller shutdown.
     ///
     /// Shutdown is biased ahead of a ready child join and route receive. EOF

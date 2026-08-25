@@ -2,6 +2,7 @@ use std::any::Any;
 use std::error::Error;
 use std::fmt;
 use std::future::{poll_fn, Future};
+use std::num::NonZeroUsize;
 use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::task::Poll;
@@ -13,21 +14,92 @@ use crate::{
     DhtBootstrapPingProducer, DhtBootstrapPingProducerConfig, DhtBootstrapPingProducerConfigError,
     DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStatsHandle, DhtCrawlerTargetError,
     DhtCrawlerTargetRotator, DhtDiscoveredNodeFindStatsHandle, DhtDiscoveredNodeFindWorker,
-    DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingInput, DhtDiscoveredNodePingStatsHandle,
-    DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeFindWorkerConfig, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingInput,
+    DhtDiscoveredNodePingStatsHandle, DhtDiscoveredNodePingWorker,
+    DhtDiscoveredNodePingWorkerConfig, DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeSchedulerConfig, DhtDiscoveredNodeSchedulerConfigError,
     DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStatsHandle, DhtDiscoveryReceiver,
     DhtDiscoveryStatsHandle, DhtInfoHashTriageInput, DhtOldestNodeFindProducer,
     DhtOldestNodeFindProducerExit, DhtOldestNodeFindProducerStatsHandle, DhtOldestNodePingProducer,
     DhtOldestNodePingProducerExit, DhtOldestNodePingProducerStatsHandle, DhtRuntimeClient,
     DhtSampleInfoHashesProducer, DhtSampleInfoHashesProducerExit,
     DhtSampleInfoHashesProducerStatsHandle, DhtSampleInfoHashesWorker,
-    DhtSampleInfoHashesWorkerExit, DhtSampleInfoHashesWorkerStatsHandle, KTable,
+    DhtSampleInfoHashesWorkerConfig, DhtSampleInfoHashesWorkerExit,
+    DhtSampleInfoHashesWorkerStatsHandle, KTable,
 };
 
 /// Taskless policy for the owned DHT crawler maintenance composition.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Each lane capacity is shared by its scheduler route and matching worker
+/// concurrency bound, so those two budgets cannot drift inside this owned
+/// composition. Go's default scaling factor of ten projects to 10, 100, and
+/// 100 respectively.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DhtCrawlerMaintenanceConfig {
+    pub ping_capacity: NonZeroUsize,
+    pub find_node_capacity: NonZeroUsize,
+    pub sample_infohashes_capacity: NonZeroUsize,
     pub bootstrap_ping: DhtBootstrapPingProducerConfig,
+}
+
+impl Default for DhtCrawlerMaintenanceConfig {
+    fn default() -> Self {
+        let scheduler = DhtDiscoveredNodeSchedulerConfig::default();
+        Self {
+            ping_capacity: scheduler.ping_capacity,
+            find_node_capacity: scheduler.find_node_capacity,
+            sample_infohashes_capacity: scheduler.sample_infohashes_capacity,
+            bootstrap_ping: DhtBootstrapPingProducerConfig::default(),
+        }
+    }
+}
+
+impl DhtCrawlerMaintenanceConfig {
+    /// Validate every fallible child policy without constructing components.
+    pub fn validate(&self) -> Result<(), DhtCrawlerMaintenanceConfigError> {
+        self.bootstrap_ping
+            .validate()
+            .map_err(DhtCrawlerMaintenanceConfigError::BootstrapPing)?;
+        self.lane_config()
+            .scheduler_config()
+            .validate()
+            .map_err(DhtCrawlerMaintenanceConfigError::Scheduler)
+    }
+
+    fn lane_config(&self) -> DhtCrawlerMaintenanceLaneConfig {
+        DhtCrawlerMaintenanceLaneConfig {
+            ping_capacity: self.ping_capacity,
+            find_node_capacity: self.find_node_capacity,
+            sample_infohashes_capacity: self.sample_infohashes_capacity,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DhtCrawlerMaintenanceLaneConfig {
+    ping_capacity: NonZeroUsize,
+    find_node_capacity: NonZeroUsize,
+    sample_infohashes_capacity: NonZeroUsize,
+}
+
+impl DhtCrawlerMaintenanceLaneConfig {
+    fn scheduler_config(self) -> DhtDiscoveredNodeSchedulerConfig {
+        DhtDiscoveredNodeSchedulerConfig {
+            ping_capacity: self.ping_capacity,
+            find_node_capacity: self.find_node_capacity,
+            sample_infohashes_capacity: self.sample_infohashes_capacity,
+            ..DhtDiscoveredNodeSchedulerConfig::default()
+        }
+    }
+}
+
+/// Invalid policy for the owned maintenance composition.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DhtCrawlerMaintenanceConfigError {
+    #[error(transparent)]
+    BootstrapPing(DhtBootstrapPingProducerConfigError),
+    #[error(transparent)]
+    Scheduler(DhtDiscoveredNodeSchedulerConfigError),
 }
 
 /// Failure to construct the partial crawler maintenance composition.
@@ -95,7 +167,7 @@ pub enum DhtCrawlerMaintenanceWithConfigError {
     Config {
         discovery: DhtDiscoveryReceiver,
         config: DhtCrawlerMaintenanceConfig,
-        source: DhtBootstrapPingProducerConfigError,
+        source: DhtCrawlerMaintenanceConfigError,
     },
     /// Valid policy reached the legacy construction boundary and that existing
     /// typed start error was preserved.
@@ -368,11 +440,13 @@ impl DhtCrawlerMaintenanceSupervisor {
         table: &KTable,
         triage: &DhtInfoHashTriageInput,
     ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceStartError> {
+        let config = DhtCrawlerMaintenanceConfig::default();
         Self::new_with_factories(
             discovery,
             client,
             table,
             triage,
+            config.lane_config(),
             DhtCrawlerTargetRotator::new,
             DhtBootstrapPingProducer::new,
         )
@@ -390,7 +464,7 @@ impl DhtCrawlerMaintenanceSupervisor {
         config: DhtCrawlerMaintenanceConfig,
     ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceWithConfigError>
     {
-        if let Err(source) = config.bootstrap_ping.validate() {
+        if let Err(source) = config.validate() {
             return Err(DhtCrawlerMaintenanceWithConfigError::Config {
                 discovery,
                 config,
@@ -398,12 +472,14 @@ impl DhtCrawlerMaintenanceSupervisor {
             });
         }
         let recovery_config = config.clone();
+        let lane_config = config.lane_config();
         let bootstrap_ping = config.bootstrap_ping;
         Self::new_with_factories(
             discovery,
             client,
             table,
             triage,
+            lane_config,
             DhtCrawlerTargetRotator::new,
             move |input| {
                 DhtBootstrapPingProducer::with_config(input, bootstrap_ping)
@@ -430,11 +506,13 @@ impl DhtCrawlerMaintenanceSupervisor {
             DhtCrawlerTargetError,
         >,
     {
+        let config = DhtCrawlerMaintenanceConfig::default();
         Self::new_with_factories(
             discovery,
             client,
             table,
             triage,
+            config.lane_config(),
             target_factory,
             DhtBootstrapPingProducer::new,
         )
@@ -445,6 +523,7 @@ impl DhtCrawlerMaintenanceSupervisor {
         client: &DhtRuntimeClient,
         table: &KTable,
         triage: &DhtInfoHashTriageInput,
+        lane_config: DhtCrawlerMaintenanceLaneConfig,
         target_factory: T,
         bootstrap_factory: B,
     ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceStartError>
@@ -472,8 +551,19 @@ impl DhtCrawlerMaintenanceSupervisor {
             }
         };
 
+        let scheduler_config = lane_config.scheduler_config();
+        let ping_config = DhtDiscoveredNodePingWorkerConfig {
+            max_inflight: lane_config.ping_capacity,
+        };
+        let find_node_config = DhtDiscoveredNodeFindWorkerConfig {
+            max_inflight: lane_config.find_node_capacity,
+        };
+        let sample_infohashes_config = DhtSampleInfoHashesWorkerConfig {
+            max_inflight: lane_config.sample_infohashes_capacity,
+        };
         let (scheduler, routes, scheduler_stats) =
-            DhtDiscoveredNodeScheduler::new(discovery, table.clone());
+            DhtDiscoveredNodeScheduler::with_config(discovery, table.clone(), scheduler_config)
+                .expect("maintenance policy was validated before composition");
         let oldest_ping_input = scheduler.ping_input();
         let bootstrap_ping_input = scheduler.ping_input();
         let oldest_find_input = scheduler.find_node_input();
@@ -484,23 +574,29 @@ impl DhtCrawlerMaintenanceSupervisor {
             sample_infohashes,
         } = routes;
 
-        let (ping, ping_stats) =
-            DhtDiscoveredNodePingWorker::new(ping, client.clone(), table.clone());
-        let (find_node, find_node_stats) = DhtDiscoveredNodeFindWorker::new(
+        let (ping, ping_stats) = DhtDiscoveredNodePingWorker::with_config(
+            ping,
+            client.clone(),
+            table.clone(),
+            ping_config,
+        );
+        let (find_node, find_node_stats) = DhtDiscoveredNodeFindWorker::with_config(
             find_node,
             client.clone(),
             table.clone(),
             recursive_discovery.clone(),
             target.clone(),
+            find_node_config,
         );
         let (sample_infohashes_worker, sample_infohashes_worker_stats) =
-            DhtSampleInfoHashesWorker::new(
+            DhtSampleInfoHashesWorker::with_config(
                 sample_infohashes,
                 client.clone(),
                 table.clone(),
                 triage.clone(),
                 recursive_discovery,
                 target,
+                sample_infohashes_config,
             );
         let (oldest_find, oldest_find_stats) =
             DhtOldestNodeFindProducer::new(table.clone(), oldest_find_input);
@@ -1113,6 +1209,7 @@ mod tests {
                     bootstrap_nodes,
                     ..DhtBootstrapPingProducerConfig::default()
                 },
+                ..DhtCrawlerMaintenanceConfig::default()
             },
         )
     }
@@ -1560,6 +1657,78 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn default_and_custom_lane_capacities_reach_actual_owned_components() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let (triage, _triage_receiver) = triage_channel();
+
+        let (_sender, discovery) = dht_discovery_channel(NonZeroUsize::MIN);
+        let (default_supervisor, _stats) =
+            DhtCrawlerMaintenanceSupervisor::new(discovery, &client, runtime.table(), &triage)
+                .expect("default maintenance composition");
+        assert_eq!(
+            default_supervisor.scheduler.config_for_test(),
+            DhtDiscoveredNodeSchedulerConfig::default()
+        );
+        assert_eq!(
+            default_supervisor.ping.config_for_test(),
+            DhtDiscoveredNodePingWorkerConfig::default()
+        );
+        assert_eq!(
+            default_supervisor.find_node.config_for_test(),
+            DhtDiscoveredNodeFindWorkerConfig::default()
+        );
+        assert_eq!(
+            default_supervisor
+                .sample_infohashes_worker
+                .config_for_test(),
+            DhtSampleInfoHashesWorkerConfig::default()
+        );
+        drop(default_supervisor);
+
+        let custom = DhtCrawlerMaintenanceConfig {
+            ping_capacity: NonZeroUsize::new(2).unwrap(),
+            find_node_capacity: NonZeroUsize::new(20).unwrap(),
+            sample_infohashes_capacity: NonZeroUsize::new(30).unwrap(),
+            ..DhtCrawlerMaintenanceConfig::default()
+        };
+        let (_sender, discovery) = dht_discovery_channel(NonZeroUsize::MIN);
+        let (custom_supervisor, _stats) = DhtCrawlerMaintenanceSupervisor::with_config(
+            discovery,
+            &client,
+            runtime.table(),
+            &triage,
+            custom.clone(),
+        )
+        .expect("custom maintenance composition");
+        let scheduler = custom_supervisor.scheduler.config_for_test();
+        assert_eq!(scheduler.ping_capacity, custom.ping_capacity);
+        assert_eq!(scheduler.find_node_capacity, custom.find_node_capacity);
+        assert_eq!(
+            scheduler.sample_infohashes_capacity,
+            custom.sample_infohashes_capacity
+        );
+        assert_eq!(
+            custom_supervisor.ping.config_for_test().max_inflight,
+            custom.ping_capacity
+        );
+        assert_eq!(
+            custom_supervisor.find_node.config_for_test().max_inflight,
+            custom.find_node_capacity
+        );
+        assert_eq!(
+            custom_supervisor
+                .sample_infohashes_worker
+                .config_for_test()
+                .max_inflight,
+            custom.sample_infohashes_capacity
+        );
+
+        drop((custom_supervisor, triage, client));
+        runtime.shutdown().await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn configured_reseed_interval_reaches_the_owned_bootstrap_child() {
         let runtime = test_runtime().await;
@@ -1577,6 +1746,7 @@ mod tests {
                     bootstrap_nodes: Vec::new(),
                     reseed_interval: configured_interval,
                 },
+                ..DhtCrawlerMaintenanceConfig::default()
             },
         )
         .expect("positive bootstrap config");
@@ -2268,6 +2438,7 @@ mod tests {
                     bootstrap_nodes: vec!["first".to_owned(), String::new(), "first".to_owned()],
                     reseed_interval,
                 },
+                ..DhtCrawlerMaintenanceConfig::default()
             };
             let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
             let error = match DhtCrawlerMaintenanceSupervisor::with_config(
@@ -2283,7 +2454,8 @@ mod tests {
             assert!(matches!(
                 &error,
                 DhtCrawlerMaintenanceWithConfigError::Config { source, .. }
-                    if *source == expected_source
+                    if *source
+                        == DhtCrawlerMaintenanceConfigError::BootstrapPing(expected_source)
             ));
             assert!(error.as_start_error().is_none());
             let (mut discovery, recovered_config) = error.into_parts();
@@ -2296,11 +2468,140 @@ mod tests {
             ));
         }
 
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        for (config, expected_source) in [
+            (
+                DhtCrawlerMaintenanceConfig {
+                    ping_capacity: over_max,
+                    ..DhtCrawlerMaintenanceConfig::default()
+                },
+                DhtDiscoveredNodeSchedulerConfigError::PingCapacityOutOfRange {
+                    capacity: over_max,
+                    maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+                },
+            ),
+            (
+                DhtCrawlerMaintenanceConfig {
+                    find_node_capacity: over_max,
+                    ..DhtCrawlerMaintenanceConfig::default()
+                },
+                DhtDiscoveredNodeSchedulerConfigError::FindNodeCapacityOutOfRange {
+                    capacity: over_max,
+                    maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+                },
+            ),
+            (
+                DhtCrawlerMaintenanceConfig {
+                    sample_infohashes_capacity: over_max,
+                    ..DhtCrawlerMaintenanceConfig::default()
+                },
+                DhtDiscoveredNodeSchedulerConfigError::SampleInfoHashesCapacityOutOfRange {
+                    capacity: over_max,
+                    maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+                },
+            ),
+        ] {
+            let (sender, discovery) = dht_discovery_channel(NonZeroUsize::MIN);
+            let error = match DhtCrawlerMaintenanceSupervisor::with_config(
+                discovery,
+                &client,
+                runtime.table(),
+                &triage,
+                config.clone(),
+            ) {
+                Ok(_) => panic!("invalid lane capacity must fail before composition"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                &error,
+                DhtCrawlerMaintenanceWithConfigError::Config { source, .. }
+                    if *source
+                        == DhtCrawlerMaintenanceConfigError::Scheduler(expected_source)
+            ));
+            assert!(error.as_start_error().is_none());
+            let (mut discovery, recovered_config) = error.into_parts();
+            assert_eq!(recovered_config, config);
+            assert_eq!(sender.offer(node(2)), DhtDiscoveryOffer::Queued);
+            assert_eq!(discovery.recv().await, Some(node(2)));
+            assert!(matches!(
+                triage_receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+
+        let config = DhtCrawlerMaintenanceConfig {
+            ping_capacity: over_max,
+            bootstrap_ping: DhtBootstrapPingProducerConfig {
+                reseed_interval: Duration::ZERO,
+                ..DhtBootstrapPingProducerConfig::default()
+            },
+            ..DhtCrawlerMaintenanceConfig::default()
+        };
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::MIN);
+        let error = match DhtCrawlerMaintenanceSupervisor::with_config(
+            discovery,
+            &client,
+            runtime.table(),
+            &triage,
+            config.clone(),
+        ) {
+            Ok(_) => panic!("bootstrap validation must retain precedence"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            &error,
+            DhtCrawlerMaintenanceWithConfigError::Config { source, .. }
+                if *source
+                    == DhtCrawlerMaintenanceConfigError::BootstrapPing(
+                        DhtBootstrapPingProducerConfigError::ZeroReseedInterval,
+                    )
+        ));
+        let (mut discovery, recovered_config) = error.into_parts();
+        assert_eq!(recovered_config, config);
+        assert_eq!(sender.offer(node(3)), DhtDiscoveryOffer::Queued);
+        assert_eq!(discovery.recv().await, Some(node(3)));
+
+        let config = DhtCrawlerMaintenanceConfig {
+            find_node_capacity: over_max,
+            ..DhtCrawlerMaintenanceConfig::default()
+        };
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::MIN);
+        drop(sender);
+        let error = match DhtCrawlerMaintenanceSupervisor::with_config(
+            discovery,
+            &client,
+            runtime.table(),
+            &triage,
+            config.clone(),
+        ) {
+            Ok(_) => panic!("config validation must precede closed discovery"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            &error,
+            DhtCrawlerMaintenanceWithConfigError::Config { source, .. }
+                if *source
+                    == DhtCrawlerMaintenanceConfigError::Scheduler(
+                        DhtDiscoveredNodeSchedulerConfigError::FindNodeCapacityOutOfRange {
+                            capacity: over_max,
+                            maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+                        }
+                    )
+        ));
+        let (mut discovery, recovered_config) = error.into_parts();
+        assert_eq!(recovered_config, config);
+        assert_eq!(discovery.recv().await, None);
+        assert!(matches!(
+            triage_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
         let config = DhtCrawlerMaintenanceConfig {
             bootstrap_ping: DhtBootstrapPingProducerConfig {
                 bootstrap_nodes: vec!["configured.example:6881".to_owned()],
                 reseed_interval: Duration::from_secs(37),
             },
+            ..DhtCrawlerMaintenanceConfig::default()
         };
         let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
         drop(sender);
