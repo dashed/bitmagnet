@@ -3008,3 +3008,143 @@ only where that slice globally excludes the existence of an isolated sample-
 infohashes producer; slice forty-one's exact seven-child supervisor and lack
 of a sample child remain authoritative. Every higher-pipeline, runtime,
 application, deployment, production, and rollout boundary remains in force.
+
+The forty-fourth slice, implemented by
+`b98da5ae34524f4b45c1bd0eee2e0d41dbd3128e`, adds the isolated typed
+info-hash triage route that a future sample-infohashes worker can target. The
+crate now publicly re-exports `DhtInfoHashTriageRequest`,
+`DhtInfoHashTriageInput`, `DhtInfoHashTriageInputClosed`,
+`DhtInfoHashTriageReceiver`, `dht_info_hash_triage_channel`, and
+`DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY`. No scheduler, producer, worker,
+supervisor, runtime, or application production path constructs the route in
+this slice; only its focused tests do.
+
+`DhtInfoHashTriageRequest` is one owned pair of `info_hash: Id20` and
+`source_node_addr: SocketAddr`; it is `Clone + Copy + Debug + PartialEq + Eq`
+and `Send + Sync`. IPv4 and IPv6 addresses, including the IPv6 flow-info and
+scope-ID fields represented by `SocketAddr`, round-trip without projection.
+Scoped IPv6 value preservation is not a live IPv6 DHT transport claim.
+`source_node_addr` records the responding node address; it does not prove that
+the node has peers for the hash. The type does not carry the sample response,
+KTable handle or node ID, retained-versus-discovered provenance, Bloom result,
+batch identity, callback, retry state, timestamp, or persistence state.
+
+`dht_info_hash_triage_channel(capacity: NonZeroUsize)` constructs exactly one
+bounded Tokio MPSC queue and returns one cloneable input plus one unique
+receiver. Requiring `NonZeroUsize` rules out Tokio's zero-capacity panic at the
+public boundary. The explicit capacity is a Rust composition and test seam;
+the function does not silently substitute the default constant and arbitrary
+values do not claim Go production equivalence. Every input clone shares the
+same queue and the same capacity rather than creating another buffer.
+
+`DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY` is exactly one hundred. It matches only
+the current Go crawler's default batching-channel input capacity. It bounds
+committed requests that have not yet been received; it does not include a
+request owned by each pending send future, a request already dequeued by a
+future consumer, a future consumer's local state, any batch, any downstream
+queue, or any task. It is therefore neither a total-retention nor a memory
+bound. Merely cloning an input adds no queue capacity, although every pending
+send can own one additional request outside the queue.
+
+`DhtInfoHashTriageInput::send(&self, request)` awaits shared capacity and
+returns `Result<(), DhtInfoHashTriageInputClosed>`. Sequential awaited sends
+preserve FIFO commit order. Competing sends use Tokio's FIFO capacity-waiter
+registration order, without a source-priority or broader fairness claim.
+Dropping a pending send future commits nothing and loses that waiter's place;
+the future-owned request occurrence is dropped and the API returns no
+cancellation error from which to recover it. A caller may separately retain a
+copy before sending. A successful return is the irrevocable queue-commit
+boundary and says only that the request entered this queue, not that any
+worker received, validated, deduplicated, batched, queried, or persisted it.
+
+Closing the unique receiver rejects a blocked send and every later send while
+preserving the already committed FIFO prefix for draining. Each rejected send
+returns its exact uncommitted request through
+`DhtInfoHashTriageInputClosed::into_request`; explicit close reaches
+drain-then-EOF even while input clones remain alive. Dropping the receiver also
+wakes blocked sends and makes later sends recover their exact uncommitted
+request, but already committed queue contents are destroyed rather than made
+recoverable through the sender error. Cancelling a pending receive consumes
+nothing.
+
+Without explicit receiver closure, `recv` reaches natural EOF only after all
+input clones are dropped and every committed request has drained. One
+surviving clone therefore keeps an empty receive pending. `try_recv` preserves
+Tokio's distinction between `Empty` while some sender remains and
+`Disconnected` after the final sender is gone and the queue is empty. The
+receiver is movable between tasks but is intentionally a single-consumer
+capability and is not cloneable.
+
+The input and closed-error types are `Send + Sync`; the input is `Clone`, and
+the error is `Clone + Copy + Debug + PartialEq + Eq + Error`. The receiver and
+both `send` and `recv` futures are `Send`. The closed error owns only the exact
+rejected request and has no retry, source, stats, or terminal-classification
+payload.
+
+Construction allocates only the bounded channel. It spawns no Tokio task,
+goroutine, timer, ticker, batcher, callback, or query; owns no shutdown token;
+and exposes no stats handle or typed process exit. Dropping the constructed
+pair therefore has no hidden child to abort or join. A producer-side `closed`
+waiter is deliberately deferred for the future sample-infohashes worker slice
+to add if its lifecycle contract needs that branch. Until then, exact send
+failure and receiver drain-then-EOF are the complete lifecycle surface.
+
+The current Go source at that implementation checkpoint is audit context for
+the shape of this prerequisite, not a strict oracle for the Rust route.
+`internal/dhtcrawler/crawler.go` defines the private `nodeHasPeersForHash` as
+exactly one `protocol.ID` and one `netip.AddrPort`.
+`internal/dhtcrawler/sample_infohashes.go` constructs that value only after
+`ignoreHashes.testAndAdd` admits a response sample, takes the source address
+from `n.Addr()`, and sends each admitted value through a cancellation-aware
+select on `infoHashTriage.In()`.
+
+`internal/dhtcrawler/factory.go` constructs that Go lane with
+`NewBatchingChannel[nodeHasPeersForHash](10*scalingFactor, 1000,
+20*time.Second)`. `internal/dhtcrawler/config.go` sets the default scaling
+factor to ten, yielding the one-hundred-item default input capacity mirrored by
+the Rust constant. `internal/concurrency/batching_channel.go` separately owns
+that buffered input, a one-batch output channel, a local slice, a twenty-second
+ticker, and a spawned batching goroutine; it flushes when the local slice
+reaches one thousand or on a non-empty ticker event. None of those batching
+objects or behaviors exists in this Rust slice.
+
+These Go facts are not source-digest pinned by slice forty-four, and this slice
+adds no Go generator, fixture, fixture hash, strict consumer, or differential
+runtime replay. The ignore-hashes oracle landed separately in
+`684aedf68d9c07b96a362c470ec3619c0290b4f5` and does not validate this
+channel's lifecycle or Go batching behavior. In particular, matching the Go
+default input capacity does not establish exact Go batching, select
+scheduling, goroutine closure, total retention, backpressure timing, address
+representation, or end-to-end worker parity.
+
+Fourteen focused unit tests freeze the public constant and type traits, exact
+IPv4 and IPv6 payload identity, explicit-capacity FIFO backpressure, a full
+one-hundred-request default-capacity prefix, cancellation of the pending one-
+hundred-first send, cancellation of the middle of three registered capacity
+waiters, close-time prefix draining, exact blocked and later-send recovery,
+receiver-drop recovery, successful-send irrevocability, final-clone EOF,
+cancelled-receive safety, `try_recv` state distinctions, and `Send` futures.
+The implementation checkpoint passed all fourteen focused tests via
+`cargo test -p bitmagnet-dht dht_info_hash_triage::tests`, the package check,
+strict all-target/all-feature Clippy with warnings denied, rustdoc with
+warnings denied, formatting, and diff whitespace checks.
+
+This slice adds no sample-infohashes worker, stable Bloom deduper, dequeue-time
+candidate check, BEP-51 request, response parsing, response interval handling,
+KTable update, recursive node discovery, callback or semaphore ownership,
+batch assembly, flush deadline, batched consumer, persistence handoff, worker
+stats, worker exit, shutdown race policy, supervisor child, route-level EOF
+cycle, runtime or application configuration, external traffic, deployment,
+production readiness, or rollout. It neither wires the slice-forty-three
+producer to a worker nor changes the seven-child maintenance supervisor.
+
+This slice supersedes slices forty-two and forty-three only where their global
+exclusions say that no typed info-hash triage route exists. Slice forty-two's
+mixed sample-work route and slice forty-three's isolated periodic producer
+remain unchanged and uncomposed. Their worker, supervisor, runtime,
+application, deployment, production, and rollout exclusions remain
+authoritative, as do the separate ignore-hashes oracle's source and runtime
+claims. A future worker slice must define ownership and cancellation across
+the mixed sample-work input, periodic producer, typed triage route, and any
+later deduper rather than treating this taskless channel as live pipeline
+parity.
