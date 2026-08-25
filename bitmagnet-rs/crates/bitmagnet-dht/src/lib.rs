@@ -14,6 +14,7 @@ mod dht_discovery;
 mod dht_dispatch;
 mod dht_driver;
 mod dht_inbound_stats;
+mod dht_info_hash_deduper;
 mod dht_info_hash_triage;
 mod dht_oldest_node_find_producer;
 mod dht_oldest_node_ping_producer;
@@ -83,6 +84,7 @@ pub use dht_discovery::{
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};
 pub use dht_inbound_stats::{DhtInboundStats, DhtInboundStatsSnapshot};
+pub use dht_info_hash_deduper::DhtInfoHashDeduper;
 pub use dht_info_hash_triage::{
     dht_info_hash_triage_channel, DhtInfoHashTriageInput, DhtInfoHashTriageInputClosed,
     DhtInfoHashTriageReceiver, DhtInfoHashTriageRequest, DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY,

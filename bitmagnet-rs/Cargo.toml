@@ -157,6 +157,9 @@ sha1 = "0.10"
 md-5 = { version = "0.11", default-features = false }
 # OS entropy for unpredictable two-byte DHT transaction IDs.
 getrandom = "0.3"
+# Per-instance random decrement starts for the process-local stable DHT
+# info-hash deduper. Exact Go math/rand sequences are intentionally not parity.
+fastrand = "2.4.1"
 
 # Lints inherited by every member via `[lints] workspace = true`. Kept at
 # `warn` (not `deny`) so local builds stay green; CI can promote to `-D
