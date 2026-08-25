@@ -1,40 +1,75 @@
 //! Typed bounded outputs for the info-hash triage decision stage.
 //!
-//! Both production routes have capacity 100, matching the Go crawler's
-//! independently buffered `getPeers` and `scrape` inputs. They share only the
-//! request type: each route owns a distinct queue and capacity budget. The
-//! routes start no tasks and do not implement either downstream worker.
+//! The production-default routes each have capacity 100, matching the Go
+//! crawler's independently buffered `getPeers` and `scrape` inputs. Explicit
+//! constructors support other valid capacities. The routes share only the
+//! request type: each owns a distinct queue and capacity budget. They start no
+//! tasks and do not implement either downstream worker.
 
 use std::num::NonZeroUsize;
 
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::DhtInfoHashTriageRequest;
+use crate::{assert_dht_channel_capacity, DhtInfoHashTriageRequest};
 
-/// Fixed capacity of the production get-peers route.
+/// Default capacity of the production get-peers route.
 pub const DHT_GET_PEERS_ROUTE_CAPACITY: usize = 100;
 
-/// Fixed capacity of the production scrape route.
+/// Default capacity of the production scrape route.
 pub const DHT_SCRAPE_ROUTE_CAPACITY: usize = 100;
 
-/// Construct the fixed-capacity production get-peers route.
+/// Construct the production-default capacity-100 get-peers route.
 ///
 /// Construction starts no task. The returned input and receiver own one
 /// bounded FIFO dedicated to get-peers work.
 #[must_use]
 pub fn dht_get_peers_channel() -> (DhtGetPeersInput, DhtGetPeersReceiver) {
-    let (input, receiver) = route(NonZeroUsize::new(DHT_GET_PEERS_ROUTE_CAPACITY).unwrap());
+    dht_get_peers_channel_with_capacity(NonZeroUsize::new(DHT_GET_PEERS_ROUTE_CAPACITY).unwrap())
+}
+
+/// Construct a get-peers route with an explicit positive capacity.
+///
+/// Construction starts no task. Every returned input clone shares the exact
+/// supplied FIFO capacity. The production default is exactly 100.
+///
+/// # Panics
+///
+/// Panics before constructing the route if `capacity` exceeds
+/// [`crate::DHT_CHANNEL_MAX_CAPACITY`].
+#[must_use]
+pub fn dht_get_peers_channel_with_capacity(
+    capacity: NonZeroUsize,
+) -> (DhtGetPeersInput, DhtGetPeersReceiver) {
+    assert_dht_channel_capacity(capacity);
+    let (input, receiver) = route(capacity);
     (DhtGetPeersInput { input }, DhtGetPeersReceiver { receiver })
 }
 
-/// Construct the fixed-capacity production scrape route.
+/// Construct the production-default capacity-100 scrape route.
 ///
 /// Construction starts no task. The returned input and receiver own one
 /// bounded FIFO dedicated to scrape work.
 #[must_use]
 pub fn dht_scrape_channel() -> (DhtScrapeInput, DhtScrapeReceiver) {
-    let (input, receiver) = route(NonZeroUsize::new(DHT_SCRAPE_ROUTE_CAPACITY).unwrap());
+    dht_scrape_channel_with_capacity(NonZeroUsize::new(DHT_SCRAPE_ROUTE_CAPACITY).unwrap())
+}
+
+/// Construct a scrape route with an explicit positive capacity.
+///
+/// Construction starts no task. Every returned input clone shares the exact
+/// supplied FIFO capacity. The production default is exactly 100.
+///
+/// # Panics
+///
+/// Panics before constructing the route if `capacity` exceeds
+/// [`crate::DHT_CHANNEL_MAX_CAPACITY`].
+#[must_use]
+pub fn dht_scrape_channel_with_capacity(
+    capacity: NonZeroUsize,
+) -> (DhtScrapeInput, DhtScrapeReceiver) {
+    assert_dht_channel_capacity(capacity);
+    let (input, receiver) = route(capacity);
     (DhtScrapeInput { input }, DhtScrapeReceiver { receiver })
 }
 
@@ -77,11 +112,11 @@ impl RouteReceiver {
 
 /// Cloneable producer capability for the bounded get-peers route.
 ///
-/// Every clone shares one capacity-100 FIFO. A pending send owns its request
-/// outside the queue until it commits, is cancelled, or observes receiver
-/// closure. Competing sends register in Tokio's FIFO waiter queue, with no
-/// producer priority promised. The final live clone keeps receiver EOF
-/// pending.
+/// Every clone shares one bounded FIFO. The production-default constructor
+/// gives it capacity 100. A pending send owns its request outside the queue
+/// until it commits, is cancelled, or observes receiver closure. Competing
+/// sends register in Tokio's FIFO waiter queue, with no producer priority
+/// promised. The final live clone keeps receiver EOF pending.
 #[derive(Clone)]
 pub struct DhtGetPeersInput {
     input: RouteInput,
@@ -146,11 +181,11 @@ impl DhtGetPeersReceiver {
 
 /// Cloneable producer capability for the bounded scrape route.
 ///
-/// Every clone shares one capacity-100 FIFO. A pending send owns its request
-/// outside the queue until it commits, is cancelled, or observes receiver
-/// closure. Competing sends register in Tokio's FIFO waiter queue, with no
-/// producer priority promised. The final live clone keeps receiver EOF
-/// pending.
+/// Every clone shares one bounded FIFO. The production-default constructor
+/// gives it capacity 100. A pending send owns its request outside the queue
+/// until it commits, is cancelled, or observes receiver closure. Competing
+/// sends register in Tokio's FIFO waiter queue, with no producer priority
+/// promised. The final live clone keeps receiver EOF pending.
 #[derive(Clone)]
 pub struct DhtScrapeInput {
     input: RouteInput,
@@ -282,7 +317,66 @@ mod tests {
 
         let (get_peers, get_peers_receiver) = dht_get_peers_channel();
         let (scrape, scrape_receiver) = dht_scrape_channel();
-        drop((get_peers, get_peers_receiver, scrape, scrape_receiver));
+        let (custom_get_peers, custom_get_peers_receiver) =
+            dht_get_peers_channel_with_capacity(NonZeroUsize::MIN);
+        let (custom_scrape, custom_scrape_receiver) =
+            dht_scrape_channel_with_capacity(NonZeroUsize::MIN);
+        drop((
+            get_peers,
+            get_peers_receiver,
+            scrape,
+            scrape_receiver,
+            custom_get_peers,
+            custom_get_peers_receiver,
+            custom_scrape,
+            custom_scrape_receiver,
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds Tokio's maximum")]
+    fn over_max_get_peers_capacity_panics_before_route_construction() {
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let _ = dht_get_peers_channel_with_capacity(over_max);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds Tokio's maximum")]
+    fn over_max_scrape_capacity_panics_before_route_construction() {
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let _ = dht_scrape_channel_with_capacity(over_max);
+    }
+
+    #[tokio::test]
+    async fn explicit_capacities_are_enforced_independently() {
+        let (get_peers, mut get_peers_receiver) =
+            dht_get_peers_channel_with_capacity(NonZeroUsize::new(2).unwrap());
+        let (scrape, mut scrape_receiver) =
+            dht_scrape_channel_with_capacity(NonZeroUsize::new(3).unwrap());
+
+        for value in 0_u8..2 {
+            get_peers.send(request(value)).await.unwrap();
+        }
+        for value in 0_u8..3 {
+            scrape.send(ipv6_request(value)).await.unwrap();
+        }
+
+        let mut blocked_get_peers = Box::pin(get_peers.send(request(2)));
+        let mut blocked_scrape = Box::pin(scrape.send(ipv6_request(3)));
+        assert_pending(blocked_get_peers.as_mut()).await;
+        assert_pending(blocked_scrape.as_mut()).await;
+
+        assert_eq!(get_peers_receiver.recv().await, Some(request(0)));
+        assert_eq!(blocked_get_peers.await, Ok(()));
+        assert_eq!(scrape_receiver.recv().await, Some(ipv6_request(0)));
+        assert_eq!(blocked_scrape.await, Ok(()));
+
+        for value in 1_u8..=2 {
+            assert_eq!(get_peers_receiver.recv().await, Some(request(value)));
+        }
+        for value in 1_u8..=3 {
+            assert_eq!(scrape_receiver.recv().await, Some(ipv6_request(value)));
+        }
     }
 
     #[tokio::test]

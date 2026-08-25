@@ -7,8 +7,8 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 
 use crate::{
-    dht_discovery_channel, CryptoTransactionIdIssuer, DhtClient, DhtClientError,
-    DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtDiscoveryReceiver,
+    assert_dht_channel_capacity, dht_discovery_channel, CryptoTransactionIdIssuer, DhtClient,
+    DhtClientError, DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtDiscoveryReceiver,
     DhtDiscoveryStatsHandle, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter, DhtInboundStats,
     DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, FindNodeResult, GetPeersResult,
     GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult, TokioIpv4UdpError,
@@ -18,7 +18,7 @@ use crate::{
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
 const MAX_INFLIGHT_QUERIES: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 const MAX_OUTSTANDING_REJECTIONS: NonZeroUsize = NonZeroUsize::new(64).unwrap();
-/// Fixed production discovery ingress capacity, matching Go's default
+/// Default production discovery ingress capacity, matching Go's
 /// `100 * ScalingFactor` with its default scaling factor of ten.
 pub const DHT_DISCOVERY_QUEUE_CAPACITY: usize = 1_000;
 
@@ -31,6 +31,10 @@ pub struct DhtRuntimeConfig {
     pub query_timeout: Duration,
     /// BEP-51 interval advertised by `sample_infohashes` responses.
     pub sample_infohashes_interval: i64,
+    /// Capacity of the discovery ingress shared by the responder and recursive
+    /// crawler producers. The production default is exactly 1,000; configured
+    /// values must not exceed [`crate::DHT_CHANNEL_MAX_CAPACITY`].
+    pub discovery_capacity: NonZeroUsize,
 }
 
 impl Default for DhtRuntimeConfig {
@@ -39,6 +43,8 @@ impl Default for DhtRuntimeConfig {
             bind_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 3334),
             query_timeout: Duration::from_secs(4),
             sample_infohashes_interval: 10,
+            discovery_capacity: NonZeroUsize::new(DHT_DISCOVERY_QUEUE_CAPACITY)
+                .expect("production discovery capacity is nonzero"),
         }
     }
 }
@@ -310,10 +316,11 @@ impl DhtRuntimeClient {
 /// active-plus-queued rejections. A saturated lane drops the newest rejection.
 /// Response and error envelopes bypass both query lanes and are delivered inline
 /// to the transaction registry even while sends are backpressured.
-/// Successful responder calls offer their exact requester node to a fixed
-/// 1,000-item discovery queue. The offer owns no task and never waits for queue
-/// capacity; saturation or a dropped receiver discards the newest event without
-/// changing the reply. The take-once receiver is intentionally not a crawler:
+/// Successful responder calls offer their exact requester node to the configured
+/// bounded discovery queue (1,000 items by default). The offer owns no task and
+/// never waits for queue capacity; saturation or a dropped receiver discards the
+/// newest event without changing the reply. The take-once receiver is intentionally
+/// not a crawler:
 /// batching, known-node filtering, and query scheduling remain downstream.
 ///
 /// Unlike Go's swallowed query-reply send errors, an admitted or rejection send
@@ -336,16 +343,20 @@ impl DhtRuntime {
     /// Construct the production table/responder/registry/supervisor composition,
     /// bind its shared IPv4 UDP socket, and spawn the owned bounded-concurrent
     /// task.
+    ///
+    /// # Panics
+    ///
+    /// Panics before generating runtime entropy or binding the socket if
+    /// [`DhtRuntimeConfig::discovery_capacity`] exceeds
+    /// [`crate::DHT_CHANNEL_MAX_CAPACITY`].
     pub async fn start(config: DhtRuntimeConfig) -> Result<Self, DhtRuntimeStartError> {
+        assert_dht_channel_capacity(config.discovery_capacity);
         let local_id = random_local_id().map_err(DhtRuntimeStartError::LocalId)?;
         let table = KTable::new(local_id);
         let registry = TransactionRegistry::default();
         let responder = DhtResponder::new(&table, config.sample_infohashes_interval)
             .map_err(DhtRuntimeStartError::TokenSecret)?;
-        let (discovery, discovered_nodes) = dht_discovery_channel(
-            NonZeroUsize::new(DHT_DISCOVERY_QUEUE_CAPACITY)
-                .expect("production discovery capacity is nonzero"),
-        );
+        let (discovery, discovered_nodes) = dht_discovery_channel(config.discovery_capacity);
         let discovery_stats = discovery.stats_handle();
         let dispatcher = DhtDispatcher::from_responder(responder).with_discovery(discovery);
 
@@ -559,9 +570,9 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::{
-        ByteString, DhtDiscoveryStats, DhtInboundStatsSnapshot, KrpcMessage, MessageArgs,
-        QuerySendError, RegisterError, RoutingNode, TokioIpv4UdpWeakSendError, TransactionRegistry,
-        MAX_INBOUND_DATAGRAM_BYTES,
+        ByteString, DhtDiscoveryOffer, DhtDiscoveryStats, DhtInboundStatsSnapshot, KrpcMessage,
+        MessageArgs, QuerySendError, RegisterError, RoutingNode, TokioIpv4UdpWeakSendError,
+        TransactionRegistry, MAX_INBOUND_DATAGRAM_BYTES,
     };
 
     use super::*;
@@ -575,12 +586,73 @@ mod tests {
         );
         assert_eq!(config.query_timeout, Duration::from_secs(4));
         assert_eq!(config.sample_infohashes_interval, 10);
+        assert_eq!(
+            config.discovery_capacity,
+            NonZeroUsize::new(DHT_DISCOVERY_QUEUE_CAPACITY).unwrap()
+        );
         assert_eq!(MAX_INFLIGHT_QUERIES.get(), 64);
         assert_eq!(MAX_OUTSTANDING_REJECTIONS.get(), 64);
         assert_eq!(DHT_DISCOVERY_QUEUE_CAPACITY, 1_000);
 
         let first = random_local_id().unwrap();
         assert_eq!(&first.as_bytes()[12..], CLIENT_SUFFIX);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "exceeds Tokio's maximum")]
+    async fn over_max_discovery_capacity_panics_before_runtime_construction() {
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let _ = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            discovery_capacity: over_max,
+            ..DhtRuntimeConfig::default()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn configured_discovery_capacity_is_used_by_the_live_runtime() {
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            discovery_capacity: NonZeroUsize::new(2).unwrap(),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut discovered = runtime
+            .take_discovered_nodes()
+            .expect("runtime exposes its discovery receiver once");
+        let discovery = discovered
+            .try_sender()
+            .expect("the live runtime retains its discovery sender");
+        let node = |byte| RoutingNode {
+            id: id(byte),
+            addr: SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                10_000 + u16::from(byte),
+            )),
+        };
+
+        assert_eq!(discovery.offer(node(1)), DhtDiscoveryOffer::Queued);
+        assert_eq!(discovery.offer(node(2)), DhtDiscoveryOffer::Queued);
+        assert_eq!(discovery.offer(node(3)), DhtDiscoveryOffer::FullDropped);
+        assert_eq!(
+            runtime.discovery_stats().snapshot(),
+            DhtDiscoveryStats {
+                offered: 3,
+                queued: 2,
+                full_dropped: 1,
+                receiver_closed_dropped: 0,
+            }
+        );
+        assert_eq!(discovered.recv().await, Some(node(1)));
+        assert_eq!(discovered.recv().await, Some(node(2)));
+
+        drop((discovery, discovered));
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            DhtRuntimeExit::Shutdown
+        ));
     }
 
     #[tokio::test]

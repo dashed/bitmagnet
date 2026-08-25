@@ -44,6 +44,22 @@ mod scrape;
 mod tokio_ipv4_udp;
 mod transaction;
 
+/// Largest capacity accepted by the public DHT Tokio channel constructors.
+///
+/// This is exactly Tokio's semaphore permit ceiling, which also bounds Tokio
+/// bounded MPSC channels.
+pub const DHT_CHANNEL_MAX_CAPACITY: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+#[track_caller]
+fn assert_dht_channel_capacity(capacity: std::num::NonZeroUsize) {
+    assert!(
+        capacity.get() <= DHT_CHANNEL_MAX_CAPACITY,
+        "DHT channel capacity {} exceeds Tokio's maximum of {}",
+        capacity,
+        DHT_CHANNEL_MAX_CAPACITY,
+    );
+}
+
 pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
 pub use dht_bootstrap_ping_producer::{
     DhtBootstrapPingProducer, DhtBootstrapPingProducerConfig, DhtBootstrapPingProducerConfigError,
@@ -95,7 +111,8 @@ pub use dht_info_hash_triage::{
     DhtInfoHashTriageReceiver, DhtInfoHashTriageRequest, DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY,
 };
 pub use dht_info_hash_triage_routes::{
-    dht_get_peers_channel, dht_scrape_channel, DhtGetPeersInput, DhtGetPeersInputClosed,
+    dht_get_peers_channel, dht_get_peers_channel_with_capacity, dht_scrape_channel,
+    dht_scrape_channel_with_capacity, DhtGetPeersInput, DhtGetPeersInputClosed,
     DhtGetPeersReceiver, DhtScrapeInput, DhtScrapeInputClosed, DhtScrapeReceiver,
     DHT_GET_PEERS_ROUTE_CAPACITY, DHT_SCRAPE_ROUTE_CAPACITY,
 };

@@ -1671,6 +1671,7 @@ mod tests {
             bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             query_timeout: Duration::from_secs(1),
             sample_infohashes_interval: 10,
+            discovery_capacity: NonZeroUsize::new(crate::DHT_DISCOVERY_QUEUE_CAPACITY).unwrap(),
         })
         .await
         .unwrap();
@@ -1733,6 +1734,7 @@ mod tests {
             bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             query_timeout: Duration::from_secs(1),
             sample_infohashes_interval: 10,
+            discovery_capacity: NonZeroUsize::new(crate::DHT_DISCOVERY_QUEUE_CAPACITY).unwrap(),
         })
         .await
         .unwrap();
@@ -1828,6 +1830,7 @@ mod tests {
             bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             query_timeout: Duration::from_secs(1),
             sample_infohashes_interval: 10,
+            discovery_capacity: NonZeroUsize::new(crate::DHT_DISCOVERY_QUEUE_CAPACITY).unwrap(),
         })
         .await
         .unwrap();
