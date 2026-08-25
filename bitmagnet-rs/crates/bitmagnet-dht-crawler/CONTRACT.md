@@ -9,16 +9,17 @@ strict differential consumers for all five stages; one concrete PostgreSQL
 lookup adapter; one concrete PostgreSQL scraped-source writer; and a thin
 adapter for the persistent blocking manager, plus one offline concrete triage
 composition test and taskless typed metainfo-request, scraped-source, and
-torrent-persistence handoffs, and a pure torrent-persistence planner. The
-get-peers worker publishes successful nonempty peer vectors through the
+torrent-persistence handoffs, a pure torrent-persistence planner, and an owned
+torrent-persistence worker behind injected lookup and atomic-writer boundaries.
+The get-peers worker publishes successful nonempty peer vectors through the
 metainfo-request handoff. The scrape worker publishes successful raw BEP-33
 Bloom filters through the scraped-source handoff. The request-metainfo worker
 publishes allowed verified metainfo through the torrent-persistence handoff.
 No concrete peer-wire metainfo requester, request-stage persistent-blocking
-adapter, torrent-persistence worker, or Rust production application composition
-exists yet. The scraped-source worker and writer are not wired into an
-application or validated against live PostgreSQL. This is not a live-database
-integration.
+adapter, torrent-persistence PostgreSQL lookup or writer, or Rust production
+application composition exists yet. The scraped-source worker and writer are
+not wired into an application or validated against live PostgreSQL. This is
+not a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -265,10 +266,54 @@ count null.
 The planner performs no lookup, route receive, clock read, database transaction,
 queue insertion, scrape send, retry, metric, logging, lifecycle, or shutdown
 work. Its deterministic scrape order is a Rust hardening over Go's unspecified
-map iteration. The future owned worker and writer remain responsible for lookup
-chunking and fail-open policy, batching and flush timing, timestamps, atomic
-transaction execution, fanout after a committed write, and typed shutdown and
-outcome accounting.
+map iteration. The owned worker described next coordinates injected lookup,
+batching, typed writer outcomes, fanout, and shutdown accounting; a future
+concrete writer remains responsible for timestamps and atomic transaction
+execution.
+
+### Owned torrent-persistence worker
+
+`DhtPersistTorrentWorker` consumes the unique torrent-persistence receiver and
+owns one sequential pipeline through an injected `DhtTorrentV2Lookup`, the pure
+planner, an injected atomic `DhtTorrentBatchWriter`, and the typed scrape input.
+Its default raw batch limit is 1,000, its first-item-relative flush interval is
+60 seconds, and its sorted unique v2 lookup chunk limit is 1,000. EOF flushes a
+final partial batch and returns `InputClosed`; unlike Go's detached generic
+batcher, no separate output buffer or task is created.
+
+The lookup returns raw `(full v2, primary)` rows because the database v2 index
+is not unique. Each call is nonempty, sorted, unique, sequential, and bounded.
+Successful earlier chunks survive the first later lookup error, later chunks
+are skipped, and planning proceeds fail-open without retry. Duplicate stored
+rows are deterministically collapsed to the lexicographically smallest primary,
+an explicit Rust hardening over Go's unspecified final-map-row winner. A
+foreign returned key invalidates and discards its whole chunk so collaborator
+output cannot reserve unrelated planner state.
+
+Every completed nonempty raw batch reaches exactly one writer call, including
+an empty transaction plan after all projections fail. `Ok(())` is the only
+outcome that permits deterministic input-order scrape fanout. `Rejected`
+proves that no writer-eligible effect committed; `OutcomeUnknown` preserves a
+none-or-whole atomicity claim without choosing which occurred. Neither error is
+retried or fanned out, and both remain local to their batch. A closed scrape
+route returns and counts each exact unsent request while later candidates and
+batches continue.
+
+Shutdown is biased over intake, the batch deadline, lookup, writer completion,
+and scrape sends. It closes and drains queued input; distinguishes pre-plan
+drops, an abandoned writer future and the scrapes it never made eligible, and
+post-success scrape abandonment; and does not turn cancellation into a
+collaborator outcome. Separate saturating ledgers conserve dequeued versus
+planned inputs, planner dispositions, writer calls, projected write outcomes,
+scrape candidates, lookup calls, and lookup keys. Confirmed persisted counts
+are planned torrent records in successful writer calls, not PostgreSQL rows
+affected.
+
+This checkpoint injects both collaborators and executes no SQL. It does not
+construct a pool, choose timestamp authority, insert queue jobs, execute a
+classifier or scrape worker, export metrics, retry, provide exactly-once
+delivery, spawn or supervise itself, or claim live database or production
+readiness.
 
 ### Scraped-source handoff route
 
@@ -1578,10 +1623,13 @@ The following remain deliberately outside this checkpoint:
   verification;
 - a concrete `DhtInfoHashBlocker` adapter to the persistent blocking manager,
   including production flush and failure policy;
-- the downstream torrent-persistence batcher, resolved-v2 lookup adapter,
-  database writer, scrape fanout, and ownership of the unique
-  torrent-persistence receiver; the pure deduplication and model-projection
-  planner exists but performs none of those effects;
+- concrete PostgreSQL implementations of the torrent worker's resolved-v2
+  lookup and atomic six-table writer, including transaction-bound queue-job
+  insertion, timestamp policy, and live schema, codec, rollback, commit,
+  query-plan, observability, and durability validation;
+- production construction and supervision of the owned torrent-persistence
+  worker, ownership transfer of the unique receiver, scrape-route close order,
+  shutdown wiring, metrics export, retry/operator policy, and health reporting;
 - production construction, supervision, shutdown wiring, metrics, retry, and
   operator failure policy for the existing Rust request-metainfo worker;
 - a producer-side `closed()` waiter on the typed triage input route;
@@ -1605,6 +1653,7 @@ supervises the triage, get-peers, scrape, and source-persistence workers as a
 pipeline. The request-metainfo route has the get-peers worker as a producer and
 the owned Rust request-metainfo worker as its consumer; allowed results flow
 through the typed torrent-persistence route. No production application
-constructs or supervises that worker, no concrete peer-wire requester or
-persistent blocker adapter supplies it, and no downstream persistence worker
-owns the unique torrent-persistence receiver in this checkpoint.
+constructs or supervises either worker, no concrete peer-wire requester or
+persistent blocker adapter supplies the request stage, and no concrete
+PostgreSQL collaborators supply the owned persistence worker in this
+checkpoint.
