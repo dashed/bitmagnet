@@ -4,23 +4,25 @@ This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
 The bounded published checkpoint contains one Rust info-hash-triage worker,
-one strict differential consumer, and one concrete PostgreSQL lookup adapter.
-It is not an application composition or a live-database integration.
+one strict differential consumer, one concrete PostgreSQL lookup adapter, and
+a thin adapter for the persistent blocking manager. It is not an application
+composition or a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
 and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
 domain enum. This crate owns the higher-level batching and routing decision,
 plus the blocking-policy and database-projection seams and the concrete SQLx
-lookup adapter. It does not make the protocol crate depend on PostgreSQL, the
-persistent blocking manager, crawler application state, or deployment
-configuration.
+lookup and blocking-manager adapters. It does not make the protocol crate
+depend on PostgreSQL, the persistent blocking manager, crawler application
+state, or deployment configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
 `3099790291597d4aed4888601d5b184f173f9bdf`. The PostgreSQL lookup checkpoint is
-`18cc4ac47cb4b6186494dde2c244884d105ab749`. Together they publish the API and
-evidence below.
+`18cc4ac47cb4b6186494dde2c244884d105ab749`. The blocking-manager adapter
+checkpoint is `c8e22493e03850d5a61712476dc000459b414438`. Together they publish
+the API and evidence below.
 
 ## Public Rust boundary
 
@@ -63,6 +65,29 @@ for a hash wins. Both async collaborators return
 that reaches the timestamp-staleness predicate. The system implementation
 projects wall time into a signed Unix-microsecond value; deterministic callers
 can inject an alternate clock.
+
+### Persistent blocking-manager adapter
+
+`BlockingManager` directly implements `DhtInfoHashBlockFilter`. A public
+wrapper would add no ownership or lifecycle semantics because this crate owns
+the collaborator trait, so the direct implementation is the smallest public
+surface. An application can share one manager as
+`Arc<dyn DhtInfoHashBlockFilter>` while retaining a typed clone for blocking
+and flush operations.
+
+The adapter converts `Id20` to `InfoHash` byte-for-byte, delegates exactly once
+to `BlockingManager::filter`, boxes `BlockingError` behind
+`TriageCollaboratorError`, and converts the result byte-for-byte back to
+`Id20`. It does not sort, deduplicate, validate against the input, retry, or
+flush independently; returned order and duplicates are preserved for the
+worker's existing contract validation. Its deterministic tests use a private
+single-use delegate seam and a lazy pool solely for construction, without
+polling a manager operation or acquiring a PostgreSQL connection.
+
+At the adapter checkpoint, all four focused adapter tests and all 34 crawler
+release tests passed. Release all-target checking, Clippy with warnings denied,
+rustdoc with warnings denied, formatting, and diff checks also passed. These
+are offline source and compile gates, not live PostgreSQL evidence.
 
 ### PostgreSQL lookup adapter
 
@@ -356,12 +381,12 @@ external-service behavior; upstream proof that the responding node has peers
 for a sampled hash; ignore-hash provenance; or any Rust API, stats,
 supervision, application, deployment, or production-readiness fact.
 
-The Rust consumer, worker, and PostgreSQL adapter do not claim exact Go map,
-SQL-result, or delivery order; exact Go SQL text or bind cardinality; exact Go
-wall-clock values or per-item `time.Now()` schedule; live PostgreSQL array
-encoding, schema compatibility, indexes, query plans, server-side
-cancellation, transactions, retries, statement timeouts, or pool
-configuration; the persistent production blocking Bloom state; Go's detached
+The Rust consumer, worker, PostgreSQL adapter, and blocking-manager adapter do
+not claim exact Go map, SQL-result, or delivery order; exact Go SQL text or
+bind cardinality; exact Go wall-clock values or per-item `time.Now()` schedule;
+live PostgreSQL array encoding, schema compatibility, indexes, query plans,
+server-side cancellation, transactions, retries, statement timeouts, or pool
+configuration; a live persistent production blocking Bloom state; Go's detached
 batcher timing, output boundary, or close behavior; downstream get-peers or
 scrape execution; Go select ties, eager lane operands, or fairness; Go logging;
 cross-route retention or waiter fairness; closed Go output behavior; live DHT
@@ -376,8 +401,8 @@ contract only.
 
 The following remain deliberately outside this checkpoint:
 
-- a production `DhtInfoHashBlockFilter` adapter backed by the persistent
-  blocking manager and its lifecycle, buffering, flush, and metrics policy;
+- application ownership and shutdown flushing of the persistent blocking
+  manager, plus metrics and operator-facing failure policy;
 - application construction of `PgDhtTorrentTriageLookup` with a configured
   pool, plus live schema/codec/query-plan validation and database
   observability;
