@@ -4,8 +4,9 @@
 //! This crate consumes typed DHT discovery products and makes database- and
 //! policy-dependent routing decisions. The core worker still receives injected
 //! collaborators, while this crate supplies concrete adapters for PostgreSQL
-//! triage lookup and the persistent blocking manager. Application ownership,
-//! lifecycle, and shutdown wiring remain deferred.
+//! triage lookup and the persistent blocking manager. A staged pipeline
+//! supervisor owns the constructed crawler lifecycle; full application
+//! configuration, readiness, and deployment wiring remain deferred.
 
 mod blocking_manager_filter;
 mod downstream_composition;
@@ -21,6 +22,7 @@ mod pg_source_batch_writer;
 mod pg_torrent_batch_writer;
 mod pg_torrent_triage_lookup;
 mod pg_torrent_v2_lookup;
+mod pipeline_supervisor;
 mod request_meta_info;
 mod request_meta_info_route;
 mod scrape;
@@ -103,6 +105,11 @@ pub use pg_torrent_batch_writer::{
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
 pub use pg_torrent_v2_lookup::PgDhtTorrentV2Lookup;
+pub use pipeline_supervisor::{
+    DhtCrawlerPipelineBlockingResult, DhtCrawlerPipelineCompletedExit,
+    DhtCrawlerPipelineDownstreamChild, DhtCrawlerPipelineDownstreamExits, DhtCrawlerPipelineExit,
+    DhtCrawlerPipelineHandles, DhtCrawlerPipelineSupervisor, DhtCrawlerPipelineTrigger,
+};
 pub use request_meta_info::{
     DefaultDhtMetaInfoBanningChecker, DhtInfoHashBlocker, DhtMetaInfoBanningChecker,
     DhtMetaInfoRequester, DhtRequestMetaInfoWorker, DhtRequestMetaInfoWorkerConfig,
