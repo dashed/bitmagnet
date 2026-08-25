@@ -3794,3 +3794,47 @@ remain deferred. This slice adds no receiver-side batching, persistence, or
 downstream triage pipeline; no separate runtime ownership or termination
 child; no application wiring; and no deployment, production-traffic, rollout,
 or operational-readiness claim.
+
+The forty-eighth bounded Rust-only slice, implemented by
+`f9acfa76bcafbad4a5e07685f2e6e5108c669b24`, exposes the existing two-phase
+discovery reservation boundary for higher crawler workers without changing its
+queue behavior. The crate now publicly re-exports the opaque, must-use
+`DhtDiscoveryPermit` and typed `DhtDiscoveryReserveError`.
+`DhtDiscoverySender::reserve` waits cancellation-safely for one slot and
+returns that permit; `DhtDiscoveryPermit::deliver` then consumes it and
+synchronously classifies the exact commit as `DhtDiscoveryOffer::Queued` or
+`DhtDiscoveryOffer::ReceiverClosed`.
+
+A held permit owns one sender clone and one queue slot. It therefore reduces
+available capacity and delays receiver EOF until delivery or drop. Dropping an
+unused permit restores capacity without changing discovery counters. A reserve
+attempt that observes a closed or dropped receiver returns
+`DhtDiscoveryReserveError::ReceiverClosed`, also without changing counters. An
+already-acquired permit retains its synchronous delivery authority after
+explicit receiver close so the receiver can drain that node; receiver
+destruction before delivery is instead classified as receiver-closed. These
+are the same semantics already used by crate-owned producers, now made an
+explicit downstream-crate contract rather than copied into a timeout-specific
+helper.
+
+The external public-API gate reserves the only slot, proves that a nonblocking
+offer is then full-dropped, drops the unused permit and observes capacity
+reopen, reserves and delivers an exact node, verifies the shared counter
+partition, and observes the typed closed-receiver error without counter drift.
+The full DHT package passed all 395 unit tests, every integration-test binary
+including this new gate, and the doctest. The release-focused gate, all-target
+checking, strict all-target Clippy with warnings denied, rustdoc with warnings
+denied, formatting, and diff checks also passed.
+
+No Go oracle is attached because this checkpoint changes only the Rust
+capability surface and preserves the already-tested channel implementation. It
+starts no task or timer and adds no timeout policy, retry, priority, queue-size
+change, network I/O, KTable mutation, get-peers worker, metainfo handoff,
+supervisor child, application ownership, deployment, or production-readiness
+claim. Higher-level callers remain responsible for bounding how long they hold
+a permit and for dropping it on cancellation.
+
+This slice supersedes slice thirty-eight only where that historical checkpoint
+states that the discovery reservation permit is crate-private and not a public
+API expansion. Slice thirty-eight's producer behavior and every later
+discovery queue, counter, shutdown, and supervisor contract remain unchanged.
