@@ -439,21 +439,62 @@ impl DhtRuntime {
         self.client.clone()
     }
 
+    /// Observe natural task termination until the caller requests graceful
+    /// shutdown, then await the exact owned-task result.
+    ///
+    /// External shutdown has deterministic priority when it and the runtime
+    /// task are ready in the same poll. The task's exact terminal result is
+    /// still preserved: an already-failed or panicked task is never rewritten
+    /// as a graceful [`DhtRuntimeExit::Shutdown`]. The shutdown future is
+    /// dropped before the runtime task is joined after an external request.
+    ///
+    /// Cancelling this consuming future drops the runtime, which closes the
+    /// registry, requests shutdown, and aborts the task instead of detaching
+    /// it. Abort is not an asynchronous join: non-yielding task code may run
+    /// until its next yield.
+    pub async fn run_until_shutdown<F>(mut self, shutdown: F) -> Result<DhtRuntimeExit, JoinError>
+    where
+        F: Future<Output = ()>,
+    {
+        let task_result = {
+            tokio::pin!(shutdown);
+            let task = self
+                .task
+                .as_mut()
+                .expect("DHT runtime task is present until the runtime is consumed");
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => None,
+                result = task => Some(result),
+            }
+        };
+
+        match task_result {
+            Some(result) => {
+                self.task.take();
+                result
+            }
+            None => {
+                let _ = self.shutdown_tx.send(true);
+                self.take_task().await
+            }
+        }
+    }
+
     /// Request graceful shutdown and await the exact task terminal result.
     ///
     /// Cancelling this consuming future drops the runtime, which closes the
     /// registry and aborts the task instead of detaching it.
-    pub async fn shutdown(mut self) -> Result<DhtRuntimeExit, JoinError> {
-        let _ = self.shutdown_tx.send(true);
-        self.take_task().await
+    pub async fn shutdown(self) -> Result<DhtRuntimeExit, JoinError> {
+        self.run_until_shutdown(std::future::ready(())).await
     }
 
     /// Await a natural task exit without requesting shutdown.
     ///
     /// Cancelling this consuming future drops the runtime and therefore closes
     /// the registry and aborts the owned task.
-    pub async fn wait(mut self) -> Result<DhtRuntimeExit, JoinError> {
-        self.take_task().await
+    pub async fn wait(self) -> Result<DhtRuntimeExit, JoinError> {
+        self.run_until_shutdown(std::future::pending()).await
     }
 
     async fn take_task(&mut self) -> Result<DhtRuntimeExit, JoinError> {
@@ -507,6 +548,10 @@ fn random_local_id() -> Result<Id20, getrandom::Error> {
 #[cfg(test)]
 mod tests {
     use std::future::{pending, poll_fn, ready, Future};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::Context;
     use std::task::Poll;
     use std::time::Instant as WallInstant;
 
@@ -1011,6 +1056,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_until_shutdown_ready_signal_joins_and_releases_owned_resources() {
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            query_timeout: Duration::from_secs(1),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let local_addr = runtime.local_addr();
+        let remote = SocketAddr::V4(local_addr);
+        let client = runtime.client();
+        let mut discovered = runtime
+            .take_discovered_nodes()
+            .expect("production discovery receiver");
+
+        let future = runtime.run_until_shutdown(ready(()));
+        assert_send(&future);
+        assert!(matches!(future.await.unwrap(), DhtRuntimeExit::Shutdown));
+        assert_eq!(discovered.recv().await, None);
+        assert_registry_closed(&client, remote).await;
+
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn run_until_shutdown_observes_natural_failure_and_panic_exactly() {
+        let failed = DhtRuntimeExit::Failed(DhtDriverError::Receive(
+            crate::ReceiveDispatchError::Transport(TokioIpv4UdpError::ReceiveIo(
+                std::io::Error::other("synthetic runtime receive failure"),
+            )),
+        ));
+        let (runtime, client, registry, local_addr) =
+            synthetic_runtime(async move { failed }).await;
+        let remote = SocketAddr::V4(local_addr);
+        let exit = runtime.run_until_shutdown(pending()).await.unwrap();
+        match exit {
+            DhtRuntimeExit::Failed(DhtDriverError::Receive(
+                crate::ReceiveDispatchError::Transport(TokioIpv4UdpError::ReceiveIo(error)),
+            )) => assert_eq!(error.to_string(), "synthetic runtime receive failure"),
+            other => panic!("unexpected natural runtime exit: {other:?}"),
+        }
+        assert_eq!(registry.pending_count(), 0);
+        assert_registry_closed(&client, remote).await;
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+
+        let (runtime, client, registry, local_addr) = synthetic_runtime(async {
+            panic!("synthetic run_until_shutdown panic");
+        })
+        .await;
+        let remote = SocketAddr::V4(local_addr);
+        let join_error = runtime.run_until_shutdown(pending()).await.unwrap_err();
+        assert!(join_error.is_panic());
+        assert_eq!(
+            join_error
+                .into_panic()
+                .downcast::<&'static str>()
+                .map(|message| *message)
+                .unwrap(),
+            "synthetic run_until_shutdown panic"
+        );
+        assert_eq!(registry.pending_count(), 0);
+        assert_registry_closed(&client, remote).await;
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+
+        let (runtime, client, registry, local_addr) =
+            synthetic_runtime(async { pending::<DhtRuntimeExit>().await }).await;
+        let remote = SocketAddr::V4(local_addr);
+        runtime
+            .task
+            .as_ref()
+            .expect("synthetic runtime task")
+            .abort();
+        let join_error = runtime.run_until_shutdown(pending()).await.unwrap_err();
+        assert!(join_error.is_cancelled());
+        assert_eq!(registry.pending_count(), 0);
+        assert_registry_closed(&client, remote).await;
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn run_until_shutdown_biases_equal_ready_signal_and_preserves_task_result() {
+        let (finished_tx, finished_rx) = oneshot::channel();
+        let failed = DhtRuntimeExit::Failed(DhtDriverError::Receive(
+            crate::ReceiveDispatchError::Transport(TokioIpv4UdpError::ReceiveIo(
+                std::io::Error::other("equal-ready runtime failure"),
+            )),
+        ));
+        let (runtime, _client, _registry, local_addr) = synthetic_runtime(async move {
+            finished_tx.send(()).unwrap();
+            failed
+        })
+        .await;
+        finished_rx.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let polled = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let shutdown = ReadyShutdownProbe {
+            polled: Arc::clone(&polled),
+            dropped: Arc::clone(&dropped),
+        };
+        let exit = runtime.run_until_shutdown(shutdown).await.unwrap();
+
+        assert!(polled.load(Ordering::SeqCst));
+        assert!(dropped.load(Ordering::SeqCst));
+        match exit {
+            DhtRuntimeExit::Failed(DhtDriverError::Receive(
+                crate::ReceiveDispatchError::Transport(TokioIpv4UdpError::ReceiveIo(error)),
+            )) => assert_eq!(error.to_string(), "equal-ready runtime failure"),
+            other => panic!("unexpected equal-ready runtime exit: {other:?}"),
+        }
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn run_until_shutdown_drops_signal_future_before_joining_task() {
+        let polled = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_observer = Arc::clone(&dropped);
+        let (runtime, _client, _registry, local_addr) = synthetic_runtime(async move {
+            while !task_observer.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            DhtRuntimeExit::Shutdown
+        })
+        .await;
+        let shutdown = ReadyShutdownProbe {
+            polled: Arc::clone(&polled),
+            dropped: Arc::clone(&dropped),
+        };
+
+        let exit =
+            tokio::time::timeout(Duration::from_secs(1), runtime.run_until_shutdown(shutdown))
+                .await
+                .expect("shutdown future is dropped before joining the task")
+                .unwrap();
+        assert!(matches!(exit, DhtRuntimeExit::Shutdown));
+        assert!(polled.load(Ordering::SeqCst));
+        assert!(dropped.load(Ordering::SeqCst));
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
+    async fn cancelling_run_until_shutdown_aborts_instead_of_detaching() {
+        let (runtime, client, local_addr) = stubborn_runtime().await;
+        let remote = SocketAddr::V4(local_addr);
+        let mut future = Box::pin(runtime.run_until_shutdown(pending()));
+        let first_poll = poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await;
+        assert!(first_poll.is_pending());
+
+        drop(future);
+        assert_registry_closed(&client, remote).await;
+        let rebound = rebind_after_task_drop(local_addr).await;
+        assert_eq!(rebound.local_addr(), local_addr);
+    }
+
+    #[tokio::test]
     async fn cancelling_consuming_wait_and_shutdown_abort_instead_of_detaching() {
         for shutdown in [false, true] {
             let (runtime, client, local_addr) = stubborn_runtime().await;
@@ -1364,6 +1572,81 @@ mod tests {
         let stats = sender.stats_handle();
         drop(sender);
         (stats, Some(receiver))
+    }
+
+    fn assert_send<T: Send>(_: &T) {}
+
+    struct ReadyShutdownProbe {
+        polled: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Future for ReadyShutdownProbe {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polled.store(true, Ordering::SeqCst);
+            Poll::Ready(())
+        }
+    }
+
+    impl Drop for ReadyShutdownProbe {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn synthetic_runtime<F>(
+        task_future: F,
+    ) -> (
+        DhtRuntime,
+        DhtRuntimeClient,
+        TransactionRegistry<CryptoTransactionIdIssuer>,
+        SocketAddrV4,
+    )
+    where
+        F: Future<Output = DhtRuntimeExit> + Send + 'static,
+    {
+        let local_id = Id20::ZERO;
+        let table = KTable::new(local_id);
+        let registry = TransactionRegistry::default();
+        let transport = TokioIpv4UdpTransport::bind_loopback().await.unwrap();
+        let local_addr = transport.local_addr();
+        let (receiver, sender) = transport.into_parts();
+        let client = DhtRuntimeClient::new(
+            local_id,
+            &registry,
+            Duration::from_secs(1),
+            sender.downgrade(),
+        );
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let task_registry = registry.clone();
+        let task = tokio::spawn(async move {
+            let _registry_guard = RegistryCloseGuard(task_registry);
+            let socket_owners = (receiver, sender);
+            let exit = task_future.await;
+            drop(socket_owners);
+            exit
+        });
+        let (discovery_stats, discovered_nodes) = empty_discovery_state();
+
+        (
+            DhtRuntime {
+                local_addr,
+                local_id,
+                table,
+                client: client.clone(),
+                registry: registry.clone(),
+                inbound_stats: DhtInboundStats::new(),
+                discovery_stats,
+                discovered_nodes,
+                shutdown_tx,
+                task: Some(task),
+            },
+            client,
+            registry,
+            local_addr,
+        )
     }
 
     async fn stubborn_runtime() -> (DhtRuntime, DhtRuntimeClient, SocketAddrV4) {
