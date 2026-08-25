@@ -30,9 +30,8 @@ const ROW_CLASSIFICATIONS: [&str; 4] = [
     "RUNTIME_EXACT",
 ];
 
-const GO_ONLY_METADATA: [&str; 9] = [
+const GO_ONLY_METADATA: [&str; 8] = [
     "input.configuredReseedIntervalMs",
-    "input.effectiveReseedIntervalMs on runtime rows",
     "expected.laneInCalls",
     "expected.deliveries[].timeIsZero",
     "expected.deliveries[].dropped",
@@ -63,8 +62,8 @@ const DELIBERATE_RUST_DELTAS: [&str; 11] = [
     "async_producer_level_cancellation_replaces_the_blocking_Go_resolver_without_claiming_OS_lookup_cancellation",
     "Go_address_family_selection_is_replayed_over_resolver_order_without_claiming_identical_DNS_answers",
     "native_and_mapped_IPv4_are_canonicalized_to_SocketAddr_V4_while_native_IPv6_is_retained",
-    "the_public_constructor_currently_uses_fixed_defaults_while_Go_configured_bootstrap_nodes_remain_deferred_application_wiring",
-    "the_fixed_fresh_600_second_delay_uses_the_effective_Go_factory_value_and_excludes_runtime_harness_overrides",
+    "the_public_config_preserves_ordered_bootstrap_occurrences_while_the_default_remains_the_exact_effective_Go_node_list",
+    "positive_configured_fresh_delays_are_honored_while_the_default_uses_the_effective_600_second_Go_factory_value",
     "resolution_failures_are_counted_and_continue_without_freezing_Go_warning_text",
     "positive_Tokio_capacity_typed_InputClosed_and_irrevocable_owned_permits_replace_raw_Go_channel_lifecycle",
     "the_owned_taskless_run_future_and_typed_terminal_exits_replace_the_detached_unjoined_Go_producer",
@@ -95,7 +94,7 @@ const RUST_HARDENING_EVIDENCE: [(&str, &str); 11] = [
     ),
     (
         DELIBERATE_RUST_DELTAS[5],
-        "first_round_is_immediate_and_later_round_uses_a_fresh_ten_minute_delay; delayed_poll_does_not_catch_up_missed_rounds",
+        "first_round_is_immediate_and_later_round_uses_the_configured_fresh_delay; delayed_poll_does_not_catch_up_missed_rounds",
     ),
     (
         DELIBERATE_RUST_DELTAS[6],
@@ -339,7 +338,6 @@ fn fixture_schema_identity_sources_metadata_and_partition_are_frozen() {
         GO_ONLY_METADATA,
         [
             "input.configuredReseedIntervalMs",
-            "input.effectiveReseedIntervalMs on runtime rows",
             "expected.laneInCalls",
             "expected.deliveries[].timeIsZero",
             "expected.deliveries[].dropped",
@@ -374,8 +372,8 @@ fn fixture_schema_identity_sources_metadata_and_partition_are_frozen() {
             "async_producer_level_cancellation_replaces_the_blocking_Go_resolver_without_claiming_OS_lookup_cancellation",
             "Go_address_family_selection_is_replayed_over_resolver_order_without_claiming_identical_DNS_answers",
             "native_and_mapped_IPv4_are_canonicalized_to_SocketAddr_V4_while_native_IPv6_is_retained",
-            "the_public_constructor_currently_uses_fixed_defaults_while_Go_configured_bootstrap_nodes_remain_deferred_application_wiring",
-            "the_fixed_fresh_600_second_delay_uses_the_effective_Go_factory_value_and_excludes_runtime_harness_overrides",
+            "the_public_config_preserves_ordered_bootstrap_occurrences_while_the_default_remains_the_exact_effective_Go_node_list",
+            "positive_configured_fresh_delays_are_honored_while_the_default_uses_the_effective_600_second_Go_factory_value",
             "resolution_failures_are_counted_and_continue_without_freezing_Go_warning_text",
             "positive_Tokio_capacity_typed_InputClosed_and_irrevocable_owned_permits_replace_raw_Go_channel_lifecycle",
             "the_owned_taskless_run_future_and_typed_terminal_exits_replace_the_detached_unjoined_Go_producer",
@@ -408,7 +406,7 @@ fn fixture_schema_identity_sources_metadata_and_partition_are_frozen() {
             ),
             (
                 DELIBERATE_RUST_DELTAS[5],
-                "first_round_is_immediate_and_later_round_uses_a_fresh_ten_minute_delay; delayed_poll_does_not_catch_up_missed_rounds",
+                "first_round_is_immediate_and_later_round_uses_the_configured_fresh_delay; delayed_poll_does_not_catch_up_missed_rounds",
             ),
             (
                 DELIBERATE_RUST_DELTAS[6],
@@ -531,7 +529,7 @@ fn assert_source_row(fixture: &Fixture) {
         );
     }
 
-    assert_eq!(RESEED_DELAY, Duration::from_secs(600));
+    assert_eq!(DEFAULT_RESEED_INTERVAL, Duration::from_secs(600));
     assert_eq!(
         DhtDiscoveredNodeSchedulerConfig::default()
             .ping_capacity
@@ -549,6 +547,10 @@ fn assert_source_row(fixture: &Fixture) {
     assert_eq!(
         producer.bootstrap_nodes.as_ref(),
         source.default_bootstrap_nodes.as_slice()
+    );
+    assert_eq!(
+        producer.reseed_interval,
+        Duration::from_secs(source.effective_reseed_interval_seconds)
     );
 }
 
@@ -699,6 +701,13 @@ fn assert_runtime_return(fixture: &Fixture) {
     assert!(fixture.expected.source.is_none());
 }
 
+fn rust_runtime_config(fixture: &Fixture) -> DhtBootstrapPingProducerConfig {
+    DhtBootstrapPingProducerConfig {
+        bootstrap_nodes: fixture.input.bootstrap_nodes.clone(),
+        reseed_interval: Duration::from_millis(fixture.input.effective_reseed_interval_ms),
+    }
+}
+
 #[tokio::test]
 async fn ordered_numeric_row_replays_on_actual_rust_resolver_with_explicit_address_delta() {
     let fixtures = fixtures();
@@ -718,10 +727,9 @@ async fn ordered_numeric_row_replays_on_actual_rust_resolver_with_explicit_addre
 
     let (input, mut receiver) =
         DhtDiscoveredNodePingInput::test_channel(fixture.input.lane_capacity);
-    let (producer, stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(
-        input,
-        fixture.input.bootstrap_nodes.clone(),
-    );
+    let (producer, stats) =
+        DhtBootstrapPingProducer::with_config(input, rust_runtime_config(fixture))
+            .expect("fixture effective reseed interval is positive");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let controller = async {
         let first = receiver.recv().await.expect("first bootstrap ping queued");
@@ -764,10 +772,9 @@ async fn invalid_continuation_row_replays_on_actual_rust_resolver_with_failure_c
     let expected = routing_node("192.0.2.11:6883");
     let (input, mut receiver) =
         DhtDiscoveredNodePingInput::test_channel(fixture.input.lane_capacity);
-    let (producer, stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(
-        input,
-        fixture.input.bootstrap_nodes.clone(),
-    );
+    let (producer, stats) =
+        DhtBootstrapPingProducer::with_config(input, rust_runtime_config(fixture))
+            .expect("fixture effective reseed interval is positive");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let controller = async {
         let actual = receiver
@@ -812,10 +819,9 @@ async fn ordered_prefix_row_proves_blocked_third_reservation_before_shutdown() {
 
     let (input, mut receiver) =
         DhtDiscoveredNodePingInput::test_channel(fixture.input.lane_capacity);
-    let (producer, stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(
-        input,
-        fixture.input.bootstrap_nodes.clone(),
-    );
+    let (producer, stats) =
+        DhtBootstrapPingProducer::with_config(input, rust_runtime_config(fixture))
+            .expect("fixture effective reseed interval is positive");
     let resolver_calls = Arc::new(Mutex::new(Vec::new()));
     let resolver_calls_for_run = Arc::clone(&resolver_calls);
     let after_reserve = Arc::new(Mutex::new(Vec::new()));

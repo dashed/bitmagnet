@@ -46,8 +46,9 @@ mod transaction;
 
 pub use compact::{CompactAddr, CompactCodecError, CompactNode, Id20};
 pub use dht_bootstrap_ping_producer::{
-    DhtBootstrapPingProducer, DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStats,
-    DhtBootstrapPingProducerStatsHandle,
+    DhtBootstrapPingProducer, DhtBootstrapPingProducerConfig, DhtBootstrapPingProducerConfigError,
+    DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStartError,
+    DhtBootstrapPingProducerStats, DhtBootstrapPingProducerStatsHandle,
 };
 pub use dht_client::{
     DhtClient, DhtClientError, FindNodeResult, GetPeersResult, GetPeersScrapeResult,
@@ -57,10 +58,11 @@ pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
 };
 pub use dht_crawler_maintenance_supervisor::{
-    DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceNotification,
-    DhtCrawlerMaintenanceRunNotifications, DhtCrawlerMaintenanceStartError,
-    DhtCrawlerMaintenanceStatsHandle, DhtCrawlerMaintenanceSupervisor,
-    DhtCrawlerMaintenanceSupervisorExit,
+    DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceConfig,
+    DhtCrawlerMaintenanceNotification, DhtCrawlerMaintenanceRunNotifications,
+    DhtCrawlerMaintenanceStartError, DhtCrawlerMaintenanceStatsHandle,
+    DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit,
+    DhtCrawlerMaintenanceWithConfigError,
 };
 pub use dht_crawler_target::{DhtCrawlerTarget, DhtCrawlerTargetError, DhtCrawlerTargetRotator};
 pub use dht_discovered_node_find_worker::{

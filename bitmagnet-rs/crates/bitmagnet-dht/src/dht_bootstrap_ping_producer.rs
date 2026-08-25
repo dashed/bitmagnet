@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use crate::{DhtDiscoveredNodePingInput, Id20, RoutingNode};
 
-const RESEED_DELAY: Duration = Duration::from_secs(10 * 60);
+const DEFAULT_RESEED_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_BOOTSTRAP_NODES: [&str; 6] = [
     "router.utorrent.com:6881",
     "router.bittorrent.com:6881",
@@ -15,6 +17,98 @@ const DEFAULT_BOOTSTRAP_NODES: [&str; 6] = [
     "router.silotis.us:6881",
     "dht.libtorrent.org:25401",
 ];
+
+/// Ordered bootstrap endpoints and the fresh delay between completed rounds.
+///
+/// Endpoint strings are deliberately retained verbatim. Resolution happens
+/// only while the producer runs, preserving configured order, duplicates, and
+/// per-entry failure isolation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtBootstrapPingProducerConfig {
+    pub bootstrap_nodes: Vec<String>,
+    pub reseed_interval: Duration,
+}
+
+impl Default for DhtBootstrapPingProducerConfig {
+    fn default() -> Self {
+        Self {
+            bootstrap_nodes: DEFAULT_BOOTSTRAP_NODES
+                .map(String::from)
+                .into_iter()
+                .collect(),
+            reseed_interval: DEFAULT_RESEED_INTERVAL,
+        }
+    }
+}
+
+impl DhtBootstrapPingProducerConfig {
+    /// Validate the timer contract without resolving endpoints or starting work.
+    pub fn validate(&self) -> Result<(), DhtBootstrapPingProducerConfigError> {
+        if self.reseed_interval.is_zero() {
+            return Err(DhtBootstrapPingProducerConfigError::ZeroReseedInterval);
+        }
+        if Instant::now().checked_add(self.reseed_interval).is_none() {
+            return Err(DhtBootstrapPingProducerConfigError::ReseedIntervalOutOfRange);
+        }
+        Ok(())
+    }
+}
+
+/// Invalid bootstrap ping producer configuration.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DhtBootstrapPingProducerConfigError {
+    #[error("the bootstrap reseed interval must be positive")]
+    ZeroReseedInterval,
+    #[error("the bootstrap reseed interval exceeds the monotonic clock range")]
+    ReseedIntervalOutOfRange,
+}
+
+/// Recoverable failure to construct a configured bootstrap producer.
+pub struct DhtBootstrapPingProducerStartError {
+    input: DhtDiscoveredNodePingInput,
+    config: DhtBootstrapPingProducerConfig,
+    source: DhtBootstrapPingProducerConfigError,
+}
+
+impl DhtBootstrapPingProducerStartError {
+    /// Borrow the typed configuration error without consuming the recoverable inputs.
+    #[must_use]
+    pub const fn config_error(&self) -> DhtBootstrapPingProducerConfigError {
+        self.source
+    }
+
+    /// Recover the exact sender capability and configuration supplied by the caller.
+    #[must_use]
+    pub fn into_parts(self) -> (DhtDiscoveredNodePingInput, DhtBootstrapPingProducerConfig) {
+        (self.input, self.config)
+    }
+}
+
+impl std::fmt::Debug for DhtBootstrapPingProducerStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DhtBootstrapPingProducerStartError")
+            .field("config", &self.config)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for DhtBootstrapPingProducerStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid bootstrap ping configuration: {}",
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for DhtBootstrapPingProducerStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// Terminal state of the owned bootstrap-node ping producer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,10 +183,11 @@ impl DhtBootstrapPingProducerStatsHandle {
 
 /// Owned periodic producer of bootstrap endpoints for the shared ping route.
 ///
-/// Construction uses the six production Go bootstrap strings in exact order.
-/// The first round is immediate. Every subsequent round starts after one fresh
-/// ten-minute, cancellation-aware delay created only after the preceding round
-/// finishes; missed periods never catch up. Endpoints are resolved and queued
+/// The default uses the six production Go bootstrap strings in exact order and
+/// the effective production ten-minute reseed interval. The first round is
+/// immediate. Every subsequent round starts after one fresh configured,
+/// cancellation-aware delay created only after the preceding round finishes;
+/// missed periods never catch up. Endpoints are resolved and queued
 /// sequentially, preserving every configured occurrence and never fanning one
 /// endpoint out into multiple pings. Resolver failures are skipped so later
 /// configured endpoints still run.
@@ -112,20 +207,41 @@ impl DhtBootstrapPingProducerStatsHandle {
 #[must_use = "the producer must be run to seed the shared ping route"]
 pub struct DhtBootstrapPingProducer {
     bootstrap_nodes: Box<[String]>,
+    reseed_interval: Duration,
     input: DhtDiscoveredNodePingInput,
     stats: DhtBootstrapPingProducerStatsHandle,
 }
 
 impl DhtBootstrapPingProducer {
-    /// Construct the fixed six-node, ten-minute production producer.
+    /// Construct the exact effective production default.
     pub fn new(input: DhtDiscoveredNodePingInput) -> (Self, DhtBootstrapPingProducerStatsHandle) {
-        Self::from_bootstrap_nodes(
-            input,
-            DEFAULT_BOOTSTRAP_NODES
-                .map(String::from)
-                .into_iter()
-                .collect(),
-        )
+        Self::with_config(input, DhtBootstrapPingProducerConfig::default())
+            .expect("the default bootstrap ping producer config is valid")
+    }
+
+    /// Construct a taskless producer from validated application policy.
+    pub fn with_config(
+        input: DhtDiscoveredNodePingInput,
+        config: DhtBootstrapPingProducerConfig,
+    ) -> Result<(Self, DhtBootstrapPingProducerStatsHandle), DhtBootstrapPingProducerStartError>
+    {
+        if let Err(source) = config.validate() {
+            return Err(DhtBootstrapPingProducerStartError {
+                input,
+                config,
+                source,
+            });
+        }
+        let stats = DhtBootstrapPingProducerStatsHandle::default();
+        Ok((
+            Self {
+                bootstrap_nodes: config.bootstrap_nodes.into_boxed_slice(),
+                reseed_interval: config.reseed_interval,
+                input,
+                stats: stats.clone(),
+            },
+            stats,
+        ))
     }
 
     #[cfg(test)]
@@ -133,22 +249,14 @@ impl DhtBootstrapPingProducer {
         input: DhtDiscoveredNodePingInput,
         bootstrap_nodes: Vec<String>,
     ) -> (Self, DhtBootstrapPingProducerStatsHandle) {
-        Self::from_bootstrap_nodes(input, bootstrap_nodes)
-    }
-
-    fn from_bootstrap_nodes(
-        input: DhtDiscoveredNodePingInput,
-        bootstrap_nodes: Vec<String>,
-    ) -> (Self, DhtBootstrapPingProducerStatsHandle) {
-        let stats = DhtBootstrapPingProducerStatsHandle::default();
-        (
-            Self {
-                bootstrap_nodes: bootstrap_nodes.into_boxed_slice(),
-                input,
-                stats: stats.clone(),
+        Self::with_config(
+            input,
+            DhtBootstrapPingProducerConfig {
+                bootstrap_nodes,
+                ..DhtBootstrapPingProducerConfig::default()
             },
-            stats,
         )
+        .expect("the test bootstrap ping producer config is valid")
     }
 
     /// Run until caller shutdown or closure of the shared ping route.
@@ -249,7 +357,7 @@ impl DhtBootstrapPingProducer {
                 biased;
                 () = &mut shutdown => return self.finish_shutdown(0),
                 () = self.input.closed() => return self.finish_input_closed(0),
-                () = delay(RESEED_DELAY) => {}
+                () = delay(self.reseed_interval) => {}
             }
         }
     }
@@ -372,14 +480,14 @@ mod tests {
     }
 
     fn pending_delay(duration: Duration) -> ScriptedDelay {
-        assert_eq!(duration, RESEED_DELAY);
+        assert_eq!(duration, DEFAULT_RESEED_INTERVAL);
         ScriptedDelay { ready: false }
     }
 
     fn one_delay_then_pending() -> impl FnMut(Duration) -> ScriptedDelay {
         let mut first = true;
         move |duration| {
-            assert_eq!(duration, RESEED_DELAY);
+            assert_eq!(duration, DEFAULT_RESEED_INTERVAL);
             let ready = first;
             first = false;
             ScriptedDelay { ready }
@@ -433,7 +541,7 @@ mod tests {
     fn constants_defaults_and_public_handles_are_sound() {
         fn assert_send_sync<T: Send + Sync>() {}
 
-        assert_eq!(RESEED_DELAY, Duration::from_secs(10 * 60));
+        assert_eq!(DEFAULT_RESEED_INTERVAL, Duration::from_secs(10 * 60));
         assert_eq!(
             DEFAULT_BOOTSTRAP_NODES,
             [
@@ -445,12 +553,36 @@ mod tests {
                 "dht.libtorrent.org:25401",
             ]
         );
+        let default_config = DhtBootstrapPingProducerConfig::default();
+        assert_eq!(
+            default_config.bootstrap_nodes,
+            DEFAULT_BOOTSTRAP_NODES.map(String::from)
+        );
+        assert_eq!(default_config.reseed_interval, DEFAULT_RESEED_INTERVAL);
+        default_config.validate().expect("default config is valid");
+        assert_eq!(
+            DhtBootstrapPingProducerConfig {
+                reseed_interval: Duration::ZERO,
+                ..DhtBootstrapPingProducerConfig::default()
+            }
+            .validate(),
+            Err(DhtBootstrapPingProducerConfigError::ZeroReseedInterval)
+        );
+        assert_eq!(
+            DhtBootstrapPingProducerConfig {
+                reseed_interval: Duration::MAX,
+                ..DhtBootstrapPingProducerConfig::default()
+            }
+            .validate(),
+            Err(DhtBootstrapPingProducerConfigError::ReseedIntervalOutOfRange)
+        );
         let (input, _receiver) = DhtDiscoveredNodePingInput::test_channel(1);
         let (producer, stats) = DhtBootstrapPingProducer::new(input);
         assert_eq!(
             producer.bootstrap_nodes.as_ref(),
             &DEFAULT_BOOTSTRAP_NODES.map(String::from)
         );
+        assert_eq!(producer.reseed_interval, DEFAULT_RESEED_INTERVAL);
         assert_eq!(stats.snapshot(), DhtBootstrapPingProducerStats::default());
         assert_send_sync::<DhtBootstrapPingProducer>();
         assert_send_sync::<DhtBootstrapPingProducerStatsHandle>();
@@ -459,6 +591,37 @@ mod tests {
         let (input, _receiver) = DhtDiscoveredNodePingInput::test_channel(1);
         let (producer, _stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(input, Vec::new());
         assert_send(producer.run(pending()));
+    }
+
+    #[tokio::test]
+    async fn invalid_config_returns_the_exact_input_and_policy() {
+        for (reseed_interval, expected_source) in [
+            (
+                Duration::ZERO,
+                DhtBootstrapPingProducerConfigError::ZeroReseedInterval,
+            ),
+            (
+                Duration::MAX,
+                DhtBootstrapPingProducerConfigError::ReseedIntervalOutOfRange,
+            ),
+        ] {
+            let config = DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: vec!["first".to_owned(), String::new(), "first".to_owned()],
+                reseed_interval,
+            };
+            let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(1);
+            let error = match DhtBootstrapPingProducer::with_config(input, config.clone()) {
+                Ok(_) => panic!("invalid config must not construct a producer"),
+                Err(error) => error,
+            };
+            assert_eq!(error.config_error(), expected_source);
+            let (input, recovered_config) = error.into_parts();
+            assert_eq!(recovered_config, config);
+
+            let expected = node(v4(9, 1009));
+            input.send(expected).await.expect("recovered input is live");
+            assert_eq!(receiver.recv().await, Some(expected));
+        }
     }
 
     #[test]
@@ -617,7 +780,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn first_round_is_immediate_and_later_round_uses_a_fresh_ten_minute_delay() {
+    async fn first_round_is_immediate_and_later_round_uses_the_configured_fresh_delay() {
         let selected = v4(1, 1001);
         let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(2);
         let (producer, stats) = DhtBootstrapPingProducer::with_bootstrap_nodes(
@@ -643,9 +806,16 @@ mod tests {
         assert_eq!(stats.snapshot(), DhtBootstrapPingProducerStats::default());
         assert_eq!(receiver.recv().await, None);
 
+        let configured_interval = Duration::from_secs(37);
         let (input, mut receiver) = DhtDiscoveredNodePingInput::test_channel(2);
-        let (producer, stats) =
-            DhtBootstrapPingProducer::with_bootstrap_nodes(input, vec!["first".to_owned()]);
+        let (producer, stats) = DhtBootstrapPingProducer::with_config(
+            input,
+            DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: vec!["first".to_owned()],
+                reseed_interval: configured_interval,
+            },
+        )
+        .expect("positive configured interval");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let run = producer.run_with(
             async move {
@@ -660,7 +830,7 @@ mod tests {
         poll_once_pending(run.as_mut()).await;
         assert_eq!(receiver.recv().await, Some(node(selected)));
         assert_eq!(stats.snapshot().rounds_started, 1);
-        tokio::time::advance(RESEED_DELAY - Duration::from_millis(1)).await;
+        tokio::time::advance(configured_interval - Duration::from_millis(1)).await;
         poll_once_pending(run.as_mut()).await;
         assert_eq!(stats.snapshot().rounds_started, 1);
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -716,7 +886,7 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(node(selected)));
         assert_eq!(stats.snapshot().rounds_started, 1);
 
-        tokio::time::advance(RESEED_DELAY - Duration::from_millis(1)).await;
+        tokio::time::advance(DEFAULT_RESEED_INTERVAL - Duration::from_millis(1)).await;
         poll_once_pending(run.as_mut()).await;
         assert_eq!(stats.snapshot().rounds_started, 1);
         tokio::time::advance(Duration::from_millis(1)).await;

@@ -2,7 +2,9 @@ use std::fmt::Debug;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::Duration;
 
-use bitmagnet_dht::DhtRuntimeConfig;
+use bitmagnet_dht::{
+    DhtBootstrapPingProducerConfig, DhtCrawlerMaintenanceConfig, DhtRuntimeConfig,
+};
 use clap::Parser;
 
 use crate::{
@@ -25,6 +27,7 @@ pub const DEFAULT_BOOTSTRAP_NODES: [&str; 6] = [
 
 const DEFAULT_BOOTSTRAP_NODES_CSV: &str = "router.utorrent.com:6881,router.bittorrent.com:6881,dht.transmissionbt.com:6881,dht.aelitis.com:6881,router.silotis.us:6881,dht.libtorrent.org:25401";
 const DEFAULT_SCALING_FACTOR: usize = 10;
+#[cfg(test)]
 const EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_SAVE_FILES_THRESHOLD: u64 = 100;
 const DEFAULT_SAVE_PIECES: bool = false;
@@ -99,8 +102,8 @@ pub struct DhtCrawlerAppConfig {
     /// Effective bootstrap reseed interval in Go duration syntax.
     ///
     /// Go's config default is one minute, but its production factory currently
-    /// ignores that field and uses ten minutes. This pin describes the effective
-    /// production behavior.
+    /// ignores that field and uses ten minutes. Rust defaults to that effective
+    /// behavior while honoring configured positive intervals.
     #[arg(
         long = "dht-crawler-reseed-bootstrap-nodes-interval",
         env = "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL",
@@ -161,17 +164,6 @@ impl DhtCrawlerAppConfig {
             &self.scaling_factor,
             &DEFAULT_SCALING_FACTOR,
         )?;
-        let expected_bootstrap_nodes = DEFAULT_BOOTSTRAP_NODES.map(str::to_owned).to_vec();
-        require_supported(
-            "DHT_CRAWLER_BOOTSTRAP_NODES",
-            &self.bootstrap_nodes,
-            &expected_bootstrap_nodes,
-        )?;
-        require_supported(
-            "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL",
-            &self.reseed_bootstrap_nodes_interval,
-            &EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL,
-        )?;
         require_supported(
             "METAINFO_REQUESTER_KEY_MUTEX_SIZE",
             &self.metainfo_key_mutex_size,
@@ -187,6 +179,20 @@ impl DhtCrawlerAppConfig {
             bind_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.dht_server_port),
             query_timeout: self.dht_server_query_timeout,
             ..DhtRuntimeConfig::default()
+        })
+    }
+
+    /// Project validated application policy into the taskless maintenance
+    /// composition without resolving bootstrap endpoints or starting work.
+    pub fn maintenance_config(
+        &self,
+    ) -> Result<DhtCrawlerMaintenanceConfig, DhtCrawlerAppConfigError> {
+        self.validate()?;
+        Ok(DhtCrawlerMaintenanceConfig {
+            bootstrap_ping: DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: self.bootstrap_nodes.clone(),
+                reseed_interval: self.reseed_bootstrap_nodes_interval,
+            },
         })
     }
 
@@ -266,6 +272,14 @@ impl TryFrom<&DhtCrawlerAppConfig> for DhtRuntimeConfig {
 
     fn try_from(value: &DhtCrawlerAppConfig) -> Result<Self, Self::Error> {
         value.dht_runtime_config()
+    }
+}
+
+impl TryFrom<&DhtCrawlerAppConfig> for DhtCrawlerMaintenanceConfig {
+    type Error = DhtCrawlerAppConfigError;
+
+    fn try_from(value: &DhtCrawlerAppConfig) -> Result<Self, Self::Error> {
+        value.maintenance_config()
     }
 }
 
@@ -402,7 +416,9 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::time::Duration;
 
-    use bitmagnet_dht::DhtRuntimeConfig;
+    use bitmagnet_dht::{
+        DhtBootstrapPingProducerConfig, DhtCrawlerMaintenanceConfig, DhtRuntimeConfig,
+    };
     use clap::{CommandFactory, FromArgMatches, Parser};
 
     use super::{
@@ -481,6 +497,11 @@ mod tests {
             config.downstream_config().expect("downstream config"),
             DhtCrawlerDownstreamConfig::default(),
             "application defaults must preserve every downstream worker default"
+        );
+        assert_eq!(
+            config.maintenance_config().expect("maintenance config"),
+            DhtCrawlerMaintenanceConfig::default(),
+            "application defaults must preserve the effective maintenance defaults"
         );
     }
 
@@ -645,22 +666,52 @@ mod tests {
     }
 
     #[test]
+    fn ordered_bootstrap_occurrences_and_positive_reseed_project_without_normalization() {
+        let mut args = supported_args();
+        for (flag, replacement) in [
+            (
+                "--dht-crawler-bootstrap-nodes",
+                "first.example:1,,third.example:3,first.example:1",
+            ),
+            ("--dht-crawler-reseed-bootstrap-nodes-interval", "1m30.5s"),
+        ] {
+            let value_index = args
+                .iter()
+                .position(|value| *value == flag)
+                .expect("supported args contain bootstrap flag")
+                + 1;
+            args[value_index] = replacement;
+        }
+
+        let config = DhtCrawlerAppConfig::try_parse_from(args).expect("typed bootstrap config");
+        config
+            .validate()
+            .expect("wired bootstrap config is supported");
+        let expected = DhtCrawlerMaintenanceConfig {
+            bootstrap_ping: DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: vec![
+                    "first.example:1".to_owned(),
+                    String::new(),
+                    "third.example:3".to_owned(),
+                    "first.example:1".to_owned(),
+                ],
+                reseed_interval: Duration::from_millis(90_500),
+            },
+        };
+        assert_eq!(config.maintenance_config().unwrap(), expected);
+        assert_eq!(
+            DhtCrawlerMaintenanceConfig::try_from(&config).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn unsupported_remaining_nondefaults_are_rejected_instead_of_ignored() {
         let cases = [
             (
                 "--dht-crawler-scaling-factor",
                 "11",
                 "DHT_CRAWLER_SCALING_FACTOR",
-            ),
-            (
-                "--dht-crawler-bootstrap-nodes",
-                "dht.example:6881",
-                "DHT_CRAWLER_BOOTSTRAP_NODES",
-            ),
-            (
-                "--dht-crawler-reseed-bootstrap-nodes-interval",
-                "11m",
-                "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL",
             ),
             (
                 "--metainfo-requester-key-mutex-size",

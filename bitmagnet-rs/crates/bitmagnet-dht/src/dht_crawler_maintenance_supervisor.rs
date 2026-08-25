@@ -10,19 +10,25 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinSet};
 
 use crate::{
-    DhtBootstrapPingProducer, DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStatsHandle,
-    DhtCrawlerTargetError, DhtCrawlerTargetRotator, DhtDiscoveredNodeFindStatsHandle,
-    DhtDiscoveredNodeFindWorker, DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingInput,
-    DhtDiscoveredNodePingStatsHandle, DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit,
-    DhtDiscoveredNodeScheduler, DhtDiscoveredNodeSchedulerExit,
-    DhtDiscoveredNodeSchedulerStatsHandle, DhtDiscoveryReceiver, DhtDiscoveryStatsHandle,
-    DhtInfoHashTriageInput, DhtOldestNodeFindProducer, DhtOldestNodeFindProducerExit,
-    DhtOldestNodeFindProducerStatsHandle, DhtOldestNodePingProducer, DhtOldestNodePingProducerExit,
-    DhtOldestNodePingProducerStatsHandle, DhtRuntimeClient, DhtSampleInfoHashesProducer,
-    DhtSampleInfoHashesProducerExit, DhtSampleInfoHashesProducerStatsHandle,
-    DhtSampleInfoHashesWorker, DhtSampleInfoHashesWorkerExit, DhtSampleInfoHashesWorkerStatsHandle,
-    KTable,
+    DhtBootstrapPingProducer, DhtBootstrapPingProducerConfig, DhtBootstrapPingProducerConfigError,
+    DhtBootstrapPingProducerExit, DhtBootstrapPingProducerStatsHandle, DhtCrawlerTargetError,
+    DhtCrawlerTargetRotator, DhtDiscoveredNodeFindStatsHandle, DhtDiscoveredNodeFindWorker,
+    DhtDiscoveredNodeFindWorkerExit, DhtDiscoveredNodePingInput, DhtDiscoveredNodePingStatsHandle,
+    DhtDiscoveredNodePingWorker, DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeScheduler,
+    DhtDiscoveredNodeSchedulerExit, DhtDiscoveredNodeSchedulerStatsHandle, DhtDiscoveryReceiver,
+    DhtDiscoveryStatsHandle, DhtInfoHashTriageInput, DhtOldestNodeFindProducer,
+    DhtOldestNodeFindProducerExit, DhtOldestNodeFindProducerStatsHandle, DhtOldestNodePingProducer,
+    DhtOldestNodePingProducerExit, DhtOldestNodePingProducerStatsHandle, DhtRuntimeClient,
+    DhtSampleInfoHashesProducer, DhtSampleInfoHashesProducerExit,
+    DhtSampleInfoHashesProducerStatsHandle, DhtSampleInfoHashesWorker,
+    DhtSampleInfoHashesWorkerExit, DhtSampleInfoHashesWorkerStatsHandle, KTable,
 };
+
+/// Taskless policy for the owned DHT crawler maintenance composition.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DhtCrawlerMaintenanceConfig {
+    pub bootstrap_ping: DhtBootstrapPingProducerConfig,
+}
 
 /// Failure to construct the partial crawler maintenance composition.
 ///
@@ -79,6 +85,86 @@ impl Error for DhtCrawlerMaintenanceStartError {
         match self {
             Self::DiscoveryClosed(_) => None,
             Self::TargetEntropy { source, .. } => Some(source),
+        }
+    }
+}
+
+/// Recoverable failure from the configurable maintenance constructor.
+pub enum DhtCrawlerMaintenanceWithConfigError {
+    /// Policy validation failed before any component was constructed.
+    Config {
+        discovery: DhtDiscoveryReceiver,
+        config: DhtCrawlerMaintenanceConfig,
+        source: DhtBootstrapPingProducerConfigError,
+    },
+    /// Valid policy reached the legacy construction boundary and that existing
+    /// typed start error was preserved.
+    Start {
+        config: DhtCrawlerMaintenanceConfig,
+        source: DhtCrawlerMaintenanceStartError,
+    },
+}
+
+impl DhtCrawlerMaintenanceWithConfigError {
+    /// Recover the exact discovery receiver and application policy supplied by
+    /// the caller, independent of which construction boundary failed.
+    #[must_use]
+    pub fn into_parts(self) -> (DhtDiscoveryReceiver, DhtCrawlerMaintenanceConfig) {
+        match self {
+            Self::Config {
+                discovery, config, ..
+            } => (discovery, config),
+            Self::Start { config, source } => (source.into_discovery(), config),
+        }
+    }
+
+    /// Borrow the unchanged legacy start error when construction progressed
+    /// beyond policy validation.
+    #[must_use]
+    pub const fn as_start_error(&self) -> Option<&DhtCrawlerMaintenanceStartError> {
+        match self {
+            Self::Config { .. } => None,
+            Self::Start { source, .. } => Some(source),
+        }
+    }
+}
+
+impl fmt::Debug for DhtCrawlerMaintenanceWithConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config { config, source, .. } => formatter
+                .debug_struct("Config")
+                .field("config", config)
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::Start { config, source } => formatter
+                .debug_struct("Start")
+                .field("config", config)
+                .field("source", source)
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Display for DhtCrawlerMaintenanceWithConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config { source, .. } => {
+                write!(
+                    formatter,
+                    "invalid DHT crawler maintenance configuration: {source}"
+                )
+            }
+            Self::Start { source, .. } => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for DhtCrawlerMaintenanceWithConfigError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Config { source, .. } => Some(source),
+            Self::Start { source, .. } => Some(source),
         }
     }
 }
@@ -269,7 +355,7 @@ pub struct DhtCrawlerMaintenanceSupervisor {
 }
 
 impl DhtCrawlerMaintenanceSupervisor {
-    /// Construct and wire the fixed partial maintenance composition.
+    /// Construct and wire the exact-default partial maintenance composition.
     ///
     /// The client, table, and triage input are cloned; the discovery receiver
     /// is consumed on success and returned intact through either start-error
@@ -290,6 +376,44 @@ impl DhtCrawlerMaintenanceSupervisor {
             DhtCrawlerTargetRotator::new,
             DhtBootstrapPingProducer::new,
         )
+    }
+
+    /// Construct and wire the maintenance composition from validated policy.
+    ///
+    /// Validation runs before target entropy, DNS resolution, or task work and
+    /// retains the unique discovery receiver on failure.
+    pub fn with_config(
+        discovery: DhtDiscoveryReceiver,
+        client: &DhtRuntimeClient,
+        table: &KTable,
+        triage: &DhtInfoHashTriageInput,
+        config: DhtCrawlerMaintenanceConfig,
+    ) -> Result<(Self, DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceWithConfigError>
+    {
+        if let Err(source) = config.bootstrap_ping.validate() {
+            return Err(DhtCrawlerMaintenanceWithConfigError::Config {
+                discovery,
+                config,
+                source,
+            });
+        }
+        let recovery_config = config.clone();
+        let bootstrap_ping = config.bootstrap_ping;
+        Self::new_with_factories(
+            discovery,
+            client,
+            table,
+            triage,
+            DhtCrawlerTargetRotator::new,
+            move |input| {
+                DhtBootstrapPingProducer::with_config(input, bootstrap_ping)
+                    .expect("the bootstrap config was validated before composition")
+            },
+        )
+        .map_err(|source| DhtCrawlerMaintenanceWithConfigError::Start {
+            config: recovery_config,
+            source,
+        })
     }
 
     #[cfg(test)]
@@ -971,7 +1095,7 @@ mod tests {
             DhtCrawlerMaintenanceSupervisor,
             DhtCrawlerMaintenanceStatsHandle,
         ),
-        DhtCrawlerMaintenanceStartError,
+        DhtCrawlerMaintenanceWithConfigError,
     > {
         assert!(
             bootstrap_nodes
@@ -979,13 +1103,17 @@ mod tests {
                 .all(|endpoint| endpoint.parse::<SocketAddr>().is_ok()),
             "test bootstrap endpoints must be numeric socket addresses"
         );
-        DhtCrawlerMaintenanceSupervisor::new_with_factories(
+        DhtCrawlerMaintenanceSupervisor::with_config(
             discovery,
             client,
             table,
             triage,
-            DhtCrawlerTargetRotator::new,
-            move |input| DhtBootstrapPingProducer::with_bootstrap_nodes(input, bootstrap_nodes),
+            DhtCrawlerMaintenanceConfig {
+                bootstrap_ping: DhtBootstrapPingProducerConfig {
+                    bootstrap_nodes,
+                    ..DhtBootstrapPingProducerConfig::default()
+                },
+            },
         )
     }
 
@@ -1429,6 +1557,55 @@ mod tests {
                 selected_dropped: 0,
             }
         );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_reseed_interval_reaches_the_owned_bootstrap_child() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let (_sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        let (triage, _triage_receiver) = triage_channel();
+        let configured_interval = Duration::from_secs(37);
+        let (supervisor, stats) = DhtCrawlerMaintenanceSupervisor::with_config(
+            discovery,
+            &client,
+            runtime.table(),
+            &triage,
+            DhtCrawlerMaintenanceConfig {
+                bootstrap_ping: DhtBootstrapPingProducerConfig {
+                    bootstrap_nodes: Vec::new(),
+                    reseed_interval: configured_interval,
+                },
+            },
+        )
+        .expect("positive bootstrap config");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut run = Box::pin(supervisor.run(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        poll_once_pending(run.as_mut()).await;
+        tokio::task::yield_now().await;
+        assert_eq!(stats.bootstrap_ping.snapshot().rounds_started, 1);
+
+        tokio::time::advance(configured_interval - Duration::from_millis(1)).await;
+        poll_once_pending(run.as_mut()).await;
+        assert_eq!(stats.bootstrap_ping.snapshot().rounds_started, 1);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        poll_once_pending(run.as_mut()).await;
+        wait_for(
+            || stats.bootstrap_ping.snapshot().rounds_started == 2,
+            "the configured bootstrap reseed timer to start its second round",
+        )
+        .await;
+
+        shutdown_tx.send(()).unwrap();
+        assert!(matches!(
+            run.await,
+            DhtCrawlerMaintenanceSupervisorExit::Shutdown { .. }
+        ));
         runtime.shutdown().await.unwrap();
     }
 
@@ -2071,11 +2248,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_start_errors_recover_exact_policy_and_discovery() {
+        let runtime = test_runtime().await;
+        let client = runtime.client();
+        let (triage, mut triage_receiver) = triage_channel();
+
+        for (reseed_interval, expected_source) in [
+            (
+                Duration::ZERO,
+                DhtBootstrapPingProducerConfigError::ZeroReseedInterval,
+            ),
+            (
+                Duration::MAX,
+                DhtBootstrapPingProducerConfigError::ReseedIntervalOutOfRange,
+            ),
+        ] {
+            let config = DhtCrawlerMaintenanceConfig {
+                bootstrap_ping: DhtBootstrapPingProducerConfig {
+                    bootstrap_nodes: vec!["first".to_owned(), String::new(), "first".to_owned()],
+                    reseed_interval,
+                },
+            };
+            let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+            let error = match DhtCrawlerMaintenanceSupervisor::with_config(
+                discovery,
+                &client,
+                runtime.table(),
+                &triage,
+                config.clone(),
+            ) {
+                Ok(_) => panic!("invalid policy must fail before composition"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                &error,
+                DhtCrawlerMaintenanceWithConfigError::Config { source, .. }
+                    if *source == expected_source
+            ));
+            assert!(error.as_start_error().is_none());
+            let (mut discovery, recovered_config) = error.into_parts();
+            assert_eq!(recovered_config, config);
+            assert_eq!(sender.offer(node(1)), DhtDiscoveryOffer::Queued);
+            assert_eq!(discovery.recv().await, Some(node(1)));
+            assert!(matches!(
+                triage_receiver.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+
+        let config = DhtCrawlerMaintenanceConfig {
+            bootstrap_ping: DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: vec!["configured.example:6881".to_owned()],
+                reseed_interval: Duration::from_secs(37),
+            },
+        };
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
+        drop(sender);
+        let error = match DhtCrawlerMaintenanceSupervisor::with_config(
+            discovery,
+            &client,
+            runtime.table(),
+            &triage,
+            config.clone(),
+        ) {
+            Ok(_) => panic!("closed discovery must preserve the legacy start error"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.as_start_error(),
+            Some(DhtCrawlerMaintenanceStartError::DiscoveryClosed(_))
+        ));
+        let (mut discovery, recovered_config) = error.into_parts();
+        assert_eq!(recovered_config, config);
+        assert_eq!(discovery.recv().await, None);
+
+        drop(triage);
+        assert_eq!(triage_receiver.recv().await, None);
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn start_errors_return_the_discovery_receiver_and_preserve_entropy_source() {
         let runtime = test_runtime().await;
         let client = runtime.client();
-        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
         let (triage, mut triage_receiver) = triage_channel();
+
+        let (sender, discovery) = dht_discovery_channel(NonZeroUsize::new(1).expect("nonzero"));
         drop(sender);
         let error = match DhtCrawlerMaintenanceSupervisor::new(
             discovery,
