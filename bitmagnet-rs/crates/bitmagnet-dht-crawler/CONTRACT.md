@@ -3,21 +3,23 @@
 This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
-The bounded published checkpoint contains one Rust info-hash-triage worker and
-one strict differential consumer; it is not an application composition or a
-production database integration.
+The bounded published checkpoint contains one Rust info-hash-triage worker,
+one strict differential consumer, and one concrete PostgreSQL lookup adapter.
+It is not an application composition or a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
 and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
 domain enum. This crate owns the higher-level batching and routing decision,
-plus the blocking-policy and database-projection seams. It does not make the
-protocol crate depend on PostgreSQL, the persistent blocking manager, crawler
-application state, or deployment configuration.
+plus the blocking-policy and database-projection seams and the concrete SQLx
+lookup adapter. It does not make the protocol crate depend on PostgreSQL, the
+persistent blocking manager, crawler application state, or deployment
+configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
-`3099790291597d4aed4888601d5b184f173f9bdf`. Together they publish the API and
+`3099790291597d4aed4888601d5b184f173f9bdf`. The PostgreSQL lookup checkpoint is
+`18cc4ac47cb4b6186494dde2c244884d105ab749`. Together they publish the API and
 evidence below.
 
 ## Public Rust boundary
@@ -61,6 +63,39 @@ for a hash wins. Both async collaborators return
 that reaches the timestamp-staleness predicate. The system implementation
 projects wall time into a signed Unix-microsecond value; deterministic callers
 can inject an alternate clock.
+
+### PostgreSQL lookup adapter
+
+`PgDhtTorrentTriageLookup::new` wraps a cheap clone of an already configured,
+application-owned `PgPool` and implements `DhtTorrentTriageLookup`. It neither
+creates nor closes the pool, starts tasks, retries queries, opens an explicit
+transaction, nor imposes a statement timeout. An empty input returns without
+accessing the pool.
+
+The static query projects the six Go triage columns. It keeps source `dht` in
+the `LEFT JOIN` predicate so torrents without a DHT source row remain visible,
+and tests membership with `info_hash = ANY($2::bytea[])`. The input bind keeps
+every occurrence in order; query result order remains unspecified. The array
+bind deliberately differs from Go's dynamic `IN` SQL text and bind
+cardinality, without changing membership semantics.
+
+SQLx rows are converted into `DhtTorrentTriageRow` with checked domain
+boundaries. File status text must name a current `FilesStatus`, hashes must be
+exactly 20 bytes, and non-null counts must fit `u64`. Rejecting malformed hash
+lengths and negative counts is intentional fail-closed Rust hardening: Go's
+scanners copy hash bytes and cast signed counts more permissively. Missing
+left-joined counts and timestamp remain `None`; the worker treats a missing
+timestamp as scrape-eligible, while the strict Go oracle does not cover that
+nullable timestamp path. SQLx and decode failures remain typed `DbError`
+values behind the collaborator error boundary.
+
+The adapter tests freeze the exact SQL string, source and array binding model,
+occurrence preservation, enum/count/hash/timestamp conversion, nullable join
+values, empty-input short circuit, clone and trait-object shape, sendability,
+and a closed-pool SQLx error. They are offline tests: they do not prepare or
+execute the query against PostgreSQL and do not prove live array encoding,
+schema compatibility, indexes or query plans, server-side cancellation, or
+application pool configuration.
 
 `DhtInfoHashTriageWorker::run` owns the worker until one typed terminal result:
 
@@ -138,8 +173,9 @@ It deliberately differs at the surrounding ownership boundary:
   catch-up schedule;
 - filtered hashes route in first-filtered order instead of Go map iteration
   order;
-- the blocking policy and database lookup are abstract async collaborators,
-  not the persistent Go manager, GORM DAO, or live PostgreSQL;
+- the worker consumes abstract async collaborators; this crate supplies a SQLx
+  lookup adapter, but not the persistent Go manager or live PostgreSQL
+  composition;
 - collaborator failures are counted, drop only the current batch, and continue
   without claiming Go log delivery;
 - shutdown, input EOF, and both downstream closures have typed results and
@@ -300,6 +336,12 @@ all-feature `cargo check`, strict all-target and all-feature Clippy with
 warnings denied, rustdoc with warnings denied, formatting checks, and diff
 whitespace checks.
 
+The PostgreSQL adapter checkpoint passed all seven focused adapter tests, the
+combined thirty-test crate suite and doctests in release mode, all-target and
+all-feature `cargo check`, strict all-target and all-feature Clippy with
+warnings denied, rustdoc with warnings denied, formatting checks, and diff
+whitespace checks. Those gates use no live PostgreSQL instance.
+
 ## Evidence boundaries and nonclaims
 
 The Go fixture does not claim map iteration, SQL result, or downstream
@@ -314,15 +356,17 @@ external-service behavior; upstream proof that the responding node has peers
 for a sampled hash; ignore-hash provenance; or any Rust API, stats,
 supervision, application, deployment, or production-readiness fact.
 
-The Rust consumer and implementation do not claim exact Go map, SQL-result, or
-delivery order; exact Go wall-clock values or per-item `time.Now()` schedule;
-live PostgreSQL behavior; the persistent production blocking Bloom state;
-Go's detached batcher timing, output boundary, or close behavior; downstream
-get-peers or scrape execution; Go select ties, eager lane operands, or
-fairness; Go logging; cross-route retention or waiter fairness; closed Go
-output behavior; live DHT traffic; upstream sample provenance; concurrent
-upstream pending-send drain accounting; supervisor/application/deployment
-wiring; or production readiness.
+The Rust consumer, worker, and PostgreSQL adapter do not claim exact Go map,
+SQL-result, or delivery order; exact Go SQL text or bind cardinality; exact Go
+wall-clock values or per-item `time.Now()` schedule; live PostgreSQL array
+encoding, schema compatibility, indexes, query plans, server-side
+cancellation, transactions, retries, statement timeouts, or pool
+configuration; the persistent production blocking Bloom state; Go's detached
+batcher timing, output boundary, or close behavior; downstream get-peers or
+scrape execution; Go select ties, eager lane operands, or fairness; Go logging;
+cross-route retention or waiter fairness; closed Go output behavior; live DHT
+traffic; upstream sample provenance; concurrent upstream pending-send drain
+accounting; supervisor/application/deployment wiring; or production readiness.
 
 The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
 dependency. Passing it establishes the bounded source and deterministic replay
@@ -334,9 +378,9 @@ The following remain deliberately outside this checkpoint:
 
 - a production `DhtInfoHashBlockFilter` adapter backed by the persistent
   blocking manager and its lifecycle, buffering, flush, and metrics policy;
-- a production `DhtTorrentTriageLookup` adapter backed by the Rust persistence
-  layer, including schema mapping, connection ownership, retries,
-  transactions, query plans, and observability;
+- application construction of `PgDhtTorrentTriageLookup` with a configured
+  pool, plus live schema/codec/query-plan validation and database
+  observability;
 - ownership of the unique triage receiver by an application or higher-level
   crawler supervisor;
 - application construction and shutdown wiring between the existing DHT
