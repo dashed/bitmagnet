@@ -671,6 +671,10 @@ fn system_time_unix_micros(time: SystemTime) -> i64 {
 }
 
 #[cfg(test)]
+#[path = "info_hash_triage_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::future::pending;
