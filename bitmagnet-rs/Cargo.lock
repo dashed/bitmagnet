@@ -1046,6 +1046,7 @@ name = "bitmagnet-processor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitmagnet-blocking",
  "bitmagnet-classifier",
  "bitmagnet-common",
  "bitmagnet-content-search",

@@ -438,9 +438,24 @@ fn parse_number(raw: &str, image: &str) -> Result<u16, PersistError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
-    use super::{episodes_json, validate_tag_name};
+    use super::{episodes_json, validate_tag_name, PreparedWriteSet};
+    use crate::WriteSet;
+
+    #[test]
+    fn delete_only_write_set_is_not_treated_as_empty() {
+        let write_set = WriteSet {
+            delete_info_hashes: vec!["1111111111111111111111111111111111111111".to_owned()],
+            ..WriteSet::default()
+        };
+
+        let prepared = PreparedWriteSet::new(&write_set, &BTreeMap::new()).unwrap();
+
+        assert!(!prepared.is_empty());
+    }
 
     #[test]
     fn episodes_string_converts_to_go_json_shape() {

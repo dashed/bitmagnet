@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Phase-3 Lane P — processor orchestration + write-shadow for the bitmagnet Rust rewrite."
 
 [dependencies]
+bitmagnet-blocking = { path = "../bitmagnet-blocking" }
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-model = { path = "../bitmagnet-model" }

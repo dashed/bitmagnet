@@ -20,6 +20,7 @@ use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod blocking_manager_adapter;
 mod compare;
 /// The read-only loader that hydrates a classifier input from the database.
 ///
