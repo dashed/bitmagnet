@@ -963,13 +963,17 @@ where
 mod tests {
     use std::error::Error;
     use std::fmt;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use bitmagnet_dht::{DhtCrawlerMaintenanceSupervisor, DhtRuntimeConfig, Id20};
+    use bitmagnet_dht::{
+        DhtCrawlerMaintenanceSupervisor, DhtDiscoveryOffer, DhtDiscoveryStats,
+        DhtInfoHashTriageRequest, Id20, RoutingNode,
+    };
+    use clap::{CommandFactory, FromArgMatches};
     use sqlx::postgres::PgPoolOptions;
     use tokio::net::UdpSocket;
     use tokio::sync::{oneshot, Notify};
@@ -977,9 +981,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        DhtCrawlerDownstreamConfig, DhtGetPeersWorkerStats, DhtInfoHashTriageStats,
-        DhtPersistSourceWorkerStats, DhtPersistTorrentWorkerStats, DhtRequestMetaInfoWorkerStats,
-        DhtScrapeWorkerStats,
+        DhtCrawlerAppConfig, DhtCrawlerAppProjection, DhtGetPeersWorkerStats,
+        DhtInfoHashTriageStats, DhtPersistSourceWorkerStats, DhtPersistTorrentWorkerStats,
+        DhtRequestMetaInfoWorkerStats, DhtScrapeWorkerStats,
     };
 
     #[derive(Default)]
@@ -2150,6 +2154,47 @@ mod tests {
     fn assert_send<T: Send>() {}
     fn assert_send_sync<T: Send + Sync>() {}
 
+    fn projected_app_config(scaling_factor: usize) -> DhtCrawlerAppProjection {
+        let command = DhtCrawlerAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None));
+        let matches = command
+            .try_get_matches_from([
+                "bitmagnet-dht-crawler".to_owned(),
+                "--expected-goose-version".to_owned(),
+                "29".to_owned(),
+                "--dht-crawler-scaling-factor".to_owned(),
+                scaling_factor.to_string(),
+            ])
+            .expect("parse projected app config without ambient environment");
+        DhtCrawlerAppConfig::from_arg_matches(&matches)
+            .expect("build projected app config")
+            .projection()
+            .expect("project complete bounded graph")
+    }
+
+    fn scaled_id(value: usize) -> Id20 {
+        let mut bytes = [0_u8; 20];
+        bytes[12..].copy_from_slice(&u64::try_from(value).unwrap().to_be_bytes());
+        Id20::from_slice(&bytes).unwrap()
+    }
+
+    fn scaled_node(value: usize) -> RoutingNode {
+        RoutingNode {
+            id: scaled_id(value),
+            addr: SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                10_000 + u16::try_from(value).unwrap(),
+            )),
+        }
+    }
+
+    fn scaled_triage_request(value: usize) -> DhtInfoHashTriageRequest {
+        DhtInfoHashTriageRequest {
+            info_hash: scaled_id(value),
+            source_node_addr: scaled_node(value).addr,
+        }
+    }
+
     #[test]
     fn public_supervisor_and_recovery_handles_have_owned_task_traits() {
         assert_send::<DhtCrawlerPipelineSupervisor>();
@@ -2158,104 +2203,146 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concrete_pre_ready_smoke_is_offline_and_releases_runtime() {
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-            .unwrap();
-        assert_eq!(pool.size(), 0);
-        assert!(!pool.is_closed());
+    async fn projected_scaling_graphs_are_bounded_offline_and_release_runtime() {
+        for scaling_factor in [2, 10] {
+            let DhtCrawlerAppProjection {
+                mut runtime,
+                maintenance,
+                downstream,
+            } = projected_app_config(scaling_factor);
+            runtime.bind_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
 
-        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
-            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
-            ..DhtRuntimeConfig::default()
-        })
-        .await
-        .unwrap();
-        let runtime_addr = runtime.local_addr();
-        let client = runtime.client();
-        let table = runtime.table().clone();
-        let discovery_receiver = runtime
-            .take_discovered_nodes()
-            .expect("the runtime exposes its discovery receiver once");
-        let discovery = discovery_receiver
-            .try_sender()
-            .expect("the live runtime retains its discovery producer");
-        let downstream_config = DhtCrawlerDownstreamConfig::default();
-        let (triage_input, downstream) = DhtCrawlerDownstreamComposition::with_config(
-            discovery,
-            &client,
-            &table,
-            &pool,
-            Id20::from_slice(b"-BM0001-composition0").unwrap(),
-            downstream_config,
-        )
-        .unwrap();
-        let (maintenance, maintenance_stats) = DhtCrawlerMaintenanceSupervisor::new(
-            discovery_receiver,
-            &client,
-            &table,
-            &triage_input,
-        )
-        .unwrap();
-        let (supervisor, handles) =
-            DhtCrawlerPipelineSupervisor::new(runtime, maintenance, triage_input, downstream);
-        drop((client, table));
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .unwrap();
+            assert_eq!(pool.size(), 0);
+            assert!(!pool.is_closed());
 
-        assert_eq!(pool.size(), 0, "construction must not acquire PostgreSQL");
-        let exit = timeout(
-            Duration::from_secs(5),
-            supervisor.run(std::future::ready(())),
-        )
-        .await
-        .expect("pre-ready shutdown must remain bounded");
-        assert!(matches!(
-            exit,
-            DhtCrawlerPipelineExit::ShutdownBeforeStart {
-                runtime: Ok(DhtRuntimeExit::Shutdown),
-                blocking: Ok(Ok(BlockingFinalizeOutcome::NothingPending)),
+            let discovery_capacity = runtime.discovery_capacity.get();
+            let mut runtime = DhtRuntime::start(runtime).await.unwrap();
+            let runtime_addr = runtime.local_addr();
+            let client = runtime.client();
+            let table = runtime.table().clone();
+            let mut discovery_receiver = runtime
+                .take_discovered_nodes()
+                .expect("the runtime exposes its discovery receiver once");
+            let discovery = discovery_receiver
+                .try_sender()
+                .expect("the live runtime retains its discovery producer");
+            let discovery_stats = discovery.stats_handle();
+            for value in 0..discovery_capacity {
+                assert_eq!(
+                    discovery.offer(scaled_node(value)),
+                    DhtDiscoveryOffer::Queued
+                );
             }
-        ));
+            assert_eq!(
+                discovery.offer(scaled_node(discovery_capacity)),
+                DhtDiscoveryOffer::FullDropped
+            );
+            let expected_discovery_stats = DhtDiscoveryStats {
+                offered: u64::try_from(discovery_capacity + 1).unwrap(),
+                queued: u64::try_from(discovery_capacity).unwrap(),
+                full_dropped: 1,
+                receiver_closed_dropped: 0,
+            };
+            assert_eq!(discovery_stats.snapshot(), expected_discovery_stats);
+            for value in 0..discovery_capacity {
+                assert_eq!(discovery_receiver.recv().await, Some(scaled_node(value)));
+            }
 
-        assert_eq!(
-            handles.downstream_stats.triage.snapshot(),
-            DhtInfoHashTriageStats::default()
-        );
-        assert_eq!(
-            handles.downstream_stats.get_peers.snapshot(),
-            DhtGetPeersWorkerStats::default()
-        );
-        assert_eq!(
-            handles.downstream_stats.request_meta_info.snapshot(),
-            DhtRequestMetaInfoWorkerStats::default()
-        );
-        assert_eq!(
-            handles.downstream_stats.persist_torrent.snapshot(),
-            DhtPersistTorrentWorkerStats::default()
-        );
-        assert_eq!(
-            handles.downstream_stats.scrape.snapshot(),
-            DhtScrapeWorkerStats::default()
-        );
-        assert_eq!(
-            handles.downstream_stats.persist_source.snapshot(),
-            DhtPersistSourceWorkerStats::default()
-        );
-        assert_eq!(
-            maintenance_stats.discovery.snapshot(),
-            bitmagnet_dht::DhtDiscoveryStats::default()
-        );
-        assert_eq!(
-            handles.blocking_finalizer.finalize().await.unwrap(),
-            BlockingFinalizeOutcome::NothingPending
-        );
-        assert_eq!(pool.size(), 0, "empty finalization must remain offline");
-        assert!(!pool.is_closed(), "the caller retains pool ownership");
+            let root_capacity = downstream.root_triage_capacity.get();
+            let (triage_input, downstream) = DhtCrawlerDownstreamComposition::with_config(
+                discovery,
+                &client,
+                &table,
+                &pool,
+                Id20::from_slice(b"-BM0001-composition0").unwrap(),
+                downstream,
+            )
+            .unwrap();
+            for value in 0..root_capacity {
+                triage_input
+                    .send(scaled_triage_request(value))
+                    .await
+                    .unwrap();
+            }
+            let mut blocked = Box::pin(triage_input.send(scaled_triage_request(root_capacity)));
+            std::future::poll_fn(|context| match blocked.as_mut().poll(context) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("configured full root route must apply backpressure"),
+            })
+            .await;
+            drop(blocked);
 
-        let rebound = UdpSocket::bind(runtime_addr)
+            let (maintenance, maintenance_stats) = DhtCrawlerMaintenanceSupervisor::with_config(
+                discovery_receiver,
+                &client,
+                &table,
+                &triage_input,
+                maintenance,
+            )
+            .unwrap();
+            let (supervisor, handles) =
+                DhtCrawlerPipelineSupervisor::new(runtime, maintenance, triage_input, downstream);
+            drop((client, table));
+
+            assert_eq!(pool.size(), 0, "construction must not acquire PostgreSQL");
+            let exit = timeout(
+                Duration::from_secs(5),
+                supervisor.run(std::future::ready(())),
+            )
             .await
-            .expect("pipeline runtime shutdown must release its UDP socket");
-        drop(rebound);
-        pool.close().await;
+            .expect("pre-ready shutdown must remain bounded");
+            assert!(matches!(
+                exit,
+                DhtCrawlerPipelineExit::ShutdownBeforeStart {
+                    runtime: Ok(DhtRuntimeExit::Shutdown),
+                    blocking: Ok(Ok(BlockingFinalizeOutcome::NothingPending)),
+                }
+            ));
+
+            assert_eq!(
+                handles.downstream_stats.triage.snapshot(),
+                DhtInfoHashTriageStats::default()
+            );
+            assert_eq!(
+                handles.downstream_stats.get_peers.snapshot(),
+                DhtGetPeersWorkerStats::default()
+            );
+            assert_eq!(
+                handles.downstream_stats.request_meta_info.snapshot(),
+                DhtRequestMetaInfoWorkerStats::default()
+            );
+            assert_eq!(
+                handles.downstream_stats.persist_torrent.snapshot(),
+                DhtPersistTorrentWorkerStats::default()
+            );
+            assert_eq!(
+                handles.downstream_stats.scrape.snapshot(),
+                DhtScrapeWorkerStats::default()
+            );
+            assert_eq!(
+                handles.downstream_stats.persist_source.snapshot(),
+                DhtPersistSourceWorkerStats::default()
+            );
+            assert_eq!(
+                maintenance_stats.discovery.snapshot(),
+                expected_discovery_stats
+            );
+            assert_eq!(
+                handles.blocking_finalizer.finalize().await.unwrap(),
+                BlockingFinalizeOutcome::NothingPending
+            );
+            assert_eq!(pool.size(), 0, "empty finalization must remain offline");
+            assert!(!pool.is_closed(), "the caller retains pool ownership");
+
+            let rebound = UdpSocket::bind(runtime_addr)
+                .await
+                .expect("pipeline runtime shutdown must release its UDP socket");
+            drop(rebound);
+            pool.close().await;
+        }
     }
 }

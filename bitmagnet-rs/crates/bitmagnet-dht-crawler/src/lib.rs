@@ -50,7 +50,10 @@ mod persist_torrent_parity;
 #[cfg(test)]
 mod scrape_parity;
 
-pub use app_config::{DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DEFAULT_BOOTSTRAP_NODES};
+pub use app_config::{
+    DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DhtCrawlerAppConfigErrorKind,
+    DhtCrawlerAppProjection, DEFAULT_BOOTSTRAP_NODES, DHT_CRAWLER_MAX_SCALING_FACTOR,
+};
 pub use downstream_composition::{
     DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError,
     DhtCrawlerDownstreamLaneConfig, DhtCrawlerDownstreamStatsHandle,
