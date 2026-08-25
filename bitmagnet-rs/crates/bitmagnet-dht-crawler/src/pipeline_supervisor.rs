@@ -31,7 +31,7 @@ use bitmagnet_dht::{
     DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit, DhtInfoHashTriageInput,
     DhtRuntime, DhtRuntimeExit,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::{Id, JoinError, JoinSet};
 
 use crate::{
@@ -124,6 +124,62 @@ pub enum DhtCrawlerPipelineExit {
     Completed(Box<DhtCrawlerPipelineCompletedExit>),
 }
 
+/// Observable one-shot lifecycle of a crawler pipeline run.
+///
+/// `Ready` is published only after all six downstream workers and all nine
+/// nested maintenance children have entered their run futures while no
+/// terminal event is observable at either supervisor boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DhtCrawlerPipelineLifecycle {
+    /// The supervisor has been constructed but has not proved every child
+    /// entered its run future.
+    Starting,
+    /// Every required child entered its run future and the supervisor had not
+    /// observed shutdown or a component terminal result at that boundary.
+    Ready,
+    /// A terminal trigger began staged cleanup, or cancellation invalidated a
+    /// previously ready run.
+    Stopping,
+    /// Staged cleanup, runtime shutdown, and blocking finalization completed.
+    Stopped,
+}
+
+/// Cloneable sender-free view of the pipeline lifecycle.
+///
+/// Channel closure without `Stopped` means the consuming run future was
+/// cancelled. Cancellation after readiness first publishes `Stopping`, so a
+/// retained snapshot cannot continue to claim readiness.
+#[derive(Clone)]
+pub struct DhtCrawlerPipelineLifecycleHandle {
+    receiver: watch::Receiver<DhtCrawlerPipelineLifecycle>,
+}
+
+impl DhtCrawlerPipelineLifecycleHandle {
+    /// Return the most recently published lifecycle state.
+    #[must_use]
+    pub fn snapshot(&self) -> DhtCrawlerPipelineLifecycle {
+        *self.receiver.borrow()
+    }
+
+    /// Whether the live publisher currently reports `Ready`.
+    ///
+    /// A closed channel is never ready, even if a stale receiver last observed
+    /// the ready state.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.snapshot() == DhtCrawlerPipelineLifecycle::Ready && self.receiver.has_changed().is_ok()
+    }
+
+    /// Wait for a lifecycle change and return its new value.
+    ///
+    /// `None` means the run future was cancelled or the terminal publisher was
+    /// otherwise dropped. A normal run publishes `Stopped` before closure.
+    pub async fn changed(&mut self) -> Option<DhtCrawlerPipelineLifecycle> {
+        self.receiver.changed().await.ok()?;
+        Some(*self.receiver.borrow_and_update())
+    }
+}
+
 /// Cloneable sender-free capabilities returned at supervisor construction.
 ///
 /// The external finalizer clone is a retry/recovery capability after a completed
@@ -141,6 +197,8 @@ pub struct DhtCrawlerPipelineHandles {
     /// Recovery capability retained independently of the consuming run future;
     /// cancellation alone does not establish that it is safe to call.
     pub blocking_finalizer: Arc<dyn BlockingFinalizer>,
+    /// Sender-free lifecycle used by health and readiness surfaces.
+    pub lifecycle: DhtCrawlerPipelineLifecycleHandle,
 }
 
 /// Concrete owner of the runtime, maintenance composition, root triage input,
@@ -155,6 +213,7 @@ pub struct DhtCrawlerPipelineSupervisor {
     root_triage_input: DhtInfoHashTriageInput,
     downstream: DhtCrawlerDownstreamWorkers,
     finalizer: Arc<dyn BlockingFinalizer>,
+    lifecycle: watch::Sender<DhtCrawlerPipelineLifecycle>,
 }
 
 impl DhtCrawlerPipelineSupervisor {
@@ -177,9 +236,13 @@ impl DhtCrawlerPipelineSupervisor {
             blocking_manager,
         } = downstream;
         let finalizer: Arc<dyn BlockingFinalizer> = blocking_manager;
+        let (lifecycle, lifecycle_receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
         let handles = DhtCrawlerPipelineHandles {
             downstream_stats: stats,
             blocking_finalizer: finalizer.clone(),
+            lifecycle: DhtCrawlerPipelineLifecycleHandle {
+                receiver: lifecycle_receiver,
+            },
         };
         (
             Self {
@@ -188,6 +251,7 @@ impl DhtCrawlerPipelineSupervisor {
                 root_triage_input,
                 downstream: workers,
                 finalizer,
+                lifecycle,
             },
             handles,
         )
@@ -215,15 +279,21 @@ impl DhtCrawlerPipelineSupervisor {
     where
         F: Future<Output = ()>,
     {
-        run_with_factories(shutdown, PipelineFactories::from_supervisor(self)).await
+        let (factories, lifecycle) = PipelineFactories::from_supervisor(self);
+        run_with_factories_and_lifecycle(shutdown, factories, lifecycle).await
     }
 }
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 type RuntimeFactory =
     Box<dyn FnOnce(watch::Receiver<bool>) -> BoxFuture<Result<DhtRuntimeExit, JoinError>> + Send>;
-type MaintenanceFactory =
-    Box<dyn FnOnce(watch::Receiver<bool>) -> BoxFuture<DhtCrawlerMaintenanceSupervisorExit> + Send>;
+struct MaintenanceRun {
+    future: BoxFuture<DhtCrawlerMaintenanceSupervisorExit>,
+    started: BoxFuture<bool>,
+    stopping: BoxFuture<bool>,
+}
+
+type MaintenanceFactory = Box<dyn FnOnce(watch::Receiver<bool>) -> MaintenanceRun + Send>;
 type TriageFactory =
     Box<dyn FnOnce(watch::Receiver<bool>) -> BoxFuture<DhtInfoHashTriageWorkerExit> + Send>;
 type GetPeersFactory =
@@ -253,7 +323,9 @@ struct PipelineFactories {
 }
 
 impl PipelineFactories {
-    fn from_supervisor(supervisor: DhtCrawlerPipelineSupervisor) -> Self {
+    fn from_supervisor(
+        supervisor: DhtCrawlerPipelineSupervisor,
+    ) -> (Self, watch::Sender<DhtCrawlerPipelineLifecycle>) {
         let DhtCrawlerPipelineSupervisor {
             runtime,
             maintenance,
@@ -268,24 +340,73 @@ impl PipelineFactories {
                     persist_source,
                 },
             finalizer,
+            lifecycle,
         } = supervisor;
+        (
+            Self {
+                runtime: Box::new(move |stop| {
+                    Box::pin(runtime.run_until_shutdown(wait_for_stop(stop)))
+                }),
+                maintenance: Box::new(move |stop| {
+                    let (notifications, future) =
+                        maintenance.run_with_notifications(wait_for_stop(stop));
+                    let (mut started, mut stopping) = notifications.into_parts();
+                    MaintenanceRun {
+                        future: Box::pin(future),
+                        started: Box::pin(async move { started.notified().await.is_ok() }),
+                        stopping: Box::pin(async move { stopping.notified().await.is_ok() }),
+                    }
+                }),
+                root_drop: Box::new(move || drop(root_triage_input)),
+                triage: Box::new(move |stop| Box::pin(triage.run(wait_for_stop(stop)))),
+                get_peers: Box::new(move |stop| Box::pin(get_peers.run(wait_for_stop(stop)))),
+                request_meta_info: Box::new(move |stop| {
+                    Box::pin(request_meta_info.run(wait_for_stop(stop)))
+                }),
+                persist_torrent: Box::new(move |stop| {
+                    Box::pin(persist_torrent.run(wait_for_stop(stop)))
+                }),
+                scrape: Box::new(move |stop| Box::pin(scrape.run(wait_for_stop(stop)))),
+                persist_source: Box::new(move |stop| {
+                    Box::pin(persist_source.run(wait_for_stop(stop)))
+                }),
+                finalizer: Box::new(move || Box::pin(async move { finalizer.finalize().await })),
+            },
+            lifecycle,
+        )
+    }
+}
+
+struct LifecyclePublisher {
+    sender: Option<watch::Sender<DhtCrawlerPipelineLifecycle>>,
+}
+
+impl LifecyclePublisher {
+    fn new(sender: watch::Sender<DhtCrawlerPipelineLifecycle>) -> Self {
         Self {
-            runtime: Box::new(move |stop| {
-                Box::pin(runtime.run_until_shutdown(wait_for_stop(stop)))
-            }),
-            maintenance: Box::new(move |stop| Box::pin(maintenance.run(wait_for_stop(stop)))),
-            root_drop: Box::new(move || drop(root_triage_input)),
-            triage: Box::new(move |stop| Box::pin(triage.run(wait_for_stop(stop)))),
-            get_peers: Box::new(move |stop| Box::pin(get_peers.run(wait_for_stop(stop)))),
-            request_meta_info: Box::new(move |stop| {
-                Box::pin(request_meta_info.run(wait_for_stop(stop)))
-            }),
-            persist_torrent: Box::new(move |stop| {
-                Box::pin(persist_torrent.run(wait_for_stop(stop)))
-            }),
-            scrape: Box::new(move |stop| Box::pin(scrape.run(wait_for_stop(stop)))),
-            persist_source: Box::new(move |stop| Box::pin(persist_source.run(wait_for_stop(stop)))),
-            finalizer: Box::new(move || Box::pin(async move { finalizer.finalize().await })),
+            sender: Some(sender),
+        }
+    }
+
+    fn publish(&self, state: DhtCrawlerPipelineLifecycle) {
+        if let Some(sender) = &self.sender {
+            sender.send_replace(state);
+        }
+    }
+
+    fn finish(mut self) {
+        self.publish(DhtCrawlerPipelineLifecycle::Stopped);
+        self.sender.take();
+    }
+}
+
+impl Drop for LifecyclePublisher {
+    fn drop(&mut self) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        if *sender.borrow() == DhtCrawlerPipelineLifecycle::Ready {
+            sender.send_replace(DhtCrawlerPipelineLifecycle::Stopping);
         }
     }
 }
@@ -323,6 +444,46 @@ impl TaskKind {
             Self::Scrape => Some(DhtCrawlerPipelineDownstreamChild::Scrape),
             Self::PersistSource => Some(DhtCrawlerPipelineDownstreamChild::PersistSource),
         }
+    }
+}
+
+#[derive(Default)]
+struct PipelineStartCollector {
+    maintenance: bool,
+    triage: bool,
+    get_peers: bool,
+    request_meta_info: bool,
+    persist_torrent: bool,
+    scrape: bool,
+    persist_source: bool,
+}
+
+impl PipelineStartCollector {
+    fn record(&mut self, kind: TaskKind) -> bool {
+        let slot = match kind {
+            TaskKind::Maintenance => &mut self.maintenance,
+            TaskKind::Triage => &mut self.triage,
+            TaskKind::GetPeers => &mut self.get_peers,
+            TaskKind::RequestMetaInfo => &mut self.request_meta_info,
+            TaskKind::PersistTorrent => &mut self.persist_torrent,
+            TaskKind::Scrape => &mut self.scrape,
+            TaskKind::PersistSource => &mut self.persist_source,
+        };
+        if *slot {
+            return false;
+        }
+        *slot = true;
+        self.complete()
+    }
+
+    fn complete(&self) -> bool {
+        self.maintenance
+            && self.triage
+            && self.get_peers
+            && self.request_meta_info
+            && self.persist_torrent
+            && self.scrape
+            && self.persist_source
     }
 }
 
@@ -532,10 +693,24 @@ async fn finish_runtime_and_finalizer(
     )
 }
 
+#[cfg(test)]
 async fn run_with_factories<F>(shutdown: F, factories: PipelineFactories) -> DhtCrawlerPipelineExit
 where
     F: Future<Output = ()>,
 {
+    let (lifecycle, _lifecycle_receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
+    run_with_factories_and_lifecycle(shutdown, factories, lifecycle).await
+}
+
+async fn run_with_factories_and_lifecycle<F>(
+    shutdown: F,
+    factories: PipelineFactories,
+    lifecycle: watch::Sender<DhtCrawlerPipelineLifecycle>,
+) -> DhtCrawlerPipelineExit
+where
+    F: Future<Output = ()>,
+{
+    let lifecycle = LifecyclePublisher::new(lifecycle);
     tokio::pin!(shutdown);
     let pre_ready =
         poll_fn(|context| Poll::Ready(matches!(shutdown.as_mut().poll(context), Poll::Ready(()))))
@@ -555,6 +730,7 @@ where
     } = factories;
 
     if pre_ready {
+        lifecycle.publish(DhtCrawlerPipelineLifecycle::Stopping);
         drop((
             maintenance,
             triage,
@@ -568,7 +744,9 @@ where
         let (_runtime_stop, runtime_stop) = watch::channel(true);
         let runtime = runtime(runtime_stop);
         let (runtime, blocking) = finish_runtime_and_finalizer(runtime, None, finalizer).await;
-        return DhtCrawlerPipelineExit::ShutdownBeforeStart { runtime, blocking };
+        let exit = DhtCrawlerPipelineExit::ShutdownBeforeStart { runtime, blocking };
+        lifecycle.finish();
+        return exit;
     }
 
     let (maintenance_stop, maintenance_stop_rx) = watch::channel(false);
@@ -577,60 +755,143 @@ where
     let mut runtime = runtime(runtime_stop_rx);
     let mut root_drop = Some(root_drop);
 
+    let MaintenanceRun {
+        future: maintenance,
+        started: mut maintenance_started,
+        stopping: mut maintenance_stopping,
+    } = maintenance(maintenance_stop_rx);
+    let mut maintenance_start_open = true;
+    let mut maintenance_stopping_open = true;
+    let (downstream_started_tx, mut downstream_started_rx) = mpsc::unbounded_channel();
+    let mut downstream_start_open = true;
     let mut tasks = JoinSet::new();
     let mut task_kinds = HashMap::new();
     spawn_task(
         &mut tasks,
         &mut task_kinds,
         TaskKind::Maintenance,
-        async move { TaskOutput::Maintenance(maintenance(maintenance_stop_rx).await) },
+        async move { TaskOutput::Maintenance(maintenance.await) },
     );
     spawn_task(&mut tasks, &mut task_kinds, TaskKind::Triage, {
         let stop = downstream_stop_rx.clone();
-        async move { TaskOutput::Triage(triage(stop).await) }
+        let started = downstream_started_tx.clone();
+        async move {
+            let future = triage(stop);
+            let _ = started.send(TaskKind::Triage);
+            TaskOutput::Triage(future.await)
+        }
     });
     spawn_task(&mut tasks, &mut task_kinds, TaskKind::GetPeers, {
         let stop = downstream_stop_rx.clone();
-        async move { TaskOutput::GetPeers(get_peers(stop).await) }
+        let started = downstream_started_tx.clone();
+        async move {
+            let future = get_peers(stop);
+            let _ = started.send(TaskKind::GetPeers);
+            TaskOutput::GetPeers(future.await)
+        }
     });
     spawn_task(&mut tasks, &mut task_kinds, TaskKind::RequestMetaInfo, {
         let stop = downstream_stop_rx.clone();
-        async move { TaskOutput::RequestMetaInfo(request_meta_info(stop).await) }
+        let started = downstream_started_tx.clone();
+        async move {
+            let future = request_meta_info(stop);
+            let _ = started.send(TaskKind::RequestMetaInfo);
+            TaskOutput::RequestMetaInfo(future.await)
+        }
     });
     spawn_task(&mut tasks, &mut task_kinds, TaskKind::PersistTorrent, {
         let stop = downstream_stop_rx.clone();
-        async move { TaskOutput::PersistTorrent(persist_torrent(stop).await) }
+        let started = downstream_started_tx.clone();
+        async move {
+            let future = persist_torrent(stop);
+            let _ = started.send(TaskKind::PersistTorrent);
+            TaskOutput::PersistTorrent(future.await)
+        }
     });
     spawn_task(&mut tasks, &mut task_kinds, TaskKind::Scrape, {
         let stop = downstream_stop_rx.clone();
-        async move { TaskOutput::Scrape(scrape(stop).await) }
+        let started = downstream_started_tx.clone();
+        async move {
+            let future = scrape(stop);
+            let _ = started.send(TaskKind::Scrape);
+            TaskOutput::Scrape(future.await)
+        }
     });
     spawn_task(
         &mut tasks,
         &mut task_kinds,
         TaskKind::PersistSource,
-        async move { TaskOutput::PersistSource(persist_source(downstream_stop_rx).await) },
+        async move {
+            let future = persist_source(downstream_stop_rx);
+            let _ = downstream_started_tx.send(TaskKind::PersistSource);
+            TaskOutput::PersistSource(future.await)
+        },
     );
 
     let mut collector = TaskCollector::default();
+    let mut starts = PipelineStartCollector::default();
     let mut runtime_result = None;
-    let first_trigger = tokio::select! {
-        biased;
-        () = &mut shutdown => DhtCrawlerPipelineTrigger::ExternalShutdown,
-        result = runtime.as_mut() => {
-            runtime_result = Some(result);
-            DhtCrawlerPipelineTrigger::Runtime
-        }
-        joined = join_next_task(&mut tasks, &mut task_kinds) => {
-            let (kind, result) = joined;
-            let child = kind.downstream();
-            let _abnormal = collector.record(kind, result);
-            match child {
-                Some(child) => DhtCrawlerPipelineTrigger::Downstream(child),
-                None => DhtCrawlerPipelineTrigger::Maintenance,
+    enum FirstEvent {
+        Trigger(DhtCrawlerPipelineTrigger),
+        MaintenanceStarted(bool),
+        MaintenanceStopping(bool),
+        DownstreamStarted(Option<TaskKind>),
+    }
+    let first_trigger = loop {
+        let event = tokio::select! {
+            biased;
+            () = &mut shutdown => {
+                FirstEvent::Trigger(DhtCrawlerPipelineTrigger::ExternalShutdown)
             }
+            result = runtime.as_mut() => {
+                runtime_result = Some(result);
+                FirstEvent::Trigger(DhtCrawlerPipelineTrigger::Runtime)
+            }
+            joined = join_next_task(&mut tasks, &mut task_kinds) => {
+                let (kind, result) = joined;
+                let child = kind.downstream();
+                let _abnormal = collector.record(kind, result);
+                FirstEvent::Trigger(match child {
+                    Some(child) => DhtCrawlerPipelineTrigger::Downstream(child),
+                    None => DhtCrawlerPipelineTrigger::Maintenance,
+                })
+            }
+            stopping = maintenance_stopping.as_mut(), if maintenance_stopping_open => {
+                FirstEvent::MaintenanceStopping(stopping)
+            }
+            started = maintenance_started.as_mut(),
+                if maintenance_start_open && !starts.complete() =>
+            {
+                FirstEvent::MaintenanceStarted(started)
+            }
+            started = downstream_started_rx.recv(),
+                if downstream_start_open && !starts.complete() =>
+            {
+                FirstEvent::DownstreamStarted(started)
+            }
+        };
+        match event {
+            FirstEvent::Trigger(trigger) => break trigger,
+            FirstEvent::MaintenanceStopping(true) => {
+                break DhtCrawlerPipelineTrigger::Maintenance;
+            }
+            FirstEvent::MaintenanceStopping(false) => maintenance_stopping_open = false,
+            FirstEvent::MaintenanceStarted(true) => {
+                maintenance_start_open = false;
+                if starts.record(TaskKind::Maintenance) {
+                    lifecycle.publish(DhtCrawlerPipelineLifecycle::Ready);
+                }
+            }
+            FirstEvent::MaintenanceStarted(false) => maintenance_start_open = false,
+            FirstEvent::DownstreamStarted(Some(kind)) => {
+                if starts.record(kind) {
+                    lifecycle.publish(DhtCrawlerPipelineLifecycle::Ready);
+                }
+            }
+            FirstEvent::DownstreamStarted(None) => downstream_start_open = false,
         }
     };
+    lifecycle.publish(DhtCrawlerPipelineLifecycle::Stopping);
 
     let _ = maintenance_stop.send(true);
     let mut downstream_stop_sent =
@@ -687,13 +948,15 @@ where
     let (runtime, blocking) =
         finish_runtime_and_finalizer(runtime, runtime_result, finalizer).await;
 
-    DhtCrawlerPipelineExit::Completed(Box::new(DhtCrawlerPipelineCompletedExit {
+    let exit = DhtCrawlerPipelineExit::Completed(Box::new(DhtCrawlerPipelineCompletedExit {
         first_trigger,
         maintenance,
         downstream,
         runtime,
         blocking,
-    }))
+    }));
+    lifecycle.finish();
+    exit
 }
 
 #[cfg(test)]
@@ -893,6 +1156,47 @@ mod tests {
         ));
     }
 
+    fn lifecycle_channel() -> (
+        watch::Sender<DhtCrawlerPipelineLifecycle>,
+        DhtCrawlerPipelineLifecycleHandle,
+    ) {
+        let (sender, receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
+        (sender, DhtCrawlerPipelineLifecycleHandle { receiver })
+    }
+
+    async fn wait_for_lifecycle(
+        lifecycle: &mut DhtCrawlerPipelineLifecycleHandle,
+        expected: DhtCrawlerPipelineLifecycle,
+    ) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if lifecycle.snapshot() == expected {
+                    return;
+                }
+                lifecycle
+                    .changed()
+                    .await
+                    .expect("lifecycle publisher remains live until the expected state");
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("lifecycle did not reach {expected:?}"));
+    }
+
+    fn scripted_maintenance_run<F, Fut>(run: F) -> MaintenanceRun
+    where
+        F: FnOnce(oneshot::Sender<()>, oneshot::Sender<()>) -> Fut,
+        Fut: Future<Output = DhtCrawlerMaintenanceSupervisorExit> + Send + 'static,
+    {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (stopping_tx, stopping_rx) = oneshot::channel();
+        MaintenanceRun {
+            future: Box::pin(run(started_tx, stopping_tx)),
+            started: Box::pin(async move { started_rx.await.is_ok() }),
+            stopping: Box::pin(async move { stopping_rx.await.is_ok() }),
+        }
+    }
+
     // Scripted one-shot factories keep production ownership concrete while
     // making lifecycle ordering deterministic and network-free in unit tests.
     #[allow(clippy::too_many_lines)]
@@ -941,9 +1245,11 @@ mod tests {
                 })
             }),
             maintenance: Box::new(move |stop| {
-                Box::pin(async move {
+                scripted_maintenance_run(move |started, stopping| async move {
                     maintenance_gate.mark(&maintenance_log, "maintenance_started");
+                    let _ = started.send(());
                     wait_for_stop(stop).await;
+                    let _ = stopping.send(());
                     maintenance_log.push("maintenance_stopped");
                     match maintenance_mode {
                         MaintenanceMode::Stop => {
@@ -1161,6 +1467,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_requires_every_start_then_tracks_stopping_and_stopped() {
+        let log = EventLog::default();
+        let gate = Arc::new(StartGate::default());
+        let finalizer_calls = Arc::new(AtomicUsize::new(0));
+        let mut factories = normal_factories(log.clone(), gate.clone(), finalizer_calls.clone());
+        let maintenance_gate = gate.clone();
+        let maintenance_log = log.clone();
+        let (maintenance_stopping_tx, maintenance_stopping_rx) = oneshot::channel();
+        let maintenance_release = Arc::new(Notify::new());
+        let maintenance_release_task = maintenance_release.clone();
+        factories.maintenance = Box::new(move |stop| {
+            scripted_maintenance_run(move |started, stopping| async move {
+                maintenance_gate.mark(&maintenance_log, "maintenance_started");
+                let _ = started.send(());
+                wait_for_stop(stop).await;
+                let _ = stopping.send(());
+                let _ = maintenance_stopping_tx.send(());
+                maintenance_release_task.notified().await;
+                maintenance_log.push("maintenance_stopped");
+                DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+            })
+        });
+        let (lifecycle_tx, mut lifecycle) = lifecycle_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(run_with_factories_and_lifecycle(
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            factories,
+            lifecycle_tx,
+        ));
+
+        wait_for_lifecycle(&mut lifecycle, DhtCrawlerPipelineLifecycle::Ready).await;
+        assert!(lifecycle.is_ready());
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(5), maintenance_stopping_rx)
+            .await
+            .expect("maintenance must observe staged stop")
+            .unwrap();
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+        assert!(!lifecycle.is_ready());
+
+        maintenance_release.notify_one();
+        let exit = timeout(Duration::from_secs(5), run)
+            .await
+            .expect("pipeline must finish after maintenance release")
+            .unwrap();
+        assert!(matches!(exit, DhtCrawlerPipelineExit::Completed(_)));
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopped);
+        assert!(!lifecycle.is_ready());
+        assert_eq!(finalizer_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn nested_stopping_beats_a_queued_stale_start_during_hung_cleanup() {
+        let gate = Arc::new(StartGate::default());
+        let mut factories =
+            normal_factories(EventLog::default(), gate, Arc::new(AtomicUsize::new(0)));
+        let (nested_stopping_tx, nested_stopping_rx) = oneshot::channel();
+        let cleanup_release = Arc::new(Notify::new());
+        let cleanup_release_task = cleanup_release.clone();
+        factories.maintenance = Box::new(move |_stop| {
+            scripted_maintenance_run(move |started, stopping| async move {
+                let _ = started.send(());
+                let _ = stopping.send(());
+                let _ = nested_stopping_tx.send(());
+                cleanup_release_task.notified().await;
+                DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+            })
+        });
+        let (lifecycle_tx, mut lifecycle) = lifecycle_channel();
+        let run = tokio::spawn(run_with_factories_and_lifecycle(
+            std::future::pending(),
+            factories,
+            lifecycle_tx,
+        ));
+
+        timeout(Duration::from_secs(5), nested_stopping_rx)
+            .await
+            .expect("maintenance must queue start and stopping notifications")
+            .unwrap();
+        wait_for_lifecycle(&mut lifecycle, DhtCrawlerPipelineLifecycle::Stopping).await;
+        assert!(!lifecycle.is_ready());
+        tokio::task::yield_now().await;
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+
+        cleanup_release.notify_one();
+        let exit = timeout(Duration::from_secs(5), run)
+            .await
+            .expect("released nested cleanup must finish the pipeline")
+            .unwrap();
+        let DhtCrawlerPipelineExit::Completed(exit) = exit else {
+            panic!("nested maintenance terminal notification starts normal cleanup");
+        };
+        assert_eq!(exit.first_trigger, DhtCrawlerPipelineTrigger::Maintenance);
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopped);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_ready_closes_at_stopping_without_stopped() {
+        let factories = normal_factories(
+            EventLog::default(),
+            Arc::new(StartGate::default()),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let (lifecycle_tx, mut lifecycle) = lifecycle_channel();
+        let run = tokio::spawn(run_with_factories_and_lifecycle(
+            std::future::pending(),
+            factories,
+            lifecycle_tx,
+        ));
+
+        wait_for_lifecycle(&mut lifecycle, DhtCrawlerPipelineLifecycle::Ready).await;
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        while lifecycle.changed().await.is_some() {}
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+        assert!(!lifecycle.is_ready());
+    }
+
+    #[tokio::test]
+    async fn pre_ready_shutdown_withholds_stopped_until_runtime_and_finalizer_finish() {
+        let log = EventLog::default();
+        let mut factories = normal_factories(
+            log.clone(),
+            Arc::new(StartGate::default()),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let (runtime_started_tx, runtime_started_rx) = oneshot::channel();
+        let runtime_release = Arc::new(Notify::new());
+        let runtime_release_task = runtime_release.clone();
+        factories.runtime = Box::new(move |_stop| {
+            Box::pin(async move {
+                let _ = runtime_started_tx.send(());
+                runtime_release_task.notified().await;
+                Ok(DhtRuntimeExit::Shutdown)
+            })
+        });
+        let (finalizer_started_tx, finalizer_started_rx) = oneshot::channel();
+        let finalizer_release = Arc::new(Notify::new());
+        let finalizer_release_task = finalizer_release.clone();
+        factories.finalizer = Box::new(move || {
+            Box::pin(async move {
+                let _ = finalizer_started_tx.send(());
+                finalizer_release_task.notified().await;
+                Ok(BlockingFinalizeOutcome::NothingPending)
+            })
+        });
+        let (lifecycle_tx, lifecycle) = lifecycle_channel();
+        let run = tokio::spawn(run_with_factories_and_lifecycle(
+            std::future::ready(()),
+            factories,
+            lifecycle_tx,
+        ));
+
+        timeout(Duration::from_secs(5), async {
+            runtime_started_rx.await.unwrap();
+            finalizer_started_rx.await.unwrap();
+        })
+        .await
+        .expect("pre-ready cleanup must poll runtime and finalizer");
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+        assert!(!lifecycle.is_ready());
+        assert!(!log
+            .snapshot()
+            .iter()
+            .any(|event| event.ends_with("_started") && *event != "runtime_started"));
+
+        runtime_release.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+        finalizer_release.notify_one();
+        let exit = timeout(Duration::from_secs(5), run)
+            .await
+            .expect("both cleanup releases must finish pre-ready shutdown")
+            .unwrap();
+        assert!(matches!(
+            exit,
+            DhtCrawlerPipelineExit::ShutdownBeforeStart { .. }
+        ));
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopped);
+    }
+
+    #[tokio::test]
+    async fn withheld_nested_maintenance_start_keeps_lifecycle_starting() {
+        let log = EventLog::default();
+        let gate = Arc::new(StartGate::default());
+        let mut factories =
+            normal_factories(log.clone(), gate.clone(), Arc::new(AtomicUsize::new(0)));
+        let maintenance_gate = gate.clone();
+        factories.maintenance = Box::new(move |stop| {
+            scripted_maintenance_run(move |_started, stopping| async move {
+                maintenance_gate.mark(&EventLog::default(), "maintenance_started");
+                wait_for_stop(stop).await;
+                let _ = stopping.send(());
+                DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+            })
+        });
+        let (lifecycle_tx, lifecycle) = lifecycle_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(run_with_factories_and_lifecycle(
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            factories,
+            lifecycle_tx,
+        ));
+
+        timeout(Duration::from_secs(5), gate.wait_for(8))
+            .await
+            .expect("runtime, maintenance, and six downstream futures must enter");
+        tokio::task::yield_now().await;
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Starting);
+        assert!(!lifecycle.is_ready());
+
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(5), run)
+            .await
+            .expect("withheld startup pipeline must still stop")
+            .unwrap();
+        assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopped);
+    }
+
+    #[test]
+    fn duplicate_pipeline_start_does_not_replace_a_missing_identity() {
+        let mut starts = PipelineStartCollector::default();
+        for kind in [
+            TaskKind::Maintenance,
+            TaskKind::Triage,
+            TaskKind::GetPeers,
+            TaskKind::RequestMetaInfo,
+            TaskKind::PersistTorrent,
+            TaskKind::Scrape,
+        ] {
+            assert!(!starts.record(kind));
+        }
+        assert!(!starts.record(TaskKind::Triage));
+        assert!(!starts.complete());
+        assert!(starts.record(TaskKind::PersistSource));
+        assert!(starts.complete());
+    }
+
+    #[tokio::test]
     async fn external_equal_ready_is_biased() {
         let mut factories = normal_factories(
             EventLog::default(),
@@ -1202,7 +1751,10 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         );
         factories.maintenance = Box::new(|_stop| {
-            Box::pin(async { DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart })
+            scripted_maintenance_run(|_started, stopping| async move {
+                let _ = stopping.send(());
+                DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart
+            })
         });
 
         let exit = completed(run_bounded(std::future::pending(), factories).await);
@@ -1447,11 +1999,23 @@ mod tests {
         let finalizer_call_count = finalizer_calls.clone();
         let factories = PipelineFactories {
             runtime: pending_factory!(Result<DhtRuntimeExit, JoinError>, "runtime_started", "runtime_dropped"),
-            maintenance: pending_factory!(
-                DhtCrawlerMaintenanceSupervisorExit,
-                "maintenance_started",
-                "maintenance_dropped"
-            ),
+            maintenance: {
+                let starts = starts.clone();
+                let drops = drops.clone();
+                let log = log.clone();
+                Box::new(move |_stop| {
+                    scripted_maintenance_run(move |started, _stopping| async move {
+                        starts.mark(&log, "maintenance_started");
+                        let _ = started.send(());
+                        let _guard = DropMark {
+                            gate: drops,
+                            log,
+                            event: "maintenance_dropped",
+                        };
+                        std::future::pending().await
+                    })
+                })
+            },
             root_drop: Box::new(move || drop(root_guard)),
             triage: pending_factory!(
                 DhtInfoHashTriageWorkerExit,
@@ -1536,7 +2100,13 @@ mod tests {
                     std::future::pending().await
                 })
             }),
-            maintenance: unused_factory!(DhtCrawlerMaintenanceSupervisorExit),
+            maintenance: {
+                let calls = child_calls.clone();
+                Box::new(move |_stop| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    scripted_maintenance_run(|_started, _stopping| std::future::pending())
+                })
+            },
             root_drop: Box::new(move || {
                 root_drop_count.fetch_add(1, Ordering::SeqCst);
             }),

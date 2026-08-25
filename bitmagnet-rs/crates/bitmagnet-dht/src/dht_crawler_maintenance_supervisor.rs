@@ -6,7 +6,7 @@ use std::panic::resume_unwind;
 use std::pin::Pin;
 use std::task::Poll;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinSet};
 
 use crate::{
@@ -164,6 +164,78 @@ pub enum DhtCrawlerMaintenanceSupervisorExit {
         first: DhtCrawlerMaintenanceChild,
         children: DhtCrawlerMaintenanceChildExits,
     },
+}
+
+/// One sender-free, one-shot maintenance lifecycle notification.
+pub struct DhtCrawlerMaintenanceNotification {
+    receiver: oneshot::Receiver<()>,
+}
+
+impl DhtCrawlerMaintenanceNotification {
+    /// Wait for the maintenance supervisor to publish this notification.
+    ///
+    /// A receive error means its run future ended or was cancelled without
+    /// reaching the corresponding lifecycle boundary.
+    pub async fn notified(&mut self) -> Result<(), oneshot::error::RecvError> {
+        (&mut self.receiver).await
+    }
+}
+
+/// Sender-free one-shot observations for one maintenance supervisor run.
+pub struct DhtCrawlerMaintenanceRunNotifications {
+    started: DhtCrawlerMaintenanceNotification,
+    stopping: DhtCrawlerMaintenanceNotification,
+}
+
+impl DhtCrawlerMaintenanceRunNotifications {
+    /// Split the uniquely owned start and stopping notifications.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        DhtCrawlerMaintenanceNotification,
+        DhtCrawlerMaintenanceNotification,
+    ) {
+        (self.started, self.stopping)
+    }
+}
+
+struct DhtCrawlerMaintenanceRunPublishers {
+    started: Option<oneshot::Sender<()>>,
+    stopping: Option<oneshot::Sender<()>>,
+}
+
+impl DhtCrawlerMaintenanceRunPublishers {
+    fn channel() -> (Self, DhtCrawlerMaintenanceRunNotifications) {
+        let (started, started_receiver) = oneshot::channel();
+        let (stopping, stopping_receiver) = oneshot::channel();
+        (
+            Self {
+                started: Some(started),
+                stopping: Some(stopping),
+            },
+            DhtCrawlerMaintenanceRunNotifications {
+                started: DhtCrawlerMaintenanceNotification {
+                    receiver: started_receiver,
+                },
+                stopping: DhtCrawlerMaintenanceNotification {
+                    receiver: stopping_receiver,
+                },
+            },
+        )
+    }
+
+    fn publish_started(&mut self) {
+        if let Some(started) = self.started.take() {
+            let _ = started.send(());
+        }
+    }
+
+    fn publish_stopping(&mut self) {
+        if let Some(stopping) = self.stopping.take() {
+            let _ = stopping.send(());
+        }
+    }
 }
 
 /// Owned partial DHT crawler maintenance composition.
@@ -351,6 +423,39 @@ impl DhtCrawlerMaintenanceSupervisor {
     where
         F: Future<Output = ()>,
     {
+        self.run_inner(shutdown, None).await
+    }
+
+    /// Build a run future with sender-free lifecycle notifications.
+    ///
+    /// `started` is published only after all nine uniquely identified child
+    /// futures have been polled and neither shutdown nor a child terminal
+    /// result is observable at that boundary. `stopping` is published
+    /// immediately after the first shutdown or child terminal trigger is
+    /// selected and before the shared stop signal or any child join cleanup.
+    /// Cancellation closes any unpublished notification without fabricating it.
+    pub fn run_with_notifications<F>(
+        self,
+        shutdown: F,
+    ) -> (
+        DhtCrawlerMaintenanceRunNotifications,
+        impl Future<Output = DhtCrawlerMaintenanceSupervisorExit>,
+    )
+    where
+        F: Future<Output = ()>,
+    {
+        let (publishers, notifications) = DhtCrawlerMaintenanceRunPublishers::channel();
+        (notifications, self.run_inner(shutdown, Some(publishers)))
+    }
+
+    async fn run_inner<F>(
+        self,
+        shutdown: F,
+        notifications: Option<DhtCrawlerMaintenanceRunPublishers>,
+    ) -> DhtCrawlerMaintenanceSupervisorExit
+    where
+        F: Future<Output = ()>,
+    {
         let Self {
             scheduler,
             ping,
@@ -362,7 +467,7 @@ impl DhtCrawlerMaintenanceSupervisor {
             sample_infohashes_producer,
             target_rotator,
         } = self;
-        run_child_factories(
+        run_child_factories_with_notifications(
             shutdown,
             [
                 Box::new(move |stop| {
@@ -417,6 +522,7 @@ impl DhtCrawlerMaintenanceSupervisor {
                     })
                 }),
             ],
+            notifications,
         )
         .await
     }
@@ -437,9 +543,83 @@ enum ChildExit {
     Target(Result<(), DhtCrawlerTargetError>),
 }
 
+#[cfg(test)]
 async fn run_child_factories<F>(
     shutdown: F,
     factories: [ChildFactory; 9],
+) -> DhtCrawlerMaintenanceSupervisorExit
+where
+    F: Future<Output = ()>,
+{
+    run_child_factories_with_notifications(shutdown, factories, None).await
+}
+
+const MAINTENANCE_CHILDREN: [DhtCrawlerMaintenanceChild; 9] = [
+    DhtCrawlerMaintenanceChild::Scheduler,
+    DhtCrawlerMaintenanceChild::Ping,
+    DhtCrawlerMaintenanceChild::FindNode,
+    DhtCrawlerMaintenanceChild::SampleInfoHashesWorker,
+    DhtCrawlerMaintenanceChild::OldestFind,
+    DhtCrawlerMaintenanceChild::OldestPing,
+    DhtCrawlerMaintenanceChild::BootstrapPing,
+    DhtCrawlerMaintenanceChild::SampleInfoHashesProducer,
+    DhtCrawlerMaintenanceChild::Target,
+];
+
+#[derive(Default)]
+struct ChildStartCollector {
+    scheduler: bool,
+    ping: bool,
+    find_node: bool,
+    sample_infohashes_worker: bool,
+    oldest_find: bool,
+    oldest_ping: bool,
+    bootstrap_ping: bool,
+    sample_infohashes_producer: bool,
+    target: bool,
+}
+
+impl ChildStartCollector {
+    fn record(&mut self, child: DhtCrawlerMaintenanceChild) -> bool {
+        let slot = match child {
+            DhtCrawlerMaintenanceChild::Scheduler => &mut self.scheduler,
+            DhtCrawlerMaintenanceChild::Ping => &mut self.ping,
+            DhtCrawlerMaintenanceChild::FindNode => &mut self.find_node,
+            DhtCrawlerMaintenanceChild::SampleInfoHashesWorker => {
+                &mut self.sample_infohashes_worker
+            }
+            DhtCrawlerMaintenanceChild::OldestFind => &mut self.oldest_find,
+            DhtCrawlerMaintenanceChild::OldestPing => &mut self.oldest_ping,
+            DhtCrawlerMaintenanceChild::BootstrapPing => &mut self.bootstrap_ping,
+            DhtCrawlerMaintenanceChild::SampleInfoHashesProducer => {
+                &mut self.sample_infohashes_producer
+            }
+            DhtCrawlerMaintenanceChild::Target => &mut self.target,
+        };
+        if *slot {
+            return false;
+        }
+        *slot = true;
+        self.complete()
+    }
+
+    fn complete(&self) -> bool {
+        self.scheduler
+            && self.ping
+            && self.find_node
+            && self.sample_infohashes_worker
+            && self.oldest_find
+            && self.oldest_ping
+            && self.bootstrap_ping
+            && self.sample_infohashes_producer
+            && self.target
+    }
+}
+
+async fn run_child_factories_with_notifications<F>(
+    shutdown: F,
+    factories: [ChildFactory; 9],
+    mut notifications: Option<DhtCrawlerMaintenanceRunPublishers>,
 ) -> DhtCrawlerMaintenanceSupervisorExit
 where
     F: Future<Output = ()>,
@@ -449,30 +629,60 @@ where
         poll_fn(|context| Poll::Ready(matches!(shutdown.as_mut().poll(context), Poll::Ready(()))))
             .await;
     if pre_ready {
+        if let Some(notifications) = &mut notifications {
+            notifications.publish_stopping();
+        }
         drop(factories);
         return DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart;
     }
 
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (child_started_tx, mut child_started_rx) = mpsc::unbounded_channel();
     let mut tasks = JoinSet::new();
-    for factory in factories {
-        tasks.spawn(factory(stop_rx.clone()));
+    for (child, factory) in MAINTENANCE_CHILDREN.into_iter().zip(factories) {
+        let future = factory(stop_rx.clone());
+        let child_started_tx = child_started_tx.clone();
+        tasks.spawn(async move {
+            let _ = child_started_tx.send(child);
+            future.await
+        });
     }
+    drop(child_started_tx);
     drop(stop_rx);
 
     let mut collector = ChildCollector::default();
+    let mut starts = ChildStartCollector::default();
     let mut first_child = None;
     enum First {
         Shutdown,
         Child(Result<ChildExit, JoinError>),
+        Started(DhtCrawlerMaintenanceChild),
     }
-    let first = tokio::select! {
-        biased;
-        () = &mut shutdown => First::Shutdown,
-        child = tasks.join_next() => {
-            First::Child(child.expect("nine maintenance children were spawned"))
+    let first = loop {
+        let first = tokio::select! {
+            biased;
+            () = &mut shutdown => First::Shutdown,
+            child = tasks.join_next() => {
+                First::Child(child.expect("nine maintenance children were spawned"))
+            }
+            child = child_started_rx.recv(), if !starts.complete() => {
+                First::Started(child.expect("an unreported maintenance child remains"))
+            }
+        };
+        match first {
+            First::Started(child) => {
+                if starts.record(child) {
+                    if let Some(notifications) = &mut notifications {
+                        notifications.publish_started();
+                    }
+                }
+            }
+            trigger => break trigger,
         }
     };
+    if let Some(notifications) = &mut notifications {
+        notifications.publish_stopping();
+    }
     if let First::Child(child) = first {
         first_child = collector.record(child);
     }
@@ -1656,11 +1866,26 @@ mod tests {
             ChildExit::Scheduler(DhtDiscoveredNodeSchedulerExit::InputClosed)
         });
 
+        let (publishers, notifications) = DhtCrawlerMaintenanceRunPublishers::channel();
+        let (mut started, mut stopping) = notifications.into_parts();
         let DhtCrawlerMaintenanceSupervisorExit::Shutdown { children } =
-            run_child_factories(ReadyAfter(child_completed), factories).await
+            run_child_factories_with_notifications(
+                ReadyAfter(child_completed),
+                factories,
+                Some(publishers),
+            )
+            .await
         else {
             panic!("biased external shutdown must remain the primary cause");
         };
+        assert!(
+            started.notified().await.is_err(),
+            "an equal-ready terminal observation must suppress startup acknowledgement"
+        );
+        stopping
+            .notified()
+            .await
+            .expect("the selected terminal trigger is published before cleanup");
         assert_eq!(
             children.scheduler,
             DhtDiscoveredNodeSchedulerExit::InputClosed
@@ -1715,6 +1940,47 @@ mod tests {
         );
         assert!(children.target.is_ok());
         assert_eq!(stopped.load(Ordering::SeqCst), 8);
+    }
+
+    #[tokio::test]
+    async fn all_nine_unique_child_starts_are_acknowledged_before_external_shutdown() {
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let factories = cooperative_factories(stopped.clone());
+        let (publishers, notifications) = DhtCrawlerMaintenanceRunPublishers::channel();
+        let (mut started, mut stopping) = notifications.into_parts();
+
+        let DhtCrawlerMaintenanceSupervisorExit::Shutdown { .. } =
+            run_child_factories_with_notifications(
+                async move {
+                    started
+                        .notified()
+                        .await
+                        .expect("all nine unique children must be acknowledged");
+                },
+                factories,
+                Some(publishers),
+            )
+            .await
+        else {
+            panic!("startup acknowledgement should drive external shutdown");
+        };
+        stopping
+            .notified()
+            .await
+            .expect("external shutdown publishes stopping before cleanup");
+        assert_eq!(stopped.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn duplicate_child_start_does_not_replace_a_missing_identity() {
+        let mut starts = ChildStartCollector::default();
+        for child in MAINTENANCE_CHILDREN.into_iter().take(8) {
+            assert!(!starts.record(child));
+        }
+        assert!(!starts.record(DhtCrawlerMaintenanceChild::Scheduler));
+        assert!(!starts.complete());
+        assert!(starts.record(DhtCrawlerMaintenanceChild::Target));
+        assert!(starts.complete());
     }
 
     struct DropFlag(Arc<AtomicUsize>);

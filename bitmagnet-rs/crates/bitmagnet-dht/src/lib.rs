@@ -57,7 +57,8 @@ pub use dht_concurrent_supervisor::{
     DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtInboundAdmissionPolicy,
 };
 pub use dht_crawler_maintenance_supervisor::{
-    DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceStartError,
+    DhtCrawlerMaintenanceChild, DhtCrawlerMaintenanceChildExits, DhtCrawlerMaintenanceNotification,
+    DhtCrawlerMaintenanceRunNotifications, DhtCrawlerMaintenanceStartError,
     DhtCrawlerMaintenanceStatsHandle, DhtCrawlerMaintenanceSupervisor,
     DhtCrawlerMaintenanceSupervisorExit,
 };

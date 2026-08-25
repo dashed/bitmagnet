@@ -114,7 +114,8 @@ pub use pg_torrent_v2_lookup::PgDhtTorrentV2Lookup;
 pub use pipeline_supervisor::{
     DhtCrawlerPipelineBlockingResult, DhtCrawlerPipelineCompletedExit,
     DhtCrawlerPipelineDownstreamChild, DhtCrawlerPipelineDownstreamExits, DhtCrawlerPipelineExit,
-    DhtCrawlerPipelineHandles, DhtCrawlerPipelineSupervisor, DhtCrawlerPipelineTrigger,
+    DhtCrawlerPipelineHandles, DhtCrawlerPipelineLifecycle, DhtCrawlerPipelineLifecycleHandle,
+    DhtCrawlerPipelineSupervisor, DhtCrawlerPipelineTrigger,
 };
 pub use request_meta_info::{
     DefaultDhtMetaInfoBanningChecker, DhtInfoHashBlocker, DhtMetaInfoBanningChecker,
