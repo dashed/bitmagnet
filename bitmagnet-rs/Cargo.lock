@@ -927,6 +927,7 @@ dependencies = [
  "bitmagnet-blocking",
  "bitmagnet-db",
  "bitmagnet-dht",
+ "bitmagnet-metainfo",
  "bitmagnet-model",
  "serde",
  "serde_json",

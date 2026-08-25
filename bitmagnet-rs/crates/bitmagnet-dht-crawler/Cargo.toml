@@ -11,6 +11,7 @@ description = "Owned DHT crawler policy workers above the protocol/runtime layer
 bitmagnet-blocking = { path = "../bitmagnet-blocking" }
 bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-dht = { path = "../bitmagnet-dht" }
+bitmagnet-metainfo = { path = "../bitmagnet-metainfo" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 async-trait.workspace = true
 sqlx.workspace = true

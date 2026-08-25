@@ -11,6 +11,7 @@ mod blocking_manager_filter;
 mod get_peers;
 mod info_hash_triage;
 mod persist_source_route;
+mod persist_torrent_route;
 mod pg_torrent_triage_lookup;
 mod request_meta_info_route;
 mod scrape;
@@ -36,6 +37,10 @@ pub use info_hash_triage::{
 pub use persist_source_route::{
     dht_persist_source_channel, DhtPersistSourceInput, DhtPersistSourceInputClosed,
     DhtPersistSourceReceiver, DhtPersistSourceRequest, DHT_PERSIST_SOURCE_ROUTE_CAPACITY,
+};
+pub use persist_torrent_route::{
+    dht_persist_torrent_channel, DhtPersistTorrentInput, DhtPersistTorrentInputClosed,
+    DhtPersistTorrentReceiver, DhtPersistTorrentRequest, DHT_PERSIST_TORRENT_ROUTE_CAPACITY,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
 pub use request_meta_info_route::{
