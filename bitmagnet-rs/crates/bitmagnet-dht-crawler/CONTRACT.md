@@ -4,18 +4,21 @@ This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
 The bounded published checkpoint contains owned Rust info-hash-triage,
-get-peers, scrape, and request-metainfo workers, strict differential consumers
-for all four stages, one concrete
-PostgreSQL lookup adapter, and a thin adapter for the persistent blocking
-manager, plus one offline concrete triage composition test and taskless typed
-metainfo-request, scraped-source, and torrent-persistence handoffs. The
-get-peers worker publishes successful nonempty peer vectors through the
-metainfo-request handoff. The scrape worker publishes successful raw BEP-33
-Bloom filters through the scraped-source handoff. The request-metainfo worker
-publishes allowed verified metainfo through the torrent-persistence handoff.
+get-peers, scrape, request-metainfo, and scraped-source-persistence workers;
+strict differential consumers for all five stages; one concrete PostgreSQL
+lookup adapter; one concrete PostgreSQL scraped-source writer; and a thin
+adapter for the persistent blocking manager, plus one offline concrete triage
+composition test and taskless typed metainfo-request, scraped-source, and
+torrent-persistence handoffs. The get-peers worker publishes successful
+nonempty peer vectors through the metainfo-request handoff. The scrape worker
+publishes successful raw BEP-33 Bloom filters through the scraped-source
+handoff. The request-metainfo worker publishes allowed verified metainfo
+through the torrent-persistence handoff.
 No concrete peer-wire metainfo requester, request-stage persistent-blocking
-adapter, scraped-source or torrent-persistence worker, or Rust production
-application composition exists yet. This is not a live-database integration.
+adapter, torrent-persistence worker, or Rust production application composition
+exists yet. The scraped-source worker and writer are not wired into an
+application or validated against live PostgreSQL. This is not a live-database
+integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -23,12 +26,12 @@ and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
 domain enum. `bitmagnet-metainfo` owns verified v1/v2 info-dictionary parsing,
 the parsed metainfo domain, normalized file projection, and default
 side-effect-free banning policy. This crate owns the higher-level batching and
-routing decision, the owned get-peers, scrape, and request-metainfo stages,
-their taskless downstream handoffs, the blocking-policy and
-database-projection seams, and the concrete SQLx lookup and triage
-blocking-manager adapters. It does not make the protocol or metainfo crate
-depend on PostgreSQL, the persistent blocking manager, crawler application
-state, or deployment configuration.
+routing decision, the owned get-peers, scrape, request-metainfo, and
+scraped-source-persistence stages, their taskless downstream handoffs, the
+blocking-policy and database-projection seams, and the concrete SQLx lookup,
+scraped-source writer, and triage blocking-manager adapters. It does not make
+the protocol or metainfo crate depend on PostgreSQL, the persistent blocking
+manager, crawler application state, or deployment configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
@@ -54,6 +57,14 @@ The frozen Go request-metainfo oracle checkpoint is
 The frozen Go source-persistence oracle checkpoint is
 `445385c62be25e221dfb8b8f3efe9a25abd0b364`, and its fixture SHA-256 is
 `01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
+Its recorded contract checkpoint is
+`ad4b62c4d699fb6cd601f69fe289d00c2574f2da`. The owned source-persistence
+worker checkpoint is `600e8e7e4eeff4c8427130c8bd1f1566834ad883`, and its strict
+Rust-consumer checkpoint is `4773e57aa8c0e7ea451dd932b7937aca3ee40cb6`.
+The initial honest outcome-contract clarification is
+`e711650c3af1d75ae08cda0c33f1419e2bcd8821`, the typed rejection-versus-unknown
+outcome checkpoint is `12ce96b3802cd0baf883c5e0a7aacbce4d547681`, and the PostgreSQL
+source-writer checkpoint is `f5a00d2f0bc1d19ce3cb852f498e519c8558da19`.
 The Rust metainfo parser, normalized-file projection, and default banning
 policy checkpoints are respectively
 `96b0fcafd846ac6458e01407d50de7487eea2bff`,
@@ -242,9 +253,9 @@ cloneable `DhtPersistSourceInput` and one unique
 Each `DhtPersistSourceRequest` owns the original `info_hash`, the supplying
 DHT `source_node_addr`, and exact `seeders_bloom` and `peers_bloom`
 `ScrapeBloomFilter` values. IPv4 and scoped IPv6 source addresses are retained.
-The peers filter is the filter a future persistence writer will project as the
-DHT leecher count, but this route preserves both raw 256-byte filters and
-performs no count projection.
+The peers filter is the filter the owned persistence worker projects as the DHT
+leecher count, but this route preserves both raw 256-byte filters and performs
+no count projection itself.
 
 A pending `send` owns its exact request outside the queue and is
 cancellation-safe. A successful send is an irrevocable queue commit. Explicit
@@ -267,6 +278,158 @@ application ownership.
 At the scraped-source route checkpoint, the seven focused route tests and all
 71 crawler unit tests, the concrete-composition integration test, and doctests
 passed in release mode. These tests use no live network or database.
+
+### Owned scraped-source persistence
+
+`DhtPersistSourceWorker::new` consumes the unique
+`DhtPersistSourceReceiver`, accepts an `Arc<dyn DhtSourceBatchWriter>`, and
+returns the unstarted worker plus a cloneable, sender-free
+`DhtPersistSourceWorkerStatsHandle`. `with_config` accepts an explicit
+`DhtPersistSourceWorkerConfig`. Its production defaults are a nonzero raw batch
+limit of `DHT_PERSIST_SOURCE_BATCH_LIMIT = 1_000` and
+`DHT_PERSIST_SOURCE_BATCH_INTERVAL = 60s`.
+
+The worker owns first-item-relative batching inside its single `run` future. It
+starts no detached batcher or ticker, has no intermediate output-capacity-one
+queue, and polls biased shutdown, then the current batch deadline, then the
+next input before every additional receive. A zero duration can therefore
+flush one-record batches even when a suffix is already queued. EOF flushes a
+partial batch and returns `InputClosed`; that exit means every dequeued input
+reached a terminal classification and every nonempty unique projected batch
+reached a typed writer outcome, not that every database-eligible effect
+succeeded.
+
+Within each raw batch, the first occurrence of an info hash wins and unique
+hashes retain first-occurrence order. Deduplication resets at the next batch.
+The worker projects `seeders_bloom.approximated_size()` directly to `seeders`
+and `peers_bloom.approximated_size()` directly to `leechers`. It discards the
+source address and raw filters at this boundary. A completed rejection or
+unknown outcome classifies only the current unique projected batch, is never
+retried, and does not stop later batches.
+
+Biased shutdown closes and drains the input. Still-queued raw occurrences were
+never dequeued and become `shutdown_queued_dropped`; a locally collected raw
+batch becomes `shutdown_batch_dropped`. Shutdown during a pending writer future
+cancels that future and classifies its unique projected records as
+`shutdown_write_abandoned`, with one
+`shutdown_writer_calls_abandoned`. This cancellation class is distinct from a
+writer that completed with an explicitly unknown outcome because dropping a
+future cannot establish what a remote backend did.
+
+`DhtSourceBatchWriteError::Rejected` proves that no writer-eligible effect from
+the batch committed. `OutcomeUnknown` preserves atomic no-proper-subset
+semantics but means none or all eligible effects may have committed, for
+example when a remote `COMMIT` succeeds before its acknowledgement is lost.
+`Ok(())` confirms completion of the whole-batch decision or transaction. A
+writer-owned predicate may still turn an input into a logical no-op, so
+`sources_persisted` counts logical records in confirmed-success calls and never
+claims affected rows. Neither error class is retried.
+
+At a terminal snapshot, the exact conservation equations are below. Every
+displayed sum uses saturating `u64` addition, matching the counters; equivalently,
+the same equations hold over unbounded event counts before each value is
+clamped to `u64::MAX`.
+
+```text
+dequeued
+  = input_duplicates_dropped
+  + sources_persisted
+  + writer_rejected_sources
+  + writer_outcome_unknown_sources
+  + shutdown_batch_dropped
+  + shutdown_write_abandoned
+
+writer_sources_submitted
+  = sources_persisted
+  + writer_rejected_sources
+  + writer_outcome_unknown_sources
+  + shutdown_write_abandoned
+
+writer_calls
+  = writer_successes
+  + writer_rejections
+  + writer_outcomes_unknown
+  + shutdown_writer_calls_abandoned
+
+batches = writer_calls
+```
+
+`shutdown_queued_dropped` is excluded because those occurrences never left the
+route. Counters are saturating and monotonic. A snapshot reads each atomic
+independently with relaxed ordering, so conservation is promised at terminal
+state rather than across an arbitrary concurrent snapshot.
+
+The strict consumer pins
+`testdata/parity/dht/dht_crawler_persist_sources.jsonl` at SHA-256
+`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`,
+requires exactly four LF-terminated rows in order, and recursively denies
+unknown fields across all twenty fixture schema shapes. Its execution
+partition is one `SOURCE_ONLY` row, two `RUNTIME_EXACT` rows, and one
+`RUNTIME_EXACT_TEST_HARNESS` row. It pins sixteen normalized-AST digests,
+sixteen Go source digests, two prerequisite fixture digests, every dependency
+and evidence line, sixteen Go-side nonclaims, and thirteen Rust-side
+nonclaims.
+
+Rows two through four reconstruct every Bloom filter solely through
+`ScrapeBloomFilter::add_ip_bytes`, including checked IPv4 and IPv6 range
+expansion. They assert every filter digest and approximation, exact scoped IPv6
+identity, duplicate observations, first-occurrence order, and the rounded
+half-up collision case. The rows then prequeue the raw requests through only
+the public route, worker, and injected writer APIs; dropping the final input
+produces one controlled batch, exactly one writer call, exact projected
+`info_hash`/`seeders`/`leechers`, exact stats, and `InputClosed`. Source address,
+nullable model fields, timestamps, and SQL remain Go source evidence rather
+than claimed Rust worker output. Row four's fixture duplicate calculation is
+asserted separately from the worker's unique writer output.
+
+`PgDhtSourceBatchWriter` implements the writer trait over a cheap clone of an
+application-owned `PgPool`. Empty input returns without touching the pool.
+Before `BEGIN`, the adapter rejects duplicate hashes defensively and checks
+both unsigned counts fit PostgreSQL `integer`. It neither creates nor closes
+the pool, retries a call, nor owns an application task.
+
+Every nonempty valid call uses one SQLx transaction. It writes ordered chunks
+of at most `PG_DHT_SOURCE_WRITE_CHUNK_LIMIT = 100` with one dynamic,
+non-persistent statement per chunk and four binds per row: text `dht`, the
+direct 20-byte `bytea` info hash, signed `integer` seeders, and signed `integer`
+leechers. `published_at` is literal `NULL`, initial `seen_count` is literal
+one, and both timestamps use PostgreSQL `CURRENT_TIMESTAMP`. That clock is
+transaction-stable across every chunk, rather than Go binding one application
+`time.Now()` value; this intentionally changes the clock authority and capture
+instant. Direct `bytea` binding and four binds per row replace Go's hex/decode
+and eight-bind SQL construction while intending the same stored 20 hash bytes
+and bounded model projection.
+
+The statement inserts only where the parent torrent exists. Conflict target
+`(info_hash, source)` updates `seeders`, `leechers`, `published_at`, and
+`updated_at`, increments the existing `seen_count` by one, and leaves
+`created_at` and `import_id` unchanged. A parent-missing input is an intentional
+logical no-op. The adapter ignores `rows_affected`, so a successful call
+confirms the atomic transaction rather than one affected row per input.
+
+Validation and `BEGIN` errors return `Rejected`. After a chunk execute error,
+the adapter explicitly rolls back: a successful rollback returns `Rejected`,
+while a rollback error returns `OutcomeUnknown` and preserves both the original
+execute error and rollback error with chunk index, input offset, and count.
+Every `COMMIT` error is `OutcomeUnknown`. One transaction prevents a later
+chunk failure from committing Go's earlier proper prefix.
+
+The adapter tests freeze exact SQL, placeholders, four-bind layout and
+PostgreSQL type selection, prepared input order, non-persistent dynamic
+statements, 100/100/1 chunking with bind-number reset, duplicate and
+integer-bound validation, public traits and pool access, empty closed-pool
+short circuit, validation-before-acquire, typed begin error, and stage context.
+They use a closed lazy pool and do not execute PostgreSQL.
+They therefore do not prove live codecs, schema or migration compatibility,
+constraints, plans, locking, affected-row counts, transaction or rollback
+behavior, durability, cancellation, application pool configuration, runtime
+wiring, supervision, deployment, or readiness.
+
+The completed test inventory is sixteen worker tests, four strict-consumer
+tests, and five PostgreSQL-writer tests. Their focused release gates, strict
+Clippy, formatting, and diff checks passed at the respective worker, replay,
+typed-outcome, and adapter checkpoints listed above. These are deterministic
+in-memory, source-contract, SQL-construction, and closed-lazy-pool gates only.
 
 ### Owned get-peers worker
 
@@ -1053,7 +1216,7 @@ freshness test passed once and in 100 consecutive runs; the crawler and Bloom
 package tests, crawler `go vet`, formatting, and diff checks also passed at the
 oracle checkpoint.
 
-No runtime row executes `runPersistSources`, `persistScrapedTorrentSources`, a
+No Go runtime row executes `runPersistSources`, `persistScrapedTorrentSources`, a
 batching goroutine or ticker, `time.Now`, logging, metrics, shutdown lifecycle,
 or PostgreSQL. The fixture therefore does not claim live SQL execution, schema
 compatibility, query plans, locking, affected-row counts, transactions,
@@ -1061,9 +1224,15 @@ server-side cancellation, actual partial commits, or database durability. It
 also does not claim ready-select winners, scheduling, fairness, total retention,
 closed-lane runtime behavior, exact elapsed timing, concurrent Bloom mutation,
 all-ones or other nonfinite `ApproximatedSize` projection, upstream DHT behavior,
-or production supervision, deployment, and readiness. No Rust strict consumer,
-source-persistence worker, repository seam, PostgreSQL adapter, application
-wiring, stats, or shutdown contract exists for this fixture yet.
+or production supervision, deployment, and readiness. The source row's
+Rust-absence nonclaim recorded the strict consumer, source-persistence worker,
+repository seam, PostgreSQL adapter, application wiring, stats, and shutdown
+contract as absent at the Go-oracle checkpoint. That historical statement
+remains a fact about commits
+`445385c62be25e221dfb8b8f3efe9a25abd0b364` and
+`ad4b62c4d699fb6cd601f69fe289d00c2574f2da`; the later Rust checkpoints provide
+the separate worker, strict replay, typed outcome, and offline adapter evidence
+documented above. They do not retroactively execute Go `runPersistSources`.
 
 ## Frozen Go request-metainfo behavior
 
@@ -1219,14 +1388,15 @@ external-service behavior; upstream proof that the responding node has peers
 for a sampled hash; ignore-hash provenance; or any Rust API, stats,
 supervision, application, deployment, or production-readiness fact.
 
-The Rust consumers, workers, PostgreSQL adapter, blocking-manager adapter, and
+The Rust consumers, workers, PostgreSQL adapters, blocking-manager adapter, and
 offline composition test do not claim exact Go map, SQL-result, or delivery
-order; exact Go SQL text or bind cardinality; exact Go wall-clock values or
-per-item `time.Now()` schedule; live PostgreSQL array encoding, schema
-compatibility, indexes, query plans, server-side cancellation, transactions,
-retries, statement timeouts, or pool configuration; a live persistent
-production blocking Bloom state or nonempty flush durability; Go's detached
-batcher timing, output boundary, or close behavior; downstream scraped-source
+order; exact Go SQL text or bind cardinality where a documented Rust adapter
+delta applies; exact Go wall-clock values or per-item `time.Now()` schedule;
+live PostgreSQL array encoding, schema compatibility, indexes, query plans,
+server-side cancellation, transaction or rollback execution, retries,
+statement timeouts, or pool configuration; a live persistent production
+blocking Bloom state or nonempty flush durability; Go's detached batcher
+timing, output boundary, or close behavior; production scraped-source
 persistence or metainfo processing; Go select ties, eager lane operands, or
 fairness; Go logging; cross-route retention or waiter fairness; closed Go
 output behavior; live DHT traffic; upstream sample provenance; concurrent
@@ -1282,6 +1452,34 @@ numeric scopes; Go lane-error semantics in the owned Rust route; or concurrent
 external pending-send accounting beyond prequeued fixture inputs. Runtime
 handoffs assert exact raw 256-byte Bloom identity and direction only.
 
+The source-persistence strict consumer executes rows two through four through
+the actual owned Rust worker and public route/writer boundaries. Row one is
+source-only. Rows two and three are exact runtime model-projection cases; row
+four uses Go's controlled duplicate harness as source evidence and proves the
+corresponding Rust first-occurrence behavior through the actual worker. The
+consumer pins every source, prerequisite, AST, dependency, execution-partition,
+and nonclaim field, but it does not execute Go `runPersistSources`, a Go batcher
+or ticker, either repository implementation, SQLx, or PostgreSQL. Its pinned
+no-concrete-PostgreSQL-writer statement describes the strict replay's injected
+test scope, not the current repository, which now contains the separate
+`PgDhtSourceBatchWriter` checkpoint.
+
+The owned worker deliberately replaces Go's detached, context-free batcher and
+writer loop with one first-item-relative future, typed EOF, biased shutdown,
+exact terminal accounting, and distinct rejection, outcome-unknown, and
+cancellation-abandonment classifications. The PostgreSQL writer deliberately
+replaces Go's nontransactional eight-bind chunks with one transaction,
+four-bind direct-`bytea` chunks, and transaction-stable `CURRENT_TIMESTAMP`.
+Those are Rust ownership and hardening deltas, not claims that the Go runtime
+behaves the same way.
+
+Neither the source-persistence fixture, consumer, worker tests, nor adapter
+tests claim live PostgreSQL codecs, schema, constraints, plans, locking,
+affected-row counts, rollback, commit acknowledgement, durability, or
+cancellation. They also do not claim actual Go `runPersistSources`, batcher
+ticks or closed-lane execution, log or metric delivery, production throughput,
+application construction, pipeline supervision, deployment, or readiness.
+
 The request-metainfo strict consumer executes six owned Rust rows. Rows two
 through five prove the bounded hardening, ordering, parsed identity, default
 policy, blocking, and handoff observations described above. Rows six and seven
@@ -1316,9 +1514,9 @@ the runtime assertions.
 The Go oracles have no live PostgreSQL, network, DNS, UDP, DHT, or deployment
 dependency. Passing them establishes the bounded source and controlled
 Go-oracle contracts only. The implemented strict Rust consumers for the four
-owned workers separately establish the bounded deterministic replays and
-deliberate deltas documented above. There is no Rust source-persistence consumer
-yet, and no gate alone establishes production composition or readiness.
+network-facing owned workers plus the source-persistence worker separately
+establish the bounded deterministic replays and deliberate deltas documented
+above. No gate alone establishes production composition or readiness.
 
 ## Pending integration
 
@@ -1336,11 +1534,12 @@ The following remain deliberately outside this checkpoint:
   worker;
 - production application construction, supervision, metrics, and operator
   policy for the existing Rust get-peers worker;
-- production application construction, supervision, metrics, retry, and
-  operator failure policy for the existing Rust scrape worker, plus the
-  strict consumer, owned batcher/model worker, repository seam, PostgreSQL
-  adapter, database validation, and ownership of the unique scraped-source
-  receiver for the newly frozen source-persistence contract;
+- production application construction, supervision, shutdown wiring, metrics,
+  and operator failure policy for the existing Rust scrape and
+  source-persistence workers; application construction of
+  `PgDhtSourceBatchWriter`; ownership of the unique scraped-source receiver;
+  and live schema, codec, transaction, rollback, query-plan, observability, and
+  durability validation for that adapter;
 - a concrete peer-wire `DhtMetaInfoRequester` implementing TCP, BEP-10/BEP-9
   extension negotiation and piece transfer, plus end-to-end requested-hash
   verification;
@@ -1360,15 +1559,17 @@ The existing DHT maintenance supervisor borrows a triage input capability for
 the sample-infohashes worker but does not own this crate's unique triage
 receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
 typed scrape input and scraped-source output routes now have an owned Rust
-scrape consumer between them, but no production application path constructs,
-runs, or supervises it. The get-peers route likewise has an owned Rust
+scrape consumer between them, and the scraped-source route now has an owned
+source-persistence consumer plus a concrete PostgreSQL writer. No production
+application path constructs, runs, or supervises either worker or supplies the
+writer with its configured pool. The get-peers route likewise has an owned Rust
 consumer without production application ownership. The concrete offline test
 composes the isolated triage worker and its persistent collaborators without
 polling them, but no current production application path constructs or
-supervises the triage, get-peers, and scrape workers as a pipeline. The
-request-metainfo route has the get-peers worker as a producer and the owned
-Rust request-metainfo worker as its consumer; allowed results flow through the
-typed torrent-persistence route. No production application constructs or
-supervises that worker, no concrete peer-wire requester or persistent blocker
-adapter supplies it, and no downstream persistence worker owns the unique
-torrent-persistence receiver in this checkpoint.
+supervises the triage, get-peers, scrape, and source-persistence workers as a
+pipeline. The request-metainfo route has the get-peers worker as a producer and
+the owned Rust request-metainfo worker as its consumer; allowed results flow
+through the typed torrent-persistence route. No production application
+constructs or supervises that worker, no concrete peer-wire requester or
+persistent blocker adapter supplies it, and no downstream persistence worker
+owns the unique torrent-persistence receiver in this checkpoint.
