@@ -775,6 +775,10 @@ fn add_saturating_usize(counter: &AtomicUsize, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_sample_infohashes_worker_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
     use std::future::{pending, poll_fn, ready, Future};
