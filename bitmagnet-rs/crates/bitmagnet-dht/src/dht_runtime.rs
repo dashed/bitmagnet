@@ -49,6 +49,31 @@ impl Default for DhtRuntimeConfig {
     }
 }
 
+impl DhtRuntimeConfig {
+    /// Validate the runtime's bounded-route policy without binding a socket or
+    /// constructing any runtime-owned state.
+    pub fn validate(&self) -> Result<(), DhtRuntimeConfigError> {
+        if self.discovery_capacity.get() > crate::DHT_CHANNEL_MAX_CAPACITY {
+            return Err(DhtRuntimeConfigError::DiscoveryCapacityOutOfRange {
+                capacity: self.discovery_capacity,
+                maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Invalid taskless DHT runtime policy.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DhtRuntimeConfigError {
+    /// The Tokio-backed discovery ingress cannot represent the requested bound.
+    #[error("the discovery capacity {capacity} exceeds Tokio's maximum of {maximum}")]
+    DiscoveryCapacityOutOfRange {
+        capacity: NonZeroUsize,
+        maximum: usize,
+    },
+}
+
 /// Failures while constructing the owned runtime before its task is spawned.
 #[derive(Debug, thiserror::Error)]
 pub enum DhtRuntimeStartError {
@@ -580,6 +605,7 @@ mod tests {
     #[test]
     fn defaults_and_random_local_id_match_production_contract() {
         let config = DhtRuntimeConfig::default();
+        assert_eq!(config.validate(), Ok(()));
         assert_eq!(
             config.bind_addr,
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 3334)
@@ -602,6 +628,17 @@ mod tests {
     #[should_panic(expected = "exceeds Tokio's maximum")]
     async fn over_max_discovery_capacity_panics_before_runtime_construction() {
         let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let config = DhtRuntimeConfig {
+            discovery_capacity: over_max,
+            ..DhtRuntimeConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(DhtRuntimeConfigError::DiscoveryCapacityOutOfRange {
+                capacity: over_max,
+                maximum: crate::DHT_CHANNEL_MAX_CAPACITY,
+            })
+        );
         let _ = DhtRuntime::start(DhtRuntimeConfig {
             bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
             discovery_capacity: over_max,

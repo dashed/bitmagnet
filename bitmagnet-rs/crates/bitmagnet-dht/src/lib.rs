@@ -128,7 +128,7 @@ pub use dht_responder::{
     DhtResponder, DhtResponderError, DhtResponderLookup, DhtResponderSample, DhtResponderTable,
 };
 pub use dht_runtime::{
-    DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig,
+    DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig, DhtRuntimeConfigError,
     DhtRuntimeControlledQueryError, DhtRuntimeDriverError, DhtRuntimeExit, DhtRuntimeStartError,
     DHT_DISCOVERY_QUEUE_CAPACITY,
 };
