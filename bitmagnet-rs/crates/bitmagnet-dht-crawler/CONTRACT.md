@@ -4,25 +4,31 @@ This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
 The bounded published checkpoint contains owned Rust info-hash-triage,
-get-peers, and scrape workers, strict differential consumers for all three
-stages, one concrete
+get-peers, scrape, and request-metainfo workers, strict differential consumers
+for all four stages, one concrete
 PostgreSQL lookup adapter, and a thin adapter for the persistent blocking
 manager, plus one offline concrete triage composition test and taskless typed
-metainfo and scraped-source handoffs. The get-peers worker publishes successful
-nonempty peer vectors through the metainfo handoff. The scrape worker publishes
-successful raw BEP-33 Bloom filters through the scraped-source handoff. No Rust
-metainfo-request or scraped-source persistence worker, or Rust production
-application composition, exists yet. This is not a live-database integration.
+metainfo-request, scraped-source, and torrent-persistence handoffs. The
+get-peers worker publishes successful nonempty peer vectors through the
+metainfo-request handoff. The scrape worker publishes successful raw BEP-33
+Bloom filters through the scraped-source handoff. The request-metainfo worker
+publishes allowed verified metainfo through the torrent-persistence handoff.
+No concrete peer-wire metainfo requester, request-stage persistent-blocking
+adapter, scraped-source or torrent-persistence worker, or Rust production
+application composition exists yet. This is not a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
 and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
-domain enum. This crate owns the higher-level batching and routing decision,
-the owned get-peers stage, the metainfo and raw scraped-source handoffs, plus
-the owned scrape stage, the blocking-policy and database-projection seams, and
-the concrete SQLx lookup and blocking-manager adapters. It does not make the
-protocol crate depend on PostgreSQL, the persistent blocking manager, crawler
-application state, or deployment configuration.
+domain enum. `bitmagnet-metainfo` owns verified v1/v2 info-dictionary parsing,
+the parsed metainfo domain, normalized file projection, and default
+side-effect-free banning policy. This crate owns the higher-level batching and
+routing decision, the owned get-peers, scrape, and request-metainfo stages,
+their taskless downstream handoffs, the blocking-policy and
+database-projection seams, and the concrete SQLx lookup and triage
+blocking-manager adapters. It does not make the protocol or metainfo crate
+depend on PostgreSQL, the persistent blocking manager, crawler application
+state, or deployment configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
@@ -45,6 +51,15 @@ checkpoint is `6f45f7b6eeb29b0c3d41c327246d9a27df0f5ac5`.
 The frozen Go request-metainfo oracle checkpoint is
 `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`, and its fixture SHA-256 is
 `03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5`.
+The Rust metainfo parser, normalized-file projection, and default banning
+policy checkpoints are respectively
+`96b0fcafd846ac6458e01407d50de7487eea2bff`,
+`2409898e398107a2372bab62feae80ce6d200877`, and
+`73d72c9c0bcb001b7aacfbdc7b5c9ea6fc51ae40`. The torrent-persistence route
+checkpoint is `53d020c5c338c28f2a573e2bcad7e99cb902bf3a`, the owned
+request-metainfo worker checkpoint is
+`918fa935274fa72ad2207f586f34f6858187152d`, and its strict Rust-consumer
+checkpoint is `d73de2fca1a39aca0d61fc7685b0aa41c6b3a041`.
 Together they publish the API and evidence below.
 
 ## Public Rust boundary
@@ -168,11 +183,50 @@ recovery. At the route checkpoint, all 41 crawler unit tests, the concrete
 composition integration test, and doctests passed in release mode. All-target
 checking, strict Clippy, rustdoc, formatting, and diff checks also passed.
 
-This queue-capacity checkpoint does not reproduce Go's 400 concurrent
-request-metainfo callbacks or claim a total-retention bound. It constructs no
-get-peers or metainfo worker and performs no DHT query, TCP request, parsing,
+At this route-only checkpoint, the queue did not reproduce Go's 400 concurrent
+request-metainfo callbacks or claim a total-retention bound. It constructed no
+get-peers or metainfo worker and performed no DHT query, TCP request, parsing,
 banning, blocking, persistence, database, classifier, supervisor, or
-application work.
+application work. Later checkpoints add owned producer and consumer workers;
+the route itself remains taskless and retains exactly the ownership contract
+above.
+
+### Torrent-persistence handoff route
+
+`dht_persist_torrent_channel` constructs one taskless bounded Tokio MPSC queue
+with fixed capacity `DHT_PERSIST_TORRENT_ROUTE_CAPACITY = 1_000`, matching the
+Go persist-torrents input capacity at default scaling. Its cloneable
+`DhtPersistTorrentInput` and unique `DhtPersistTorrentReceiver` own the queue;
+the final input clone controls drain-then-EOF.
+
+Each `DhtPersistTorrentRequest` owns the original requested `info_hash`, the
+supplying DHT `source_node_addr`, and one shared `Arc<ParsedInfo>` containing
+the decoded info domain and verified v1 and optional v2 identities; normalized
+files can be projected fallibly from `Info`. IPv4 and scoped IPv6 source
+addresses are retained. The route does not recompute identity, copy parsed
+metainfo per input clone, or replace the original requested hash with an
+identity parsed from the payload.
+
+A pending `send` owns its exact request outside the queue and is
+cancellation-safe. A successful send is an irrevocable FIFO commit. Explicit
+receiver close or destruction rejects later and pending sends and returns the
+exact unsent request through `DhtPersistTorrentInputClosed::into_request`;
+explicit close retains the committed prefix for draining. Receiver EOF occurs
+only after explicit close or the final input clone is dropped and that prefix
+has drained.
+
+Seven focused tests freeze the public constant and type traits, exact parsed
+payload sharing and route identity, exact thousand-item FIFO and the blocked
+1,001st send, pending-send cancellation, clone-controlled EOF,
+close-and-drain behavior, and receiver-drop recovery. At the route checkpoint,
+all 101 then-registered crawler unit tests, the concrete composition
+integration test, and doctests passed in release mode. Release all-target
+checking, strict Clippy, rustdoc, formatting, and diff checks also passed.
+
+Construction starts no task. The route does not implement Go's maximum-1,000,
+60-second persist-torrents batcher, its output-capacity-one writer boundary,
+deduplication, model projection, database writes, retries, metrics,
+supervision, or application ownership.
 
 ### Scraped-source handoff route
 
@@ -392,6 +446,105 @@ strict tests also passed in 25 consecutive focused runs. Release all-target and
 all-feature checking, strict Clippy, rustdoc, formatting, and diff checks
 passed. These tests inject scrape results and do not open UDP, DNS, PostgreSQL,
 or any live service.
+
+### Owned request-metainfo worker
+
+`DhtRequestMetaInfoWorker::new` consumes the unique
+`DhtRequestMetaInfoReceiver` and owns the supplied `DhtPersistTorrentInput`,
+`Arc<dyn DhtMetaInfoRequester>`,
+`Arc<dyn DhtMetaInfoBanningChecker>`, and
+`Arc<dyn DhtInfoHashBlocker>`. It returns the unstarted worker and a cloneable,
+sender-free `DhtRequestMetaInfoWorkerStatsHandle`. The requester returns one
+already verified `ParsedInfo`; the checker is synchronous and side-effect-free;
+the blocker receives an ordered hash slice and explicit flush flag.
+`DefaultDhtMetaInfoBanningChecker` adapts the default policy from
+`bitmagnet-metainfo` without blocking as a side effect. No concrete peer-wire
+requester or persistent blocking-manager adapter is implied by these seams.
+
+`with_config` accepts a `DhtRequestMetaInfoWorkerConfig`; its nonzero
+`max_inflight` defaults to 400, matching Go's configured callback concurrency
+at default scaling. `run` owns one `JoinSet` and does not poll input at
+capacity, so it retains no acquire waiter beyond accepted children and the
+capacity-100 input route. Route EOF joins every accepted child before returning
+`InputClosed`. Biased shutdown closes and drains input, aborts and joins every
+accepted child, and returns exact queued, task, peer-occurrence, pending
+request, pending block, and pending persistence counts. A panicking child
+aborts and joins its siblings before the original panic resumes. Dropping the
+run future closes input and aborts children but deliberately produces no typed
+exit; non-graceful drop does not manufacture terminal shutdown counters.
+
+Every task tries peer occurrences sequentially in original order, including
+duplicates. Request errors fall through. The first success stops attempts and
+classifies the complete unattempted suffix as skipped. An empty peer vector is
+dropped as Rust hardening, and an all-failed vector is dropped after retaining
+ordered failure display and cause identity within the worker's private parity
+seam. Neither condition emits a zero-valued `ParsedInfo`.
+
+Successful metainfo is checked once. A rejection invokes one block call on the
+exact original requested hash with `flush = false`, ignores and counts that
+call's error, emits no persistence request, and never tries the suffix. An
+allowed result emits one `DhtPersistTorrentRequest` with the original hash,
+source address, and `Arc<ParsedInfo>`. Normal torrent-route closure is local to
+that child and counted. The worker does not retry, compare the parsed v1 hash
+with the requested hash, persist blocking state itself, or own the downstream
+receiver.
+
+At quiescent normal EOF, the exact statistics equations are:
+
+```text
+dequeued = tasks_completed
+peer_occurrences
+  = request_attempts_failed
+  + request_attempts_succeeded
+  + peer_occurrences_skipped
+request_attempts_started
+  = request_attempts_failed + request_attempts_succeeded
+request_attempts_succeeded = allowed + banned
+tasks_completed = empty_peers_dropped + all_peers_failed + allowed + banned
+banned = block_calls_started = block_succeeded + block_failed_ignored
+allowed = persist_queued + persist_closed_dropped
+```
+
+After typed shutdown:
+
+```text
+dequeued = tasks_completed + shutdown_tasks_cancelled
+peer_occurrences
+  = request_attempts_failed
+  + request_attempts_succeeded
+  + peer_occurrences_skipped
+  + shutdown_peer_occurrences_dropped
+request_attempts_started
+  = request_attempts_failed
+  + request_attempts_succeeded
+  + shutdown_request_attempts_cancelled
+request_attempts_succeeded
+  = allowed
+  + banned
+  + shutdown_block_calls_cancelled
+  + shutdown_persist_requests_dropped
+block_calls_started = banned + shutdown_block_calls_cancelled
+```
+
+Completed tasks, completed block calls, and completed persistence sends retain
+their normal classification equations. Queued shutdown drops were never
+dequeued and remain separate. Every counter is saturating and monotonic;
+snapshots read fields independently with relaxed ordering, so conservation is
+promised only after exit.
+
+Fifteen focused worker tests freeze defaults, type and default-checker shape,
+saturation, empty/all-failed behavior, ordered duplicates and first success,
+exact banned and allowed effects, output closure, capacity and EOF joining,
+shutdown during a request, block, and persistence send, pre-ready drain,
+child-panic cleanup, and active-run drop. At the worker checkpoint, all 116
+then-registered crawler unit tests, the concrete composition integration test,
+and doctests passed in release mode; the focused worker suite passed 25
+consecutive runs. At the strict-consumer checkpoint, all 125 crawler unit
+tests, the integration test, and doctests passed, and all nine focused strict
+tests passed 100 consecutive runs. Release all-target and all-feature checks,
+strict Clippy, rustdoc, formatting, and diff checks passed. These are scripted
+collaborator and in-memory route tests; they open no TCP, UDP, DNS, PostgreSQL,
+or other live service.
 
 ### PostgreSQL lookup adapter
 
@@ -829,8 +982,8 @@ It contains exactly eight ordered rows:
    persistence-input source contract without executing a runtime row;
 2. `zero_peers_returns_nil_error_and_emits_zero_parsed_info`
    (`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA`) freezes Go's empty `errors.Join`
-   result and resulting zero-valued parsed-info handoff as a bug that a future
-   owned Rust worker should deliberately harden rather than reproduce;
+   result and resulting zero-valued parsed-info handoff as a bug that the owned
+   Rust worker deliberately hardens by dropping rather than reproducing;
 3. `ordered_duplicate_peers_fail_through_to_first_allowed_hybrid_success`
    (`RUNTIME_EXACT`) freezes sequential duplicate attempts, failure
    fallthrough, first allowed success, and exact original-route plus parsed
@@ -902,6 +1055,59 @@ networking, PostgreSQL, model conversion, database writes, or nonempty
 blocking-manager persistence. The generator freshness test passed once and in
 100 consecutive runs, its race focus passed ten consecutive runs, and
 `go vet ./internal/dhtcrawler` passed at the oracle checkpoint.
+
+### Strict Rust request-metainfo consumer
+
+The strict consumer recursively rejects unknown JSON fields, pins the exact
+fixture SHA-256, final LF, eight-row order and IDs, and the one source-only,
+three runtime-exact, three owned-shutdown-delta, and one Go-only-lane class
+partition. It also pins all 20 normalized AST digests, 16 source-file digests,
+four prerequisite fixture digests, six evidence commits, and the source row's
+17 ordered nonclaims; it separately pins 17 Rust nonclaims. Exact source,
+prerequisite, and evidence maps and both ordered nonclaim vectors must match;
+extra, missing, reordered, or duplicated entries fail closed.
+
+The six Rust runtime rows exercise the actual owned worker or its private
+ordered-attempt seam, the real typed routes, the actual Rust parser, and the
+default banning checker:
+
+1. row two proves the empty-peer hardening drop and absence of a zero
+   `ParsedInfo` handoff;
+2. row three parses the pinned hybrid torrent and reproduces ordered duplicate
+   failures, scoped IPv6 identity, first success, skipped suffix, exact event
+   order, original route identity, parsed v1/v2 identity, and route EOF;
+3. row four reproduces ordered all-failure display and every original error
+   identity, then proves the worker's local all-failed drop and terminal stats;
+4. row five parses raw invalid-name bytes, reproduces the exact short-name,
+   small-size, and invalid-UTF-8 default ban, blocks the original requested hash
+   with `false`, ignores the scripted block error, and emits no output;
+5. row six cancels actual owned work during the pending first request, proving
+   that Rust drops the current and remaining suffix instead of continuing with
+   a cancelled context; and
+6. row seven fills the real 1,000-slot torrent route, reaches its actual blocked
+   send, and proves shutdown cancellation preserves the committed prefix while
+   the pending persistence request never commits.
+
+Row seven is deliberately a conceptual mapping from Go's unavailable-output
+observation to owned Rust output cancellation; it is not an exact replay of
+Go's peer sequence. Row eight partitions Go's swallowed manual-lane error from
+Rust's typed `InputClosed` behavior and does not claim that the latter is a Go
+runtime result. The source-only row is never executed as Rust runtime behavior.
+
+The banned row's scripted parsed v1 hash
+`80b26192d4afd1a76f8a52d1899bc59af904c0b8` intentionally differs from its
+requested hash ending in `00cc`. It proves worker routing and blocking identity,
+not end-to-end requester hash verification. Go's `U+FFFD` is only the lossy
+JSON display projection; Rust retains the original raw `0xff` name byte.
+Passing `flush = false` proves the worker argument, not that a future concrete
+blocking-manager adapter cannot flush under its own policy.
+
+The nine focused strict-consumer tests passed in 100 consecutive runs. The
+current Go generator freshness test regenerated the same fixture SHA, and the
+full crawler suite contained 125 passing unit tests plus the concrete
+composition integration test. Strict Clippy, rustdoc, formatting, and diff
+checks passed at the consumer checkpoint. This evidence uses only pinned
+fixtures, scripted collaborators, and in-memory routes.
 
 ## Evidence boundaries and nonclaims
 
@@ -980,34 +1186,42 @@ numeric scopes; Go lane-error semantics in the owned Rust route; or concurrent
 external pending-send accounting beyond prequeued fixture inputs. Runtime
 handoffs assert exact raw 256-byte Bloom identity and direction only.
 
-The request-metainfo fixture has no Rust parsed-metainfo domain type, strict
-Rust consumer, owned request-metainfo worker, worker stats or lifecycle, or
-typed persist-torrents route. Its three
-`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA` rows classify deliberate future Rust
-hardening: reject zero peers rather than emit zero parsed info, stop owned work
-on shutdown rather than continue peer attempts with a cancelled context, and
-own cancellation of any future persistence send. They are not evidence that a
-Rust implementation exists.
+The request-metainfo strict consumer executes six owned Rust rows. Rows two
+through five prove the bounded hardening, ordering, parsed identity, default
+policy, blocking, and handoff observations described above. Rows six and seven
+freeze deliberate owned-shutdown deltas with exact terminal and stats
+accounting; row seven remains a conceptual owned-output cancellation mapping,
+not an exact Go peer-sequence replay. The source-only and Go-only lane rows are
+not Rust runtime behaviors. The source row's pinned
+`Rust_public_API_or_owned_task_lifecycle_no_Rust_consumer_exists_in_this_slice`
+nonclaim is historical evidence about the earlier Go-oracle checkpoint, not
+the current repository.
 
-The request-metainfo fixture does not claim goroutine scheduling or callback
-completion order; semaphore or channel fairness; closed Go input execution;
-callback joining; ready-select tie resolution; arbitrary eager-operand effects
-beyond the recorded `In()` call; send-to-closed Go-channel behavior; a live
-metainfo TCP handshake, extension negotiation, piece transfer, or requester;
-banning rules beyond the actual combined-checker row; absence of a real
-blocking-manager policy flush merely because `flush` is false; blocking Bloom
-state, database behavior, or nonempty durability; `runPersistTorrents`
-batching, deduplication, model conversion, or database behavior; batching
-ticks, logs, metrics, or persisted-counter delivery; production throughput,
-retention, or waiter fairness; application supervision, deployment, or
-readiness; arbitrary textual IPv6 zones beyond unscoped or numeric scopes; or
-any Rust API, task ownership, stats, shutdown lifecycle, or production
-composition.
+Neither fixture nor Rust consumer claims exact Go ready-select winners or
+eager-operand side effects beyond the recorded input accessor; Go callback
+scheduling or completion order; semaphore or channel fairness; closed Go input
+execution; callback joining; send-to-closed Go-channel behavior; production
+throughput, total retention, or waiter fairness; arbitrary textual IPv6 zones
+beyond numeric scope; or concurrent external pending-send accounting outside
+the fixture's prequeued inputs. Rust's typed input EOF does not reproduce Go's
+manual lane-error semantics.
+
+They also do not claim a live metainfo TCP handshake, extension negotiation,
+piece transfer, requester, or end-to-end requester hash verification;
+production banning behavior beyond the frozen default-checker row; real
+blocking-manager buffering, Bloom state, policy flush, database, or durability;
+`runPersistTorrents` batching, deduplication, model conversion, or database
+behavior; batching ticks, logs, metrics, or persisted-counter delivery; or
+application supervision, deployment, or production readiness. The scripted
+banned-row hash mismatch, raw-byte versus lossy `U+FFFD` distinction, and row
+seven's conceptual mapping remain explicit nonclaims rather than gaps hidden by
+the runtime assertions.
 
 The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
 dependency. Passing it establishes the bounded source and controlled Go-oracle
-contract only; deterministic Rust replay is claimed only for a fixture with an
-implemented strict Rust consumer.
+contract only. The implemented strict Rust consumer separately establishes the
+bounded deterministic replay and deliberate deltas documented above; neither
+gate alone establishes production composition or readiness.
 
 ## Pending integration
 
@@ -1029,9 +1243,15 @@ The following remain deliberately outside this checkpoint:
   operator failure policy for the existing Rust scrape worker, plus the
   downstream database persistence writer that will own high-density
   `ApproximatedSize` projection;
-- a Rust parsed-metainfo domain, metainfo requester and owned worker,
-  parser/hash verifier, banning and block-on-ban path, typed persist-torrents
-  route, downstream persistence worker, and their shutdown ownership;
+- a concrete peer-wire `DhtMetaInfoRequester` implementing TCP, BEP-10/BEP-9
+  extension negotiation and piece transfer, plus end-to-end requested-hash
+  verification;
+- a concrete `DhtInfoHashBlocker` adapter to the persistent blocking manager,
+  including production flush and failure policy;
+- the downstream torrent-persistence batcher, deduplication, model projection,
+  database writer, and ownership of the unique torrent-persistence receiver;
+- production construction, supervision, shutdown wiring, metrics, retry, and
+  operator failure policy for the existing Rust request-metainfo worker;
 - a producer-side `closed()` waiter on the typed triage input route;
 - configuration loading, health reporting, metrics export, and operator-facing
   diagnostics; and
@@ -1048,7 +1268,9 @@ consumer without production application ownership. The concrete offline test
 composes the isolated triage worker and its persistent collaborators without
 polling them, but no current production application path constructs or
 supervises the triage, get-peers, and scrape workers as a pipeline. The
-request-metainfo route now has the get-peers worker as a producer, but no
-Rust metainfo domain or request consumer owns it, no typed persist-torrents
-route consumes its future output, and no application composition supervises
-that stage in this checkpoint.
+request-metainfo route has the get-peers worker as a producer and the owned
+Rust request-metainfo worker as its consumer; allowed results flow through the
+typed torrent-persistence route. No production application constructs or
+supervises that worker, no concrete peer-wire requester or persistent blocker
+adapter supplies it, and no downstream persistence worker owns the unique
+torrent-persistence receiver in this checkpoint.
