@@ -5,9 +5,11 @@
 //! policy-dependent routing decisions. The core worker still receives injected
 //! collaborators, while this crate supplies concrete adapters for PostgreSQL
 //! triage lookup and the persistent blocking manager. A staged pipeline
-//! supervisor owns the constructed crawler lifecycle; full application
-//! configuration, readiness, and deployment wiring remain deferred.
+//! supervisor owns the constructed crawler lifecycle. The pure application
+//! configuration contract is present; database-secret loading, executable,
+//! readiness, and deployment wiring remain deferred.
 
+mod app_config;
 mod blocking_manager_filter;
 mod downstream_composition;
 mod get_peers;
@@ -48,6 +50,7 @@ mod persist_torrent_parity;
 #[cfg(test)]
 mod scrape_parity;
 
+pub use app_config::{DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DEFAULT_BOOTSTRAP_NODES};
 pub use downstream_composition::{
     DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamStatsHandle, DhtCrawlerDownstreamWorkers,
 };

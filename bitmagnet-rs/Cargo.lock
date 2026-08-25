@@ -931,6 +931,7 @@ dependencies = [
  "bitmagnet-metainfo",
  "bitmagnet-model",
  "bitmagnet-queue",
+ "clap",
  "serde",
  "serde_json",
  "sha1 0.10.7",
