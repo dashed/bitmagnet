@@ -3662,3 +3662,128 @@ mutex, randomness, probabilistic boundaries, public API, and strict ignore-
 hashes oracle remain unchanged. Slice forty-one's exact seven-child supervisor
 and every broader runtime, application, deployment, production, and rollout
 exclusion remain in force.
+
+The forty-seventh slice composes the two sample-infohashes components into the
+existing crawler-maintenance supervisor in
+`cf99204cb52dee9ea811c83300745516a7547ad4`. The public constructor is now
+`DhtCrawlerMaintenanceSupervisor::new(discovery: DhtDiscoveryReceiver,
+client: &DhtRuntimeClient, table: &KTable, triage:
+&DhtInfoHashTriageInput) -> Result<(Self,
+DhtCrawlerMaintenanceStatsHandle), DhtCrawlerMaintenanceStartError>`. It
+consumes the unique discovery receiver and borrows then clones the runtime
+client, KTable, and triage input. The unique triage receiver remains wholly
+caller-owned: the supervisor does not own or monitor it as a child or terminal
+condition. The sample worker observes receiver closure only through typed send
+results. Existing construction errors retain their exact discovery-receiver
+recovery and target-entropy semantics.
+
+`DhtCrawlerMaintenanceStatsHandle` adds the sender-free
+`sample_infohashes_worker` and `sample_infohashes_producer` handles. The
+ordered child identity adds `DhtCrawlerMaintenanceChild::SampleInfoHashesWorker`
+and `DhtCrawlerMaintenanceChild::SampleInfoHashesProducer`, and
+`DhtCrawlerMaintenanceChildExits` adds the matching concrete worker and
+producer exit fields. These are not aggregate or inferred exits: the
+supervisor preserves the typed result returned by each component after the
+shared stop signal and join barrier.
+
+The fixed child-identity, run-factory, spawn, and exit-record order is scheduler,
+ping worker, find-node worker, sample-infohashes worker, oldest-find producer,
+oldest-ping producer, bootstrap-ping producer, sample-infohashes producer, and
+target rotator. The factory array therefore has length nine. Pre-ready
+shutdown is biased before factory invocation and drops all nine factories
+without spawning or polling child work. Once started, external shutdown is
+biased ahead of child completion; otherwise the first observed child result
+retains its exact ordered identity, triggers the single watch stop signal, and
+the supervisor joins and records all eight siblings before returning.
+Child-panic cleanup still joins siblings and resumes the exact first panic
+payload, and dropping the polled supervisor run aborts all nine owned tasks
+rather than detaching them.
+
+Composition reuses one rotating target across the target rotator, find-node
+worker, and sample-infohashes worker. The find-node and sample-infohashes
+workers share recursive-discovery sender capabilities into the one discovery
+lane. The scheduler and periodic sample-infohashes producer share the bounded
+sample-work route, while one sample-infohashes worker consumes both immutable
+`Discovered` work and exact-generation `Retained` handles. Scheduler-origin
+sample work remains separately attributable through
+`routed_sample_infohashes`; periodic retained work remains attributable through
+the producer's `selected` and `queued` counters. The route's capacity of one
+hundred and the worker's default one-hundred-task bound are independent bounds,
+not a claim that total retained work is one hundred or that the two sources are
+fairly ordered.
+
+Four route-level capability cycles are now intentional and tested. First, the
+find-node and sample-infohashes workers keep scheduler discovery ingress open
+through their recursive-discovery senders. Second, the oldest-find producer
+and scheduler keep the shared find-node route open. Third, the oldest-ping and
+bootstrap-ping producers plus scheduler keep the shared ping route open.
+Fourth, the scheduler and periodic sample-infohashes producer keep the sample
+route open. The tests cover both drop orders for the jointly held recursive-
+discovery, ping, and sample dependencies; the find-route proof drops the
+scheduler first and observes EOF only after the oldest-find producer is also
+gone. The externally owned triage receiver is not a fifth cycle: this slice
+does not add a producer-side `closed()` waiter, and empty or fully suppressed
+sample work need not inspect triage closure.
+
+No new Go oracle was required for this composition. Producer provenance is
+reused from Go oracle commit
+`602dce3287795bbe2eee89bbcc1e0ebc6f9c7701`, fixture SHA-256
+`b0069a060b32edc4e1c6f5b2008f6b50f796eea6d162b4df3a148cad29745c1e`,
+and strict Rust consumer
+`407725a92cfaa08545f0b387fa23b1aa23374591`. Its
+`production_source_factory_and_lifecycle_contract` row binds the one
+factory-created sample channel, default capacity and concurrency of one
+hundred, shared worker/producer context, producer start, worker consumption,
+and discovered-node send callsite. Worker provenance is reused from Go oracle
+commit `491af314a69158051f37cefa2ea22df4fb25c07b`, fixture SHA-256
+`8533c4644ceaed71a372ef52ec944f1b625f48c0042e1ef7f45990dbe0ef2744`,
+and strict Rust consumer
+`d828ade1c9420d1bd1299170a1138c9609f1fed4`. Its
+`production_source_callback_interval_put_and_fanout_contract` row binds the
+worker, factory, start, channel, deduper, triage, discovery, and shared-context
+source facts and pins the producer fixture as prerequisite evidence. These
+source and strict-consumer bindings establish that the two Go paths use the
+same sample lane; they do not turn the Rust supervisor lifecycle into a Go
+runtime replay.
+
+The exact nine-child ordering, factory invocation boundary, watch-stop
+propagation, biased first-cause selection, structured exit collection, stats
+projection, join and panic cleanup, drop abort, and four-cycle EOF topology are
+deliberate Rust-only composition contracts. Textual Go goroutine launch order
+does not claim Go scheduling order. This slice claims no Go parity for detached
+callback or fanout joining, semaphore or channel fairness, equal-ready select
+choice, cross-source registration order, maximum aggregate retention, closed-
+input panic behavior, pointer ABI, source tags, aggregate stats, fx active
+flags, lazy dependency acquisition, lifecycle hooks, worker groups, logging,
+or metrics.
+
+The focused supervisor suite covers all eighteen constructor, routing,
+first-cause, structured-exit, shutdown, panic, drop, EOF-topology, and
+construction-error cases, and passes both once and for one hundred consecutive
+runs. The full `bitmagnet-dht` suite passes all 389 unit tests, every
+integration-test binary, and the doctest. All-target, all-feature `cargo check`
+and strict Clippy with warnings denied pass; rustdoc with warnings denied,
+format checking, and the diff check also pass.
+
+This slice supersedes slice forty-one only where that slice fixes the old
+three-argument constructor, seven children, omitted sample component stats and
+exits, and three rather than four route-level cycles. Its start errors,
+target-entropy boundary,
+pre-ready and outer shutdown bias, exact-first-cause rule, cleanup semantics,
+weak runtime ownership, and broader exclusions remain authoritative. It
+supersedes slice forty-two only where the supervisor closes the sample receiver
+and composes neither sample component; that slice's mixed representation,
+capacity, public projection, private receive, provenance counters, and
+cross-source ordering boundaries remain exact. It supersedes slice forty-three
+only where the periodic producer is not supervisor-composed, and slice forty-
+six only where the worker is isolated and the fourth EOF cycle is absent. The
+component behavior, exits, stats, strict-oracle ledgers, and nonclaims in both
+slices remain unchanged.
+
+Slices forty-four and forty-five remain authoritative for the externally owned
+typed triage route and the worker-owned stable deduper. In particular, the
+receiver-side triage consumer and the producer-side triage `closed()` waiter
+remain deferred. This slice adds no receiver-side batching, persistence, or
+downstream triage pipeline; no separate runtime ownership or termination
+child; no application wiring; and no deployment, production-traffic, rollout,
+or operational-readiness claim.
