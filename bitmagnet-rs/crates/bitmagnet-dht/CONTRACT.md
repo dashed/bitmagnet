@@ -2850,3 +2850,161 @@ and ping capacity, cancellation, direct-bypass, and EOF-extension contracts,
 but adds the retained-versus-discovered representation required only by the
 sample worker. It does not supersede their independent routes or any producer,
 worker, supervisor, runtime, application, deployment, or rollout contract.
+
+The forty-third slice freezes the Go periodic sample-infohashes producer with
+`602dce3287795bbe2eee89bbcc1e0ebc6f9c7701`, implements the isolated Rust
+producer in `4e1f7c07ac39e3e0ec905f46bf7f33b5a09f177b`, and lands its strict
+consumer in `407725a92cfaa08545f0b387fa23b1aa23374591`.
+
+`DhtSampleInfoHashesProducer::new(table, input)` returns one owned, taskless
+producer and a cloneable sender-free stats handle. The public surface adds
+exactly the producer, `DhtSampleInfoHashesProducerExit`,
+`DhtSampleInfoHashesProducerStats`, and
+`DhtSampleInfoHashesProducerStatsHandle`; it adds no public configuration.
+Its public `run(self, shutdown)` future performs no work until polled and
+spawns no task. In the absence of a pre-ready terminal condition, the first
+KTable query is immediate. Every query has the fixed nonzero limit sixty, and
+the synchronous KTable call executes only when the lowest-priority async
+branch is polled. Ready shutdown therefore wins over ready sample-route
+closure, and either pre-ready terminal condition returns before any table
+query. This is an intentional Rust hardening delta from Go, whose already-
+cancelled runtime row still calls `GetNodesForSampleInfoHashes(60)` and eagerly
+evaluates the lane `In` operand before cancellation wins.
+
+Each completed Rust query returns generation-specific `KTableNodeHandle`
+values in the table's deterministic ID order. The producer preserves that
+returned order and sends each exact handle through the direct sample input,
+which wraps it as internal `Retained` work. It performs no `RoutingNode`
+projection, generation replacement, dropped-state or candidate recheck, route
+selection, scheduler batching, or scheduler counter update. It introduces no
+source priority or cross-source registration order beyond slice forty-two's
+Tokio waiter contract. A successful send is the irrevocable queue-commit
+boundary. A handle selected before its table entry is dropped and re-added
+remains the original dropped generation when capacity later permits its
+commit.
+
+Shutdown is biased ahead of sample-route closure, which is biased ahead of
+each query, send, and delay. During a blocked send, shutdown or closure
+abandons the current uncommitted handle and the untouched selected suffix.
+`DhtSampleInfoHashesProducerExit::{Shutdown, InputClosed}` reports that exact
+`selected_dropped` occurrence count. A committed prefix remains drainable;
+when send capacity and shutdown become ready together, shutdown wins and the
+newly writable handle is not committed. A send that independently observes a
+closed receiver is classified as `InputClosed` with the same exact current-
+plus-suffix count.
+
+After every complete round, including an empty result, Rust constructs one
+fresh one-second delay. Missed time never causes catch-up queries. Shutdown or
+route closure cancels that delay and returns with `selected_dropped: 0`. This
+deliberately differs from Go's unconditional post-round `time.After`: while
+the Go table remains empty, cancellation is never observed and the detached
+goroutine continues querying and sleeping. Rust also resolves equal-ready
+send and cancellation states with the documented bias instead of claiming
+Go select's nondeterministic choice.
+
+`DhtSampleInfoHashesProducerStats` exposes exactly five saturating monotonic
+counters: `table_queries`, `selected`, `queued`, `input_closed_dropped`, and
+`shutdown_dropped`. Snapshots load fields independently with relaxed ordering
+and are not transactional. After normal terminal return,
+`selected == queued.saturating_add(input_closed_dropped).saturating_add(
+shutdown_dropped)`. Dropping a constructed producer or its polled run future
+releases its direct sender without fabricating a terminal classification or
+cross-counter conservation promise. Drain-then-EOF follows only when no
+scheduler-owned sender or other direct-input clone survives.
+
+The final three-row oracle fixture is
+`testdata/parity/dht/dht_crawler_sample_infohashes_producer.jsonl`, with
+SHA-256 `b0069a060b32edc4e1c6f5b2008f6b50f796eea6d162b4df3a148cad29745c1e`.
+Its strict child-module consumer denies unknown fields throughout, consumes
+all thirty-one source-contract fields, and fixes these ordered IDs and
+classifications:
+
+- `production_source_factory_and_lifecycle_contract`: `SOURCE_ONLY`;
+- `already_cancelled_still_queries_before_first_send`: `RUNTIME_EXACT` Go
+  evidence with a separate Rust zero-work pre-ready-shutdown replay; and
+- `ordered_prefix_then_cancel_at_blocked_third_send`: `RUNTIME_EXACT` with an
+  actual Rust retained-handle prefix-and-suffix replay.
+
+The source row freezes Go's immediate limit-sixty query, unspecified map-
+iteration candidate prefix, preservation of returned order and dynamic
+`ktable.Node` handle identity, absence of an explicit lane source tag,
+select-operand evaluation, cancellation-aware per-node sends, lack of
+projection or recheck, unconditional one-second sleep, detached lifecycle,
+shared production capacity and concurrency of one hundred, dequeue before
+the worker semaphore, detached callbacks, and the fact that lane capacity is
+not a total retention bound. It also distinguishes source-only delay and
+perpetual-empty behavior from the two runtime rows, both of which return from
+the per-node select before sleeping.
+
+The consumer binds the exact nine source paths and live SHA-256 digests:
+
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/discovered_nodes.go`:
+  `22806cabf39173df71010a54d874a4319458f1715308834be828dbdb99767027`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/sample_infohashes.go`:
+  `483b9037673dce82f9026f2aec9448812f804c13484fd0bd2f55fcfc70a52983`;
+- `internal/protocol/dht/ktable/node.go`:
+  `93ed9a76a7cd0f50ee3ad255c6e77a8d19e5fe17081edc6238c5efab4983b3c3`;
+- `internal/protocol/dht/ktable/query.go`:
+  `103ec27a7904bdbbbd91f3ea1dae1f4d6ea3b3d6652757a6ab8ddbf598a7060e`;
+  and
+- `internal/protocol/dht/ktable/table.go`:
+  `68e3caf4394b2692fd9358224cce2b70ae3d90d920097bd28885b6b3bb77848f`.
+
+The pre-cancelled Go row remains Go-runtime evidence rather than a literal
+Rust replay. Its actual producer performs one limit-sixty query, evaluates
+lane `In` once, calls no node accessor, delivers nothing, and abandons the one
+returned handle. The paired Rust gate instead proves a ready shutdown returns
+`Shutdown { selected_dropped: 0 }` with default stats, no query, no send, and
+the table's retained generation unchanged.
+
+The capacity-two Go row calls lane `In` exactly three times, commits the exact
+A and B interface handles in returned order, abandons C and D, and calls none
+of the four handles' node accessors. Its Rust replay inserts A through D into
+the actual KTable and compares generation identity through crate-private
+`recv_work`, rejecting a weaker public `RoutingNode` projection. Before
+cancellation it proves one query, four selected occurrences, two exact
+`Retained` commits, and send attempt indices `[0, 1, 2]`. Shutdown at the
+blocked third send drains exactly A then B, abandons C and D, returns
+`Shutdown { selected_dropped: 2 }`, and finishes with `table_queries=1`,
+`selected=4`, `queued=2`, `shutdown_dropped=2`, and terminal conservation.
+Rust handle equality is semantic retained-generation identity; it makes no Go
+pointer or interface ABI claim.
+
+The strict ledger separately freezes eighteen Go-only metadata entries,
+eight deliberate Rust deltas with exact test-evidence mappings, and ten
+nonclaims. No exact Go production map prefix, equal-ready select result,
+wall-clock `time.After` schedule, perpetual-empty runtime trace, or
+cancellation inside the synchronous Rust table query is claimed. The Go
+oracle's manual unbuffered lane is only a runtime gate; Go production capacity
+remains one hundred, matching the scheduler's default sample-route capacity,
+without becoming a total-retention guarantee.
+
+This slice adds no sample-infohashes worker, BEP-51 network request, response
+Bloom processing, info-hash triage, callback ownership, semaphore concurrency,
+cross-source fairness guarantee, supervisor child, fourth route-level EOF
+cycle, runtime or application wiring, external traffic, deployment,
+production readiness, or rollout. In particular, composing this producer
+before a worker owns the unique receiver would make route closure terminal;
+the seven-child maintenance supervisor therefore remains unchanged and still
+closes the unused sample route during construction.
+
+This slice supersedes slice forty-two only where that slice reserves the
+direct input's `closed` waiter for a future producer; excludes the periodic
+producer, its limit-sixty KTable query, one-second cadence, typed exits, and
+producer stats; says no producer oracle or fixture exists; or says the next
+producer oracle has not been created. Slice forty-two's mixed-source queue,
+retained-versus-discovered representation, capacity, EOF, public projection,
+private exact-work receive, scheduler counter provenance, and all worker and
+supervisor exclusions remain authoritative. It supersedes slice forty-one
+only where that slice globally excludes the existence of an isolated sample-
+infohashes producer; slice forty-one's exact seven-child supervisor and lack
+of a sample child remain authoritative. Every higher-pipeline, runtime,
+application, deployment, production, and rollout boundary remains in force.
