@@ -6,21 +6,22 @@ protocol, runtime, scheduler, route, and maintenance primitives in
 The bounded published checkpoint contains owned Rust info-hash-triage and
 get-peers workers, strict differential consumers for both stages, one concrete
 PostgreSQL lookup adapter, and a thin adapter for the persistent blocking
-manager, plus one offline concrete triage composition test. The get-peers
-worker publishes successful nonempty peer vectors through a taskless typed
-metainfo handoff. No Rust metainfo-request worker or Rust production
-application composition exists yet. No Rust scrape worker exists, and this is
-not a live-database integration.
+manager, plus one offline concrete triage composition test and taskless typed
+metainfo and scraped-source handoffs. The get-peers worker publishes successful
+nonempty peer vectors through the metainfo handoff. No Rust metainfo-request
+worker or Rust production application composition exists yet. No Rust scrape
+worker or strict Rust scrape replay exists, and this is not a live-database
+integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
 and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
 domain enum. This crate owns the higher-level batching and routing decision,
-the owned get-peers stage, the metainfo handoff, plus the blocking-policy and
-database-projection seams and the concrete SQLx lookup and blocking-manager
-adapters. It does not make the protocol crate depend on PostgreSQL, the
-persistent blocking manager, crawler application state, or deployment
-configuration.
+the owned get-peers stage, the metainfo and raw scraped-source handoffs, plus
+the blocking-policy and database-projection seams and the concrete SQLx lookup
+and blocking-manager adapters. It does not make the protocol crate depend on
+PostgreSQL, the persistent blocking manager, crawler application state, or
+deployment configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
@@ -33,6 +34,10 @@ The Go get-peers oracle checkpoint is
 checkpoint is `73a4d867b41f4a4e7933d527c633b044736300c6`. The owned get-peers
 worker checkpoint is `b52c174eec3a58cc02d09a18435abf5e3f31f64b`, and its strict
 Rust-consumer checkpoint is `7c49c4be0a5d8465d234b4c63d2ac5bf190572ca`.
+The scraped-source route checkpoint is
+`a76591e92430ceb65fc7eb62af4ffbbaa791dad7`. The frozen Go scrape-oracle
+checkpoint is `c6b365ab0a62000351baf76ec78cfca38506b5ee`, and its fixture SHA-256
+is `d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b`.
 Together they publish the API and evidence below.
 
 ## Public Rust boundary
@@ -161,6 +166,43 @@ request-metainfo callbacks or claim a total-retention bound. It constructs no
 get-peers or metainfo worker and performs no DHT query, TCP request, parsing,
 banning, blocking, persistence, database, classifier, supervisor, or
 application work.
+
+### Scraped-source handoff route
+
+`dht_persist_source_channel` constructs one taskless bounded Tokio MPSC queue
+with fixed capacity `DHT_PERSIST_SOURCE_ROUTE_CAPACITY = 1_000`, matching Go's
+raw persist-sources input capacity at default scaling. The function returns one
+cloneable `DhtPersistSourceInput` and one unique
+`DhtPersistSourceReceiver`; every input clone shares the same FIFO.
+
+Each `DhtPersistSourceRequest` owns the original `info_hash`, the supplying
+DHT `source_node_addr`, and exact `seeders_bloom` and `peers_bloom`
+`ScrapeBloomFilter` values. IPv4 and scoped IPv6 source addresses are retained.
+The peers filter is the filter a future persistence writer will project as the
+DHT leecher count, but this route preserves both raw 256-byte filters and
+performs no count projection.
+
+A pending `send` owns its exact request outside the queue and is
+cancellation-safe. A successful send is an irrevocable queue commit. Explicit
+`DhtPersistSourceReceiver::close` or receiver destruction rejects pending and
+later sends and returns each exact unsent request through
+`DhtPersistSourceInputClosed::into_request`; explicit close retains the
+already-committed FIFO prefix for draining. `recv` awaits the next FIFO item and
+`try_recv` observes only a currently queued item. Receiver EOF occurs only
+after explicit close or the final input clone is dropped and the committed
+prefix is drained.
+
+Seven focused route tests freeze the public constant and type traits, raw empty
+and patterned filter identity, scoped source identity, exact thousand-item
+FIFO and backpressured 1,001st send, pending-send cancellation,
+clone-controlled drain-then-EOF, close-and-drain recovery, and receiver-drop
+recovery. Construction starts no task. The route does not batch, estimate
+counts, persist sources, access a database, or define worker, supervisor, or
+application ownership.
+
+At this documentation checkpoint, the seven focused route tests and all 71
+crawler unit tests, the concrete-composition integration test, and doctests
+passed in release mode. These tests use no live network or database.
 
 ### Owned get-peers worker
 
@@ -587,6 +629,84 @@ all-feature `cargo check`, strict all-target and all-feature Clippy with
 warnings denied, rustdoc with warnings denied, formatting checks, and diff
 whitespace checks. Those gates use no live PostgreSQL instance.
 
+## Frozen Go scrape behavior
+
+Go oracle checkpoint `c6b365ab0a62000351baf76ec78cfca38506b5ee`
+generated `testdata/parity/dht/dht_crawler_scrape.jsonl` with SHA-256
+`d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b`.
+It contains exactly eight ordered rows:
+
+1. `production_source_factory_and_lifecycle_contract` (`SOURCE_ONLY`) pins the
+   production worker, factory, shared context, channel, dependency, and
+   prerequisite source contract without executing a runtime row;
+2. `scrape_error_drops_request_ip_and_preserves_cause` (`RUNTIME_EXACT`) freezes
+   the wrapped error identity and exact reason plus the request-IP-and-scope
+   `DropAddr`, with no discovery or persistence handoff;
+3. `success_present_empty_filters_ignores_values_and_hands_off_raw_blooms`
+   (`RUNTIME_EXACT`) freezes responder `PutNode`, ignored peer values, and one
+   raw present-empty seeders/peers handoff;
+4. `success_preserves_node_order_and_bloom_direction_before_persist`
+   (`RUNTIME_EXACT`) freezes responder-first ordering, distinct Bloom
+   directions, and discovery order with the exact duplicate sequence first,
+   second, first before one raw handoff;
+5. `cancelled_before_client_return_still_puts_responder_but_abandons_fanout_and_persist`
+   (`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA`) retains the responder put and recorded
+   eager route-accessor calls but commits no discovery or persistence output;
+6. `cancel_after_one_discovery_retains_prefix_but_abandons_suffix_and_persist`
+   (`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA`) retains exactly the first discovery,
+   records the eagerly evaluated suffix and persistence accessors, and commits
+   neither the discovery suffix nor persistence handoff;
+7. `cancellation_when_persist_send_is_unavailable_keeps_table_and_discovery_prefix`
+   (`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA`) retains the responder and complete
+   discovery prefix, evaluates `persistSources.In()` while its unbuffered send
+   is unavailable, cancels during that eager operand, and commits no
+   persistence request; and
+8. `lane_error_is_swallowed` (`GO_ONLY_LANE`) freezes `runScrape` returning
+   after its manual input lane errors without invoking a callback.
+
+Each production callback calls `GetPeersScrape` with the shared context and
+the request address and info hash. An error applies one request-IP-and-numeric-
+scope `DropAddr` without the port, using the exact reason
+`failed to get peers from p: <cause>` while preserving the wrapped cause.
+Success first applies `PutNode` with the response ID at the original request
+address and `NodeResponded`, before any cancellation check, and ignores every
+response `Values` item. It then visits response nodes in order, including
+duplicates, under one configured one-second child context. The unlabeled
+`break` exits only the `select`, so cancellation still scans the suffix and
+eagerly evaluates each discovery `In()` accessor; ready send/cancellation ties
+remain unspecified. After all discovery attempts, the raw handoff retains the
+original request, maps `BfSeeders` to BFsd and `BfPeers` to BFpe, and eagerly
+evaluates `persistSources.In()`.
+
+Row seven proves eager persistence-accessor evaluation and zero delivery while
+the unbuffered send is unavailable. It does not prove elapsed blocked-send
+time or a particular ready-select winner.
+
+The source row pins 21 normalized AST digests, 18 source-file digests, seven
+prerequisite fixture digests, the Bloom dependency lines from `go.mod` and
+`go.sum`, and the evidence commits. At default scaling it records Go scrape
+input capacity 100 and callback concurrency 200; discovered-node input
+capacity 1,000 with maximum batch size ten, configured 10 ms interval, and
+output capacity one; and raw persist-sources input capacity 1,000 with maximum
+batch size 1,000, configured 60-second interval, and output capacity one. No
+batching-ticker schedule or delivery is runtime-proven. Go dequeues before
+acquiring its semaphore, can retain one acquire waiter beyond input capacity
+plus callback concurrency, starts detached callbacks, and does not join them.
+`crawler.start` starts its worker detached, waits only for `stopped`, defers
+shared-context cancellation, and joins neither the worker nor callbacks. The
+source row also freezes Go's unchecked closed-input loop as source evidence
+rather than executing it.
+
+Runtime rows execute actual Go `runScrape` and `requestScrape` through a
+manual callback lane, scripted client, tracing wrapper over an actual KTable,
+and controlled discovery and raw persist-sources inputs. They do not execute
+`runPersistSources`. No UDP, DNS, live DHT, PostgreSQL, model conversion, or
+database writer participates.
+
+The generator freshness test passed once and in 100 consecutive runs, its race
+focus passed ten consecutive runs, and `go vet ./internal/dhtcrawler` passed at
+the oracle checkpoint.
+
 ## Evidence boundaries and nonclaims
 
 The triage Go fixture does not claim map iteration, SQL result, or downstream
@@ -637,9 +757,22 @@ fairness; application supervision, deployment, or readiness; arbitrary textual
 IPv6 zones beyond numeric scopes; Go lane-error semantics; or concurrent
 external pending-send accounting.
 
+The scrape fixture has no Rust consumer, runtime replay, owned scrape worker,
+worker stats, or worker lifecycle. Its three
+`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA` labels classify rows for a future owned
+Rust implementation; they are not evidence that such an implementation exists.
+Runtime handoffs assert only exact raw 256-byte Bloom hex and direction. They do
+not call or assert Bloom capacity, hash count, set-bit count, or
+`ApproximatedSize`; high-density `ApproximatedSize` projection at the
+persistence boundary is deliberately deferred until the database persistence
+writer. The fixture also makes no claim about `runPersistSources` batching,
+deduplication, model conversion, database behavior, nonempty durability,
+production supervision, deployment, or readiness.
+
 The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
-dependency. Passing it establishes the bounded source and deterministic replay
-contract only.
+dependency. Passing it establishes the bounded source and controlled Go-oracle
+contract only; deterministic Rust replay is claimed only for a fixture with an
+implemented strict Rust consumer.
 
 ## Pending integration
 
@@ -657,8 +790,10 @@ The following remain deliberately outside this checkpoint:
   worker;
 - production application construction, supervision, metrics, and operator
   policy for the existing Rust get-peers worker;
-- a Rust scrape worker, its owned concurrency, persistence output, retries,
-  and failure policy;
+- a Rust scrape worker and strict fixture replay, its owned concurrency,
+  production into the existing scraped-source handoff, retries, and failure
+  policy, plus the downstream database persistence writer that will own
+  high-density `ApproximatedSize` projection;
 - the metainfo requester, parser/hash verifier, banning and block-on-ban path,
   torrent-persistence handoff, and their shutdown ownership;
 - a producer-side `closed()` waiter on the typed triage input route;
@@ -670,7 +805,8 @@ The following remain deliberately outside this checkpoint:
 The existing DHT maintenance supervisor borrows a triage input capability for
 the sample-infohashes worker but does not own this crate's unique triage
 receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
-typed scrape route remains a handoff primitive without a downstream worker.
+typed scrape input and scraped-source output routes remain handoff primitives
+without an owned Rust scrape worker between them.
 The get-peers route now has an owned Rust consumer, but no production
 application path constructs, runs, or supervises it. The concrete offline test
 composes the isolated triage worker and its persistent collaborators without
