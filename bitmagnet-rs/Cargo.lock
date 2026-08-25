@@ -1009,6 +1009,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-metainfo"
+version = "0.1.0"
+dependencies = [
+ "bendy",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bitmagnet-model"
 version = "0.1.0"
 dependencies = [

@@ -30,6 +30,7 @@ members = [
     "crates/bitmagnet-tape",
     "crates/bitmagnet-bloom",
     "crates/bitmagnet-blocking",
+    "crates/bitmagnet-metainfo",
     "crates/bitmagnet-dht",
     "crates/bitmagnet-dht-crawler",
 ]
@@ -155,6 +156,9 @@ bendy = "=0.6.1"
 # SHA-1 for BEP-33's two scrape-bloom bit indexes. This is protocol hashing,
 # not a password or signature primitive.
 sha1 = "0.10"
+# SHA-256 for BEP-52 full info hashes. As with SHA-1 above, this verifies
+# protocol identity and is not a password or signature primitive.
+sha2 = "0.10"
 # MD5 for the deployed BEP-5 announce-token derivation. This is compatibility
 # hashing, not a password or signature primitive.
 md-5 = { version = "0.11", default-features = false }

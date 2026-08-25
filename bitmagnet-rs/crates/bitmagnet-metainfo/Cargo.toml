@@ -1,0 +1,17 @@
+[package]
+name = "bitmagnet-metainfo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Owned BitTorrent v1/v2 info-dictionary parsing and identity verification."
+
+[dependencies]
+bendy.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
