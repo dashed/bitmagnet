@@ -1,8 +1,9 @@
 //! Owned BitTorrent v1/v2 info-dictionary parsing.
 //!
-//! [`parse_info_bytes`] hashes the exact received bytes before decoding them.
-//! It deliberately does not parse a whole `.torrent` file, perform BEP-9
-//! transport, decide whether content should be banned, or persist anything.
+//! [`parse_info_bytes`] hashes the exact received bytes before decoding them,
+//! and [`check_default_banning`] applies Bitmagnet's side-effect-free default
+//! rejection policy. This crate deliberately does not parse a whole `.torrent`
+//! file, perform BEP-9 transport, block hashes, or persist anything.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -15,6 +16,12 @@ use thiserror::Error;
 
 /// Maximum nested list/dictionary depth accepted from an untrusted peer.
 pub const MAX_INFO_NESTING_DEPTH: usize = 64;
+
+/// Minimum byte length accepted by Bitmagnet's default name checker.
+pub const DEFAULT_MIN_NAME_BYTES: usize = 8;
+
+/// Minimum unpadded total length accepted by Bitmagnet's default size checker.
+pub const DEFAULT_MIN_TOTAL_LENGTH: i64 = 1_024;
 
 type OwnedValue = Value<'static>;
 type OwnedDict = BTreeMap<Cow<'static, [u8]>, OwnedValue>;
@@ -403,6 +410,120 @@ pub enum InfoFilesError {
     TorrentOffsetOverflow { path: Vec<Vec<u8>> },
     #[error("total length overflow after file at {path:?}")]
     TotalLengthOverflow { path: Vec<Vec<u8>> },
+}
+
+/// One issue reported by [`check_default_banning`].
+///
+/// The first three variants preserve the exact messages emitted by the Go
+/// default checkers. [`Self::InvalidFileProjection`] is the Rust safety
+/// extension that rejects malformed metadata instead of panicking, wrapping,
+/// or accidentally allowing it during the size check.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DefaultBanIssue {
+    #[error("name too short")]
+    NameTooShort,
+    #[error("size too small")]
+    SizeTooSmall,
+    #[error("meta info contains an invalid utf8 string")]
+    InvalidUtf8,
+    #[error("could not project info files for size check: {0}")]
+    InvalidFileProjection(#[source] InfoFilesError),
+}
+
+/// Ordered reasons why the default banning check rejected an info dictionary.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DefaultBanReport {
+    issues: Vec<DefaultBanIssue>,
+}
+
+impl DefaultBanReport {
+    /// Issues in default checker order: name, size (or projection), then UTF-8.
+    #[must_use]
+    pub fn issues(&self) -> &[DefaultBanIssue] {
+        &self.issues
+    }
+
+    /// Returns the file-projection error, when malformed file data prevented
+    /// the size checker from calculating a trustworthy total.
+    #[must_use]
+    pub fn projection_error(&self) -> Option<&InfoFilesError> {
+        self.issues.iter().find_map(|issue| match issue {
+            DefaultBanIssue::InvalidFileProjection(error) => Some(error),
+            _ => None,
+        })
+    }
+}
+
+impl std::fmt::Display for DefaultBanReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, issue) in self.issues.iter().enumerate() {
+            if index != 0 {
+                formatter.write_str("\n")?;
+            }
+            std::fmt::Display::fmt(issue, formatter)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DefaultBanReport {}
+
+/// Apply Bitmagnet's default metainfo banning policy without side effects.
+///
+/// Like Go's combined checker, all independent checks run and their failures
+/// are returned in deterministic name, size, UTF-8 order. Name limits count
+/// bytes. UTF-8 validation covers the best name and raw v1 `files` display
+/// paths only; BEP-52 file-tree names are deliberately outside this Go parity
+/// contract. A typed projection issue safely rejects metadata whose total
+/// length cannot be calculated.
+pub fn check_default_banning(info: &Info) -> Result<(), DefaultBanReport> {
+    let mut issues = Vec::with_capacity(3);
+
+    if info.best_name().len() < DEFAULT_MIN_NAME_BYTES {
+        issues.push(DefaultBanIssue::NameTooShort);
+    }
+
+    match info.total_length() {
+        Ok(length) if length < DEFAULT_MIN_TOTAL_LENGTH => {
+            issues.push(DefaultBanIssue::SizeTooSmall);
+        }
+        Ok(_) => {}
+        Err(error) => issues.push(DefaultBanIssue::InvalidFileProjection(error)),
+    }
+
+    if has_invalid_default_utf8(info) {
+        issues.push(DefaultBanIssue::InvalidUtf8);
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(DefaultBanReport { issues })
+    }
+}
+
+fn has_invalid_default_utf8(info: &Info) -> bool {
+    invalid_utf8_or_nul(info.best_name())
+        || info
+            .files()
+            .is_some_and(|files| files.iter().any(|file| invalid_v1_display_path(info, file)))
+}
+
+fn invalid_v1_display_path(info: &Info, file: &InfoFile) -> bool {
+    if !info.is_dir() {
+        return invalid_utf8_or_nul(info.best_name());
+    }
+
+    // Go joins BestPath components with an ASCII slash. Since that separator
+    // is valid, non-NUL UTF-8, checking each component is equivalent without
+    // allocating the joined display path.
+    file.best_path()
+        .iter()
+        .any(|component| invalid_utf8_or_nul(component))
+}
+
+fn invalid_utf8_or_nul(value: &[u8]) -> bool {
+    std::str::from_utf8(value).is_err() || value.contains(&0)
 }
 
 struct SelectedFile {

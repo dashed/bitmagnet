@@ -1,5 +1,6 @@
 use bitmagnet_metainfo::{
-    parse_info_bytes, InfoFilesError, MetaVersion, ParseInfoError, MAX_INFO_NESTING_DEPTH,
+    check_default_banning, parse_info_bytes, DefaultBanIssue, InfoFilesError, MetaVersion,
+    ParseInfoError, DEFAULT_MIN_NAME_BYTES, DEFAULT_MIN_TOTAL_LENGTH, MAX_INFO_NESTING_DEPTH,
 };
 use sha1::{Digest as _, Sha1};
 use sha2::Sha256;
@@ -107,6 +108,23 @@ fn v2_info(piece_length: i64, children: Vec<(&[u8], Vec<u8>)>) -> Vec<u8> {
             ),
         ),
         entry(b"meta version", encoded_integer(2)),
+        entry(b"piece length", encoded_integer(piece_length)),
+    ])
+}
+
+fn named_v2_info(name: &[u8], piece_length: i64, children: Vec<(&[u8], Vec<u8>)>) -> Vec<u8> {
+    encoded_dict(vec![
+        entry(
+            b"file tree",
+            encoded_dict(
+                children
+                    .into_iter()
+                    .map(|(name, tree)| entry(name, tree))
+                    .collect(),
+            ),
+        ),
+        entry(b"meta version", encoded_integer(2)),
+        entry(b"name", encoded_bytes(name)),
         entry(b"piece length", encoded_integer(piece_length)),
     ])
 }
@@ -502,4 +520,158 @@ fn retains_raw_names_and_files_presence_while_ignoring_unknown_fields() {
     assert!(!parsed.info().is_dir());
     assert_eq!(parsed.info().upverted_files().unwrap().len(), 1);
     assert_eq!(parsed.info().total_length(), Ok(0));
+}
+
+#[test]
+fn default_banning_replays_oracle_triple_error_in_checker_order() {
+    let raw = encoded_dict(vec![
+        entry(b"length", encoded_integer(0)),
+        entry(b"name", encoded_bytes(&[0xff])),
+    ]);
+    let parsed = parse_info_bytes(sha1(&raw), &raw).unwrap();
+    let report = check_default_banning(parsed.info()).unwrap_err();
+
+    assert_eq!(
+        report.issues(),
+        [
+            DefaultBanIssue::NameTooShort,
+            DefaultBanIssue::SizeTooSmall,
+            DefaultBanIssue::InvalidUtf8,
+        ]
+    );
+    assert_eq!(
+        report.to_string(),
+        "name too short\nsize too small\nmeta info contains an invalid utf8 string"
+    );
+    assert_eq!(report.projection_error(), None);
+}
+
+#[test]
+fn default_banning_name_and_size_boundaries_are_inclusive() {
+    assert_eq!(DEFAULT_MIN_NAME_BYTES, 8);
+    assert_eq!(DEFAULT_MIN_TOTAL_LENGTH, 1_024);
+
+    let accepted = encoded_dict(vec![
+        entry(b"length", encoded_integer(DEFAULT_MIN_TOTAL_LENGTH)),
+        entry(b"name", encoded_bytes("éééé".as_bytes())),
+    ]);
+    let parsed = parse_info_bytes(sha1(&accepted), &accepted).unwrap();
+    assert_eq!(check_default_banning(parsed.info()), Ok(()));
+
+    let short_name = encoded_dict(vec![
+        entry(b"length", encoded_integer(DEFAULT_MIN_TOTAL_LENGTH)),
+        entry(b"name", encoded_bytes(b"1234567")),
+    ]);
+    let parsed = parse_info_bytes(sha1(&short_name), &short_name).unwrap();
+    assert_eq!(
+        check_default_banning(parsed.info()).unwrap_err().issues(),
+        [DefaultBanIssue::NameTooShort]
+    );
+
+    let small = encoded_dict(vec![
+        entry(b"length", encoded_integer(DEFAULT_MIN_TOTAL_LENGTH - 1)),
+        entry(b"name", encoded_bytes(b"12345678")),
+    ]);
+    let parsed = parse_info_bytes(sha1(&small), &small).unwrap();
+    assert_eq!(
+        check_default_banning(parsed.info()).unwrap_err().issues(),
+        [DefaultBanIssue::SizeTooSmall]
+    );
+}
+
+#[test]
+fn default_banning_uses_nonempty_name_utf8_in_preference_to_raw_name() {
+    let preferred = encoded_dict(vec![
+        entry(b"length", encoded_integer(DEFAULT_MIN_TOTAL_LENGTH)),
+        entry(b"name", encoded_bytes(&[0xff; DEFAULT_MIN_NAME_BYTES])),
+        entry(b"name.utf-8", encoded_bytes(b"valid-utf8-name")),
+    ]);
+    let parsed = parse_info_bytes(sha1(&preferred), &preferred).unwrap();
+    assert_eq!(check_default_banning(parsed.info()), Ok(()));
+
+    for invalid_preferred in [&[0xff; DEFAULT_MIN_NAME_BYTES][..], b"nul\0name".as_slice()] {
+        let raw = encoded_dict(vec![
+            entry(b"length", encoded_integer(DEFAULT_MIN_TOTAL_LENGTH)),
+            entry(b"name", encoded_bytes(b"valid-raw-name")),
+            entry(b"name.utf-8", encoded_bytes(invalid_preferred)),
+        ]);
+        let parsed = parse_info_bytes(sha1(&raw), &raw).unwrap();
+        assert_eq!(
+            check_default_banning(parsed.info()).unwrap_err().issues(),
+            [DefaultBanIssue::InvalidUtf8]
+        );
+    }
+}
+
+#[test]
+fn default_banning_checks_only_best_v1_display_paths() {
+    let preferred_path = encoded_dict(vec![
+        entry(
+            b"files",
+            encoded_list(vec![v1_file(
+                DEFAULT_MIN_TOTAL_LENGTH,
+                &[&[0xff]],
+                &[b"valid.bin"],
+            )]),
+        ),
+        entry(b"name", encoded_bytes(b"valid-root")),
+    ]);
+    let parsed = parse_info_bytes(sha1(&preferred_path), &preferred_path).unwrap();
+    assert_eq!(check_default_banning(parsed.info()), Ok(()));
+
+    for invalid_path in [&[0xff][..], b"nul\0path".as_slice()] {
+        let raw = encoded_dict(vec![
+            entry(
+                b"files",
+                encoded_list(vec![v1_file(
+                    DEFAULT_MIN_TOTAL_LENGTH,
+                    &[b"ignored-raw.bin"],
+                    &[invalid_path],
+                )]),
+            ),
+            entry(b"name", encoded_bytes(b"valid-root")),
+        ]);
+        let parsed = parse_info_bytes(sha1(&raw), &raw).unwrap();
+        assert_eq!(
+            check_default_banning(parsed.info()).unwrap_err().issues(),
+            [DefaultBanIssue::InvalidUtf8]
+        );
+    }
+}
+
+#[test]
+fn default_banning_does_not_inspect_pure_v2_file_tree_names() {
+    let raw = named_v2_info(
+        b"valid-v2-name",
+        16,
+        vec![(&[0xff], v2_leaf(DEFAULT_MIN_TOTAL_LENGTH, &[0x11; 32]))],
+    );
+    let parsed = parse_info_bytes(sha1(&raw), &raw).unwrap();
+
+    assert!(!parsed.info().has_v1());
+    assert!(parsed.info().has_v2());
+    assert_eq!(parsed.info().files(), None);
+    assert_eq!(check_default_banning(parsed.info()), Ok(()));
+}
+
+#[test]
+fn default_banning_rejects_and_exposes_invalid_file_projection() {
+    let raw = named_v2_info(
+        b"valid-v2-name",
+        16,
+        vec![(b"file", v2_leaf(DEFAULT_MIN_TOTAL_LENGTH, &[0x11]))],
+    );
+    let parsed = parse_info_bytes(sha1(&raw), &raw).unwrap();
+    let report = check_default_banning(parsed.info()).unwrap_err();
+
+    assert!(matches!(
+        report.issues(),
+        [DefaultBanIssue::InvalidFileProjection(
+            InfoFilesError::InvalidPiecesRootLength { actual: 1, .. }
+        )]
+    ));
+    assert!(matches!(
+        report.projection_error(),
+        Some(InfoFilesError::InvalidPiecesRootLength { actual: 1, .. })
+    ));
 }
