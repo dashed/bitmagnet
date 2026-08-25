@@ -13,6 +13,7 @@ mod info_hash_triage;
 mod persist_source_route;
 mod persist_torrent_route;
 mod pg_torrent_triage_lookup;
+mod request_meta_info;
 mod request_meta_info_route;
 mod scrape;
 
@@ -43,6 +44,12 @@ pub use persist_torrent_route::{
     DhtPersistTorrentReceiver, DhtPersistTorrentRequest, DHT_PERSIST_TORRENT_ROUTE_CAPACITY,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
+pub use request_meta_info::{
+    DefaultDhtMetaInfoBanningChecker, DhtInfoHashBlocker, DhtMetaInfoBanningChecker,
+    DhtMetaInfoRequester, DhtRequestMetaInfoWorker, DhtRequestMetaInfoWorkerConfig,
+    DhtRequestMetaInfoWorkerExit, DhtRequestMetaInfoWorkerStats,
+    DhtRequestMetaInfoWorkerStatsHandle, RequestMetaInfoCollaboratorError,
+};
 pub use request_meta_info_route::{
     dht_request_meta_info_channel, DhtMetaInfoRequest, DhtRequestMetaInfoInput,
     DhtRequestMetaInfoInputClosed, DhtRequestMetaInfoReceiver,
