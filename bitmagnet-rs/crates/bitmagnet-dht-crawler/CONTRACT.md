@@ -6,8 +6,10 @@ protocol, runtime, scheduler, route, and maintenance primitives in
 The bounded published checkpoint contains one Rust info-hash-triage worker,
 one strict differential consumer, one concrete PostgreSQL lookup adapter, and
 a thin adapter for the persistent blocking manager, plus one offline concrete
-composition test. It is not a production application composition or a
-live-database integration.
+composition test. A separate strict Go oracle freezes the next get-peers stage,
+and a taskless typed route publishes its future metainfo handoff. No Rust
+get-peers or metainfo-request worker exists yet. This is not a production
+application composition or a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -23,8 +25,11 @@ The implementation checkpoint is
 `3099790291597d4aed4888601d5b184f173f9bdf`. The PostgreSQL lookup checkpoint is
 `18cc4ac47cb4b6186494dde2c244884d105ab749`. The blocking-manager adapter
 checkpoint is `c8e22493e03850d5a61712476dc000459b414438`. The offline concrete
-composition checkpoint is `846c4c0f813da949db02a34ce20a78d73eb72a3b`. Together
-they publish the API and evidence below.
+composition checkpoint is `846c4c0f813da949db02a34ce20a78d73eb72a3b`.
+The Go get-peers oracle checkpoint is
+`19f568e01c637a8ae1b94f38e3db2c9f95734d8c`, and the request-metainfo route
+checkpoint is `73a4d867b41f4a4e7933d527c633b044736300c6`. Together they
+publish the API and evidence below.
 
 ## Public Rust boundary
 
@@ -124,6 +129,35 @@ integration test, and doctests passed in release mode. All-target checking,
 Clippy with warnings denied, rustdoc with warnings denied, formatting, and diff
 checks also passed. These gates used no database service or live network.
 
+### Request-metainfo handoff route
+
+`dht_request_meta_info_channel` constructs one taskless bounded Tokio MPSC
+queue with fixed capacity `DHT_REQUEST_META_INFO_ROUTE_CAPACITY = 100`, matching
+the Go request-metainfo input capacity at default scaling. Its cloneable
+`DhtRequestMetaInfoInput` and unique `DhtRequestMetaInfoReceiver` own the queue;
+the final input clone controls drain-then-EOF.
+
+Each `DhtMetaInfoRequest` owns the original `info_hash`, the queried DHT
+`source_node_addr`, and the complete ordered `peers` vector. IPv4 and scoped
+IPv6 addresses, order, and duplicates are preserved. A pending send owns that
+payload outside the queue and is cancellation-safe. Explicit receiver close or
+receiver destruction returns the exact unsent request through
+`DhtRequestMetaInfoInputClosed::into_request`; explicit close retains the
+already committed prefix for draining.
+
+Seven focused route tests freeze the public constant and type traits, payload
+identity, exact hundred-item FIFO and the blocked 101st send, pending-send
+cancellation, clone-controlled EOF, close-and-drain behavior, and receiver-drop
+recovery. At the route checkpoint, all 41 crawler unit tests, the concrete
+composition integration test, and doctests passed in release mode. All-target
+checking, strict Clippy, rustdoc, formatting, and diff checks also passed.
+
+This queue-capacity checkpoint does not reproduce Go's 400 concurrent
+request-metainfo callbacks or claim a total-retention bound. It constructs no
+get-peers or metainfo worker and performs no DHT query, TCP request, parsing,
+banning, blocking, persistence, database, classifier, supervisor, or
+application work.
+
 ### PostgreSQL lookup adapter
 
 `PgDhtTorrentTriageLookup::new` wraps a cheap clone of an already configured,
@@ -216,6 +250,60 @@ is started as a detached goroutine, has no worker join and no stats surface,
 and receives from the batching output without checking the channel-open
 boolean. Those lifecycle facts are source evidence, not behavior reproduced by
 the Rust worker.
+
+## Frozen Go get-peers behavior
+
+The strict get-peers oracle freezes the next downstream stage before its Rust
+implementation. With default scaling ten, Go's get-peers input has capacity
+100 and concurrency 200. The request-metainfo input has capacity 100 and
+concurrency 400. `BufferedConcurrentChannel.Run` dequeues before acquiring its
+semaphore, can therefore retain one additional acquire waiter, starts detached
+callbacks, does not join them, and does not check the input channel-open
+boolean. The crawler starts `runGetPeers` as an unjoined goroutine and ignores
+the lane's returned error.
+
+One callback calls `GetPeers` with the shared context, queried source address,
+and info hash. A query error synchronously issues one IP-and-scope keyed
+`DropAddr`; the source port is excluded, the reason is exactly
+`failed to get peers: <cause>`, and the wrapped cause remains identifiable. No
+success-side command or route is reached. A successful response instead puts
+the response ID at the queried address with `NodeResponded` before any
+cancellation check, discovery fanout, or peer-presence check.
+
+Response nodes are visited in order under one child context with a one-second
+timeout. Go's cancellation arm contains an unlabeled `break` inside the
+`select`, so it exits only that `select`, not the enclosing node loop. Remaining
+iterations still evaluate the discovery input accessor; when cancellation and
+a send are both ready, the selected arm is unspecified. The oracle records
+accessor calls separately from committed deliveries and makes no deterministic
+post-timeout suffix claim.
+
+After discovery, absent or empty peer values return the exact helper error
+`no peers found`; the responder put and any discovery prefix remain, while no
+address drop, hash put, or metainfo handoff occurs. Nonempty values are copied
+in order, with duplicates, into both KTable hash peers and the metainfo request.
+The hash put is synchronous and precedes the cancellation-aware metainfo send,
+so cancellation cannot retract the responder or hash mutations. The KTable may
+later collapse peers by IP and keep the final port, while the metainfo payload
+retains the full ordered vector.
+
+The eight-line fixture is
+`testdata/parity/dht/dht_crawler_get_peers.jsonl`, with SHA-256
+`82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844`.
+It fixes one source-only row, three exact runtime rows, three rows partitioned
+for future owned-shutdown deltas, and one Go-only lane-error row. Runtime rows
+execute the actual `runGetPeers` and `requestPeersForHash` through a manual
+callback lane, scripted client, tracing wrapper over the actual KTable, and
+controlled discovery/metainfo inputs. The source row pins normalized AST
+digests, sixteen full repository-source digests, five prerequisite-fixture
+digests, six evidence commits, and eighteen nonclaims.
+
+The generator freshness gate passed once and one hundred consecutive times;
+its race-enabled focus passed ten times. `go vet`, Go formatting, manual fixture
+hash verification, and diff checks also passed. These are deterministic source
+and controlled-collaborator gates: they do not execute a server adapter, UDP,
+DNS, a one-second wall-clock timeout, a metainfo requester, banning/blocking,
+persistence, PostgreSQL, a supervisor, or an application.
 
 ## Deliberate Rust ownership and hardening deltas
 
@@ -430,6 +518,14 @@ cross-route retention or waiter fairness; closed Go output behavior; live DHT
 traffic; upstream sample provenance; concurrent upstream pending-send drain
 accounting; supervisor/application/deployment wiring; or production readiness.
 
+The get-peers fixture currently has no Rust worker consumer. Its Go runtime
+rows do not claim cross-callback scheduling or completion order, semaphore or
+channel fairness, equal-ready select winners, callback joining, closed-input or
+send-to-closed-channel behavior, exact wall-clock response timestamps, actual
+one-second elapsed timing, KTable map iteration or eviction, live DHT/client
+wire behavior, downstream discovery processing, metainfo/banning/blocking or
+database behavior, Rust task ownership, or production throughput and wiring.
+
 The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
 dependency. Passing it establishes the bounded source and deterministic replay
 contract only.
@@ -447,8 +543,10 @@ The following remain deliberately outside this checkpoint:
   crawler supervisor;
 - application construction and shutdown wiring between the existing DHT
   sample-infohashes maintenance path and this worker;
-- production get-peers and scrape consumers, their concurrency, callbacks,
-  persistence outputs, retries, and failure policy;
+- Rust get-peers and scrape workers, their owned concurrency, callbacks,
+  downstream outputs, retries, and failure policy;
+- the metainfo requester, parser/hash verifier, banning and block-on-ban path,
+  torrent-persistence handoff, and their shutdown ownership;
 - a producer-side `closed()` waiter on the typed triage input route;
 - configuration loading, health reporting, metrics export, and operator-facing
   diagnostics; and
@@ -461,4 +559,6 @@ receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
 typed get-peers and scrape routes are handoff primitives; this checkpoint does
 not add their downstream workers. The concrete offline test composes the
 isolated worker and its persistent collaborators without polling them, but no
-current production application path completes this pipeline.
+current production application path completes this pipeline. The separate
+request-metainfo route is likewise only a taskless handoff: no producer or
+consumer is composed around it in this checkpoint.
