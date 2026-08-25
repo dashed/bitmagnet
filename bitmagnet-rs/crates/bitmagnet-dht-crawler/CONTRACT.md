@@ -5,21 +5,22 @@ protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
 The bounded published checkpoint contains owned Rust info-hash-triage,
 get-peers, scrape, request-metainfo, and scraped-source-persistence workers;
-strict differential consumers for all five stages; one concrete PostgreSQL
-lookup adapter; one concrete PostgreSQL scraped-source writer; and a thin
-adapter for the persistent blocking manager, plus one offline concrete triage
-composition test and taskless typed metainfo-request, scraped-source, and
-torrent-persistence handoffs, a pure torrent-persistence planner, and an owned
-torrent-persistence worker behind injected lookup and atomic-writer boundaries.
+strict differential consumers for all five stages; concrete PostgreSQL triage
+and torrent full-v2 lookup adapters; one concrete PostgreSQL scraped-source
+writer; and a thin adapter for the persistent blocking manager, plus one offline
+concrete triage composition test and taskless typed metainfo-request,
+scraped-source, and torrent-persistence handoffs, a pure torrent-persistence
+planner, and an owned torrent-persistence worker behind injected lookup and
+atomic-writer boundaries.
 The get-peers worker publishes successful nonempty peer vectors through the
 metainfo-request handoff. The scrape worker publishes successful raw BEP-33
 Bloom filters through the scraped-source handoff. The request-metainfo worker
 publishes allowed verified metainfo through the torrent-persistence handoff.
 No concrete peer-wire metainfo requester, request-stage persistent-blocking
-adapter, torrent-persistence PostgreSQL lookup or writer, or Rust production
-application composition exists yet. The scraped-source worker and writer are
-not wired into an application or validated against live PostgreSQL. This is
-not a live-database integration.
+adapter, torrent-persistence PostgreSQL writer, or Rust production application
+composition exists yet. The PostgreSQL adapters are not wired into an
+application or validated against live PostgreSQL. This is not a live-database
+integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -309,11 +310,37 @@ scrape candidates, lookup calls, and lookup keys. Confirmed persisted counts
 are planned torrent records in successful writer calls, not PostgreSQL rows
 affected.
 
-This checkpoint injects both collaborators and executes no SQL. It does not
+The worker itself injects both collaborators and executes no SQL. It does not
 construct a pool, choose timestamp authority, insert queue jobs, execute a
 classifier or scrape worker, export metrics, retry, provide exactly-once
 delivery, spawn or supervise itself, or claim live database or production
 readiness.
+
+### PostgreSQL torrent full-v2 lookup
+
+`PgDhtTorrentV2Lookup` wraps a cheap clone of an application-owned pool and
+implements the worker's read-only full-v2 lookup boundary. Each nonempty call
+executes one static query selecting raw `info_hash` and `info_hash_v2` values
+from `torrents` with `info_hash_v2 = ANY($1::bytea[])`. Keys are bound directly
+as 32 raw bytes. This array bind is a Rust SQL-construction delta from Go's
+dynamic `IN` list with the same intended non-null membership behavior.
+
+The query deliberately has no `ORDER BY`, `DISTINCT`, grouping, limiting,
+canonicalization, chunking, retry, or explicit transaction. It returns every
+matching table row; `info_hash_v2` has a deliberately non-unique plain index.
+The worker remains responsible for deterministic duplicate collapse,
+foreign-row validation, partial-prefix fail-open behavior, suffix skipping, and
+cancellation accounting. The adapter requires exact 20-byte primary and 32-byte
+full-v2 values and surfaces query or decode failure without converting it into
+an empty successful lookup. An empty direct call short-circuits before pool
+access.
+
+Offline tests freeze query shape, raw bindings, strict decoding, duplicate-row
+preservation, and collaborator error identity. They do not establish live
+PostgreSQL array codecs, schema or index state, query plans, result order,
+server-side cancellation, or production readiness. The adapter creates and
+closes no pool, starts no task, retries nothing, and is not application-wired in
+this checkpoint.
 
 ### Scraped-source handoff route
 
@@ -1623,10 +1650,10 @@ The following remain deliberately outside this checkpoint:
   verification;
 - a concrete `DhtInfoHashBlocker` adapter to the persistent blocking manager,
   including production flush and failure policy;
-- concrete PostgreSQL implementations of the torrent worker's resolved-v2
-  lookup and atomic six-table writer, including transaction-bound queue-job
-  insertion, timestamp policy, and live schema, codec, rollback, commit,
-  query-plan, observability, and durability validation;
+- a concrete PostgreSQL implementation of the torrent worker's atomic six-table
+  writer, including transaction-bound queue-job insertion, timestamp policy,
+  and live schema, codec, rollback, commit, query-plan, observability, and
+  durability validation; the read-only full-v2 lookup adapter exists offline;
 - production construction and supervision of the owned torrent-persistence
   worker, ownership transfer of the unique receiver, scrape-route close order,
   shutdown wiring, metrics export, retry/operator policy, and health reporting;
@@ -1655,5 +1682,5 @@ the owned Rust request-metainfo worker as its consumer; allowed results flow
 through the typed torrent-persistence route. No production application
 constructs or supervises either worker, no concrete peer-wire requester or
 persistent blocker adapter supplies the request stage, and no concrete
-PostgreSQL collaborators supply the owned persistence worker in this
-checkpoint.
+PostgreSQL atomic writer supplies the owned persistence worker in this
+checkpoint. Its concrete read-only full-v2 lookup is not application-wired.

@@ -17,6 +17,7 @@ mod persist_torrent_route;
 mod persist_torrent_worker;
 mod pg_source_batch_writer;
 mod pg_torrent_triage_lookup;
+mod pg_torrent_v2_lookup;
 mod request_meta_info;
 mod request_meta_info_route;
 mod scrape;
@@ -81,6 +82,7 @@ pub use pg_source_batch_writer::{
     PgDhtSourceBatchWriter, PgDhtSourceBatchWriterError, PG_DHT_SOURCE_WRITE_CHUNK_LIMIT,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
+pub use pg_torrent_v2_lookup::PgDhtTorrentV2Lookup;
 pub use request_meta_info::{
     DefaultDhtMetaInfoBanningChecker, DhtInfoHashBlocker, DhtMetaInfoBanningChecker,
     DhtMetaInfoRequester, DhtRequestMetaInfoWorker, DhtRequestMetaInfoWorkerConfig,
