@@ -3319,3 +3319,346 @@ capability and deliberate deltas separately. Slices forty-two and forty-three
 remain authoritative for the mixed sample-work input and periodic producer;
 the worker and every supervisor, runtime, application, deployment, production,
 and rollout boundary remain deferred.
+
+The forty-sixth slice freezes the Go sample-infohashes worker with
+`491af314a69158051f37cefa2ea22df4fb25c07b`, implements the isolated Rust
+worker in `22000fbf4448527c24a5086509f4c1b6bb610dc7`, and lands its strict
+consumer in `d828ade1c9420d1bd1299170a1138c9609f1fed4`.
+
+The crate publicly re-exports `DhtSampleInfoHashesWorker`,
+`DhtSampleInfoHashesWorkerConfig`, `DhtSampleInfoHashesWorkerExit`,
+`DhtSampleInfoHashesWorkerStats`, and
+`DhtSampleInfoHashesWorkerStatsHandle`. `DhtSampleInfoHashesWorker::new`
+consumes the unique mixed sample-work receiver plus the existing runtime
+client, KTable, typed triage input, discovery sender, and rotating target. It
+constructs one fresh slice-forty-five deduper and returns one owned worker plus
+one cloneable sender-free stats handle. The public `with_config` constructor
+accepts the same dependencies plus
+`DhtSampleInfoHashesWorkerConfig { max_inflight: NonZeroUsize }`. The config's
+`Default` and the public `new` constructor fix that bound at one hundred;
+`with_config` accepts any explicit nonzero bound. There is no public query
+timeout, retry, deduper geometry, fanout timeout, queue capacity, clock, hook,
+or source-priority configuration.
+
+The worker is taskless until its `run(self, shutdown)` future is polled. It
+accepts work only while fewer than `max_inflight` tasks are active and does not
+poll or retain one extra route item while at capacity. Every accepted query,
+dedupe pass, ordered triage wait, KTable command, and recursive-discovery wait
+remains in one worker-owned `JoinSet`. This deliberately replaces Go's
+dequeue-before-semaphore behavior, detached callbacks, separately detached
+fanout, and maximum retention of channel capacity plus concurrency plus one
+semaphore waiter.
+
+Natural route EOF stops further receives but joins every already accepted task
+before returning `DhtSampleInfoHashesWorkerExit::InputClosed`. Shutdown is
+biased ahead of a ready task join or route receive. It first closes the unique
+receiver and drains the exact still-queued work prefix, then marks shutdown in
+progress, aborts every accepted task, and observes every join before returning
+`DhtSampleInfoHashesWorkerExit::Shutdown { queued_dropped,
+tasks_cancelled, triage_hashes_dropped, recursive_nodes_dropped }`. The two
+downstream suffix values are work already classified as novel or recursive
+but not committed when cancellation destroyed its task. A child panic aborts
+and joins all siblings and then resumes the original panic payload rather than
+turning it into a typed exit.
+
+Dropping the worker or a polled run future closes its sample receiver and
+aborts owned tasks. Synchronous `Drop` cannot await those joins, returns no
+exit, and fabricates no queued, cancellation, or suffix accounting. A query
+future dropped by worker shutdown is no longer awaited, but an already-sent
+UDP datagram cannot be retracted. The worker adds no query retry, restart,
+backoff, task health signal, or panic recovery policy.
+
+The mixed input's internal provenance remains significant. A `Discovered`
+value is an immutable routing-node snapshot and is always eligible for its
+accepted query. A `Retained` value preserves its exact generation-specific
+`KTableNodeHandle`; the accepted task rechecks
+`is_sample_infohashes_candidate` before reading the target or invoking the
+client. An ineligible retained handle increments `candidate_skipped`, completes
+without a query, and performs no dedupe, triage, KTable command, or fanout.
+This callback-time recheck is the worker behavior for which slice forty-two
+preserved the private retained variant. It is semantic retained-generation
+identity, not a Go interface-pointer or ABI claim.
+
+An eligible task reads the work item's then-current address, snapshots the
+rotating target at client-call time, increments `queries_started`, and performs
+exactly one `sample_infohashes` request. On a typed client error it increments
+`queries_failed`, attempts one atomic `DropNode` command for the advertised
+work ID, increments `drop_commands`, and completes. It does not inspect the
+scripted response fields from an error row, use a response ID as advertised
+identity, preserve the client error inside the KTable command, or reproduce
+Go's wrapped drop-reason string.
+
+On success the worker increments `queries_succeeded` and ignores the response
+ID. An absent sample list is treated as empty. Every returned sample is passed
+to the shared stable deduper synchronously and in response order before the
+first triage wait. An already-present result increments
+`sample_hashes_suppressed`; every novel result increments
+`sample_hashes_novel` and snapshots the work item's then-current address into
+one `DhtInfoHashTriageRequest`. A discovered snapshot always yields its fixed
+address; later retained-handle updates can give different novel hashes
+different source addresses without changing their response order. The worker
+does not claim exact-set membership or replay Go's random-decrement stream.
+
+Novel requests are sent sequentially in that order. Each successful send is
+the typed triage route's existing irrevocable commit boundary. Receiver
+closure classifies the current request and complete remaining suffix in
+`triage_closed_dropped`; it does not roll back the committed prefix and does
+not prevent the later KTable put or recursive fanout. Worker shutdown instead
+aborts the pending send and records the exact uncommitted novel suffix in
+`shutdown_triage_hashes_dropped`. The worker owns the send future, but this
+slice adds no triage consumer, batching, database behavior, downstream route,
+or total-retention bound. It also does not add the producer-side `closed`
+waiter deferred by slice forty-four. Each owned send observes receiver closure
+through its existing typed result, worker shutdown cancels the owning task,
+and zero-novel work does not consult triage closure; the route API therefore
+remains unchanged.
+
+After every triage occurrence is committed or receiver-closed, the worker
+rereads the advertised ID and current address and attempts one atomic KTable
+batch containing one `PutNode` command. Its option order is exactly
+`Responded`, `Bep51Support(true)`, then `SampleInfoHashesResponse`. The
+response option receives the novel count as `discovered_num`, the response's
+signed `num` as `total_num`, and the computed next-sample instant. Existing
+KTable semantics retain wrapping cumulative counts and add the established
+five-minute penalty after a zero-discovery response; the worker does not
+duplicate that penalty itself. `put_commands` counts the attempt even if the
+KTable rejects or no-ops it.
+
+The effective response interval is clamped to sixty seconds only when at least
+one hash was novel and the signed raw interval is greater than three hundred.
+Otherwise the raw signed interval is retained. Rust first reproduces Go's
+signed `int64` nanosecond multiplication with wrapping arithmetic. The strict
+vectors cover negative seven, the 300 and 301 boundaries, novel and zero-novel
+301, and both `i64` extremes; notably `i64::MAX` with zero novel hashes wraps
+to negative one second and `i64::MIN` wraps to zero. Rust then saturates any
+unrepresentable shift of `std::time::Instant`, rather than claiming an exact
+Go wall-clock value or an impossible Rust instant.
+
+Only after the put does the worker process response nodes. It preserves their
+response order and applies one shared fresh one-second deadline to the whole
+fanout, not one second per node. Each capacity reservation is owned and
+cancellation-safe; a successful permit commits exactly one node. Receiver
+closure classifies the complete remaining suffix in
+`recursive_nodes_closed_dropped`, and the shared deadline classifies it in
+`recursive_nodes_timed_out_dropped`. On shutdown, an in-progress owned fanout
+is aborted and its exact suffix is recorded in
+`shutdown_recursive_nodes_dropped`. Timeout is biased ahead of a same-poll
+ready reservation, so Rust may skip Go's eager `discoveredNodes.In()` operand
+evaluation. Fanout is never detached from its accepted task, and a typed
+terminal return never precedes that task's observed join.
+
+`DhtSampleInfoHashesWorkerStats` exposes exactly twenty-one saturating
+monotonic counters: `dequeued`, `candidate_skipped`, `queries_started`,
+`tasks_completed`, `queries_succeeded`, `queries_failed`,
+`sample_hashes_returned`, `sample_hashes_suppressed`, `sample_hashes_novel`,
+`triage_queued`, `triage_closed_dropped`, `put_commands`, `drop_commands`,
+`recursive_nodes`, `recursive_nodes_queued`,
+`recursive_nodes_closed_dropped`, `recursive_nodes_timed_out_dropped`,
+`shutdown_queued_dropped`, `shutdown_tasks_cancelled`,
+`shutdown_triage_hashes_dropped`, and
+`shutdown_recursive_nodes_dropped`. Every counter saturates at `u64::MAX`.
+Snapshots load fields independently with relaxed ordering and are not
+transactional.
+
+After normal EOF, the exact conservation equations are
+`dequeued == candidate_skipped.saturating_add(queries_started) ==
+tasks_completed`, `queries_started == queries_succeeded.saturating_add(
+queries_failed)`, `sample_hashes_returned ==
+sample_hashes_suppressed.saturating_add(sample_hashes_novel)`,
+`sample_hashes_novel == triage_queued.saturating_add(
+triage_closed_dropped)`, and `recursive_nodes ==
+recursive_nodes_queued.saturating_add(recursive_nodes_closed_dropped)
+.saturating_add(recursive_nodes_timed_out_dropped)`. After typed shutdown,
+`shutdown_tasks_cancelled`, `shutdown_triage_hashes_dropped`, and
+`shutdown_recursive_nodes_dropped` extend their respective task, triage, and
+recursive equations. Items in `shutdown_queued_dropped` were never dequeued.
+Cancellation during a query can leave `queries_started` without a succeeded
+or failed outcome, so the normal query equation is not promised on shutdown.
+
+The final five-row oracle fixture is
+`testdata/parity/dht/dht_crawler_sample_infohashes_worker.jsonl`, with SHA-256
+`8533c4644ceaed71a372ef52ec944f1b625f48c0042e1ef7f45990dbe0ef2744`.
+Its strict child-module consumer denies unknown fields on all twelve fixture
+shapes, consumes all sixty-three source fields, fixes the Rust execution
+partition and both nonclaim ledgers, and requires these ordered IDs and
+classifications:
+
+- `production_source_callback_interval_put_and_fanout_contract`:
+  `SOURCE_ONLY`;
+- `actual_buffered_lane_mutated_interface_node_candidate_skipped`:
+  `RUNTIME_EXACT`;
+- `eligible_client_error_drops_advertised_node`: `RUNTIME_EXACT`;
+- `ordered_novel_prefix_cancel_after_full_dedupe`: `RUNTIME_EXACT`; and
+- `clamp_put_then_detached_recursive_prefix_cancel`: `RUNTIME_EXACT`.
+
+The source-only row binds Go's production worker, factory, start and shared
+channel shapes; callback-time dynamic access; response ordering; stable-filter
+call placement; sequential triage; signed interval and option ordering;
+detached fanout; channel capacities and batching defaults; dequeue-before-
+semaphore retention; closed-input behavior; and start/cancellation lifecycle.
+It is source evidence rather than a whole-worker Rust runtime replay. The
+consumer verifies these seventeen embedded repository sources:
+
+- `internal/concurrency/atomic.go`:
+  `09cc4842dbdf516f8574f26b411130daba526f69dbf217e1f2867e829f781a4f`;
+- `internal/concurrency/batching_channel.go`:
+  `72b3c9fd5fbc8ecbfb0ba2bc2ed5e6c1d45de01f03d3e015b2467f114ec70975`;
+- `internal/concurrency/buffered_concurrent_channel.go`:
+  `4be882800ec66d0c1709319fe029d61773c3f4a37bdb409e3a2f7d5d415d954c`;
+- `internal/dhtcrawler/config.go`:
+  `b3cac15378cdca0f21c5f21f37aeb0679815d5bacd16bfa0c3bac2af56db87ef`;
+- `internal/dhtcrawler/crawler.go`:
+  `ae6ca2484a57231a08351629c21fdc0a875f2272bfd4ad42a4e5386be86500b6`;
+- `internal/dhtcrawler/discovered_nodes.go`:
+  `22806cabf39173df71010a54d874a4319458f1715308834be828dbdb99767027`;
+- `internal/dhtcrawler/factory.go`:
+  `ed34129835773817736d70e74c7c884e5b9197e35741dee922ee9a5d691288a6`;
+- `internal/dhtcrawler/sample_infohashes.go`:
+  `483b9037673dce82f9026f2aec9448812f804c13484fd0bd2f55fcfc70a52983`;
+- `internal/protocol/dht/client/interface.go`:
+  `477139d727ea685538bccfb0be114ab4fa43556cbdb70d5492a074f24482389f`;
+- `internal/protocol/dht/client/server_adapter.go`:
+  `51334196660c0baeb730b1968f70db06af2622ea706de3e093fad39420539afa`;
+- `internal/protocol/dht/ktable/command.go`:
+  `575e58a01856db0746281c3a66a95d6d5483452fb8ab20dc6379ffbc45cedf11`;
+- `internal/protocol/dht/ktable/keyspace.go`:
+  `fe0894e7df90dcfc85b10c72bba3c55d639fff3030735d78172d0b9fdf761573`;
+- `internal/protocol/dht/ktable/node.go`:
+  `93ed9a76a7cd0f50ee3ad255c6e77a8d19e5fe17081edc6238c5efab4983b3c3`;
+- `internal/protocol/dht/ktable/query.go`:
+  `103ec27a7904bdbbbd91f3ea1dae1f4d6ea3b3d6652757a6ab8ddbf598a7060e`;
+- `internal/protocol/dht/ktable/table.go`:
+  `68e3caf4394b2692fd9358224cce2b70ae3d90d920097bd28885b6b3bb77848f`;
+- `internal/protocol/dht/msg.go`:
+  `a5129736a50eeb47cf955c075bec982a19d1d498c7bb9de6ce130b3c68118e70`;
+  and
+- `internal/protocol/id.go`:
+  `e1947e2b4af4cc008f5bb8cf5000ebfe784a82e119cb0418c2a74c3ed5f8c26f`.
+
+The same source row binds four prerequisite fixture SHA-256 values:
+`testdata/parity/dht/dht_crawler_ignore_hashes.jsonl` at
+`7900b4046d10037b9c7541d36d79370a92ceb3135f9c81be0adef985ac1f4621`,
+`testdata/parity/dht/dht_crawler_sample_infohashes_producer.jsonl` at
+`b0069a060b32edc4e1c6f5b2008f6b50f796eea6d162b4df3a148cad29745c1e`,
+`testdata/parity/dht/ktable_temporal.jsonl` at
+`03178e62efbc40519ccc0496204a081469ef49cf6b1a2336cff39b474a745444`,
+and `testdata/parity/dht/peer_sample_client.jsonl` at
+`8c432a1555587a0c3dff51af3191c689adb3a2eda8b6515975ee1470b4bdfe51`.
+It additionally fixes the historical evidence commits
+`684aedf68d9c07b96a362c470ec3619c0290b4f5` for the ignore-hashes oracle,
+`1df4d7a09f74e13e75ea2e1ab1dcfc67a130ed9d` for KTable temporal behavior,
+`1f00b40705ba527721208023ddec64220fb40729` for the peer sample client,
+`accec9e0c0f89a3e5b64e8a60bb3f29393c13b52` for the Rust deduper,
+`602dce3287795bbe2eee89bbcc1e0ebc6f9c7701` for the periodic producer oracle,
+`e0fdd622f5869d092ff4322433d72bd17f783d11` for the shared sample-input seam,
+and `b98da5ae34524f4b45c1bd0eee2e0d41dbd3128e` for the typed triage route.
+
+The candidate-mutation Rust replay uses an actual retained KTable handle,
+commits it through the mixed route while eligible, then marks that same
+generation ineligible before callback execution. It returns `InputClosed`
+without invoking the client or either downstream route and records exactly
+`dequeued=1`, `candidate_skipped=1`, and `tasks_completed=1`. Go's capacity-
+zero lane, permit blocker, accessor-call trace, callback detachment, and event
+schedule remain bound metadata rather than Rust behavior.
+
+The error replay queries the exact fixture address with the fixture target,
+returns a typed sentinel error, drops the advertised retained generation, and
+queues no triage or discovery work. It returns `InputClosed` with exact nonzero
+counters `dequeued=1`, `queries_started=1`, `tasks_completed=1`,
+`queries_failed=1`, and `drop_commands=1`. The unused scripted success payload,
+Go error wrapping, context identity, and callback event text do not become
+Rust output surfaces.
+
+The ordered-dedupe replay processes fixture hashes A, B, C, and D in order,
+classifies B as already present, and rereads the retained address so committed
+A and C requests carry `198.51.100.62:6962` and
+`198.51.100.63:6963`. The capacity-two triage queue commits those two requests;
+shutdown at attempted novel-send index two abandons D before any put or
+fanout. The worker returns `Shutdown { queued_dropped: 0, tasks_cancelled: 1,
+triage_hashes_dropped: 1, recursive_nodes_dropped: 0 }` with four samples,
+one suppressed hash, three novel hashes, two triage commits, and the matching
+shutdown suffix conservation.
+
+The clamp-and-fanout replay processes one novel hash and captures
+`198.51.100.72:6972` for triage, then rereads
+`198.51.100.73:6973` for the advertised-ID KTable put. It proves the 301-to-60
+clamp, exact three-option stored state, signed total `-17`, and response-ID
+ignorance. It preserves four recursive response nodes, commits the first two
+in order, and triggers shutdown at reserve-attempt index two. Rust returns
+`Shutdown { queued_dropped: 0, tasks_cancelled: 1,
+triage_hashes_dropped: 0, recursive_nodes_dropped: 2 }` with one triage commit,
+one put attempt, four recursive nodes, two recursive commits, and exact suffix
+conservation. Unlike Go's row, the fanout is owned and joined through worker
+shutdown rather than detached.
+
+The strict ledger records ten deliberate Rust deltas: owned and joined
+accepted tasks; no receive while at concurrency capacity; biased shutdown with
+typed exact suffixes; typed route EOF and downstream closure; cancellation-safe
+triage and discovery reservations; explicit `Discovered` versus `Retained`
+provenance; abort-and-join cleanup for shutdown and observed child panic;
+drop-time abort without terminal accounting or a join guarantee; saturating
+Rust instants after signed Go-duration wrap; and timeout bias that may skip
+Go's eager fanout operand evaluation.
+
+The consumer also retains eleven Rust nonclaims. It does not claim Go's exact
+callback or fanout schedule and detachment, pointer ABI identity, semaphore or
+channel fairness, equal-ready select winner or eager operand evaluation, exact
+wall-clock values or an unrepresentable Go deadline, BoomFilters random
+decrement history or false-positive behavior, production batch flushes,
+database triage or downstream discovery routing, KTable map iteration and
+eviction, opaque Go option-function identity, live DNS/UDP/DHT traffic,
+supervisor/application/deployment wiring, or response-ID identity.
+
+The source row's separate eighteen Go nonclaims also remain exact: no exact
+wall-clock `NodeResponded` or next-sample timestamp; ready-select winner;
+goroutine callback or fanout scheduling order; semaphore or mutex fairness;
+closed-buffered-input runtime execution; callback or fanout join guarantee;
+elapsed one-second timeout in the runtime rows; exact BoomFilters decrement
+offsets or retention; exact-set or false-positive/false-negative semantics;
+production batch-flush timing or output boundaries; info-hash triage database
+blocking or downstream route behavior; discovered-node deduplication,
+filtering, or downstream routing; KTable map iteration or eviction; opaque
+`NodeOption` function identity or internal layout; live DNS, UDP, or DHT
+behavior; response ID as advertised identity; Rust public API or overlapping-
+task lifecycle; or Rust signed-overflow parity for interval and deadline
+arithmetic. These exclusions prevent source and harness evidence from being
+promoted into Rust or production claims.
+
+The checkpoint passed all five strict-consumer tests, that focus one hundred
+consecutive times, the exact twenty-test built-in worker focus, the full DHT
+package with 385 unit tests plus every integration-test binary and the doctest,
+the all-target and all-feature package check, strict all-target and all-feature
+Clippy with warnings denied, rustdoc with warnings denied, formatting checks,
+and diff whitespace checks.
+
+This slice adds no sample producer/worker supervisor composition, fourth
+route-level EOF cycle, application constructor, production batching consumer,
+database persistence, metrics export, health signal, live socket or DHT
+traffic, deployment configuration, production readiness, or rollout. The
+seven-child maintenance supervisor from slice forty-one still requests no
+sample receiver and constructs neither the slice-forty-three producer nor this
+worker. Explicit callers may now compose the isolated prerequisites, but no
+existing runtime or application path does so in this slice.
+
+This slice supersedes slice forty-two only where that slice defers the mixed-
+route worker, callback-time retained candidate check, query ownership, and
+worker accounting. Slice forty-two's mixed-source queue, exact retained versus
+discovered representation, bounded capacity, public projection, private exact-
+work receive, direct-send and scheduler-counter provenance, EOF extension,
+and cross-source ordering boundaries remain exact. It supersedes slice forty-
+three only where that slice globally excludes an isolated worker; the periodic
+producer's query, cadence, retained-handle, capacity, exit, stats, and strict-
+oracle contracts remain unchanged and the supervisor still composes neither
+sample component.
+
+This slice supersedes slice forty-four only where worker-side triage submission
+and cancellation were deferred. The typed triage route's request
+shape, capacity, FIFO commit, closure, recovery, EOF, taskless construction,
+absence of a producer-side `closed` waiter, and lack of a production consumer
+on the receiver side remain authoritative. It supersedes slice forty-five only
+where the deduper was not used by any worker and the end-to-end sample worker
+was deferred. Slice forty-five's fixed geometry, FNV-1 kernel, stable eviction,
+mutex, randomness, probabilistic boundaries, public API, and strict ignore-
+hashes oracle remain unchanged. Slice forty-one's exact seven-child supervisor
+and every broader runtime, application, deployment, production, and rollout
+exclusion remain in force.
