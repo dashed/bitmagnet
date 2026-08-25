@@ -25,6 +25,9 @@ mod get_peers_parity;
 mod request_meta_info_parity;
 
 #[cfg(test)]
+mod persist_source_parity;
+
+#[cfg(test)]
 mod scrape_parity;
 
 pub use get_peers::{
