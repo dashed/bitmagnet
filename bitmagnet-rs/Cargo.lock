@@ -900,11 +900,13 @@ name = "bitmagnet-dht-crawler"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bitmagnet-db",
  "bitmagnet-dht",
  "bitmagnet-model",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tokio",
  "tracing",
 ]

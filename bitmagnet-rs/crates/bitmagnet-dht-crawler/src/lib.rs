@@ -8,6 +8,7 @@
 //! composition.
 
 mod info_hash_triage;
+mod pg_torrent_triage_lookup;
 
 pub use info_hash_triage::{
     DhtInfoHashBlockFilter, DhtInfoHashTriageClock, DhtInfoHashTriageConfig,
@@ -17,3 +18,4 @@ pub use info_hash_triage::{
     DHT_INFO_HASH_TRIAGE_BATCH_LIMIT, DHT_INFO_HASH_TRIAGE_RESCRAPE_THRESHOLD,
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
 };
+pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
