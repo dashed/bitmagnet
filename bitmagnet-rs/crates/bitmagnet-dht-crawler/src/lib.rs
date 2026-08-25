@@ -8,6 +8,7 @@
 //! lifecycle, and shutdown wiring remain deferred.
 
 mod blocking_manager_filter;
+mod downstream_composition;
 mod get_peers;
 mod info_hash_triage;
 mod peer_wire_meta_info_requester;
@@ -42,6 +43,9 @@ mod persist_torrent_parity;
 #[cfg(test)]
 mod scrape_parity;
 
+pub use downstream_composition::{
+    DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamStatsHandle, DhtCrawlerDownstreamWorkers,
+};
 pub use get_peers::{
     DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,
     DhtGetPeersWorkerStatsHandle,
