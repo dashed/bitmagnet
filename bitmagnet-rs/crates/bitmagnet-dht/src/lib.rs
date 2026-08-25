@@ -80,8 +80,8 @@ pub use dht_discovered_node_scheduler::{
     DhtDiscoveredNodeSchedulerStatsHandle,
 };
 pub use dht_discovery::{
-    dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryReceiver, DhtDiscoverySender,
-    DhtDiscoveryStats, DhtDiscoveryStatsHandle,
+    dht_discovery_channel, DhtDiscoveryOffer, DhtDiscoveryPermit, DhtDiscoveryReceiver,
+    DhtDiscoveryReserveError, DhtDiscoverySender, DhtDiscoveryStats, DhtDiscoveryStatsHandle,
 };
 pub use dht_dispatch::{DhtDispatchOutcome, DhtDispatcher};
 pub use dht_driver::{DhtDriver, DhtDriverError, DhtDriverOutcome};

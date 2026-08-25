@@ -12,9 +12,9 @@ use crate::RoutingNode;
 /// Offering a node does not await or block on capacity and never starts a task.
 /// When the channel has no unreserved capacity or its receiver is gone, the
 /// newest node is dropped and classified by both the return value and shared
-/// counters. In-crate producers that require backpressure can instead reserve
-/// one slot and then synchronously deliver through the resulting permit. Both
-/// paths share the same attempt and outcome counters.
+/// counters. Producers that require backpressure can instead reserve one slot
+/// and then synchronously deliver through the resulting permit. Both paths
+/// share the same attempt and outcome counters.
 #[must_use]
 pub fn dht_discovery_channel(capacity: NonZeroUsize) -> (DhtDiscoverySender, DhtDiscoveryReceiver) {
     let (sender, receiver) = mpsc::channel(capacity.get());
@@ -63,7 +63,8 @@ struct DhtDiscoveryReceiverState {
 /// races the reservation. Dropping an unused permit releases its slot without
 /// changing discovery counters. The permit owns one sender clone, so it delays
 /// receiver EOF until it is either delivered or dropped.
-pub(crate) struct DhtDiscoveryPermit {
+#[must_use = "a held discovery permit consumes queue capacity and delays receiver EOF"]
+pub struct DhtDiscoveryPermit {
     permit: mpsc::OwnedPermit<RoutingNode>,
     stats: DhtDiscoveryStatsHandle,
     receiver_state: Arc<Mutex<DhtDiscoveryReceiverState>>,
@@ -71,7 +72,8 @@ pub(crate) struct DhtDiscoveryPermit {
 
 /// Failure to reserve discovery-queue capacity.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub(crate) enum DhtDiscoveryReserveError {
+pub enum DhtDiscoveryReserveError {
+    /// The unique discovery receiver was closed or dropped.
     #[error("DHT discovery receiver is closed")]
     ReceiverClosed,
 }
@@ -150,9 +152,13 @@ impl DhtDiscoverySender {
     /// [`DhtDiscoveryReserveError::ReceiverClosed`] and likewise leaves
     /// counters unchanged.
     ///
+    /// A successfully returned permit consumes one queue slot and owns a
+    /// sender clone until it is delivered or dropped. Holding it indefinitely
+    /// therefore reduces available capacity and delays receiver EOF.
+    ///
     /// Once acquired, [`DhtDiscoveryPermit::deliver`] commits synchronously,
     /// including if the receiver was explicitly closed after the reservation.
-    pub(crate) async fn reserve(&self) -> Result<DhtDiscoveryPermit, DhtDiscoveryReserveError> {
+    pub async fn reserve(&self) -> Result<DhtDiscoveryPermit, DhtDiscoveryReserveError> {
         let permit = self
             .sender
             .clone()
@@ -190,7 +196,7 @@ impl DhtDiscoveryPermit {
     /// still drain a delivery from a permit acquired before it closed. Receiver
     /// destruction is synchronized with this commit so a node is never counted
     /// as queued when the receiver was already gone.
-    pub(crate) fn deliver(self, node: RoutingNode) -> DhtDiscoveryOffer {
+    pub fn deliver(self, node: RoutingNode) -> DhtDiscoveryOffer {
         let Self {
             permit,
             stats,
