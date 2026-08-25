@@ -71,6 +71,52 @@ impl InfoFile {
     }
 }
 
+/// An owned file projection shared by v1, v2, and hybrid info dictionaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedFile {
+    length: i64,
+    path: Vec<Vec<u8>>,
+    path_utf8: Vec<Vec<u8>>,
+    pieces_root: Option<[u8; 32]>,
+    torrent_offset: i64,
+}
+
+impl NormalizedFile {
+    #[must_use]
+    pub const fn length(&self) -> i64 {
+        self.length
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &[Vec<u8>] {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn path_utf8(&self) -> &[Vec<u8>] {
+        &self.path_utf8
+    }
+
+    #[must_use]
+    pub fn best_path(&self) -> &[Vec<u8>] {
+        if self.path_utf8.is_empty() {
+            &self.path
+        } else {
+            &self.path_utf8
+        }
+    }
+
+    #[must_use]
+    pub const fn pieces_root(&self) -> Option<[u8; 32]> {
+        self.pieces_root
+    }
+
+    #[must_use]
+    pub const fn torrent_offset(&self) -> i64 {
+        self.torrent_offset
+    }
+}
+
 /// File properties stored under the empty key in a BEP-52 file tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileTreeFile {
@@ -198,6 +244,66 @@ impl Info {
         &self.file_tree
     }
 
+    /// Mirrors `anacrolix/metainfo.Info.IsDir`.
+    #[must_use]
+    pub fn is_dir(&self) -> bool {
+        if self.has_v2() {
+            self.file_tree.is_dir()
+        } else {
+            self.files.as_ref().is_some_and(|files| !files.is_empty())
+        }
+    }
+
+    /// Selects and normalizes files using the same generation preference as
+    /// `anacrolix/metainfo.Info.UpvertedFiles`.
+    ///
+    /// Unlike Go's helper, which panics for short piece roots and silently
+    /// truncates overlong ones, this requires every nonempty root to be exactly
+    /// 32 bytes and returns a typed error for malformed input.
+    pub fn upverted_files(&self) -> Result<Vec<NormalizedFile>, InfoFilesError> {
+        let selected = self.selected_files()?;
+        let mut offset = 0_i64;
+        let mut files = Vec::with_capacity(selected.len());
+        for file in selected {
+            let advance = if self.has_v2() {
+                checked_piece_aligned_length(file.length, self.piece_length).ok_or_else(|| {
+                    InfoFilesError::TorrentOffsetOverflow {
+                        path: file.path.clone(),
+                    }
+                })?
+            } else {
+                file.length
+            };
+            let next_offset = offset.checked_add(advance).ok_or_else(|| {
+                InfoFilesError::TorrentOffsetOverflow {
+                    path: file.path.clone(),
+                }
+            })?;
+            files.push(NormalizedFile {
+                length: file.length,
+                path: file.path,
+                path_utf8: file.path_utf8,
+                pieces_root: file.pieces_root,
+                torrent_offset: offset,
+            });
+            offset = next_offset;
+        }
+        Ok(files)
+    }
+
+    /// Returns the checked sum of the selected files' unpadded lengths.
+    pub fn total_length(&self) -> Result<i64, InfoFilesError> {
+        self.selected_files()?
+            .into_iter()
+            .try_fold(0_i64, |total, file| {
+                total
+                    .checked_add(file.length)
+                    .ok_or_else(|| InfoFilesError::TotalLengthOverflow {
+                        path: file.path.clone(),
+                    })
+            })
+    }
+
     /// Mirrors `anacrolix/metainfo.Info.HasV1`, including presence of an empty
     /// `files` list.
     #[must_use]
@@ -213,6 +319,26 @@ impl Info {
     #[must_use]
     pub const fn has_v2(&self) -> bool {
         self.raw_meta_version == 2
+    }
+
+    fn selected_files(&self) -> Result<Vec<SelectedFile>, InfoFilesError> {
+        if self.has_v2() {
+            if self.piece_length <= 0 {
+                return Err(InfoFilesError::NonPositiveV2PieceLength(self.piece_length));
+            }
+            let mut files = Vec::new();
+            self.file_tree
+                .collect_selected_files(&mut Vec::new(), &mut files)?;
+            return Ok(files);
+        }
+
+        let Some(info_files) = self.files.as_ref().filter(|files| !files.is_empty()) else {
+            return Ok(vec![SelectedFile::v1(self.length, Vec::new(), Vec::new())?]);
+        };
+        info_files
+            .iter()
+            .map(|file| SelectedFile::v1(file.length, file.path.clone(), file.path_utf8.clone()))
+            .collect()
     }
 }
 
@@ -262,6 +388,100 @@ pub enum ParseInfoError {
         field: String,
         expected: &'static str,
     },
+}
+
+/// Invalid file data or arithmetic encountered while normalizing an info dict.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum InfoFilesError {
+    #[error("file at {path:?} has negative length {length}")]
+    NegativeFileLength { path: Vec<Vec<u8>>, length: i64 },
+    #[error("v2 piece length must be positive, got {0}")]
+    NonPositiveV2PieceLength(i64),
+    #[error("file at {path:?} has pieces root length {actual}, expected zero or 32")]
+    InvalidPiecesRootLength { path: Vec<Vec<u8>>, actual: usize },
+    #[error("torrent offset overflow after file at {path:?}")]
+    TorrentOffsetOverflow { path: Vec<Vec<u8>> },
+    #[error("total length overflow after file at {path:?}")]
+    TotalLengthOverflow { path: Vec<Vec<u8>> },
+}
+
+struct SelectedFile {
+    length: i64,
+    path: Vec<Vec<u8>>,
+    path_utf8: Vec<Vec<u8>>,
+    pieces_root: Option<[u8; 32]>,
+}
+
+impl SelectedFile {
+    fn v1(
+        length: i64,
+        path: Vec<Vec<u8>>,
+        path_utf8: Vec<Vec<u8>>,
+    ) -> Result<Self, InfoFilesError> {
+        if length < 0 {
+            return Err(InfoFilesError::NegativeFileLength { path, length });
+        }
+        Ok(Self {
+            length,
+            path,
+            path_utf8,
+            pieces_root: None,
+        })
+    }
+}
+
+impl FileTree {
+    fn collect_selected_files(
+        &self,
+        path: &mut Vec<Vec<u8>>,
+        files: &mut Vec<SelectedFile>,
+    ) -> Result<(), InfoFilesError> {
+        if self.is_dir() {
+            for (name, child) in &self.children {
+                path.push(name.clone());
+                child.collect_selected_files(path, files)?;
+                path.pop();
+            }
+            return Ok(());
+        }
+
+        if self.file.length < 0 {
+            return Err(InfoFilesError::NegativeFileLength {
+                path: path.clone(),
+                length: self.file.length,
+            });
+        }
+        let pieces_root = match self.file.pieces_root.len() {
+            0 => None,
+            32 => {
+                let mut root = [0_u8; 32];
+                for (destination, source) in root.iter_mut().zip(&self.file.pieces_root) {
+                    *destination = *source;
+                }
+                Some(root)
+            }
+            actual => {
+                return Err(InfoFilesError::InvalidPiecesRootLength {
+                    path: path.clone(),
+                    actual,
+                });
+            }
+        };
+        files.push(SelectedFile {
+            length: self.file.length,
+            path: path.clone(),
+            path_utf8: path.clone(),
+            pieces_root,
+        });
+        Ok(())
+    }
+}
+
+fn checked_piece_aligned_length(length: i64, piece_length: i64) -> Option<i64> {
+    let pieces = length
+        .checked_div(piece_length)?
+        .checked_add(i64::from(length % piece_length != 0))?;
+    pieces.checked_mul(piece_length)
 }
 
 /// Verify and decode the raw info dictionary returned for a 20-byte DHT hash.
