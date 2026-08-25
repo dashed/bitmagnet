@@ -3,25 +3,26 @@
 This crate owns database- and policy-dependent crawler behavior above the
 protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
-The bounded published checkpoint contains owned Rust info-hash-triage and
-get-peers workers, strict differential consumers for both stages, one concrete
+The bounded published checkpoint contains owned Rust info-hash-triage,
+get-peers, and scrape workers, strict differential consumers for all three
+stages, one concrete
 PostgreSQL lookup adapter, and a thin adapter for the persistent blocking
 manager, plus one offline concrete triage composition test and taskless typed
 metainfo and scraped-source handoffs. The get-peers worker publishes successful
-nonempty peer vectors through the metainfo handoff. No Rust metainfo-request
-worker or Rust production application composition exists yet. No Rust scrape
-worker or strict Rust scrape replay exists, and this is not a live-database
-integration.
+nonempty peer vectors through the metainfo handoff. The scrape worker publishes
+successful raw BEP-33 Bloom filters through the scraped-source handoff. No Rust
+metainfo-request or scraped-source persistence worker, or Rust production
+application composition, exists yet. This is not a live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
 and scrape output routes. `bitmagnet-model` supplies the shared `FilesStatus`
 domain enum. This crate owns the higher-level batching and routing decision,
 the owned get-peers stage, the metainfo and raw scraped-source handoffs, plus
-the blocking-policy and database-projection seams and the concrete SQLx lookup
-and blocking-manager adapters. It does not make the protocol crate depend on
-PostgreSQL, the persistent blocking manager, crawler application state, or
-deployment configuration.
+the owned scrape stage, the blocking-policy and database-projection seams, and
+the concrete SQLx lookup and blocking-manager adapters. It does not make the
+protocol crate depend on PostgreSQL, the persistent blocking manager, crawler
+application state, or deployment configuration.
 
 The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
@@ -38,6 +39,9 @@ The scraped-source route checkpoint is
 `a76591e92430ceb65fc7eb62af4ffbbaa791dad7`. The frozen Go scrape-oracle
 checkpoint is `c6b365ab0a62000351baf76ec78cfca38506b5ee`, and its fixture SHA-256
 is `d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b`.
+The owned scrape-worker checkpoint is
+`c9921be38a9d68a9812d4647bf1c33b74812ad5f`, and its strict Rust-consumer
+checkpoint is `6f45f7b6eeb29b0c3d41c327246d9a27df0f5ac5`.
 Together they publish the API and evidence below.
 
 ## Public Rust boundary
@@ -200,8 +204,8 @@ recovery. Construction starts no task. The route does not batch, estimate
 counts, persist sources, access a database, or define worker, supervisor, or
 application ownership.
 
-At this documentation checkpoint, the seven focused route tests and all 71
-crawler unit tests, the concrete-composition integration test, and doctests
+At the scraped-source route checkpoint, the seven focused route tests and all
+71 crawler unit tests, the concrete-composition integration test, and doctests
 passed in release mode. These tests use no live network or database.
 
 ### Owned get-peers worker
@@ -282,6 +286,108 @@ composition integration test, and doctests passed in release mode. The seven
 strict tests also passed in 25 consecutive focused runs. Release all-target and
 all-feature checking, strict Clippy, rustdoc, formatting, and diff checks
 passed. These tests inject query results and do not open UDP, DNS, PostgreSQL,
+or any live service.
+
+### Owned scrape worker
+
+`DhtScrapeWorker::new` consumes the unique `DhtScrapeReceiver` and owns the
+supplied `DhtRuntimeClient`, `KTable`, `DhtPersistSourceInput`, and
+`DhtDiscoverySender` handles. It returns the unstarted worker and a cloneable,
+sender-free `DhtScrapeWorkerStatsHandle`. `with_config` accepts a
+`DhtScrapeWorkerConfig`; its nonzero `max_inflight` defaults to 200, matching
+Go's configured callback concurrency at default scaling. Construction starts
+no task.
+
+`run` owns one `JoinSet` and does not poll input at capacity, so it retains no
+extra acquire waiter beyond accepted children and the capacity-100 input
+route. Route EOF joins every accepted child before returning `InputClosed`.
+Biased shutdown closes and drains input, marks shutdown accounting, aborts
+every accepted child, joins every cancellation, and returns
+`Shutdown { queued_dropped, tasks_cancelled, recursive_nodes_dropped,
+persist_source_requests_dropped }`. A panicking child aborts and joins all
+siblings before its original panic payload resumes. Dropping the run future
+closes input and aborts children but deliberately produces no typed exit or
+terminal shutdown counters.
+
+Each started child invokes `get_peers_scrape` exactly once with the request's
+source address and info hash. An error applies one `DropAddr`; Rust KTable
+reverse identity uses the IP and numeric IPv6 scope but excludes the port, and
+the Go error cause is not stored. Success counts every returned peer occurrence
+as deliberately ignored, then applies one synchronous `PutNode` using the
+response ID, request address, and `Responded`, before discovery fanout or any
+downstream await. It never applies `PutHash` for ignored scrape peer values.
+
+Response nodes retain response order and duplicates under one absolute
+one-second deadline. Each node requires an owned discovery reservation; an
+equal-ready deadline wins, and receiver closure or timeout deterministically
+classifies the complete current-and-remaining suffix. Every successful query
+produces one exact `DhtPersistSourceRequest` containing the original info hash
+and source address, with `seeders_bloom` and `peers_bloom` preserved in their
+original directions as raw 256-byte filters. On normal completion, if the child
+reaches the handoff, it attempts the cancellation-safe send after discovery,
+including when the node list or either filter is empty. Normal discovery or
+scraped-source receiver closure is counted and remains local to that child
+rather than stopping the worker.
+
+At quiescent normal EOF, the exact statistics equations are:
+
+```text
+dequeued = queries_started = tasks_completed
+queries_started = queries_succeeded + queries_failed
+put_node_commands = queries_succeeded
+drop_addr_commands = queries_failed
+recursive_nodes
+  = recursive_nodes_queued
+  + recursive_nodes_closed_dropped
+  + recursive_nodes_timed_out_dropped
+queries_succeeded
+  = persist_source_queued
+  + persist_source_closed_dropped
+```
+
+`peer_values_ignored` counts response occurrences, including duplicates, and
+has no equality to the number of successful queries. After typed shutdown,
+`dequeued = tasks_completed + shutdown_tasks_cancelled`;
+`shutdown_recursive_nodes_dropped` extends the recursive-node equation; and
+`shutdown_persist_source_dropped` extends the successful-query/persist-source
+equation. The exit's four fields correspond respectively to
+`shutdown_queued_dropped`, `shutdown_tasks_cancelled`,
+`shutdown_recursive_nodes_dropped`, and
+`shutdown_persist_source_dropped`. Every counter is saturating and monotonic;
+`DhtScrapeWorkerStatsHandle::snapshot` reads fields independently with relaxed
+ordering, so cross-field conservation is promised only after worker exit.
+
+The strict consumer records these deliberate Rust deltas from the frozen Go
+oracle: Rust owns and joins bounded tasks; input EOF is typed; shutdown closes
+and drains input before aborting and joining accepted tasks; shutdown during a
+pending query applies none of Go's post-cancellation prefix; shutdown after a
+discovery prefix accounts the exact unattempted suffix; shutdown at
+scraped-source backpressure preserves the table and discovery prefix; discovery
+uses cancellation-safe owned reservations and one suffix deadline; the
+scraped-source send future is owned by worker shutdown; typed EOF, shutdown,
+and accounting replace Go's swallowed lane error; and Rust drops KTable
+addresses by IP and numeric scope without storing Go's error cause.
+
+Sixteen focused worker tests freeze defaults and saturation, pre-ready drain,
+scoped address drop, success ordering, duplicate discovery, raw Bloom
+direction, absolute and equal-ready deadlines, capacity and EOF joining, three
+shutdown positions, normal downstream closure, never-polled accepted work,
+child-panic cleanup, active-run drop, and core-drop request recovery. Seven
+strict-consumer tests pin the complete Go source row and replay rows two through
+seven through the actual worker core, KTable, discovery route, and
+scraped-source route. Rows five
+through seven assert the deliberate owned-shutdown deltas; the two downstream
+shutdown replays enter the actual full-route waits rather than stopping in
+their observation hooks. Row one remains source-only, and row eight remains a
+Go-only manual-lane behavior.
+
+At the worker checkpoint, all 87 then-registered crawler unit tests, the
+concrete composition integration test, and doctests passed in release mode.
+At the strict-consumer checkpoint, all 94 crawler unit tests, the concrete
+composition integration test, and doctests passed in release mode. The seven
+strict tests also passed in 25 consecutive focused runs. Release all-target and
+all-feature checking, strict Clippy, rustdoc, formatting, and diff checks
+passed. These tests inject scrape results and do not open UDP, DNS, PostgreSQL,
 or any live service.
 
 ### PostgreSQL lookup adapter
@@ -728,12 +834,12 @@ per-item `time.Now()` schedule; live PostgreSQL array encoding, schema
 compatibility, indexes, query plans, server-side cancellation, transactions,
 retries, statement timeouts, or pool configuration; a live persistent
 production blocking Bloom state or nonempty flush durability; Go's detached
-batcher timing, output boundary, or close behavior; downstream scrape execution
-or metainfo processing; Go select ties, eager lane operands, or fairness; Go
-logging; cross-route retention or waiter fairness; closed Go output behavior;
-live DHT traffic; upstream sample provenance; concurrent upstream pending-send
-drain accounting; supervisor/application/deployment wiring; or production
-readiness.
+batcher timing, output boundary, or close behavior; downstream scraped-source
+persistence or metainfo processing; Go select ties, eager lane operands, or
+fairness; Go logging; cross-route retention or waiter fairness; closed Go
+output behavior; live DHT traffic; upstream sample provenance; concurrent
+upstream pending-send drain accounting; supervisor/application/deployment
+wiring; or production readiness.
 
 The get-peers strict consumer executes its six runtime rows through the actual
 Rust worker core. Rows two through four reproduce the bounded Go command and
@@ -757,17 +863,32 @@ fairness; application supervision, deployment, or readiness; arbitrary textual
 IPv6 zones beyond numeric scopes; Go lane-error semantics; or concurrent
 external pending-send accounting.
 
-The scrape fixture has no Rust consumer, runtime replay, owned scrape worker,
-worker stats, or worker lifecycle. Its three
-`RUNTIME_WITH_OWNED_SHUTDOWN_DELTA` labels classify rows for a future owned
-Rust implementation; they are not evidence that such an implementation exists.
-Runtime handoffs assert only exact raw 256-byte Bloom hex and direction. They do
-not call or assert Bloom capacity, hash count, set-bit count, or
-`ApproximatedSize`; high-density `ApproximatedSize` projection at the
-persistence boundary is deliberately deferred until the database persistence
-writer. The fixture also makes no claim about `runPersistSources` batching,
-deduplication, model conversion, database behavior, nonempty durability,
-production supervision, deployment, or readiness.
+The scrape strict consumer executes its six runtime rows through the actual
+Rust worker core. Rows two through four reproduce the bounded command,
+discovery, ignored-peer, and raw-filter handoff observations. Rows five through
+seven freeze the deliberate owned-shutdown deltas with exact terminal and stats
+accounting. The source-only row and Go-only lane-error row are not Rust runtime
+behaviors. The source row's historical no-Rust-consumer nonclaim describes the
+Go-oracle checkpoint, not the current repository.
+
+The Rust consumer does not reproduce exact Go ready-select winners or eager
+operand effects. The Go fixture freezes only the recorded `In()` accessor call
+counts and claims no arbitrary operand side effects beyond them; neither
+surface claims production callback scheduling or completion order, semaphore
+fairness, closed-input execution, or callback joining. They also do not claim
+actual elapsed one-second timing; send-to-closed Go-channel behavior; exact
+`NodeResponded` timestamps; KTable iteration, eviction, or internal layout;
+opaque Go node-option identity or Rust storage of the Go error cause; Bloom
+capacity, hash count, set-bit count, or `ApproximatedSize` runtime assertions;
+high-density `ApproximatedSize` projection before the database persistence
+writer; live DNS, UDP, DHT, client, or wire behavior; downstream discovered-node
+processing; `runPersistSources` batching, deduplication, model conversion, or
+database behavior; torrent-source database or nonempty durability behavior;
+production throughput, total retention, or waiter fairness; application
+supervision, deployment, or readiness; arbitrary textual IPv6 zones beyond
+numeric scopes; Go lane-error semantics in the owned Rust route; or concurrent
+external pending-send accounting beyond prequeued fixture inputs. Runtime
+handoffs assert exact raw 256-byte Bloom identity and direction only.
 
 The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
 dependency. Passing it establishes the bounded source and controlled Go-oracle
@@ -790,10 +911,10 @@ The following remain deliberately outside this checkpoint:
   worker;
 - production application construction, supervision, metrics, and operator
   policy for the existing Rust get-peers worker;
-- a Rust scrape worker and strict fixture replay, its owned concurrency,
-  production into the existing scraped-source handoff, retries, and failure
-  policy, plus the downstream database persistence writer that will own
-  high-density `ApproximatedSize` projection;
+- production application construction, supervision, metrics, retry, and
+  operator failure policy for the existing Rust scrape worker, plus the
+  downstream database persistence writer that will own high-density
+  `ApproximatedSize` projection;
 - the metainfo requester, parser/hash verifier, banning and block-on-ban path,
   torrent-persistence handoff, and their shutdown ownership;
 - a producer-side `closed()` waiter on the typed triage input route;
@@ -805,13 +926,13 @@ The following remain deliberately outside this checkpoint:
 The existing DHT maintenance supervisor borrows a triage input capability for
 the sample-infohashes worker but does not own this crate's unique triage
 receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
-typed scrape input and scraped-source output routes remain handoff primitives
-without an owned Rust scrape worker between them.
-The get-peers route now has an owned Rust consumer, but no production
-application path constructs, runs, or supervises it. The concrete offline test
+typed scrape input and scraped-source output routes now have an owned Rust
+scrape consumer between them, but no production application path constructs,
+runs, or supervises it. The get-peers route likewise has an owned Rust
+consumer without production application ownership. The concrete offline test
 composes the isolated triage worker and its persistent collaborators without
 polling them, but no current production application path constructs or
-supervises the triage and get-peers workers as a pipeline. The
+supervises the triage, get-peers, and scrape workers as a pipeline. The
 request-metainfo route now has the get-peers worker as a producer, but no
 metainfo-request consumer or application composition owns it in this
 checkpoint.
