@@ -813,6 +813,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-blocking"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitmagnet-bloom",
+ "bitmagnet-model",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "bitmagnet-bloom"
 version = "0.1.0"
 dependencies = [
