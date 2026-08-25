@@ -2,11 +2,12 @@
 //! protocol, runtime, scheduler, and maintenance primitives in `bitmagnet-dht`.
 //!
 //! This crate consumes typed DHT discovery products and makes database- and
-//! policy-dependent routing decisions. PostgreSQL and the persistent blocking
-//! manager remain injected boundaries so the core worker is deterministic,
-//! testable without external services, and reusable by later application
-//! composition.
+//! policy-dependent routing decisions. The core worker still receives injected
+//! collaborators, while this crate supplies concrete adapters for PostgreSQL
+//! triage lookup and the persistent blocking manager. Application ownership,
+//! lifecycle, and shutdown wiring remain deferred.
 
+mod blocking_manager_filter;
 mod info_hash_triage;
 mod pg_torrent_triage_lookup;
 

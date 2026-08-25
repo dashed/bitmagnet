@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Owned DHT crawler policy workers above the protocol/runtime layer."
 
 [dependencies]
+bitmagnet-blocking = { path = "../bitmagnet-blocking" }
 bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-dht = { path = "../bitmagnet-dht" }
 bitmagnet-model = { path = "../bitmagnet-model" }

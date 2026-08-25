@@ -924,6 +924,7 @@ name = "bitmagnet-dht-crawler"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bitmagnet-blocking",
  "bitmagnet-db",
  "bitmagnet-dht",
  "bitmagnet-model",
