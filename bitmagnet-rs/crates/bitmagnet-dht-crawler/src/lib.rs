@@ -10,6 +10,7 @@
 mod blocking_manager_filter;
 mod get_peers;
 mod info_hash_triage;
+mod persist_source_route;
 mod pg_torrent_triage_lookup;
 mod request_meta_info_route;
 
@@ -27,6 +28,10 @@ pub use info_hash_triage::{
     SystemDhtInfoHashTriageClock, TriageCollaboratorError, DHT_INFO_HASH_TRIAGE_BATCH_INTERVAL,
     DHT_INFO_HASH_TRIAGE_BATCH_LIMIT, DHT_INFO_HASH_TRIAGE_RESCRAPE_THRESHOLD,
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
+};
+pub use persist_source_route::{
+    dht_persist_source_channel, DhtPersistSourceInput, DhtPersistSourceInputClosed,
+    DhtPersistSourceReceiver, DhtPersistSourceRequest, DHT_PERSIST_SOURCE_ROUTE_CAPACITY,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
 pub use request_meta_info_route::{
