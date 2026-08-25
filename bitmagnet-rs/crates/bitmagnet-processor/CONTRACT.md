@@ -48,13 +48,34 @@ The milestone-2 live-PostgreSQL gate ran against goose 26 and proved upsert/dele
 semantics, blocker-before-delete ordering, exact microsecond timestamps, and
 full rollback when a late tag write fails.
 
+The concrete persistent-manager adapter checkpoint is
+`5f4f1d92c85222ab92476dcee977ce27f7addacc`. It parses the complete deletion
+batch before mutation, delegates exactly once to the shared blocking manager
+with `flush = false`, and preserves input order and duplicates until the
+manager-owned set buffer. Parse or manager failure aborts before the processor
+transaction and retains the original error in the existing boxed source chain.
+At that checkpoint, all 52 processor release tests passed, with the one
+explicitly opt-in PostgreSQL test ignored; release all-target checking, Clippy
+with warnings denied, rustdoc with warnings denied, formatting, and diff checks
+also passed. These are offline source and compile gates for the adapter, not a
+new live-PostgreSQL or large-object validation.
+
+Rust deliberately handles a deletion-only write set even though Go currently
+returns early when a batch produces no `torrent_contents`, dropping deletion
+hashes collected from that batch before `persist` can block or delete them.
+`PreparedWriteSet::is_empty` includes whole-info-hash deletes, and an offline
+regression test freezes that correctness improvement. Exact parity is claimed
+for the pre-transaction blocking boundary once Go reaches `persist`, not for
+that Go orchestration bug.
+
 This is not yet the complete runtime persistence milestone:
 
 - attached `content` remains rejected until Lane C exposes the structured
   content row and its associations;
 - the runtime loader still needs to carry the volatile persistence metadata and
   construct the weighted FTS vector;
-- the concrete stable-bloom blocking manager is not yet ported; and
+- application composition still needs to share the manager across callers and
+  flush it after all producers stop but before the PostgreSQL pool closes; and
 - at milestone 2, queue retry wiring, post-commit Tantivy dual-write, the
   poll-mirror, and the full write-set comparator remained outstanding. The
   later shadow-only pieces are now covered by milestones 4 and 5.
