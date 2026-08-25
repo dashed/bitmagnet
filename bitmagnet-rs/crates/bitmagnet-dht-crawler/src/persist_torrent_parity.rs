@@ -42,7 +42,7 @@ const ROW_EXECUTIONS: [&str; 6] = [
 ];
 
 const RUST_NONCLAIMS: [&str; 5] = [
-    "Rust_torrent_persistence_planner_or_worker_execution",
+    "this_strict_consumer_does_not_execute_the_Rust_torrent_persistence_planner_or_worker",
     "Rust_torrent_repository_or_PostgreSQL_execution",
     "Rust_queue_writer_classifier_or_scrape_fanout_execution",
     "Go_runPersistTorrents_or_batcher_runtime_execution",
@@ -1136,7 +1136,7 @@ fn source_hashes_layout_partition_and_contract_are_exact() {
     assert_eq!(
         RUST_NONCLAIMS,
         [
-            "Rust_torrent_persistence_planner_or_worker_execution",
+            "this_strict_consumer_does_not_execute_the_Rust_torrent_persistence_planner_or_worker",
             "Rust_torrent_repository_or_PostgreSQL_execution",
             "Rust_queue_writer_classifier_or_scrape_fanout_execution",
             "Go_runPersistTorrents_or_batcher_runtime_execution",

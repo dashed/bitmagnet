@@ -9,11 +9,11 @@ strict differential consumers for all five stages; one concrete PostgreSQL
 lookup adapter; one concrete PostgreSQL scraped-source writer; and a thin
 adapter for the persistent blocking manager, plus one offline concrete triage
 composition test and taskless typed metainfo-request, scraped-source, and
-torrent-persistence handoffs. The get-peers worker publishes successful
-nonempty peer vectors through the metainfo-request handoff. The scrape worker
-publishes successful raw BEP-33 Bloom filters through the scraped-source
-handoff. The request-metainfo worker publishes allowed verified metainfo
-through the torrent-persistence handoff.
+torrent-persistence handoffs, and a pure torrent-persistence planner. The
+get-peers worker publishes successful nonempty peer vectors through the
+metainfo-request handoff. The scrape worker publishes successful raw BEP-33
+Bloom filters through the scraped-source handoff. The request-metainfo worker
+publishes allowed verified metainfo through the torrent-persistence handoff.
 No concrete peer-wire metainfo requester, request-stage persistent-blocking
 adapter, torrent-persistence worker, or Rust production application composition
 exists yet. The scraped-source worker and writer are not wired into an
@@ -239,8 +239,36 @@ checking, strict Clippy, rustdoc, formatting, and diff checks also passed.
 
 Construction starts no task. The route does not implement Go's maximum-1,000,
 60-second persist-torrents batcher, its output-capacity-one writer boundary,
-deduplication, model projection, database writes, retries, metrics,
-supervision, or application ownership.
+database writes, retries, metrics, supervision, or application ownership. The
+separate pure planner implements the bounded deduplication and model projection
+described below without owning this route.
+
+### Pure torrent-persistence planner
+
+`DhtTorrentPlanner` accepts one ordered request slice and an already-resolved
+full-v2-to-primary snapshot. It returns inert writer-eligible rows, exact
+classifier groups and queue-job values, deterministic scrape candidates,
+typed projection failures and availability diagnostics, and conservation
+counters. `v2_lookup_keys` supplies the sorted unique full-v2 keys that a later
+lookup adapter must resolve.
+
+Planning preserves Go's v2-cross-primary filter before exact-primary
+first-wins collapse. An identity-invalid request is never allowed to reserve a
+full-v2 key, but it still reserves its exact requested primary and scrape
+candidate before its typed projection failure. Successful projections preserve
+the default 100-file threshold, optional pieces policy, nullable blob and file
+extension semantics, DHT source association, and 100-hash classifier jobs with
+a 60-second delay. Blob encoding failure retains the relational projection and
+classifier group while leaving blob, file extensions, and compressed byte
+count null.
+
+The planner performs no lookup, route receive, clock read, database transaction,
+queue insertion, scrape send, retry, metric, logging, lifecycle, or shutdown
+work. Its deterministic scrape order is a Rust hardening over Go's unspecified
+map iteration. The future owned worker and writer remain responsible for lookup
+chunking and fail-open policy, batching and flush timing, timestamps, atomic
+transaction execution, fanout after a committed write, and typed shutdown and
+outcome accounting.
 
 ### Scraped-source handoff route
 
@@ -1500,6 +1528,11 @@ beyond numeric scope; or concurrent external pending-send accounting outside
 the fixture's prequeued inputs. Rust's typed input EOF does not reproduce Go's
 manual lane-error semantics.
 
+The strict torrent-persistence fixture consumer does not execute the separate
+Rust planner; the planner's own tests replay the fixture's parsed models,
+deduplication matrix, and classifier job evidence without upgrading the Go
+oracle's runtime nonclaims.
+
 They also do not claim a live metainfo TCP handshake, extension negotiation,
 piece transfer, requester, or end-to-end requester hash verification;
 production banning behavior beyond the frozen default-checker row; real
@@ -1545,8 +1578,10 @@ The following remain deliberately outside this checkpoint:
   verification;
 - a concrete `DhtInfoHashBlocker` adapter to the persistent blocking manager,
   including production flush and failure policy;
-- the downstream torrent-persistence batcher, deduplication, model projection,
-  database writer, and ownership of the unique torrent-persistence receiver;
+- the downstream torrent-persistence batcher, resolved-v2 lookup adapter,
+  database writer, scrape fanout, and ownership of the unique
+  torrent-persistence receiver; the pure deduplication and model-projection
+  planner exists but performs none of those effects;
 - production construction, supervision, shutdown wiring, metrics, retry, and
   operator failure policy for the existing Rust request-metainfo worker;
 - a producer-side `closed()` waiter on the typed triage input route;

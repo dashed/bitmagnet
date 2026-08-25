@@ -13,6 +13,7 @@ bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-dht = { path = "../bitmagnet-dht" }
 bitmagnet-metainfo = { path = "../bitmagnet-metainfo" }
 bitmagnet-model = { path = "../bitmagnet-model" }
+bitmagnet-queue = { path = "../bitmagnet-queue" }
 async-trait.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
@@ -22,6 +23,7 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+sha1.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
