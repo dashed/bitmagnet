@@ -236,6 +236,11 @@ pub struct DhtInfoHashTriageWorker {
 }
 
 impl DhtInfoHashTriageWorker {
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtInfoHashTriageConfig {
+        self.config
+    }
+
     /// Construct the production-policy worker with an injected filter and
     /// lookup and the system wall clock.
     pub fn new(

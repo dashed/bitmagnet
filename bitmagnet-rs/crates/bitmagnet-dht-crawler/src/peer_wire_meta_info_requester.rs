@@ -277,6 +277,11 @@ async fn connect_ipv4(peer: SocketAddrV4) -> Result<TcpStream, DhtPeerWireMetaIn
 
 #[async_trait]
 impl DhtMetaInfoRequester for DhtPeerWireMetaInfoRequester {
+    #[cfg(test)]
+    fn peer_wire_config_for_test(&self) -> Option<DhtPeerWireMetaInfoRequesterConfig> {
+        Some(self.config)
+    }
+
     async fn request(
         &self,
         info_hash: Id20,

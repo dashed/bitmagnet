@@ -459,6 +459,11 @@ pub struct DhtPersistTorrentWorker {
 }
 
 impl DhtPersistTorrentWorker {
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtPersistTorrentWorkerConfig {
+        self.config
+    }
+
     /// Construct a worker with production batching, lookup, and planner
     /// defaults, returning a sender-free statistics handle alongside it.
     pub fn new(

@@ -33,6 +33,11 @@ pub trait DhtMetaInfoRequester: Send + Sync {
         info_hash: Id20,
         peer: SocketAddr,
     ) -> Result<ParsedInfo, RequestMetaInfoCollaboratorError>;
+
+    #[cfg(test)]
+    fn peer_wire_config_for_test(&self) -> Option<crate::DhtPeerWireMetaInfoRequesterConfig> {
+        None
+    }
 }
 
 /// Side-effect-free policy check applied to verified metainfo.
@@ -277,6 +282,13 @@ pub struct DhtRequestMetaInfoWorker {
 }
 
 impl DhtRequestMetaInfoWorker {
+    #[cfg(test)]
+    pub(crate) fn peer_wire_config_for_test(
+        &self,
+    ) -> Option<crate::DhtPeerWireMetaInfoRequesterConfig> {
+        self.requester.peer_wire_config_for_test()
+    }
+
     pub fn new(
         input: DhtRequestMetaInfoReceiver,
         persist_torrent: DhtPersistTorrentInput,

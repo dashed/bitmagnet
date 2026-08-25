@@ -52,7 +52,8 @@ mod scrape_parity;
 
 pub use app_config::{DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DEFAULT_BOOTSTRAP_NODES};
 pub use downstream_composition::{
-    DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamStatsHandle, DhtCrawlerDownstreamWorkers,
+    DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamStatsHandle,
+    DhtCrawlerDownstreamWorkers,
 };
 pub use get_peers::{
     DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,

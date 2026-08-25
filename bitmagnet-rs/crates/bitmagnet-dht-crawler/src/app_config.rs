@@ -5,6 +5,11 @@ use std::time::Duration;
 use bitmagnet_dht::DhtRuntimeConfig;
 use clap::Parser;
 
+use crate::{
+    DhtCrawlerDownstreamConfig, DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig,
+    DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
+};
+
 /// Go's ordered `dht_crawler.bootstrap_nodes` default.
 ///
 /// Order is application behavior: the bootstrap producer traverses this list in
@@ -23,7 +28,9 @@ const DEFAULT_SCALING_FACTOR: usize = 10;
 const EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DEFAULT_SAVE_FILES_THRESHOLD: u64 = 100;
 const DEFAULT_SAVE_PIECES: bool = false;
+#[cfg(test)]
 const DEFAULT_RESCRAPE_THRESHOLD: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+#[cfg(test)]
 const DEFAULT_METAINFO_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const DEFAULT_METAINFO_KEY_MUTEX_SIZE: usize = 1_000;
 
@@ -36,10 +43,10 @@ const DEFAULT_METAINFO_KEY_MUTEX_SIZE: usize = 1_000;
 /// this type's `Debug` implementation. The expected Goose version is a
 /// non-secret admission pin and is therefore kept here.
 ///
-/// Several Go-compatible knobs are represented even though the current Rust
-/// composition still fixes their effective values. [`Self::validate`] rejects
-/// every unsupported nondefault, preventing a deployment from silently
-/// accepting configuration it cannot honor.
+/// Go-compatible knobs are represented even when the current Rust composition
+/// still fixes their effective values. [`Self::validate`] rejects every
+/// unsupported nondefault, preventing a deployment from silently accepting
+/// configuration it cannot honor.
 #[derive(Clone, Debug, Parser, PartialEq, Eq)]
 #[command(
     name = "bitmagnet-dht-crawler",
@@ -166,26 +173,6 @@ impl DhtCrawlerAppConfig {
             &EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL,
         )?;
         require_supported(
-            "DHT_CRAWLER_SAVE_FILES_THRESHOLD",
-            &self.save_files_threshold,
-            &DEFAULT_SAVE_FILES_THRESHOLD,
-        )?;
-        require_supported(
-            "DHT_CRAWLER_SAVE_PIECES",
-            &self.save_pieces,
-            &DEFAULT_SAVE_PIECES,
-        )?;
-        require_supported(
-            "DHT_CRAWLER_RESCRAPE_THRESHOLD",
-            &self.rescrape_threshold,
-            &DEFAULT_RESCRAPE_THRESHOLD,
-        )?;
-        require_supported(
-            "METAINFO_REQUESTER_REQUEST_TIMEOUT",
-            &self.metainfo_request_timeout,
-            &DEFAULT_METAINFO_REQUEST_TIMEOUT,
-        )?;
-        require_supported(
             "METAINFO_REQUESTER_KEY_MUTEX_SIZE",
             &self.metainfo_key_mutex_size,
             &DEFAULT_METAINFO_KEY_MUTEX_SIZE,
@@ -200,6 +187,32 @@ impl DhtCrawlerAppConfig {
             bind_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.dht_server_port),
             query_timeout: self.dht_server_query_timeout,
             ..DhtRuntimeConfig::default()
+        })
+    }
+
+    /// Project validated application policy into the taskless downstream
+    /// composition while retaining every unrelated worker default.
+    pub fn downstream_config(
+        &self,
+    ) -> Result<DhtCrawlerDownstreamConfig, DhtCrawlerAppConfigError> {
+        self.validate()?;
+        Ok(DhtCrawlerDownstreamConfig {
+            triage: DhtInfoHashTriageConfig {
+                save_files_threshold: self.save_files_threshold,
+                rescrape_threshold: self.rescrape_threshold,
+                ..DhtInfoHashTriageConfig::default()
+            },
+            persist_torrent: DhtPersistTorrentWorkerConfig {
+                plan_config: DhtTorrentPlanConfig {
+                    save_files_threshold: self.save_files_threshold,
+                    save_pieces: self.save_pieces,
+                },
+                ..DhtPersistTorrentWorkerConfig::default()
+            },
+            metainfo_requester: DhtPeerWireMetaInfoRequesterConfig {
+                request_timeout: self.metainfo_request_timeout,
+                ..DhtPeerWireMetaInfoRequesterConfig::default()
+            },
         })
     }
 
@@ -253,6 +266,14 @@ impl TryFrom<&DhtCrawlerAppConfig> for DhtRuntimeConfig {
 
     fn try_from(value: &DhtCrawlerAppConfig) -> Result<Self, Self::Error> {
         value.dht_runtime_config()
+    }
+}
+
+impl TryFrom<&DhtCrawlerAppConfig> for DhtCrawlerDownstreamConfig {
+    type Error = DhtCrawlerAppConfigError;
+
+    fn try_from(value: &DhtCrawlerAppConfig) -> Result<Self, Self::Error> {
+        value.downstream_config()
     }
 }
 
@@ -385,10 +406,11 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches, Parser};
 
     use super::{
-        parse_go_duration, DhtCrawlerAppConfig, DEFAULT_BOOTSTRAP_NODES,
-        DEFAULT_METAINFO_KEY_MUTEX_SIZE, DEFAULT_METAINFO_REQUEST_TIMEOUT,
-        DEFAULT_RESCRAPE_THRESHOLD, DEFAULT_SAVE_FILES_THRESHOLD, DEFAULT_SAVE_PIECES,
-        DEFAULT_SCALING_FACTOR, EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL,
+        parse_go_duration, DhtCrawlerAppConfig, DhtCrawlerDownstreamConfig,
+        DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig,
+        DhtTorrentPlanConfig, DEFAULT_BOOTSTRAP_NODES, DEFAULT_METAINFO_KEY_MUTEX_SIZE,
+        DEFAULT_METAINFO_REQUEST_TIMEOUT, DEFAULT_RESCRAPE_THRESHOLD, DEFAULT_SAVE_FILES_THRESHOLD,
+        DEFAULT_SAVE_PIECES, DEFAULT_SCALING_FACTOR, EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL,
     };
 
     fn supported_args() -> Vec<&'static str> {
@@ -454,6 +476,11 @@ mod tests {
         assert_eq!(
             config.metainfo_key_mutex_size(),
             DEFAULT_METAINFO_KEY_MUTEX_SIZE
+        );
+        assert_eq!(
+            config.downstream_config().expect("downstream config"),
+            DhtCrawlerDownstreamConfig::default(),
+            "application defaults must preserve every downstream worker default"
         );
     }
 
@@ -561,7 +588,64 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_nondefaults_are_rejected_instead_of_ignored() {
+    fn supported_downstream_nondefaults_project_to_every_consuming_policy() {
+        for (threshold, save_pieces) in [("0", "false"), ("500000", "true")] {
+            let mut args = supported_args();
+            for (flag, replacement) in [
+                ("--dht-crawler-save-files-threshold", threshold),
+                ("--dht-crawler-save-pieces", save_pieces),
+                ("--dht-crawler-rescrape-threshold", "48h"),
+                ("--metainfo-requester-request-timeout", "1500ms"),
+            ] {
+                let value_index = args
+                    .iter()
+                    .position(|value| *value == flag)
+                    .expect("supported args contain downstream flag")
+                    + 1;
+                args[value_index] = replacement;
+            }
+
+            let config = DhtCrawlerAppConfig::try_parse_from(args).expect("typed nondefaults");
+            config.validate().expect("wired nondefaults are supported");
+            let downstream = config.downstream_config().expect("downstream projection");
+            let threshold = threshold.parse::<u64>().unwrap();
+            let save_pieces = save_pieces.parse::<bool>().unwrap();
+
+            assert_eq!(
+                downstream.triage,
+                DhtInfoHashTriageConfig {
+                    save_files_threshold: threshold,
+                    rescrape_threshold: Duration::from_secs(48 * 60 * 60),
+                    ..DhtInfoHashTriageConfig::default()
+                }
+            );
+            assert_eq!(
+                downstream.persist_torrent,
+                DhtPersistTorrentWorkerConfig {
+                    plan_config: DhtTorrentPlanConfig {
+                        save_files_threshold: threshold,
+                        save_pieces,
+                    },
+                    ..DhtPersistTorrentWorkerConfig::default()
+                }
+            );
+            assert_eq!(
+                downstream.metainfo_requester,
+                DhtPeerWireMetaInfoRequesterConfig {
+                    request_timeout: Duration::from_millis(1_500),
+                    ..DhtPeerWireMetaInfoRequesterConfig::default()
+                }
+            );
+            assert_eq!(
+                DhtCrawlerDownstreamConfig::try_from(&config).unwrap(),
+                downstream,
+                "the trait and method projections must be identical"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_remaining_nondefaults_are_rejected_instead_of_ignored() {
         let cases = [
             (
                 "--dht-crawler-scaling-factor",
@@ -577,26 +661,6 @@ mod tests {
                 "--dht-crawler-reseed-bootstrap-nodes-interval",
                 "11m",
                 "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL",
-            ),
-            (
-                "--dht-crawler-save-files-threshold",
-                "101",
-                "DHT_CRAWLER_SAVE_FILES_THRESHOLD",
-            ),
-            (
-                "--dht-crawler-save-pieces",
-                "true",
-                "DHT_CRAWLER_SAVE_PIECES",
-            ),
-            (
-                "--dht-crawler-rescrape-threshold",
-                "721h",
-                "DHT_CRAWLER_RESCRAPE_THRESHOLD",
-            ),
-            (
-                "--metainfo-requester-request-timeout",
-                "7s",
-                "METAINFO_REQUESTER_REQUEST_TIMEOUT",
             ),
             (
                 "--metainfo-requester-key-mutex-size",

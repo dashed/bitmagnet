@@ -18,15 +18,28 @@ use bitmagnet_dht::{
 use crate::{
     dht_persist_source_channel, dht_persist_torrent_channel, dht_request_meta_info_channel,
     DefaultDhtMetaInfoBanningChecker, DhtGetPeersWorker, DhtGetPeersWorkerStatsHandle,
-    DhtInfoHashBlockFilter, DhtInfoHashBlocker, DhtInfoHashTriageStatsHandle,
-    DhtInfoHashTriageWorker, DhtMetaInfoBanningChecker, DhtMetaInfoRequester,
-    DhtPeerWireMetaInfoRequester, DhtPersistSourceWorker, DhtPersistSourceWorkerStatsHandle,
-    DhtPersistTorrentWorker, DhtPersistTorrentWorkerStatsHandle, DhtRequestMetaInfoWorker,
+    DhtInfoHashBlockFilter, DhtInfoHashBlocker, DhtInfoHashTriageConfig,
+    DhtInfoHashTriageStatsHandle, DhtInfoHashTriageWorker, DhtMetaInfoBanningChecker,
+    DhtMetaInfoRequester, DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
+    DhtPersistSourceWorker, DhtPersistSourceWorkerStatsHandle, DhtPersistTorrentWorker,
+    DhtPersistTorrentWorkerConfig, DhtPersistTorrentWorkerStatsHandle, DhtRequestMetaInfoWorker,
     DhtRequestMetaInfoWorkerStatsHandle, DhtScrapeWorker, DhtScrapeWorkerStatsHandle,
     DhtSourceBatchWriter, DhtTorrentBatchWriter, DhtTorrentTriageLookup, DhtTorrentV2Lookup,
     PgDhtSourceBatchWriter, PgDhtTorrentBatchWriter, PgDhtTorrentTriageLookup,
-    PgDhtTorrentV2Lookup,
+    PgDhtTorrentV2Lookup, SystemDhtInfoHashTriageClock,
 };
+
+/// Policy knobs consumed by the concrete downstream crawler composition.
+///
+/// Each field retains the complete worker policy so application projection can
+/// override the Go-compatible values without changing batching, connection,
+/// or lookup defaults owned by the individual workers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DhtCrawlerDownstreamConfig {
+    pub triage: DhtInfoHashTriageConfig,
+    pub persist_torrent: DhtPersistTorrentWorkerConfig,
+    pub metainfo_requester: DhtPeerWireMetaInfoRequesterConfig,
+}
 
 /// The six concrete downstream workers, with every internal route capability
 /// moved into exactly the worker that consumes or produces through it.
@@ -90,6 +103,32 @@ impl DhtCrawlerDownstreamComposition {
         pool: &PgPool,
         metainfo_peer_id: Id20,
     ) -> Self {
+        Self::with_config(
+            triage_receiver,
+            discovery,
+            client,
+            table,
+            pool,
+            metainfo_peer_id,
+            DhtCrawlerDownstreamConfig::default(),
+        )
+    }
+
+    /// Construct all six downstream workers with explicit downstream policy.
+    ///
+    /// Construction remains taskless and offline. Policies not represented by
+    /// [`DhtCrawlerDownstreamConfig`] retain the exact worker defaults used by
+    /// [`Self::new`].
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub fn with_config(
+        triage_receiver: DhtInfoHashTriageReceiver,
+        discovery: DhtDiscoverySender,
+        client: &DhtRuntimeClient,
+        table: &KTable,
+        pool: &PgPool,
+        metainfo_peer_id: Id20,
+        config: DhtCrawlerDownstreamConfig,
+    ) -> Self {
         let (get_peers_input, get_peers_receiver) = dht_get_peers_channel();
         let (scrape_input, scrape_receiver) = dht_scrape_channel();
         let persist_torrent_scrape_input = scrape_input.clone();
@@ -111,17 +150,20 @@ impl DhtCrawlerDownstreamComposition {
             Arc::new(PgDhtTorrentV2Lookup::new(pool.clone()));
         let torrent_writer: Arc<dyn DhtTorrentBatchWriter> =
             Arc::new(PgDhtTorrentBatchWriter::new(pool.clone()));
-        let requester: Arc<dyn DhtMetaInfoRequester> =
-            Arc::new(DhtPeerWireMetaInfoRequester::new(metainfo_peer_id));
+        let requester: Arc<dyn DhtMetaInfoRequester> = Arc::new(
+            DhtPeerWireMetaInfoRequester::with_config(metainfo_peer_id, config.metainfo_requester),
+        );
         let checker: Arc<dyn DhtMetaInfoBanningChecker> =
             Arc::new(DefaultDhtMetaInfoBanningChecker);
 
-        let (triage, triage_stats) = DhtInfoHashTriageWorker::new(
+        let (triage, triage_stats) = DhtInfoHashTriageWorker::with_config(
             triage_receiver,
             get_peers_input,
             scrape_input,
             block_filter,
             triage_lookup,
+            Arc::new(SystemDhtInfoHashTriageClock),
+            config.triage,
         );
         let (get_peers, get_peers_stats) = DhtGetPeersWorker::new(
             get_peers_receiver,
@@ -137,11 +179,12 @@ impl DhtCrawlerDownstreamComposition {
             checker,
             blocker,
         );
-        let (persist_torrent, persist_torrent_stats) = DhtPersistTorrentWorker::new(
+        let (persist_torrent, persist_torrent_stats) = DhtPersistTorrentWorker::with_config(
             persist_torrent_receiver,
             persist_torrent_scrape_input,
             torrent_lookup,
             torrent_writer,
+            config.persist_torrent,
         );
         let (scrape, scrape_stats) = DhtScrapeWorker::new(
             scrape_receiver,
@@ -207,9 +250,82 @@ mod tests {
 
     #[test]
     fn public_bundles_and_stats_handles_are_send_sync() {
+        assert_send_sync::<DhtCrawlerDownstreamConfig>();
         assert_send_sync::<DhtCrawlerDownstreamWorkers>();
         assert_send_sync::<DhtCrawlerDownstreamStatsHandle>();
         assert_send_sync::<DhtCrawlerDownstreamComposition>();
+    }
+
+    #[tokio::test]
+    async fn with_config_installs_nondefault_policy_into_each_concrete_consumer() {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let mut runtime = DhtRuntime::start(DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+            ..DhtRuntimeConfig::default()
+        })
+        .await
+        .unwrap();
+        let client = runtime.client();
+        let table = runtime.table().clone();
+        let discovery = runtime
+            .take_discovered_nodes()
+            .expect("the runtime exposes its discovery receiver once")
+            .try_sender()
+            .expect("the live runtime retains the original discovery sender");
+        let (_triage_input, triage_receiver) = dht_info_hash_triage_channel(
+            NonZeroUsize::new(DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY).unwrap(),
+        );
+        let config = DhtCrawlerDownstreamConfig {
+            triage: DhtInfoHashTriageConfig {
+                save_files_threshold: 500_000,
+                rescrape_threshold: Duration::from_secs(48 * 60 * 60),
+                ..DhtInfoHashTriageConfig::default()
+            },
+            persist_torrent: DhtPersistTorrentWorkerConfig {
+                plan_config: crate::DhtTorrentPlanConfig {
+                    save_files_threshold: 500_000,
+                    save_pieces: true,
+                },
+                ..DhtPersistTorrentWorkerConfig::default()
+            },
+            metainfo_requester: DhtPeerWireMetaInfoRequesterConfig {
+                request_timeout: Duration::from_millis(1_500),
+                ..DhtPeerWireMetaInfoRequesterConfig::default()
+            },
+        };
+
+        let composition = DhtCrawlerDownstreamComposition::with_config(
+            triage_receiver,
+            discovery,
+            &client,
+            &table,
+            &pool,
+            peer_id(),
+            config,
+        );
+
+        assert_eq!(composition.workers.triage.config_for_test(), config.triage);
+        assert_eq!(
+            composition.workers.persist_torrent.config_for_test(),
+            config.persist_torrent
+        );
+        assert_eq!(
+            composition
+                .workers
+                .request_meta_info
+                .peer_wire_config_for_test(),
+            Some(config.metainfo_requester)
+        );
+
+        drop((composition, client, table));
+        assert!(matches!(
+            runtime.shutdown().await.unwrap(),
+            DhtRuntimeExit::Shutdown
+        ));
+        pool.close().await;
     }
 
     #[tokio::test]
