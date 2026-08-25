@@ -9,7 +9,7 @@ description = "BitTorrent DHT KRPC contracts and owned Tokio runtime."
 
 [dependencies]
 bendy.workspace = true
-fastrand.workspace = true
+bitmagnet-bloom = { path = "../bitmagnet-bloom" }
 getrandom.workspace = true
 hex.workspace = true
 md-5.workspace = true

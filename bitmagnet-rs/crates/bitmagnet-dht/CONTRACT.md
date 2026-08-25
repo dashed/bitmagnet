@@ -3210,14 +3210,15 @@ the poisoned state would incorrectly expose it as valid. This is a Rust fail-
 fast delta from Go's mutex, not a claim about mutex fairness, throughput,
 which contending caller wins, or cross-thread completion order.
 
-The workspace adds a direct `fastrand = "2.4.1"` dependency, and
-`bitmagnet-dht` opts into that workspace pin. The version and checksum were
-already present transitively in `Cargo.lock`; this slice adds only `fastrand`
-to the DHT package's dependency list. Each fresh deduper constructs one
-`fastrand::Rng`, stores it under the same mutex as the filter state, and uses
-it only to choose a start in `0..10_000_000`. Clones share that one stream.
-Rust does not reuse Go's process-global `math/rand` stream and claims no exact
-Go seed, offset, cell, or random sequence.
+The workspace adds a shared `bitmagnet-bloom` crate and a direct
+`fastrand = "2.4.1"` dependency used by that crate. `bitmagnet-dht` depends on
+the in-workspace Bloom crate rather than on `fastrand` directly. The version
+and checksum were already present transitively in `Cargo.lock`. Each fresh
+deduper constructs the shared primitive with one `fastrand::Rng`, stores the
+source under the same mutex as the filter state, and uses it only to choose a
+start in `0..10_000_000`. Clones share that one stream. Rust does not reuse
+Go's process-global `math/rand` stream and claims no exact Go seed, offset,
+cell, or random sequence.
 
 A private `cfg(test)` decrement-start source can replace the random source with
 an ordered script. It freezes cell-level transition tests without becoming a
@@ -3245,7 +3246,11 @@ geometry and derived values, FNV-1 double-hash kernel, global-random adjacent
 decrement shape, probabilistic scope, module identity and sums, Go module and
 sum lines, adjacent-duplicate scope, evidence, and all sixteen Go nonclaims.
 The consumer also binds the Go-derived serialized length 2,500,091 as source
-metadata without implementing or claiming that serialization format in Rust.
+metadata. The shared `bitmagnet-bloom` primitive now implements a strict,
+bounded codec for the raw BoomFilters stream, while `DhtInfoHashDeduper`
+deliberately exposes no serialization API. This older ignore-hashes fixture
+does not bind or prove exact serialized contents; exact production-geometry
+wire bytes remain a separate parity checkpoint.
 
 The source row fixes these seven path digests:
 
@@ -3281,25 +3286,27 @@ so the deterministic runtime prefix does not rely on an accidental cross-ID
 false positive. Neither the Go nor Rust gate claims which contending caller
 returns the single false.
 
-Eleven focused tests cover the two strict-consumer rows plus fixed geometry,
-`Default`, `Send + Sync`, exact FNV-1 sums and double-hash indexes, pairwise
-runtime-vector separation, packed-cell neighbor preservation, saturating
-decrement, modulo wrap, membership-before-decrement, restore-to-maximum,
-adjacent duplicates, scripted stable eviction, clone sharing, fresh-instance
-separation, and eight-thread atomicity. The checkpoint passed the eleven-test
-focus, that focus one hundred consecutive times, the full DHT package and
-doctests, the package check, rustdoc with warnings denied, formatting, strict
-all-target and all-feature Clippy with warnings denied, and diff whitespace
-checks.
+Nine focused DHT tests cover the two strict-consumer rows plus `Default`,
+`Send + Sync`, pairwise runtime-vector separation, adjacent duplicates,
+scripted stable eviction, clone sharing, fresh-instance separation, and
+eight-thread atomicity. The shared Bloom crate's eleven tests cover validated
+geometry including the Go `uint32` mutation-offset boundary, exact FNV-1 sums
+and double-hash indexes, packed-cell neighbor preservation, arbitrary bucket
+widths, saturating decrement, modulo wrap, membership-before-decrement,
+restore-to-maximum, and strict bounded raw-codec validation and round trips.
+The checkpoint passed both focused suites, the full DHT package and doctests,
+package checks, rustdoc with warnings denied, formatting, strict all-target and
+all-feature Clippy with warnings denied, and diff whitespace checks.
 
-This slice adds no BoomFilters serialization or deserialization, public
+`DhtInfoHashDeduper` still adds no serialization or deserialization, public
 configuration, public constants, public seed, reset, membership-only test,
 stats, metrics, task, timer, async operation, persistence, restart recovery,
 database state, KTable state, response parsing, triage message, queue,
 callback, retry, worker, producer change, supervisor child, runtime or
 application wiring, external traffic, deployment, production readiness, or
-rollout. The deduper is a standalone, publicly constructible prerequisite but
-is not used by a production path in this slice.
+rollout. The shared Bloom crate's raw codec does not alter that public deduper
+surface or make this slice a production path. The deduper remains a
+standalone, publicly constructible prerequisite.
 
 No exact random decrement offsets, Go `math/rand` seed or sequence, exact-set
 semantics, measured or guaranteed false-positive or false-negative rate,

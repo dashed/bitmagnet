@@ -28,6 +28,7 @@ members = [
     "crates/bitmagnet-content-search",
     # B′ oracle reader: replays the flags-ON tape Go records.
     "crates/bitmagnet-tape",
+    "crates/bitmagnet-bloom",
     "crates/bitmagnet-dht",
     "crates/bitmagnet-dht-crawler",
 ]

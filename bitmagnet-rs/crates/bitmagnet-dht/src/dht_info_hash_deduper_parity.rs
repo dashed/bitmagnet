@@ -32,7 +32,7 @@ const DELIBERATE_RUST_DELTAS: [&str; 4] = [
     "one_per_instance_fastrand_stream_replaces_the_Go_process_global_math_rand_stream",
     "fatal_Rust_mutex_poison_replaces_the_Go_mutex_without_poison_state",
     "a_cloneable_fixed_public_capability_replaces_the_internal_Go_crawler_wrapper",
-    "Rust_binds_but_does_not_implement_the_BoomFilters_serialization_format",
+    "the_shared_Rust_primitive_adds_a_strict_bounded_BoomFilters_raw_codec_while_the_deduper_exposes_no_serialization",
 ];
 
 const RUST_NONCLAIMS: [&str; 7] = [
@@ -267,7 +267,7 @@ fn fixture_schema_source_contract_and_partition_are_exact() {
             "one_per_instance_fastrand_stream_replaces_the_Go_process_global_math_rand_stream",
             "fatal_Rust_mutex_poison_replaces_the_Go_mutex_without_poison_state",
             "a_cloneable_fixed_public_capability_replaces_the_internal_Go_crawler_wrapper",
-            "Rust_binds_but_does_not_implement_the_BoomFilters_serialization_format",
+            "the_shared_Rust_primitive_adds_a_strict_bounded_BoomFilters_raw_codec_while_the_deduper_exposes_no_serialization",
         ]
     );
     assert_eq!(

@@ -1,0 +1,15 @@
+[package]
+name = "bitmagnet-bloom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "BoomFilters-compatible stable Bloom filter primitive for bitmagnet."
+
+[dependencies]
+fastrand.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

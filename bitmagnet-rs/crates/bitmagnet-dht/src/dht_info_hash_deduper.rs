@@ -9,19 +9,24 @@
 
 #[cfg(test)]
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+
+use bitmagnet_bloom::{
+    DecrementStartSource as BloomDecrementStartSource, RandomDecrementStartSource,
+    StableBloomFilter, StableBloomGeometry,
+};
 
 use crate::Id20;
 
 const CELL_COUNT: usize = 10_000_000;
 const BITS_PER_CELL: usize = 2;
-const CELLS_PER_BYTE: usize = 8 / BITS_PER_CELL;
 const HASH_FUNCTIONS: usize = 5;
 const DECREMENT_CELLS: usize = 49;
+#[cfg(test)]
 const MAX_CELL_VALUE: u8 = 3;
+#[cfg(test)]
 const CELL_PAYLOAD_BYTES: usize = CELL_COUNT * BITS_PER_CELL / 8;
-const FNV1_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV1_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Cloneable, fixed-geometry stable Bloom deduper for v1 info hashes.
 ///
@@ -36,13 +41,12 @@ pub struct DhtInfoHashDeduper {
 }
 
 struct DhtInfoHashDeduperState {
-    cells: Box<[u8]>,
-    index_buffer: [usize; HASH_FUNCTIONS],
+    filter: StableBloomFilter,
     decrement_starts: DecrementStartSource,
 }
 
 enum DecrementStartSource {
-    Random(fastrand::Rng),
+    Random(RandomDecrementStartSource),
     #[cfg(test)]
     Scripted(VecDeque<usize>),
 }
@@ -57,7 +61,9 @@ impl DhtInfoHashDeduper {
     /// Construct one fresh filter with the fixed Go production geometry.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_source(DecrementStartSource::Random(fastrand::Rng::new()))
+        Self::with_source(DecrementStartSource::Random(
+            RandomDecrementStartSource::new(),
+        ))
     }
 
     /// Test whether all membership cells were nonzero, then add the info hash.
@@ -71,32 +77,16 @@ impl DhtInfoHashDeduper {
             .inner
             .lock()
             .expect("DHT info-hash deduper state lock poisoned");
-        state.index_buffer = hash_indices(info_hash);
-        let already_present = state
-            .index_buffer
-            .iter()
-            .all(|&index| get_cell(&state.cells, index) != 0);
-
-        let decrement_start = state.decrement_starts.next();
-        decrement_adjacent(
-            &mut state.cells,
-            decrement_start,
-            DECREMENT_CELLS,
-            CELL_COUNT,
-        );
-
-        let indices = state.index_buffer;
-        for index in indices {
-            set_cell(&mut state.cells, index, MAX_CELL_VALUE);
-        }
-        already_present
+        let state = &mut *state;
+        state
+            .filter
+            .test_and_add(info_hash.as_bytes(), &mut state.decrement_starts)
     }
 
     fn with_source(decrement_starts: DecrementStartSource) -> Self {
         Self {
             inner: Arc::new(Mutex::new(DhtInfoHashDeduperState {
-                cells: vec![0; CELL_PAYLOAD_BYTES].into_boxed_slice(),
-                index_buffer: [0; HASH_FUNCTIONS],
+                filter: StableBloomFilter::new(deduper_geometry()),
                 decrement_starts,
             })),
         }
@@ -113,10 +103,10 @@ impl DhtInfoHashDeduper {
     }
 }
 
-impl DecrementStartSource {
-    fn next(&mut self) -> usize {
+impl BloomDecrementStartSource for DecrementStartSource {
+    fn next_start(&mut self, cell_count: NonZeroUsize) -> usize {
         match self {
-            Self::Random(rng) => rng.usize(..CELL_COUNT),
+            Self::Random(source) => source.next_start(cell_count),
             #[cfg(test)]
             Self::Scripted(starts) => starts
                 .pop_front()
@@ -125,46 +115,26 @@ impl DecrementStartSource {
     }
 }
 
+fn deduper_geometry() -> StableBloomGeometry {
+    StableBloomGeometry::new(
+        CELL_COUNT,
+        BITS_PER_CELL as u8,
+        HASH_FUNCTIONS,
+        DECREMENT_CELLS,
+    )
+    .expect("fixed DHT info-hash deduper geometry is valid")
+}
+
+#[cfg(test)]
 fn fnv1_64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(FNV1_OFFSET, |hash, &byte| {
-        hash.wrapping_mul(FNV1_PRIME) ^ u64::from(byte)
-    })
+    bitmagnet_bloom::fnv1_64(bytes)
 }
 
+#[cfg(test)]
 fn hash_indices(info_hash: Id20) -> [usize; HASH_FUNCTIONS] {
-    let sum = fnv1_64(info_hash.as_bytes());
-    let low = u64::from(sum as u32);
-    let high = u64::from((sum >> 32) as u32);
-    std::array::from_fn(|index| ((low + high * index as u64) % CELL_COUNT as u64) as usize)
-}
-
-fn get_cell(cells: &[u8], index: usize) -> u8 {
-    let byte_index = index / CELLS_PER_BYTE;
-    let shift = (index % CELLS_PER_BYTE) * BITS_PER_CELL;
-    (cells[byte_index] >> shift) & MAX_CELL_VALUE
-}
-
-fn set_cell(cells: &mut [u8], index: usize, value: u8) {
-    debug_assert!(value <= MAX_CELL_VALUE);
-    let byte_index = index / CELLS_PER_BYTE;
-    let shift = (index % CELLS_PER_BYTE) * BITS_PER_CELL;
-    let mask = MAX_CELL_VALUE << shift;
-    cells[byte_index] = (cells[byte_index] & !mask) | ((value & MAX_CELL_VALUE) << shift);
-}
-
-fn decrement_cell(cells: &mut [u8], index: usize) {
-    let value = get_cell(cells, index);
-    if value != 0 {
-        set_cell(cells, index, value - 1);
-    }
-}
-
-fn decrement_adjacent(cells: &mut [u8], start: usize, count: usize, cell_count: usize) {
-    debug_assert!(start < cell_count);
-    debug_assert!(cell_count <= cells.len() * CELLS_PER_BYTE);
-    for offset in 0..count {
-        decrement_cell(cells, (start + offset) % cell_count);
-    }
+    bitmagnet_bloom::hash_indices(info_hash.as_bytes(), deduper_geometry())
+        .try_into()
+        .expect("fixed hash-function count")
 }
 
 #[cfg(test)]
@@ -196,8 +166,8 @@ mod tests {
 
         let deduper = DhtInfoHashDeduper::default();
         let state = deduper.inner.lock().unwrap();
-        assert_eq!(state.cells.len(), CELL_PAYLOAD_BYTES);
-        assert_eq!(state.index_buffer.len(), HASH_FUNCTIONS);
+        assert_eq!(state.filter.geometry(), deduper_geometry());
+        assert_eq!(state.filter.packed_cells().len(), CELL_PAYLOAD_BYTES);
     }
 
     #[test]
@@ -254,58 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn packed_cells_preserve_all_four_neighbors_and_clamp_at_zero() {
-        let mut cells = [0_u8; 2];
-        for (index, value) in [1, 2, 3, 1, 2, 3, 1, 2].into_iter().enumerate() {
-            set_cell(&mut cells, index, value);
-        }
-        assert_eq!(cells, [0b01_11_10_01, 0b10_01_11_10]);
-
-        decrement_cell(&mut cells, 2);
-        decrement_cell(&mut cells, 0);
-        decrement_cell(&mut cells, 0);
-        assert_eq!(
-            (0..8)
-                .map(|index| get_cell(&cells, index))
-                .collect::<Vec<_>>(),
-            vec![0, 2, 2, 1, 2, 3, 1, 2]
-        );
-    }
-
-    #[test]
-    fn adjacent_decrement_wraps_at_the_last_cell() {
-        let mut cells = [0_u8; 2];
-        for index in [0, 1, 6, 7] {
-            set_cell(&mut cells, index, 1);
-        }
-        set_cell(&mut cells, 2, 2);
-
-        decrement_adjacent(&mut cells, 6, 4, 8);
-
-        assert_eq!(get_cell(&cells, 6), 0);
-        assert_eq!(get_cell(&cells, 7), 0);
-        assert_eq!(get_cell(&cells, 0), 0);
-        assert_eq!(get_cell(&cells, 1), 0);
-        assert_eq!(get_cell(&cells, 2), 2);
-    }
-
-    #[test]
     fn membership_test_precedes_decrement_and_every_call_restores_maximum() {
         let info_hash = id("00000000000000000000000000000000000000a1");
         let indices = hash_indices(info_hash);
-        let deduper = DhtInfoHashDeduper::with_decrement_starts([indices[0]]);
-        {
-            let mut state = deduper.inner.lock().unwrap();
-            for index in indices {
-                set_cell(&mut state.cells, index, 1);
-            }
-        }
+        let deduper = DhtInfoHashDeduper::with_decrement_starts([5_000_000, indices[0], 5_000_000]);
 
+        assert!(!deduper.test_and_add(info_hash));
         assert!(deduper.test_and_add(info_hash));
-        let state = deduper.inner.lock().unwrap();
-        assert!(indices
-            .into_iter()
-            .all(|index| get_cell(&state.cells, index) == MAX_CELL_VALUE));
+        assert!(deduper.test_and_add(info_hash));
     }
 
     #[test]
