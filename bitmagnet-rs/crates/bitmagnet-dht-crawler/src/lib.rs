@@ -13,6 +13,7 @@ mod info_hash_triage;
 mod persist_source_route;
 mod pg_torrent_triage_lookup;
 mod request_meta_info_route;
+mod scrape;
 
 #[cfg(test)]
 mod get_peers_parity;
@@ -38,4 +39,8 @@ pub use request_meta_info_route::{
     dht_request_meta_info_channel, DhtMetaInfoRequest, DhtRequestMetaInfoInput,
     DhtRequestMetaInfoInputClosed, DhtRequestMetaInfoReceiver,
     DHT_REQUEST_META_INFO_ROUTE_CAPACITY,
+};
+pub use scrape::{
+    DhtScrapeWorker, DhtScrapeWorkerConfig, DhtScrapeWorkerExit, DhtScrapeWorkerStats,
+    DhtScrapeWorkerStatsHandle,
 };
