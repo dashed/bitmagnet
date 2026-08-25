@@ -10,6 +10,7 @@
 mod blocking_manager_filter;
 mod get_peers;
 mod info_hash_triage;
+mod persist_source;
 mod persist_source_route;
 mod persist_torrent_route;
 mod pg_torrent_triage_lookup;
@@ -37,6 +38,12 @@ pub use info_hash_triage::{
     SystemDhtInfoHashTriageClock, TriageCollaboratorError, DHT_INFO_HASH_TRIAGE_BATCH_INTERVAL,
     DHT_INFO_HASH_TRIAGE_BATCH_LIMIT, DHT_INFO_HASH_TRIAGE_RESCRAPE_THRESHOLD,
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
+};
+pub use persist_source::{
+    DhtPersistSourceWorker, DhtPersistSourceWorkerConfig, DhtPersistSourceWorkerExit,
+    DhtPersistSourceWorkerStats, DhtPersistSourceWorkerStatsHandle, DhtSourceBatchWriter,
+    DhtSourceWrite, PersistSourceCollaboratorError, DHT_PERSIST_SOURCE_BATCH_INTERVAL,
+    DHT_PERSIST_SOURCE_BATCH_LIMIT,
 };
 pub use persist_source_route::{
     dht_persist_source_channel, DhtPersistSourceInput, DhtPersistSourceInputClosed,
