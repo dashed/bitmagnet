@@ -238,8 +238,14 @@ impl DhtDiscoveryReceiver {
     /// Recover a producer for this exact channel while any producer remains.
     ///
     /// The receiver stores only a weak sender, so this capability seam does
-    /// not keep the channel open or delay receiver EOF by itself.
-    pub(crate) fn try_sender(&self) -> Option<DhtDiscoverySender> {
+    /// not keep the channel open or delay receiver EOF by itself. A returned
+    /// sender is strong and does delay EOF until dropped. Explicitly closing
+    /// the receiver does not prevent recovery while another strong producer
+    /// remains, but every recovered-sender offer then reports
+    /// [`DhtDiscoveryOffer::ReceiverClosed`]. `None` means no strong producer
+    /// remains; it does not describe whether the receiver was explicitly
+    /// closed.
+    pub fn try_sender(&self) -> Option<DhtDiscoverySender> {
         self.weak_sender.upgrade().map(|sender| DhtDiscoverySender {
             sender,
             stats: self.stats.clone(),
