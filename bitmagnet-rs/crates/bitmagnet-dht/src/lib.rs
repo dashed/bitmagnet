@@ -18,6 +18,7 @@ mod dht_oldest_node_find_producer;
 mod dht_oldest_node_ping_producer;
 mod dht_responder;
 mod dht_runtime;
+mod dht_sample_infohashes_producer;
 mod dht_send;
 mod dht_supervisor;
 mod inbound;
@@ -96,6 +97,10 @@ pub use dht_runtime::{
     DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig,
     DhtRuntimeControlledQueryError, DhtRuntimeDriverError, DhtRuntimeExit, DhtRuntimeStartError,
     DHT_DISCOVERY_QUEUE_CAPACITY,
+};
+pub use dht_sample_infohashes_producer::{
+    DhtSampleInfoHashesProducer, DhtSampleInfoHashesProducerExit, DhtSampleInfoHashesProducerStats,
+    DhtSampleInfoHashesProducerStatsHandle,
 };
 pub use dht_send::{send_dht_reply, DhtSendError};
 pub use dht_supervisor::{DhtSupervisor, DhtSupervisorExit};

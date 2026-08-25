@@ -304,13 +304,6 @@ impl DhtDiscoveredNodeSampleInfoHashesInput {
     /// Wait until the unique sample-route receiver closes or is dropped.
     ///
     /// This crate-private lifecycle hook consumes no queue capacity.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved for the periodic sample-infohashes producer"
-        )
-    )]
     pub(crate) async fn closed(&self) {
         self.sender.closed().await;
     }
