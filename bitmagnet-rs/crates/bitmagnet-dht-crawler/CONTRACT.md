@@ -5,8 +5,9 @@ protocol, runtime, scheduler, route, and maintenance primitives in
 `bitmagnet-dht`. Go remains the production implementation and source of truth.
 The bounded published checkpoint contains one Rust info-hash-triage worker,
 one strict differential consumer, one concrete PostgreSQL lookup adapter, and
-a thin adapter for the persistent blocking manager. It is not an application
-composition or a live-database integration.
+a thin adapter for the persistent blocking manager, plus one offline concrete
+composition test. It is not a production application composition or a
+live-database integration.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -21,8 +22,9 @@ The implementation checkpoint is
 `102f290e9d50d779c4b5ad05adf0f02f7d825d45`. The strict-consumer checkpoint is
 `3099790291597d4aed4888601d5b184f173f9bdf`. The PostgreSQL lookup checkpoint is
 `18cc4ac47cb4b6186494dde2c244884d105ab749`. The blocking-manager adapter
-checkpoint is `c8e22493e03850d5a61712476dc000459b414438`. Together they publish
-the API and evidence below.
+checkpoint is `c8e22493e03850d5a61712476dc000459b414438`. The offline concrete
+composition checkpoint is `846c4c0f813da949db02a34ce20a78d73eb72a3b`. Together
+they publish the API and evidence below.
 
 ## Public Rust boundary
 
@@ -88,6 +90,39 @@ At the adapter checkpoint, all four focused adapter tests and all 34 crawler
 release tests passed. Release all-target checking, Clippy with warnings denied,
 rustdoc with warnings denied, formatting, and diff checks also passed. These
 are offline source and compile gates, not live PostgreSQL evidence.
+
+### Offline concrete composition proof
+
+The integration test at the concrete-composition checkpoint uses only public
+APIs to construct a lazy caller-owned `PgPool`, one
+`Arc<BlockingManager>` shared through `Arc<dyn DhtInfoHashBlockFilter>`, one
+`Arc<PgDhtTorrentTriageLookup>` shared through
+`Arc<dyn DhtTorrentTriageLookup>`, the concrete triage/get-peers/scrape routes,
+and one real `DhtInfoHashTriageWorker`. The route, manager, lookup, and worker
+constructors start no application worker, and the lazy pool opens no
+connection. SQLx may own an internal pool-maintenance task.
+
+The test queues three triage requests and gives `run` an already-ready shutdown
+future. The worker's biased shutdown branch wins before intake, so it returns
+exactly `Shutdown { queued_dropped: 3, batch_dropped: 0 }`; its stats are the
+default value except for three `shutdown_queued_dropped`. This proves that the
+concrete filter and lookup collaborators were not polled. It also proves that
+the worker drops its sole output capabilities, closes and drains the unique
+triage receiver, and releases its collaborator clones. A subsequent input send
+recovers its exact rejected request.
+
+The retained typed manager then performs an empty `flush` while the lazy pool
+is still open and has size zero. The test drops the remaining collaborators,
+closes the pool last, and observes the closed state. This is a bounded ownership
+and shutdown-order proof only: the empty flush is a no-op, and the test does not
+exercise PostgreSQL, a nonempty persistent Bloom write, UDP, an application
+pipeline task, downstream processing, a supervisor, or a production
+application.
+
+At the concrete-composition checkpoint, the 34 crawler unit tests, the one
+integration test, and doctests passed in release mode. All-target checking,
+Clippy with warnings denied, rustdoc with warnings denied, formatting, and diff
+checks also passed. These gates used no database service or live network.
 
 ### PostgreSQL lookup adapter
 
@@ -198,9 +233,10 @@ It deliberately differs at the surrounding ownership boundary:
   catch-up schedule;
 - filtered hashes route in first-filtered order instead of Go map iteration
   order;
-- the worker consumes abstract async collaborators; this crate supplies a SQLx
-  lookup adapter, but not the persistent Go manager or live PostgreSQL
-  composition;
+- the worker consumes abstract async collaborators; this crate supplies the
+  SQLx lookup and persistent-manager adapters, and proves their public
+  construction in an offline test, but not a live PostgreSQL or production
+  application composition;
 - collaborator failures are counted, drop only the current batch, and continue
   without claiming Go log delivery;
 - shutdown, input EOF, and both downstream closures have typed results and
@@ -381,12 +417,13 @@ external-service behavior; upstream proof that the responding node has peers
 for a sampled hash; ignore-hash provenance; or any Rust API, stats,
 supervision, application, deployment, or production-readiness fact.
 
-The Rust consumer, worker, PostgreSQL adapter, and blocking-manager adapter do
-not claim exact Go map, SQL-result, or delivery order; exact Go SQL text or
-bind cardinality; exact Go wall-clock values or per-item `time.Now()` schedule;
-live PostgreSQL array encoding, schema compatibility, indexes, query plans,
-server-side cancellation, transactions, retries, statement timeouts, or pool
-configuration; a live persistent production blocking Bloom state; Go's detached
+The Rust consumer, worker, PostgreSQL adapter, blocking-manager adapter, and
+offline composition test do not claim exact Go map, SQL-result, or delivery
+order; exact Go SQL text or bind cardinality; exact Go wall-clock values or
+per-item `time.Now()` schedule; live PostgreSQL array encoding, schema
+compatibility, indexes, query plans, server-side cancellation, transactions,
+retries, statement timeouts, or pool configuration; a live persistent
+production blocking Bloom state or nonempty flush durability; Go's detached
 batcher timing, output boundary, or close behavior; downstream get-peers or
 scrape execution; Go select ties, eager lane operands, or fairness; Go logging;
 cross-route retention or waiter fairness; closed Go output behavior; live DHT
@@ -401,8 +438,8 @@ contract only.
 
 The following remain deliberately outside this checkpoint:
 
-- application ownership and shutdown flushing of the persistent blocking
-  manager, plus metrics and operator-facing failure policy;
+- production application ownership and nonempty shutdown flushing of the
+  persistent blocking manager, plus metrics and operator-facing failure policy;
 - application construction of `PgDhtTorrentTriageLookup` with a configured
   pool, plus live schema/codec/query-plan validation and database
   observability;
@@ -422,5 +459,6 @@ The existing DHT maintenance supervisor borrows a triage input capability for
 the sample-infohashes worker but does not own this crate's unique triage
 receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
 typed get-peers and scrape routes are handoff primitives; this checkpoint does
-not add their downstream workers. Explicit tests can compose the isolated
-worker, but no current production application path completes this pipeline.
+not add their downstream workers. The concrete offline test composes the
+isolated worker and its persistent collaborators without polling them, but no
+current production application path completes this pipeline.
