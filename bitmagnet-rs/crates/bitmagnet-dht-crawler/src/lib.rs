@@ -10,6 +10,7 @@
 mod blocking_manager_filter;
 mod info_hash_triage;
 mod pg_torrent_triage_lookup;
+mod request_meta_info_route;
 
 pub use info_hash_triage::{
     DhtInfoHashBlockFilter, DhtInfoHashTriageClock, DhtInfoHashTriageConfig,
@@ -20,3 +21,8 @@ pub use info_hash_triage::{
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
+pub use request_meta_info_route::{
+    dht_request_meta_info_channel, DhtMetaInfoRequest, DhtRequestMetaInfoInput,
+    DhtRequestMetaInfoInputClosed, DhtRequestMetaInfoReceiver,
+    DHT_REQUEST_META_INFO_ROUTE_CAPACITY,
+};
