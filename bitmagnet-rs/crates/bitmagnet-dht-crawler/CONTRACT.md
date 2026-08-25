@@ -51,6 +51,9 @@ checkpoint is `6f45f7b6eeb29b0c3d41c327246d9a27df0f5ac5`.
 The frozen Go request-metainfo oracle checkpoint is
 `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`, and its fixture SHA-256 is
 `03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5`.
+The frozen Go source-persistence oracle checkpoint is
+`445385c62be25e221dfb8b8f3efe9a25abd0b364`, and its fixture SHA-256 is
+`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
 The Rust metainfo parser, normalized-file projection, and default banning
 policy checkpoints are respectively
 `96b0fcafd846ac6458e01407d50de7487eea2bff`,
@@ -969,6 +972,99 @@ The generator freshness test passed once and in 100 consecutive runs, its race
 focus passed ten consecutive runs, and `go vet ./internal/dhtcrawler` passed at
 the oracle checkpoint.
 
+## Frozen Go source-persistence behavior
+
+Go oracle checkpoint `445385c62be25e221dfb8b8f3efe9a25abd0b364`
+generated `testdata/parity/dht/dht_crawler_persist_sources.jsonl` with
+SHA-256
+`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
+It contains exactly four ordered, recursively strict-ready rows:
+
+1. `production_source_factory_batcher_lifecycle_model_sql_and_schema_contract`
+   (`SOURCE_ONLY`) pins the production factory, batching channel, crawler
+   lifecycle, worker loop, model conversion, repository SQL, migrations, Bloom
+   dependency, and prerequisite fixture source contracts without executing any
+   of them;
+2. `empty_and_directional_filters_project_valid_counts_null_optionals_and_bloom_direction`
+   (`RUNTIME_EXACT`) calls actual Go `bloom.FromScrape`,
+   `BloomFilter.ApproximatedSize`, and `createTorrentSourceModel` for an empty
+   filter pair and an asymmetric pair. The empty pair produces valid zero
+   seeders and leechers. The asymmetric pair maps BFsd to one seeder and BFpe
+   directly to two leechers without subtracting seeders;
+3. `one_bit_hash_collision_rounds_half_up_to_one_while_truncation_would_be_zero`
+   (`RUNTIME_EXACT`) feeds raw IPv4 bytes `0a0002ae`, whose two BEP-33 hash
+   indexes collide into one set bit. The finite unrounded size is approximately
+   `0.500122`, so the pinned `bits-and-blooms` round-half-up projection produces
+   one seeder where truncation would produce zero; and
+4. `ordered_duplicate_batch_first_occurrence_wins_in_first_unique_order`
+   (`RUNTIME_EXACT_TEST_HARNESS`) runs a controlled, source-pinned copy of the
+   first-occurrence loop over five inputs. Hashes ending `0b`, `0c`, `0b`,
+   `0d`, `0c` yield actual converter calls and models in `0b`, `0c`, `0d`
+   order; conflicting later nodes and Bloom filters for the duplicate hashes are
+   discarded. This row is a test harness, not execution of
+   `runPersistSources`.
+
+Every runtime model uses source `dht`, retains the original 20-byte info hash,
+sets `seen_count = 1`, and creates valid nullable seeders and leechers from the
+rounded BFsd and BFpe estimates. `import_id` and `published_at` remain invalid,
+the model timestamps remain zero before repository construction, and the source
+node and raw Bloom filters are not retained in the model. Runtime rows record
+the exact 256-byte-filter SHA-256 values and explicitly record that
+`runPersistSources` was not executed.
+
+The source row freezes the hard-coded production persist-sources input capacity
+1,000, maximum batch size 1,000, configured 60-second interval, and output
+capacity one; these are not crawler configuration fields. The generic batcher
+flushes at the maximum size or a nonempty ticker observation, starts its ticker
+at construction, resets it after a flush, blocks on output delivery, and has no
+context. Its unlabeled `break` on closed input exits only the `select`, so the
+closed input spins without reaching the deferred output close. The writer reads
+the output without checking its open boolean. These batching and closed-lane
+facts are source evidence only.
+
+`crawler.start` launches `runPersistSources` detached, waits only for `stopped`,
+and cancels the shared context after that wait; stop does not close or drain the
+batcher and joins neither worker nor batcher. The source-pinned worker loop
+deduplicates by `protocol.ID`, preserves first-unique order, logs and skips a
+conversion error even though the current conversion always returns nil, calls
+the repository for an empty model slice, logs repository errors and continues,
+and neither retries nor requeues. Its success metric label is
+`TorrentsTorrentSource` and counts prepared unique models, not rows actually
+inserted, updated, or committed.
+
+The repository source contract chunks prepared models at exactly 100 with eight
+arguments per row and one `time.Now()` value per invocation. It has no explicit
+transaction. Its `WHERE EXISTS` silently skips hashes without a parent torrent.
+Conflict target `(info_hash, source)` replaces `seeders`, `leechers`,
+`published_at`, and `updated_at`, preserves `created_at` and `import_id`, and
+increments existing `seen_count` by exactly one. The first failed `Exec` stops
+later chunks without retry or requeue; earlier chunks can already have
+committed. The pinned schema keeps primary key `(source, info_hash)`, nullable
+integer seeders and leechers, nullable import and publication fields, nonnull
+timestamps, and nonnull integer `seen_count` defaulting to one. The earlier raw
+BFsd and BFpe database columns have been removed.
+
+The source row pins normalized AST digests, production-source and migration
+digests, exact `bits-and-blooms/bloom/v3 v3.7.0` module and checksum lines, and
+the scrape and Bloom prerequisite fixture digests. The generator encodes
+deterministic LF-only JSONL with a final LF, recursively strict-decodes every
+row with unknown fields denied, and pins the complete fixture SHA. Its focused
+freshness test passed once and in 100 consecutive runs; the crawler and Bloom
+package tests, crawler `go vet`, formatting, and diff checks also passed at the
+oracle checkpoint.
+
+No runtime row executes `runPersistSources`, `persistScrapedTorrentSources`, a
+batching goroutine or ticker, `time.Now`, logging, metrics, shutdown lifecycle,
+or PostgreSQL. The fixture therefore does not claim live SQL execution, schema
+compatibility, query plans, locking, affected-row counts, transactions,
+server-side cancellation, actual partial commits, or database durability. It
+also does not claim ready-select winners, scheduling, fairness, total retention,
+closed-lane runtime behavior, exact elapsed timing, concurrent Bloom mutation,
+all-ones or other nonfinite `ApproximatedSize` projection, upstream DHT behavior,
+or production supervision, deployment, and readiness. No Rust strict consumer,
+source-persistence worker, repository seam, PostgreSQL adapter, application
+wiring, stats, or shutdown contract exists for this fixture yet.
+
 ## Frozen Go request-metainfo behavior
 
 Go oracle checkpoint `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`
@@ -1217,11 +1313,12 @@ banned-row hash mismatch, raw-byte versus lossy `U+FFFD` distinction, and row
 seven's conceptual mapping remain explicit nonclaims rather than gaps hidden by
 the runtime assertions.
 
-The oracle has no live PostgreSQL, network, DNS, UDP, DHT, or deployment
-dependency. Passing it establishes the bounded source and controlled Go-oracle
-contract only. The implemented strict Rust consumer separately establishes the
-bounded deterministic replay and deliberate deltas documented above; neither
-gate alone establishes production composition or readiness.
+The Go oracles have no live PostgreSQL, network, DNS, UDP, DHT, or deployment
+dependency. Passing them establishes the bounded source and controlled
+Go-oracle contracts only. The implemented strict Rust consumers for the four
+owned workers separately establish the bounded deterministic replays and
+deliberate deltas documented above. There is no Rust source-persistence consumer
+yet, and no gate alone establishes production composition or readiness.
 
 ## Pending integration
 
@@ -1241,8 +1338,9 @@ The following remain deliberately outside this checkpoint:
   policy for the existing Rust get-peers worker;
 - production application construction, supervision, metrics, retry, and
   operator failure policy for the existing Rust scrape worker, plus the
-  downstream database persistence writer that will own high-density
-  `ApproximatedSize` projection;
+  strict consumer, owned batcher/model worker, repository seam, PostgreSQL
+  adapter, database validation, and ownership of the unique scraped-source
+  receiver for the newly frozen source-persistence contract;
 - a concrete peer-wire `DhtMetaInfoRequester` implementing TCP, BEP-10/BEP-9
   extension negotiation and piece transfer, plus end-to-end requested-hash
   verification;
