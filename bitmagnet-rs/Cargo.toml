@@ -29,6 +29,7 @@ members = [
     # B′ oracle reader: replays the flags-ON tape Go records.
     "crates/bitmagnet-tape",
     "crates/bitmagnet-dht",
+    "crates/bitmagnet-dht-crawler",
 ]
 
 [workspace.package]
