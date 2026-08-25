@@ -200,6 +200,10 @@ fn increment_saturating_by(counter: &AtomicU64, amount: usize) {
 }
 
 #[cfg(test)]
+#[path = "dht_sample_infohashes_producer_parity.rs"]
+mod parity_tests;
+
+#[cfg(test)]
 mod tests {
     use std::future::{pending, poll_fn, ready};
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
