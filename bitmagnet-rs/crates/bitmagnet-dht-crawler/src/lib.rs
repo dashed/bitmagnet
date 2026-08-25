@@ -44,9 +44,9 @@ pub use info_hash_triage::{
 };
 pub use persist_source::{
     DhtPersistSourceWorker, DhtPersistSourceWorkerConfig, DhtPersistSourceWorkerExit,
-    DhtPersistSourceWorkerStats, DhtPersistSourceWorkerStatsHandle, DhtSourceBatchWriter,
-    DhtSourceWrite, PersistSourceCollaboratorError, DHT_PERSIST_SOURCE_BATCH_INTERVAL,
-    DHT_PERSIST_SOURCE_BATCH_LIMIT,
+    DhtPersistSourceWorkerStats, DhtPersistSourceWorkerStatsHandle, DhtSourceBatchWriteError,
+    DhtSourceBatchWriter, DhtSourceWrite, PersistSourceCollaboratorError,
+    DHT_PERSIST_SOURCE_BATCH_INTERVAL, DHT_PERSIST_SOURCE_BATCH_LIMIT,
 };
 pub use persist_source_route::{
     dht_persist_source_channel, DhtPersistSourceInput, DhtPersistSourceInputClosed,

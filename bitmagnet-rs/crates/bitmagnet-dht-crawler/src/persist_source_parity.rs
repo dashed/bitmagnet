@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use super::{
     dht_persist_source_channel, DhtPersistSourceRequest, DhtPersistSourceWorker,
     DhtPersistSourceWorkerConfig, DhtPersistSourceWorkerExit, DhtPersistSourceWorkerStats,
-    DhtSourceBatchWriter, DhtSourceWrite, PersistSourceCollaboratorError,
+    DhtSourceBatchWriteError, DhtSourceBatchWriter, DhtSourceWrite,
 };
 
 const FIXTURE_TEXT: &str = include_str!(concat!(
@@ -65,7 +65,7 @@ const DELIBERATE_RUST_DELTAS: [&str; 6] = [
     "Rust_owns_first_item_relative_batching_without_a_detached_batcher_or_one_batch_output_buffer",
     "Rust_has_typed_input_EOF_and_flushes_the_final_partial_batch",
     "Rust_polls_biased_shutdown_then_deadline_before_every_additional_receive",
-    "Rust_writer_calls_require_atomic_all_or_none_behavior_while_Go_100_row_chunks_can_partially_commit",
+    "Rust_writer_calls_prevent_a_proper_subset_of_writer_eligible_effects_while_Go_100_row_chunks_can_partially_commit",
     "Rust_has_saturating_conservation_stats_and_truthful_shutdown_write_abandonment",
 ];
 
@@ -521,7 +521,7 @@ impl DhtSourceBatchWriter for ScriptWriter {
     async fn write_batch(
         &self,
         sources: &[DhtSourceWrite],
-    ) -> Result<(), PersistSourceCollaboratorError> {
+    ) -> Result<(), DhtSourceBatchWriteError> {
         self.calls.lock().unwrap().push(sources.to_vec());
         Ok(())
     }
@@ -762,7 +762,7 @@ fn source_contract_hashes_layout_partition_ast_dependencies_and_nonclaims_are_ex
             "Rust_owns_first_item_relative_batching_without_a_detached_batcher_or_one_batch_output_buffer",
             "Rust_has_typed_input_EOF_and_flushes_the_final_partial_batch",
             "Rust_polls_biased_shutdown_then_deadline_before_every_additional_receive",
-            "Rust_writer_calls_require_atomic_all_or_none_behavior_while_Go_100_row_chunks_can_partially_commit",
+            "Rust_writer_calls_prevent_a_proper_subset_of_writer_eligible_effects_while_Go_100_row_chunks_can_partially_commit",
             "Rust_has_saturating_conservation_stats_and_truthful_shutdown_write_abandonment",
         ]
     );

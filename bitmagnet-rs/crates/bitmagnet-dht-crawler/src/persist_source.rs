@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::error::Error;
+use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +23,65 @@ pub const DHT_PERSIST_SOURCE_BATCH_INTERVAL: Duration = Duration::from_secs(60);
 /// Error type returned by an injected source-batch writer.
 pub type PersistSourceCollaboratorError = Box<dyn Error + Send + Sync + 'static>;
 
+/// Typed completion error for one atomic source-batch write.
+///
+/// Both variants mean the worker must continue without retrying the batch. A
+/// rejection proves that none of the batch's eligible effects committed. An
+/// unknown outcome preserves the no-proper-subset guarantee but means the
+/// backend may have committed either none or all eligible effects, such as when
+/// a remote `COMMIT` succeeds before its acknowledgement is lost. Inputs
+/// skipped by a writer-owned predicate are logical no-ops, not rejections.
+#[derive(Debug)]
+pub enum DhtSourceBatchWriteError {
+    /// No eligible effect from the batch committed.
+    Rejected {
+        /// Underlying collaborator error.
+        source: PersistSourceCollaboratorError,
+    },
+    /// The collaborator cannot determine whether none or all eligible effects
+    /// committed.
+    OutcomeUnknown {
+        /// Underlying collaborator error.
+        source: PersistSourceCollaboratorError,
+    },
+}
+
+impl DhtSourceBatchWriteError {
+    /// Classify an error that proves no writer-eligible effect committed.
+    pub fn rejected(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Rejected {
+            source: Box::new(source),
+        }
+    }
+
+    /// Classify an error whose whole-batch acceptance outcome is unknowable.
+    pub fn outcome_unknown(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::OutcomeUnknown {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for DhtSourceBatchWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected { source } => write!(formatter, "DHT source batch rejected: {source}"),
+            Self::OutcomeUnknown { source } => {
+                write!(formatter, "DHT source batch outcome unknown: {source}")
+            }
+        }
+    }
+}
+
+impl Error for DhtSourceBatchWriteError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        let source = match self {
+            Self::Rejected { source } | Self::OutcomeUnknown { source } => source,
+        };
+        Some(source.as_ref())
+    }
+}
+
 /// One DHT source observation projected for persistence.
 ///
 /// The source-node address and raw bloom filters have completed their policy
@@ -40,12 +100,16 @@ pub struct DhtSourceWrite {
 
 /// Persistence boundary for one ordered, info-hash-unique DHT source batch.
 ///
-/// A call is an atomic no-proper-subset unit: `Ok(())` confirms every supplied
-/// record, while `Err` confirms no acceptance outcome. Concrete writers may
-/// chunk their SQL internally, but must prevent a proper subset from committing
-/// (for example with one transaction). This is an intentional Rust hardening
-/// delta: Go writes nontransactional 100-row chunks, so a later chunk error can
-/// leave an earlier prefix committed.
+/// A call is an atomic no-proper-subset unit over writer-eligible effects:
+/// `Ok(())` confirms that the whole-batch decision or transaction completed,
+/// while a typed error distinguishes definite rejection from an unknown
+/// none-or-whole outcome. Writer-owned predicates may skip supplied records as
+/// logical no-ops, so success never promises one affected row per input.
+/// Concrete writers may chunk their SQL internally, but must prevent a chunk
+/// failure from committing a proper subset of eligible effects (for example
+/// with one transaction). This is an intentional Rust hardening delta: Go
+/// writes nontransactional 100-row chunks, so a later chunk error can leave an
+/// earlier prefix committed.
 ///
 /// A remote `COMMIT` can succeed before its acknowledgement is lost, so an
 /// error may mean either none or the whole batch committed. Likewise, dropping
@@ -55,10 +119,8 @@ pub struct DhtSourceWrite {
 #[async_trait]
 pub trait DhtSourceBatchWriter: Send + Sync {
     /// Persist one nonempty batch in slice order.
-    async fn write_batch(
-        &self,
-        sources: &[DhtSourceWrite],
-    ) -> Result<(), PersistSourceCollaboratorError>;
+    async fn write_batch(&self, sources: &[DhtSourceWrite])
+        -> Result<(), DhtSourceBatchWriteError>;
 }
 
 /// Owned batching policy for source persistence.
@@ -86,10 +148,12 @@ struct DhtPersistSourceWorkerStatsInner {
     input_duplicates_dropped: AtomicU64,
     writer_calls: AtomicU64,
     writer_successes: AtomicU64,
-    writer_failures: AtomicU64,
+    writer_rejections: AtomicU64,
+    writer_outcomes_unknown: AtomicU64,
     writer_sources_submitted: AtomicU64,
     sources_persisted: AtomicU64,
-    writer_failure_dropped: AtomicU64,
+    writer_rejected_sources: AtomicU64,
+    writer_outcome_unknown_sources: AtomicU64,
     shutdown_queued_dropped: AtomicU64,
     shutdown_batch_dropped: AtomicU64,
     shutdown_write_abandoned: AtomicU64,
@@ -106,14 +170,12 @@ pub struct DhtPersistSourceWorkerStatsHandle {
 ///
 /// At a terminal snapshot, every dequeued occurrence is classified by exactly
 /// one of `input_duplicates_dropped`, `sources_persisted`,
-/// `writer_failure_dropped`, `shutdown_batch_dropped`, or
-/// `shutdown_write_abandoned`. Queued shutdown drops were never dequeued and are
-/// tracked separately. This is worker-pipeline disposition accounting, not a
-/// database-state partition: a writer error removes a batch from the pipeline
-/// without retry, but a lost commit acknowledgement can leave its whole backend
-/// outcome unknown. Persisted counts are records in confirmed-success writer
-/// calls, matching Go's logical metric; they do not claim PostgreSQL rows
-/// affected after a parent-existence predicate.
+/// `writer_rejected_sources`, `writer_outcome_unknown_sources`,
+/// `shutdown_batch_dropped`, or `shutdown_write_abandoned`. Queued shutdown
+/// drops were never dequeued and are tracked separately. Persisted counts are
+/// records in confirmed-success writer calls, matching Go's logical metric;
+/// they do not claim PostgreSQL rows affected after a parent-existence
+/// predicate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DhtPersistSourceWorkerStats {
     /// Raw input occurrences removed from the route.
@@ -126,17 +188,25 @@ pub struct DhtPersistSourceWorkerStats {
     pub writer_calls: u64,
     /// Writer calls that completed successfully.
     pub writer_successes: u64,
-    /// Writer calls that returned an error.
-    pub writer_failures: u64,
+    /// Writer calls that reported rejection, proving no writer-eligible effect
+    /// committed.
+    pub writer_rejections: u64,
+    /// Writer calls whose none-or-whole eligible-effect outcome is unknowable.
+    pub writer_outcomes_unknown: u64,
     /// Unique projected records supplied across all writer calls.
     pub writer_sources_submitted: u64,
     /// Records in writer calls whose whole-batch success was confirmed.
     pub sources_persisted: u64,
-    /// Unique records dropped from the worker pipeline after a writer error.
+    /// Unique submitted records in calls classified as rejected.
     ///
-    /// This does not prove backend rejection: a lost commit acknowledgement may
-    /// leave the whole transaction committed but unconfirmed.
-    pub writer_failure_dropped: u64,
+    /// These records leave the worker pipeline without retry. The rejection
+    /// proves no writer-eligible effect committed, but the count can also
+    /// include records that a writer predicate would have treated as logical
+    /// no-ops.
+    pub writer_rejected_sources: u64,
+    /// Unique submitted records in calls whose eligible-effect outcome is
+    /// unknowable.
+    pub writer_outcome_unknown_sources: u64,
     /// Still-queued raw occurrences drained after shutdown won.
     pub shutdown_queued_dropped: u64,
     /// Dequeued raw occurrences dropped before deduplication and submission.
@@ -158,10 +228,14 @@ impl DhtPersistSourceWorkerStatsHandle {
             input_duplicates_dropped: inner.input_duplicates_dropped.load(Ordering::Relaxed),
             writer_calls: inner.writer_calls.load(Ordering::Relaxed),
             writer_successes: inner.writer_successes.load(Ordering::Relaxed),
-            writer_failures: inner.writer_failures.load(Ordering::Relaxed),
+            writer_rejections: inner.writer_rejections.load(Ordering::Relaxed),
+            writer_outcomes_unknown: inner.writer_outcomes_unknown.load(Ordering::Relaxed),
             writer_sources_submitted: inner.writer_sources_submitted.load(Ordering::Relaxed),
             sources_persisted: inner.sources_persisted.load(Ordering::Relaxed),
-            writer_failure_dropped: inner.writer_failure_dropped.load(Ordering::Relaxed),
+            writer_rejected_sources: inner.writer_rejected_sources.load(Ordering::Relaxed),
+            writer_outcome_unknown_sources: inner
+                .writer_outcome_unknown_sources
+                .load(Ordering::Relaxed),
             shutdown_queued_dropped: inner.shutdown_queued_dropped.load(Ordering::Relaxed),
             shutdown_batch_dropped: inner.shutdown_batch_dropped.load(Ordering::Relaxed),
             shutdown_write_abandoned: inner.shutdown_write_abandoned.load(Ordering::Relaxed),
@@ -175,7 +249,11 @@ impl DhtPersistSourceWorkerStatsHandle {
 /// Terminal state of the owned source-persistence worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DhtPersistSourceWorkerExit {
-    /// Every input clone is gone and the final partial batch was written.
+    /// Every input clone is gone and the final partial batch reached a writer
+    /// outcome.
+    ///
+    /// This does not imply every write succeeded: rejected and unknown-outcome
+    /// batches are counted separately and are not retried.
     InputClosed,
     /// Caller shutdown stopped intake, collection, or an in-flight writer call.
     Shutdown {
@@ -191,12 +269,14 @@ pub enum DhtPersistSourceWorkerExit {
 /// Owned sequential source-persistence worker.
 ///
 /// Raw input batches use the first occurrence of each info hash and retain that
-/// order. Writer errors classify only their current atomic-contract batch and
-/// the worker continues. EOF flushes a final partial batch. Shutdown is biased
-/// ahead of intake, the batch deadline, and writer completion; it closes and
-/// drains the input, drops a buffered raw batch, and cancels a pending writer.
-/// Cancelled writer records are reported as abandoned because Rust cannot infer
-/// whether a remote database committed work before cancellation was observed.
+/// order. Definite rejection and unknown acceptance classify only their current
+/// atomic-contract batch, are never retried, and the worker continues. EOF
+/// flushes a final partial batch but does not convert either error class into
+/// success. Shutdown is biased ahead of intake, the batch deadline, and writer
+/// completion; it closes and drains the input, drops a buffered raw batch, and
+/// cancels a pending writer. Cancelled writer records are reported as abandoned
+/// because Rust cannot infer whether a remote database committed work before
+/// cancellation was observed.
 ///
 /// Unlike Go's generic batching channel, this worker starts no detached task,
 /// has no separate output buffer, and measures the interval from each batch's
@@ -347,15 +427,26 @@ impl DhtPersistSourceWorker {
                 increment_saturating(&self.stats.inner.writer_successes);
                 add_saturating(&self.stats.inner.sources_persisted, count_u64(writes.len()));
             }
-            Err(error) => {
-                increment_saturating(&self.stats.inner.writer_failures);
+            Err(DhtSourceBatchWriteError::Rejected { source }) => {
+                increment_saturating(&self.stats.inner.writer_rejections);
                 add_saturating(
-                    &self.stats.inner.writer_failure_dropped,
+                    &self.stats.inner.writer_rejected_sources,
                     count_u64(writes.len()),
                 );
                 tracing::warn!(
-                    %error,
-                    "DHT source batch writer failed; not retrying batch with possibly unknown backend outcome"
+                    %source,
+                    "DHT source batch writer rejected batch; not retrying"
+                );
+            }
+            Err(DhtSourceBatchWriteError::OutcomeUnknown { source }) => {
+                increment_saturating(&self.stats.inner.writer_outcomes_unknown);
+                add_saturating(
+                    &self.stats.inner.writer_outcome_unknown_sources,
+                    count_u64(writes.len()),
+                );
+                tracing::warn!(
+                    %source,
+                    "DHT source batch writer outcome unknown; not retrying"
                 );
             }
         }
@@ -441,7 +532,8 @@ mod tests {
 
     enum Step {
         Ok,
-        Err(&'static str),
+        Rejected(&'static str),
+        OutcomeUnknown(&'static str),
     }
 
     struct ScriptWriter {
@@ -467,7 +559,7 @@ mod tests {
         async fn write_batch(
             &self,
             sources: &[DhtSourceWrite],
-        ) -> Result<(), PersistSourceCollaboratorError> {
+        ) -> Result<(), DhtSourceBatchWriteError> {
             self.calls.lock().unwrap().push(sources.to_vec());
             match self
                 .steps
@@ -477,7 +569,12 @@ mod tests {
                 .expect("scripted writer step")
             {
                 Step::Ok => Ok(()),
-                Step::Err(message) => Err(Box::new(io::Error::other(message))),
+                Step::Rejected(message) => Err(DhtSourceBatchWriteError::rejected(
+                    io::Error::other(message),
+                )),
+                Step::OutcomeUnknown(message) => Err(DhtSourceBatchWriteError::outcome_unknown(
+                    io::Error::other(message),
+                )),
             }
         }
     }
@@ -501,7 +598,7 @@ mod tests {
         async fn write_batch(
             &self,
             sources: &[DhtSourceWrite],
-        ) -> Result<(), PersistSourceCollaboratorError> {
+        ) -> Result<(), DhtSourceBatchWriteError> {
             self.calls.lock().unwrap().push(sources.to_vec());
             let _drop_flag = DropFlag(Arc::clone(&self.dropped));
             self.entered.notify_one();
@@ -519,7 +616,7 @@ mod tests {
         async fn write_batch(
             &self,
             _sources: &[DhtSourceWrite],
-        ) -> Result<(), PersistSourceCollaboratorError> {
+        ) -> Result<(), DhtSourceBatchWriteError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             if let Some(signal) = self.signal.lock().unwrap().take() {
                 let _ = signal.send(());
@@ -599,19 +696,26 @@ mod tests {
             stats.dequeued,
             stats.input_duplicates_dropped
                 + stats.sources_persisted
-                + stats.writer_failure_dropped
+                + stats.writer_rejected_sources
+                + stats.writer_outcome_unknown_sources
                 + stats.shutdown_batch_dropped
                 + stats.shutdown_write_abandoned,
             "every dequeued source occurrence must have one terminal classification: {stats:?}"
         );
         assert_eq!(
             stats.writer_sources_submitted,
-            stats.sources_persisted + stats.writer_failure_dropped + stats.shutdown_write_abandoned,
+            stats.sources_persisted
+                + stats.writer_rejected_sources
+                + stats.writer_outcome_unknown_sources
+                + stats.shutdown_write_abandoned,
             "every submitted source must have one observed writer outcome: {stats:?}"
         );
         assert_eq!(
             stats.writer_calls,
-            stats.writer_successes + stats.writer_failures + stats.shutdown_writer_calls_abandoned,
+            stats.writer_successes
+                + stats.writer_rejections
+                + stats.writer_outcomes_unknown
+                + stats.shutdown_writer_calls_abandoned,
             "every writer call must have one observed completion class: {stats:?}"
         );
         assert_eq!(stats.batches, stats.writer_calls);
@@ -647,9 +751,32 @@ mod tests {
         assert_eq!(defaults.batch_limit.get(), 1_000);
         assert_eq!(defaults.batch_interval, Duration::from_secs(60));
         assert_send_sync::<DhtSourceWrite>();
+        assert_send_sync::<DhtSourceBatchWriteError>();
         assert_send_sync::<DhtPersistSourceWorkerStatsHandle>();
         assert_send_sync::<DhtPersistSourceWorkerStats>();
         assert_send::<DhtPersistSourceWorker>();
+
+        let rejected = DhtSourceBatchWriteError::rejected(io::Error::other("rejected"));
+        assert!(matches!(
+            &rejected,
+            DhtSourceBatchWriteError::Rejected { .. }
+        ));
+        assert_eq!(rejected.to_string(), "DHT source batch rejected: rejected");
+        assert_eq!(rejected.source().unwrap().to_string(), "rejected");
+        let unknown =
+            DhtSourceBatchWriteError::outcome_unknown(io::Error::other("acknowledgement lost"));
+        assert!(matches!(
+            &unknown,
+            DhtSourceBatchWriteError::OutcomeUnknown { .. }
+        ));
+        assert_eq!(
+            unknown.to_string(),
+            "DHT source batch outcome unknown: acknowledgement lost"
+        );
+        assert_eq!(
+            unknown.source().unwrap().to_string(),
+            "acknowledgement lost"
+        );
 
         let counter = AtomicU64::new(u64::MAX - 1);
         add_saturating(&counter, 10);
@@ -889,8 +1016,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_error_drops_only_that_atomic_batch_and_continues() {
-        let writer = ScriptWriter::new([Step::Err("first"), Step::Ok]);
+    async fn writer_rejection_classifies_only_that_atomic_batch_and_continues() {
+        let writer = ScriptWriter::new([Step::Rejected("first"), Step::Ok]);
         let (input, receiver) = dht_persist_source_channel();
         let (worker, stats) =
             DhtPersistSourceWorker::with_config(receiver, writer.clone(), config(1));
@@ -911,10 +1038,43 @@ mod tests {
                 batches: 2,
                 writer_calls: 2,
                 writer_successes: 1,
-                writer_failures: 1,
+                writer_rejections: 1,
                 writer_sources_submitted: 2,
                 sources_persisted: 1,
-                writer_failure_dropped: 1,
+                writer_rejected_sources: 1,
+                ..DhtPersistSourceWorkerStats::default()
+            }
+        );
+        assert_conserved(snapshot);
+    }
+
+    #[tokio::test]
+    async fn writer_unknown_outcome_classifies_only_that_atomic_batch_and_continues() {
+        let writer = ScriptWriter::new([Step::OutcomeUnknown("commit acknowledgement"), Step::Ok]);
+        let (input, receiver) = dht_persist_source_channel();
+        let (worker, stats) =
+            DhtPersistSourceWorker::with_config(receiver, writer.clone(), config(1));
+        send_all(&input, [request(12), request(13)]).await;
+        drop(input);
+
+        assert_eq!(
+            worker.run(pending()).await,
+            DhtPersistSourceWorkerExit::InputClosed
+        );
+        assert_eq!(writer.calls()[0][0].info_hash, id(12));
+        assert_eq!(writer.calls()[1][0].info_hash, id(13));
+        let snapshot = stats.snapshot();
+        assert_eq!(
+            snapshot,
+            DhtPersistSourceWorkerStats {
+                dequeued: 2,
+                batches: 2,
+                writer_calls: 2,
+                writer_successes: 1,
+                writer_outcomes_unknown: 1,
+                writer_sources_submitted: 2,
+                sources_persisted: 1,
+                writer_outcome_unknown_sources: 1,
                 ..DhtPersistSourceWorkerStats::default()
             }
         );
