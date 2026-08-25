@@ -13,6 +13,7 @@ mod info_hash_triage;
 mod persist_source;
 mod persist_source_route;
 mod persist_torrent_route;
+mod pg_source_batch_writer;
 mod pg_torrent_triage_lookup;
 mod request_meta_info;
 mod request_meta_info_route;
@@ -55,6 +56,9 @@ pub use persist_source_route::{
 pub use persist_torrent_route::{
     dht_persist_torrent_channel, DhtPersistTorrentInput, DhtPersistTorrentInputClosed,
     DhtPersistTorrentReceiver, DhtPersistTorrentRequest, DHT_PERSIST_TORRENT_ROUTE_CAPACITY,
+};
+pub use pg_source_batch_writer::{
+    PgDhtSourceBatchWriter, PgDhtSourceBatchWriterError, PG_DHT_SOURCE_WRITE_CHUNK_LIMIT,
 };
 pub use pg_torrent_triage_lookup::PgDhtTorrentTriageLookup;
 pub use request_meta_info::{
