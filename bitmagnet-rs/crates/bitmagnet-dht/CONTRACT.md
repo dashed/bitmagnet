@@ -3287,8 +3287,10 @@ runtime-vector separation, packed-cell neighbor preservation, saturating
 decrement, modulo wrap, membership-before-decrement, restore-to-maximum,
 adjacent duplicates, scripted stable eviction, clone sharing, fresh-instance
 separation, and eight-thread atomicity. The checkpoint passed the eleven-test
-focus, that focus one hundred consecutive times, formatting, strict all-target
-and all-feature Clippy with warnings denied, and diff whitespace checks.
+focus, that focus one hundred consecutive times, the full DHT package and
+doctests, the package check, rustdoc with warnings denied, formatting, strict
+all-target and all-feature Clippy with warnings denied, and diff whitespace
+checks.
 
 This slice adds no BoomFilters serialization or deserialization, public
 configuration, public constants, public seed, reset, membership-only test,
