@@ -8,10 +8,15 @@
 //! lifecycle, and shutdown wiring remain deferred.
 
 mod blocking_manager_filter;
+mod get_peers;
 mod info_hash_triage;
 mod pg_torrent_triage_lookup;
 mod request_meta_info_route;
 
+pub use get_peers::{
+    DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,
+    DhtGetPeersWorkerStatsHandle,
+};
 pub use info_hash_triage::{
     DhtInfoHashBlockFilter, DhtInfoHashTriageClock, DhtInfoHashTriageConfig,
     DhtInfoHashTriageStats, DhtInfoHashTriageStatsHandle, DhtInfoHashTriageWorker,
