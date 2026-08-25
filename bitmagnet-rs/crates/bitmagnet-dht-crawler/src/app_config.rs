@@ -220,6 +220,7 @@ impl DhtCrawlerAppConfig {
                 request_timeout: self.metainfo_request_timeout,
                 ..DhtPeerWireMetaInfoRequesterConfig::default()
             },
+            ..DhtCrawlerDownstreamConfig::default()
         })
     }
 

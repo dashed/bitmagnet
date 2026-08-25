@@ -16,7 +16,7 @@ use std::num::NonZeroUsize;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::Id20;
+use crate::{assert_dht_channel_capacity, Id20};
 
 /// Default capacity of the bounded info-hash triage input queue.
 ///
@@ -38,10 +38,16 @@ pub struct DhtInfoHashTriageRequest {
 /// The explicit capacity applies to one shared FIFO across every input clone.
 /// Construction starts no task. Dropping a pending send commits nothing;
 /// receiver closure returns the exact unsent request.
+///
+/// # Panics
+///
+/// Panics before constructing the route if `capacity` exceeds
+/// [`crate::DHT_CHANNEL_MAX_CAPACITY`].
 #[must_use]
 pub fn dht_info_hash_triage_channel(
     capacity: NonZeroUsize,
 ) -> (DhtInfoHashTriageInput, DhtInfoHashTriageReceiver) {
+    assert_dht_channel_capacity(capacity);
     let (sender, receiver) = mpsc::channel(capacity.get());
     (
         DhtInfoHashTriageInput { sender },
@@ -186,6 +192,13 @@ mod tests {
         let (input, receiver) = dht_info_hash_triage_channel(NonZeroUsize::new(1).unwrap());
         drop(input);
         drop(receiver);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds Tokio's maximum")]
+    fn over_max_capacity_panics_before_route_construction() {
+        let over_max = NonZeroUsize::new(crate::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let _ = dht_info_hash_triage_channel(over_max);
     }
 
     #[tokio::test]

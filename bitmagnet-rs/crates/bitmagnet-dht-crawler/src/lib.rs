@@ -52,8 +52,9 @@ mod scrape_parity;
 
 pub use app_config::{DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DEFAULT_BOOTSTRAP_NODES};
 pub use downstream_composition::{
-    DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamStatsHandle,
-    DhtCrawlerDownstreamWorkers,
+    DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError,
+    DhtCrawlerDownstreamLaneConfig, DhtCrawlerDownstreamStatsHandle,
+    DhtCrawlerDownstreamWithConfigError, DhtCrawlerDownstreamWorkers,
 };
 pub use get_peers::{
     DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,
@@ -125,8 +126,8 @@ pub use request_meta_info::{
     DhtRequestMetaInfoWorkerStatsHandle, RequestMetaInfoCollaboratorError,
 };
 pub use request_meta_info_route::{
-    dht_request_meta_info_channel, DhtMetaInfoRequest, DhtRequestMetaInfoInput,
-    DhtRequestMetaInfoInputClosed, DhtRequestMetaInfoReceiver,
+    dht_request_meta_info_channel, dht_request_meta_info_channel_with_capacity, DhtMetaInfoRequest,
+    DhtRequestMetaInfoInput, DhtRequestMetaInfoInputClosed, DhtRequestMetaInfoReceiver,
     DHT_REQUEST_META_INFO_ROUTE_CAPACITY,
 };
 pub use scrape::{

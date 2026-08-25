@@ -194,6 +194,13 @@ pub struct DhtGetPeersWorker {
 }
 
 impl DhtGetPeersWorker {
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtGetPeersWorkerConfig {
+        DhtGetPeersWorkerConfig {
+            max_inflight: self.core.max_inflight,
+        }
+    }
+
     /// Construct the production-compatible two-hundred-task worker.
     pub fn new(
         input: DhtGetPeersReceiver,

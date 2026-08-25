@@ -283,6 +283,11 @@ pub struct DhtRequestMetaInfoWorker {
 
 impl DhtRequestMetaInfoWorker {
     #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtRequestMetaInfoWorkerConfig {
+        self.config
+    }
+
+    #[cfg(test)]
     pub(crate) fn peer_wire_config_for_test(
         &self,
     ) -> Option<crate::DhtPeerWireMetaInfoRequesterConfig> {

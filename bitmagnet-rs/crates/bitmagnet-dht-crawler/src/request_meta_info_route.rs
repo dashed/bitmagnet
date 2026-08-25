@@ -6,10 +6,10 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 
-use bitmagnet_dht::Id20;
+use bitmagnet_dht::{Id20, DHT_CHANNEL_MAX_CAPACITY};
 use tokio::sync::mpsc;
 
-/// Fixed capacity of the production request-metainfo route.
+/// Default capacity of the production request-metainfo route.
 pub const DHT_REQUEST_META_INFO_ROUTE_CAPACITY: usize = 100;
 
 /// One info hash, its supplying DHT node, and the ordered peers to try.
@@ -20,13 +20,37 @@ pub struct DhtMetaInfoRequest {
     pub peers: Vec<SocketAddr>,
 }
 
-/// Construct the fixed-capacity request-metainfo route.
+/// Construct the production-default capacity-100 request-metainfo route.
 ///
 /// Construction starts no task. The returned input and receiver own one
 /// bounded FIFO shared by every input clone.
 #[must_use]
 pub fn dht_request_meta_info_channel() -> (DhtRequestMetaInfoInput, DhtRequestMetaInfoReceiver) {
-    route(NonZeroUsize::new(DHT_REQUEST_META_INFO_ROUTE_CAPACITY).unwrap())
+    dht_request_meta_info_channel_with_capacity(
+        NonZeroUsize::new(DHT_REQUEST_META_INFO_ROUTE_CAPACITY).unwrap(),
+    )
+}
+
+/// Construct a request-metainfo route with an explicit positive capacity.
+///
+/// Construction starts no task. Every returned input clone shares the exact
+/// supplied FIFO capacity. The production default is exactly 100.
+///
+/// # Panics
+///
+/// Panics before constructing the route if `capacity` exceeds
+/// [`DHT_CHANNEL_MAX_CAPACITY`].
+#[must_use]
+pub fn dht_request_meta_info_channel_with_capacity(
+    capacity: NonZeroUsize,
+) -> (DhtRequestMetaInfoInput, DhtRequestMetaInfoReceiver) {
+    assert!(
+        capacity.get() <= DHT_CHANNEL_MAX_CAPACITY,
+        "DHT channel capacity {} exceeds Tokio's maximum of {}",
+        capacity,
+        DHT_CHANNEL_MAX_CAPACITY,
+    );
+    route(capacity)
 }
 
 fn route(capacity: NonZeroUsize) -> (DhtRequestMetaInfoInput, DhtRequestMetaInfoReceiver) {
@@ -177,6 +201,28 @@ mod tests {
         assert_future_send(input.send(request(1)));
         assert_future_send(receiver.recv());
         drop((input, receiver));
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds Tokio's maximum")]
+    fn over_max_capacity_panics_before_route_construction() {
+        let over_max = NonZeroUsize::new(DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let _ = dht_request_meta_info_channel_with_capacity(over_max);
+    }
+
+    #[tokio::test]
+    async fn explicit_capacity_is_fifo_and_backpressured() {
+        let (input, mut receiver) =
+            dht_request_meta_info_channel_with_capacity(NonZeroUsize::new(2).unwrap());
+        input.send(request(1)).await.unwrap();
+        input.send(request(2)).await.unwrap();
+
+        let mut blocked = Box::pin(input.send(request(3)));
+        assert_pending(blocked.as_mut()).await;
+        assert_eq!(receiver.recv().await, Some(request(1)));
+        assert_eq!(blocked.await, Ok(()));
+        assert_eq!(receiver.recv().await, Some(request(2)));
+        assert_eq!(receiver.recv().await, Some(request(3)));
     }
 
     #[tokio::test]

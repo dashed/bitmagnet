@@ -186,6 +186,13 @@ pub struct DhtScrapeWorker {
 }
 
 impl DhtScrapeWorker {
+    #[cfg(test)]
+    pub(crate) const fn config_for_test(&self) -> DhtScrapeWorkerConfig {
+        DhtScrapeWorkerConfig {
+            max_inflight: self.core.max_inflight,
+        }
+    }
+
     /// Construct the production-compatible two-hundred-task worker.
     pub fn new(
         input: DhtScrapeReceiver,

@@ -964,16 +964,12 @@ mod tests {
     use std::error::Error;
     use std::fmt;
     use std::net::{Ipv4Addr, SocketAddrV4};
-    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use bitmagnet_dht::{
-        dht_info_hash_triage_channel, DhtCrawlerMaintenanceSupervisor, DhtRuntimeConfig, Id20,
-        DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY,
-    };
+    use bitmagnet_dht::{DhtCrawlerMaintenanceSupervisor, DhtRuntimeConfig, Id20};
     use sqlx::postgres::PgPoolOptions;
     use tokio::net::UdpSocket;
     use tokio::sync::{oneshot, Notify};
@@ -981,8 +977,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        DhtGetPeersWorkerStats, DhtInfoHashTriageStats, DhtPersistSourceWorkerStats,
-        DhtPersistTorrentWorkerStats, DhtRequestMetaInfoWorkerStats, DhtScrapeWorkerStats,
+        DhtCrawlerDownstreamConfig, DhtGetPeersWorkerStats, DhtInfoHashTriageStats,
+        DhtPersistSourceWorkerStats, DhtPersistTorrentWorkerStats, DhtRequestMetaInfoWorkerStats,
+        DhtScrapeWorkerStats,
     };
 
     #[derive(Default)]
@@ -2184,9 +2181,16 @@ mod tests {
         let discovery = discovery_receiver
             .try_sender()
             .expect("the live runtime retains its discovery producer");
-        let (triage_input, triage_receiver) = dht_info_hash_triage_channel(
-            NonZeroUsize::new(DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY).unwrap(),
-        );
+        let downstream_config = DhtCrawlerDownstreamConfig::default();
+        let (triage_input, downstream) = DhtCrawlerDownstreamComposition::with_config(
+            discovery,
+            &client,
+            &table,
+            &pool,
+            Id20::from_slice(b"-BM0001-composition0").unwrap(),
+            downstream_config,
+        )
+        .unwrap();
         let (maintenance, maintenance_stats) = DhtCrawlerMaintenanceSupervisor::new(
             discovery_receiver,
             &client,
@@ -2194,14 +2198,6 @@ mod tests {
             &triage_input,
         )
         .unwrap();
-        let downstream = DhtCrawlerDownstreamComposition::new(
-            triage_receiver,
-            discovery,
-            &client,
-            &table,
-            &pool,
-            Id20::from_slice(b"-BM0001-composition0").unwrap(),
-        );
         let (supervisor, handles) =
             DhtCrawlerPipelineSupervisor::new(runtime, maintenance, triage_input, downstream);
         drop((client, table));
