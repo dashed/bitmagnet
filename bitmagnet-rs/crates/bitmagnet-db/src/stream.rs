@@ -62,7 +62,7 @@ LIMIT $2";
 /// `after_info_hash` (or from the start when `None`), ordered by `info_hash`.
 ///
 /// Pass the last returned hash back as `after_info_hash` to fetch the next
-/// page. Uses the runtime [`sqlx::query`] API, so it compiles without a live
+/// page. Uses the runtime [`sqlx::query()`] API, so it compiles without a live
 /// database.
 pub async fn stream_torrents_with_files(
     pool: &PgPool,
@@ -476,7 +476,7 @@ LIMIT $3";
 /// Reads up to `limit` `torrent_contents` rows whose `id` is greater than
 /// `after_id` (or from the start when `None`), ordered by `id` — one row per
 /// search document. Pass the last returned [`TorrentForIndex::id`] back as
-/// `after_id` for the next page. Uses the runtime [`sqlx::query`] API, so it
+/// `after_id` for the next page. Uses the runtime [`sqlx::query()`] API, so it
 /// compiles without a live database.
 pub async fn stream_torrents_for_index(
     pool: &PgPool,

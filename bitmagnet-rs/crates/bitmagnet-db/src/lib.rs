@@ -18,7 +18,7 @@
 //!   [`stream_torrents_for_index_info_hashes`] — the 00024 incremental follow
 //!   contract for the main Tantivy sidecar.
 //!
-//! All queries use the runtime [`sqlx::query`] API (not the compile-time
+//! All queries use the runtime [`sqlx::query()`] API (not the compile-time
 //! `query!` macros), so the crate builds and tests green without a live
 //! database or `DATABASE_URL`.
 //!
@@ -28,6 +28,7 @@ mod agg;
 mod config;
 mod deleted;
 mod error;
+mod goose;
 mod pool;
 mod stream;
 
@@ -35,6 +36,10 @@ pub use agg::{batch_torrent_files_ext_agg, FileExtAgg};
 pub use config::DbConfig;
 pub use deleted::{prune_deleted_torrents, read_deleted_torrents};
 pub use error::{DbError, Result};
+pub use goose::{
+    assert_goose_applied_head, read_goose_applied_head, GooseAppliedHead, GooseHeadMismatch,
+    GOOSE_VERSION_HISTORY_SQL,
+};
 pub use pool::{connect, ping};
 pub use stream::{
     stream_changed_torrent_keys, stream_changed_torrents, stream_torrents_for_index,
