@@ -18,6 +18,9 @@ mod scrape;
 #[cfg(test)]
 mod get_peers_parity;
 
+#[cfg(test)]
+mod scrape_parity;
+
 pub use get_peers::{
     DhtGetPeersWorker, DhtGetPeersWorkerConfig, DhtGetPeersWorkerExit, DhtGetPeersWorkerStats,
     DhtGetPeersWorkerStatsHandle,
