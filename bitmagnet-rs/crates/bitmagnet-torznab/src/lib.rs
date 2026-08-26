@@ -10,6 +10,7 @@
 pub mod categories;
 pub mod config;
 pub mod mapping;
+mod pg;
 pub mod request;
 pub mod response;
 pub mod result_map;
@@ -25,6 +26,7 @@ pub use categories::{
 };
 pub use config::{Config, Profile};
 pub use mapping::to_search_params;
+pub use pg::{admit_pg, pg_router, PgAdmissionError};
 pub use request::{
     parse, profile_name, TorznabRequest, FUNCTION_BOOK, FUNCTION_CAPS, FUNCTION_MOVIE,
     FUNCTION_MUSIC, FUNCTION_SEARCH, FUNCTION_TV_SEARCH, PARAM_CAT, PARAM_EPISODE, PARAM_IMDB_ID,

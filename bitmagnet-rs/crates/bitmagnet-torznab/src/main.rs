@@ -1,7 +1,6 @@
 //! Entry point for the PostgreSQL-backed Torznab HTTP adapter.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -12,12 +11,11 @@ use axum::Router;
 use bitmagnet_common::metrics::{
     maybe_spawn_metrics_server, register_histogram, register_int_counter,
 };
-use bitmagnet_db::{DbConfig, PgPool};
-use bitmagnet_search_query::{SearchResultItem, TorznabSearchParams};
-use bitmagnet_torznab::{Config, SearchClient, SearchError};
+use bitmagnet_db::DbConfig;
+use bitmagnet_torznab::{admit_pg, pg_router, Config};
 use clap::Parser;
 use prometheus::{Histogram, IntCounter};
-use tracing::{info, warn};
+use tracing::info;
 
 /// `bitmagnet-torznab` — the PostgreSQL-backed Torznab HTTP adapter.
 #[derive(Debug, Parser)]
@@ -31,28 +29,12 @@ struct Args {
     listen_addr: String,
 
     /// Goose migration version the database must have applied.
-    #[arg(long, env = "BITMAGNET_TORZNAB_EXPECTED_GOOSE_VERSION")]
-    expected_goose_version: Option<i64>,
-}
-
-struct PgSearchClient {
-    pool: PgPool,
-}
-
-#[async_trait::async_trait]
-impl SearchClient for PgSearchClient {
-    async fn search(
-        &self,
-        params: TorznabSearchParams,
-    ) -> Result<Vec<SearchResultItem>, SearchError> {
-        // Lane Q's build_query/fetch are live; only content-JOIN hydration of
-        // release_year/imdb_id/tmdb_id is stubbed to None until Q2b, so live
-        // Torznab feeds omit those three torznab:attrs until then. The deploy
-        // ships dark (route disabled) regardless.
-        let query = bitmagnet_search_query::build_query(&params)?;
-        let rows = query.fetch(&self.pool).await?;
-        Ok(rows)
-    }
+    #[arg(
+        long,
+        env = "BITMAGNET_TORZNAB_EXPECTED_GOOSE_VERSION",
+        value_parser = parse_positive_i64
+    )]
+    expected_goose_version: i64,
 }
 
 /// Request metrics for the Rust Torznab adapter.
@@ -90,14 +72,17 @@ async fn main() -> anyhow::Result<()> {
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid listen address {:?}", args.listen_addr))?;
 
-    let pool = bitmagnet_db::connect(&DbConfig::from_env()?).await?;
-    assert_goose_version(&pool, args.expected_goose_version).await?;
+    let pool = bitmagnet_db::connect(&DbConfig::from_compatible_env()?).await?;
+    let goose_head = admit_pg(&pool, args.expected_goose_version).await?;
+    info!(
+        goose_version = goose_head.version,
+        "goose schema version confirmed"
+    );
 
     let _metrics_server = maybe_spawn_metrics_server().await?;
     let request_metrics = TorznabMetrics::register();
 
-    let client = PgSearchClient { pool };
-    let app = bitmagnet_torznab::router(Config::default().merge_defaults(), Arc::new(client));
+    let app = pg_router(Config::default().merge_defaults(), pool);
     let app = with_request_metrics(app, request_metrics);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -110,45 +95,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn assert_goose_version(pool: &PgPool, expected: Option<i64>) -> anyhow::Result<()> {
-    let Some(expected) = expected else {
-        warn!(
-            "goose schema version assertion skipped; no \
-             BITMAGNET_TORZNAB_EXPECTED_GOOSE_VERSION configured"
-        );
-        return Ok(());
-    };
-
-    let detected =
-        match sqlx::query_scalar::<_, Option<i64>>("SELECT max(version_id) FROM goose_db_version")
-            .fetch_one(pool)
-            .await
-        {
-            Ok(detected) => detected,
-            Err(error) => anyhow::bail!(
-                "goose schema version assertion failed: detected=unavailable, \
-             expected={expected}: {error}"
-            ),
-        };
-
-    if let Some(message) = goose_mismatch(expected, detected) {
-        anyhow::bail!(message);
+fn parse_positive_i64(value: &str) -> Result<i64, String> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|error| format!("invalid positive integer {value:?}: {error}"))?;
+    if parsed <= 0 {
+        return Err(format!("expected a positive integer, got {parsed}"));
     }
-
-    info!(goose_version = expected, "goose schema version confirmed");
-    Ok(())
-}
-
-fn goose_mismatch(expected: i64, detected: Option<i64>) -> Option<String> {
-    match detected {
-        Some(detected) if detected == expected => None,
-        Some(detected) => Some(format!(
-            "goose schema version mismatch: detected={detected}, expected={expected}"
-        )),
-        None => Some(format!(
-            "goose schema version mismatch: detected=none, expected={expected}"
-        )),
-    }
+    Ok(parsed)
 }
 
 fn with_request_metrics(app: Router, metrics: TorznabMetrics) -> Router {
@@ -178,7 +132,7 @@ mod tests {
     use clap::Parser;
     use tower::ServiceExt;
 
-    use super::{goose_mismatch, with_request_metrics, Args, TorznabMetrics};
+    use super::{with_request_metrics, Args, TorznabMetrics};
 
     struct ArgsEnvRestore {
         listen_addr: Option<OsString>,
@@ -217,13 +171,18 @@ mod tests {
     }
 
     #[test]
-    fn args_parse_defaults_and_overrides() {
+    fn args_require_positive_goose_version_and_accept_overrides() {
         let _restore = ArgsEnvRestore::clear();
 
-        let defaults =
-            Args::try_parse_from(["bitmagnet-torznab"]).expect("default Torznab arguments parse");
-        assert_eq!(defaults.listen_addr, "0.0.0.0:3336");
-        assert_eq!(defaults.expected_goose_version, None);
+        assert!(Args::try_parse_from(["bitmagnet-torznab"]).is_err());
+        for invalid in ["0", "-1"] {
+            assert!(Args::try_parse_from([
+                "bitmagnet-torznab",
+                "--expected-goose-version",
+                invalid,
+            ])
+            .is_err());
+        }
 
         let overridden = Args::try_parse_from([
             "bitmagnet-torznab",
@@ -234,20 +193,7 @@ mod tests {
         ])
         .expect("explicit Torznab arguments parse");
         assert_eq!(overridden.listen_addr, "127.0.0.1:43336");
-        assert_eq!(overridden.expected_goose_version, Some(2_026_071_101));
-    }
-
-    #[test]
-    fn goose_mismatch_reports_missing_and_wrong_versions() {
-        assert_eq!(goose_mismatch(42, Some(42)), None);
-        assert_eq!(
-            goose_mismatch(42, Some(41)).as_deref(),
-            Some("goose schema version mismatch: detected=41, expected=42")
-        );
-        assert_eq!(
-            goose_mismatch(42, None).as_deref(),
-            Some("goose schema version mismatch: detected=none, expected=42")
-        );
+        assert_eq!(overridden.expected_goose_version, 2_026_071_101);
     }
 
     #[tokio::test]
