@@ -31,6 +31,7 @@ pub mod load;
 mod persist;
 mod runtime;
 mod shadow;
+mod writer_load;
 mod writer_projection;
 
 pub use compare::{
@@ -45,6 +46,7 @@ pub use runtime::{MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeErro
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
 };
+pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
 pub use writer_projection::{
     project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
 };
