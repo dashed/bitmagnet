@@ -251,8 +251,10 @@ Facts Lane T must feed the builder, mirrored from `search_options.go`:
 - `TorrentContentDefaultOption()` + `WithTotalCount(false)` baseline
   (`adapter.go:22`) — total is deliberately not computed (why `response` omits it).
 
-**Until Lane Q pushes its API**, the crate builds against an in-crate
-`SearchQuery` trait with a stub returning empty results, so T1/T2/T3 do not block.
+Lane Q's production `build_query`/`fetch` API is live, including content-join
+hydration for release year, IMDb, and TMDB identifiers. The production
+`pg_router` seam uses that real PostgreSQL client; fixture-only tests retain the
+injectable `SearchClient` boundary.
 
 ## 8. Byte-parity normalization surface (for Lane G goldens)
 

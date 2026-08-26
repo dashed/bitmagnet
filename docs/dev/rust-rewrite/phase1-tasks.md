@@ -34,8 +34,8 @@ Go builder being ported — NO changes there).
 ## Lane T — `bitmagnet-torznab` crate + bin (branch `p1t-torznab`)
 Owns: `bitmagnet-rs/crates/bitmagnet-torznab/**`. Read-only reference:
 `internal/torznab/**` (Go adapter/XML being mirrored — NO changes there).
-Consumes Lane Q's crate API — until Q2 lands, build against stub returns
-behind a feature flag or in-crate trait; do NOT block.
+Consumes Lane Q's live `build_query`/`fetch` crate API through the production
+PostgreSQL router seam; fixture-only tests may still inject `SearchClient`.
 
 | # | Task | Status |
 |---|------|--------|
