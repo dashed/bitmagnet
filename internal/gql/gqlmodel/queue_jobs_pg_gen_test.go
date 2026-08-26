@@ -178,6 +178,8 @@ func queueJobsOracleCases() []queueJobsOracleCase {
 		{ID: "duplicate-order-replaces-direction", Input: json.RawMessage(`{"limit":5,"hasNextPage":true,"orderBy":[{"field":"priority"},{"field":"created_at","descending":true},{"field":"priority","descending":true}]}`)},
 		{ID: "ran-at-desc-nulls-first", Input: json.RawMessage(`{"limit":5,"orderBy":[{"field":"ran_at","descending":true},{"field":"created_at","descending":true}]}`)},
 		{ID: "explicit-empty-filter", Input: json.RawMessage(`{"queues":[],"statuses":[],"limit":100,"totalCount":true,"hasNextPage":true,"facets":{"queue":{"aggregate":true,"filter":[]},"status":{"aggregate":true,"filter":[]}}}`)},
+		{ID: "empty-queue-facet-filter-noop", Input: json.RawMessage(`{"limit":3,"totalCount":true,"hasNextPage":true,"facets":{"queue":{"aggregate":true,"filter":[]}},"orderBy":[{"field":"created_at"}]}`)},
+		{ID: "empty-status-facet-filter-noop", Input: json.RawMessage(`{"limit":3,"totalCount":true,"hasNextPage":true,"facets":{"status":{"aggregate":true,"filter":[]}},"orderBy":[{"field":"created_at"}]}`)},
 		{ID: "false-count-flags", Input: json.RawMessage(`{"limit":3,"totalCount":false,"hasNextPage":false,"orderBy":[{"field":"created_at"}]}`)},
 		{ID: "fractional-timestamp-wire-format", Input: json.RawMessage(`{"limit":1,"offset":1,"orderBy":[{"field":"created_at"}]}`)},
 	}

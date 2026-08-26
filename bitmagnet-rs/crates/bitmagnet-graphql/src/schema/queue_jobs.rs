@@ -592,7 +592,7 @@ fn normalize_queue_facet(
     }
     Ok(Some(QueueJobsFacetRequest {
         aggregate: maybe_bool(input.aggregate).unwrap_or(false),
-        filter: input.filter,
+        filter: input.filter.filter(|values| !values.is_empty()),
     }))
 }
 
@@ -611,6 +611,7 @@ fn normalize_status_facet(
         aggregate: maybe_bool(input.aggregate).unwrap_or(false),
         filter: input
             .filter
+            .filter(|values| !values.is_empty())
             .map(|values| values.into_iter().map(status_name).collect()),
     }))
 }
@@ -750,6 +751,45 @@ mod tests {
             .await;
         assert_eq!(response.errors.len(), 1);
         assert!(response.errors[0].message.contains("limit must be between"));
+    }
+
+    #[test]
+    fn empty_facet_filters_normalize_to_go_noop() {
+        let input = QueueJobsQueryInput {
+            facets: MaybeUndefined::Value(QueueJobsFacetsInput {
+                queue: MaybeUndefined::Value(QueueJobQueueFacetInput {
+                    aggregate: MaybeUndefined::Value(true),
+                    filter: Some(Vec::new()),
+                }),
+                status: MaybeUndefined::Value(QueueJobStatusFacetInput {
+                    aggregate: MaybeUndefined::Value(true),
+                    filter: Some(Vec::new()),
+                }),
+            }),
+            has_next_page: MaybeUndefined::Undefined,
+            limit: MaybeUndefined::Undefined,
+            offset: MaybeUndefined::Undefined,
+            order_by: None,
+            page: MaybeUndefined::Undefined,
+            queues: None,
+            statuses: None,
+            total_count: MaybeUndefined::Undefined,
+        };
+        let request = normalize_input(input).expect("normalize empty facet filters");
+        assert_eq!(
+            request.queue_facet,
+            Some(QueueJobsFacetRequest {
+                aggregate: true,
+                filter: None,
+            })
+        );
+        assert_eq!(
+            request.status_facet,
+            Some(QueueJobsFacetRequest {
+                aggregate: true,
+                filter: None,
+            })
+        );
     }
 
     #[test]
