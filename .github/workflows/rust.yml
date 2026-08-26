@@ -201,6 +201,84 @@ jobs:
             --security-opt no-new-privileges --user 65532:65532 "$image" --help \
             | grep -F 'Usage: bitmagnet-process-torrent-batch'
 
+  docker-dht-observe:
+    name: docker build and smoke (DHT observer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: bitmagnet-rs
+          file: bitmagnet-rs/docker/Dockerfile.dht-observe
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bitmagnet-dht-observe:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=dht-observe
+          cache-to: type=gha,mode=max,scope=dht-observe
+      - name: Verify image contract and executable lifecycle
+        working-directory: ${{ github.workspace }}
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          image=bitmagnet-dht-observe:ci
+          inspect="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-dht-observe"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            .[0].Config.StopSignal == "SIGTERM" and
+            (.[0].Config.ExposedPorts | keys) == ["3333/tcp", "3334/udp", "9090/tcp"] and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.dht-mode"] == "observe-only" and
+            .[0].Config.Labels["io.bitmagnet.dht-observe-contract"] == "observe-only/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null and
+            (.[0].Config.Env | index("HTTP_SERVER_LOCAL_ADDRESS=0.0.0.0:3333")) != null
+          ' "$inspect"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 "$image" --help \
+            | grep -F 'Usage: bitmagnet-dht-observe'
+
+          container="$(docker run -d --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            -e HTTP_SERVER_LOCAL_ADDRESS=127.0.0.1:3333 \
+            -e DHT_SERVER_PORT=3334 \
+            -e DHT_CRAWLER_SCALING_FACTOR=1 \
+            -e DHT_CRAWLER_BOOTSTRAP_NODES=localhost:9 \
+            -e BITMAGNET_METRICS_ADDR=127.0.0.1:9090 \
+            -e BITMAGNET_DHT_OBSERVE_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS=3 \
+            -e RUST_LOG=info \
+            "$image")"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 100); do
+            if docker logs "$container" 2>&1 | grep -Fq 'bitmagnet-dht-observe started'; then
+              break
+            fi
+            test "$attempt" -lt 100
+            sleep 0.1
+          done
+          docker kill --signal TERM "$container"
+          test "$(docker wait "$container")" = 0
+          docker logs "$container" 2>&1 | grep -F 'bitmagnet-dht-observe stopped cleanly'
+
   docker-writeset-replay:
     name: docker build (write-set and tape parity replay)
     runs-on: ubuntu-latest
