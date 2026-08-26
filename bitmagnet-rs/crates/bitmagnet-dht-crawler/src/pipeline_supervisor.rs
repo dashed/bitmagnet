@@ -172,6 +172,56 @@ pub enum DhtCrawlerPipelineExit {
     Completed(Box<DhtCrawlerPipelineCompletedExit>),
 }
 
+impl DhtCrawlerPipelineExit {
+    /// Whether an external request produced a complete canonical drain.
+    ///
+    /// A successful outer shutdown classification is not sufficient: every
+    /// nested maintenance and downstream child, the UDP runtime, and blocking
+    /// finalization must also retain the expected terminal evidence. A shutdown
+    /// observed before task start is clean only when runtime shutdown and the
+    /// one finalization attempt both completed successfully.
+    #[must_use]
+    pub fn is_clean_external_shutdown(&self) -> bool {
+        match self {
+            Self::ShutdownBeforeStart { runtime, blocking } => {
+                matches!(runtime, Ok(DhtRuntimeExit::Shutdown)) && matches!(blocking, Ok(Ok(_)))
+            }
+            Self::Completed(exit) => {
+                exit.first_trigger == DhtCrawlerPipelineTrigger::ExternalShutdown
+                    && crate::observe_only_supervisor::maintenance_shutdown_is_clean(
+                        &exit.maintenance,
+                    )
+                    && matches!(
+                        &exit.downstream.triage,
+                        Ok(DhtInfoHashTriageWorkerExit::InputClosed)
+                    )
+                    && matches!(
+                        &exit.downstream.get_peers,
+                        Ok(DhtGetPeersWorkerExit::InputClosed)
+                    )
+                    && matches!(
+                        &exit.downstream.request_meta_info,
+                        Ok(DhtRequestMetaInfoWorkerExit::InputClosed)
+                    )
+                    && matches!(
+                        &exit.downstream.persist_torrent,
+                        Ok(DhtPersistTorrentWorkerExit::InputClosed)
+                    )
+                    && matches!(
+                        &exit.downstream.scrape,
+                        Ok(DhtScrapeWorkerExit::InputClosed)
+                    )
+                    && matches!(
+                        &exit.downstream.persist_source,
+                        Ok(DhtPersistSourceWorkerExit::InputClosed)
+                    )
+                    && matches!(&exit.runtime, Ok(DhtRuntimeExit::Shutdown))
+                    && matches!(&exit.blocking, Ok(Ok(_)))
+            }
+        }
+    }
+}
+
 /// Observable one-shot lifecycle of a crawler pipeline run.
 ///
 /// `Ready` is published only after all six downstream workers and all nine
@@ -1906,7 +1956,9 @@ mod tests {
         let finalizer_calls = Arc::new(AtomicUsize::new(0));
         let factories = normal_factories(log.clone(), gate.clone(), finalizer_calls.clone());
 
-        let exit = completed(run_bounded(gate.wait_for(8), factories).await);
+        let exit = run_bounded(gate.wait_for(8), factories).await;
+        assert!(exit.is_clean_external_shutdown());
+        let exit = completed(exit);
 
         assert_eq!(
             exit.first_trigger,
@@ -2357,7 +2409,9 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         );
 
-        let exit = completed(run_bounded(gate.wait_for(8), factories).await);
+        let exit = run_bounded(gate.wait_for(8), factories).await;
+        assert!(!exit.is_clean_external_shutdown());
+        let exit = completed(exit);
 
         assert_eq!(
             exit.first_trigger,
@@ -2439,6 +2493,7 @@ mod tests {
         )
         .await;
 
+        assert!(exit.is_clean_external_shutdown());
         assert!(matches!(
             exit,
             DhtCrawlerPipelineExit::ShutdownBeforeStart {

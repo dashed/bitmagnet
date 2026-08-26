@@ -166,7 +166,7 @@ impl DhtCrawlerObserveOnlyExit {
     }
 }
 
-fn maintenance_shutdown_is_clean(
+pub(crate) fn maintenance_shutdown_is_clean(
     result: &Result<DhtCrawlerMaintenanceSupervisorExit, JoinError>,
 ) -> bool {
     match result {
