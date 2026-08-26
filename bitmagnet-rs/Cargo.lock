@@ -944,6 +944,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-dht-crawler-app"
+version = "0.1.0"
+dependencies = [
+ "bitmagnet-dht-crawler",
+ "clap",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bitmagnet-dht-observe"
 version = "0.1.0"
 dependencies = [

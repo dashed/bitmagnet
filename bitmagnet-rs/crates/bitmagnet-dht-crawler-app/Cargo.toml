@@ -1,0 +1,16 @@
+[package]
+name = "bitmagnet-dht-crawler-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Bounded process ownership for the writer-capable Rust DHT crawler."
+
+[dependencies]
+bitmagnet-dht-crawler = { path = "../bitmagnet-dht-crawler" }
+clap.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
