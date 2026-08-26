@@ -4,8 +4,8 @@
 //!
 //! Only the write side is ported here (the B′-0 seam needs
 //! `model.Content.UpdateTsv`): the map representation, [`Tsvector::add_text`],
-//! and the `String()` rendering. `ParseTsvector` and the GORM `Value()` glue
-//! have no Rust consumer yet.
+//! [`Tsvector::add_text_bounded`], and the `String()` rendering.
+//! `ParseTsvector` and the GORM `Value()` glue have no Rust consumer yet.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -18,6 +18,11 @@ use crate::tokenize_flat;
 /// `fts.MaxLexemeBytes`). Longer lexemes are silently dropped rather than
 /// failing the whole insert.
 pub const MAX_LEXEME_BYTES: usize = 2046;
+
+/// A conservative serialized-size ceiling below PostgreSQL's 1,048,575-byte
+/// `tsvector` limit (Go `fts.MaxTsvectorBytes`). Callers use the remaining
+/// budget with [`Tsvector::add_text_bounded`] for unbounded, low-priority text.
+pub const MAX_TSVECTOR_BYTES: usize = 900_000;
 
 /// A lexeme's position label weight (Go `fts.TsvectorWeight`, a rune).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,6 +109,61 @@ impl Tsvector {
             next_pos += 1;
         }
     }
+
+    /// Go `Tsvector.AddTextBounded` — append tokenized lexemes while a signed
+    /// conservative byte budget can pay for them, returning the remainder.
+    ///
+    /// A non-positive budget leaves the vector untouched. Lexemes exceeding
+    /// [`MAX_LEXEME_BYTES`] are skipped without consuming budget or stopping the
+    /// scan. Every other lexeme costs its byte length plus 12 before insertion;
+    /// the first such lexeme that does not fit stops the scan. Position and
+    /// repeated-lexeme behavior is otherwise identical to [`Self::add_text`].
+    #[must_use]
+    pub fn add_text_bounded(
+        &mut self,
+        text: &str,
+        weight: TsvectorWeight,
+        mut budget: isize,
+    ) -> isize {
+        if budget <= 0 {
+            return budget;
+        }
+
+        let mut next_pos = 1;
+        for labels in self.0.values() {
+            for pos in labels.keys() {
+                if *pos >= next_pos {
+                    next_pos = *pos + 1;
+                }
+            }
+        }
+        if next_pos > 1 {
+            next_pos += 1;
+        }
+
+        for lexeme in tokenize_flat(text) {
+            if lexeme.len() > MAX_LEXEME_BYTES {
+                continue;
+            }
+
+            let cost = tsvector_lexeme_cost(&lexeme);
+            if cost > budget {
+                break;
+            }
+            budget -= cost;
+
+            self.0.entry(lexeme).or_default().insert(next_pos, weight);
+            next_pos += 1;
+        }
+
+        budget
+    }
+}
+
+/// Conservative serialized cost of one lexeme: force quotes plus room for its
+/// position label, weight, and separator. Mirrors Go `tsvectorLexemeCost`.
+fn tsvector_lexeme_cost(lexeme: &str) -> isize {
+    isize::try_from(lexeme.len()).expect("an accepted lexeme length fits isize") + 12
 }
 
 impl fmt::Display for Tsvector {
@@ -200,6 +260,70 @@ mod tests {
         let at_limit = "b".repeat(MAX_LEXEME_BYTES);
         tsv.add_text(&at_limit, TsvectorWeight::A);
         assert_eq!(tsv.len(), 1, "a lexeme exactly at the limit is kept");
+    }
+
+    #[test]
+    fn add_text_bounded_non_positive_budget_is_unchanged() {
+        for budget in [-1, 0] {
+            let mut tsv = Tsvector::new();
+            tsv.add_text("existing", TsvectorWeight::A);
+            let before = tsv.clone();
+
+            let remaining = tsv.add_text_bounded("alpha bravo", TsvectorWeight::D, budget);
+
+            assert_eq!(remaining, budget);
+            assert_eq!(tsv, before);
+        }
+    }
+
+    #[test]
+    fn add_text_bounded_exact_fit_inserts_and_one_byte_short_stops() {
+        // "alpha" costs len + 12 = 17 bytes.
+        let mut exact = Tsvector::new();
+        assert_eq!(exact.add_text_bounded("alpha", TsvectorWeight::D, 17), 0);
+        assert_eq!(exact.to_string(), "'alpha':1");
+
+        let mut short = Tsvector::new();
+        assert_eq!(
+            short.add_text_bounded("alpha bravo", TsvectorWeight::D, 16),
+            16
+        );
+        assert!(short.is_empty());
+    }
+
+    #[test]
+    fn add_text_bounded_skips_overlong_lexeme_then_keeps_normal_one() {
+        let oversized = "a".repeat(MAX_LEXEME_BYTES + 1);
+        let mut tsv = Tsvector::new();
+
+        let remaining = tsv.add_text_bounded(&format!("{oversized} keep"), TsvectorWeight::D, 16);
+
+        assert_eq!(remaining, 0);
+        assert_eq!(tsv.to_string(), "'keep':1");
+    }
+
+    #[test]
+    fn add_text_bounded_preserves_positional_gap() {
+        let mut tsv = Tsvector::new();
+        tsv.add_text("matrix", TsvectorWeight::A);
+
+        let remaining = tsv.add_text_bounded("1999", TsvectorWeight::D, 16);
+
+        assert_eq!(remaining, 0);
+        assert_eq!(tsv.to_string(), "'1999':3 'matrix':1A");
+    }
+
+    #[test]
+    fn add_text_bounded_charges_repeated_lexemes() {
+        let mut tsv = Tsvector::new();
+        tsv.add_text("matrix", TsvectorWeight::A);
+
+        // Each occurrence costs 18 bytes. The first is inserted at the normal
+        // cross-field gap; the second cannot fit and stops the scan.
+        let remaining = tsv.add_text_bounded("matrix matrix", TsvectorWeight::D, 35);
+
+        assert_eq!(remaining, 17);
+        assert_eq!(tsv.to_string(), "'matrix':1A,3");
     }
 
     #[test]
