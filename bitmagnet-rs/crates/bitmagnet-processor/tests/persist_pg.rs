@@ -1,8 +1,8 @@
 //! Live-PostgreSQL gate for the Lane P transaction kernel.
 //!
-//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to a disposable goose-29
-//! database. The test truncates processor-owned rows and must never target a
-//! production database.
+//! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to the exact disposable
+//! Goose-33 database named `bitmagnet_processor_writer_load_test`. The test
+//! truncates processor-owned rows and refuses every other database name.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -24,6 +24,7 @@ use sqlx::{PgPool, Row};
 const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const TEST_DATABASE_NAME: &str = "bitmagnet_processor_writer_load_test";
 
 struct RecordingBlocker {
     pool: PgPool,
@@ -111,7 +112,7 @@ fn assert_insufficient_privilege(error: sqlx::Error) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable goose-29 PostgreSQL"]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-33 database"]
 async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
@@ -120,6 +121,14 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let pool = PgPool::connect(&database_url)
         .await
         .expect("connect disposable PostgreSQL");
+    let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .expect("read disposable database sentinel");
+    assert_eq!(
+        database_name, TEST_DATABASE_NAME,
+        "ignored persistence gate refuses a database without its exact disposable-name sentinel"
+    );
 
     sqlx::query("TRUNCATE torrent_tags, torrent_contents, torrents CASCADE")
         .execute(&pool)
