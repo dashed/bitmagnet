@@ -98,6 +98,7 @@ this in the docs: http://dev.apollodata.com/core/fragments.html#unique-names`):a
   hasFilesInfo
   singleFile
   fileType
+  fileExtensions
   sources {
     key
     name

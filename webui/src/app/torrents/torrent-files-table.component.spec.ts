@@ -23,6 +23,7 @@ describe("TorrentFilesTableComponent", () => {
       size: 100,
       filesStatus: "single",
       hasFilesInfo: true,
+      fileExtensions: [],
       sources: [],
       tagNames: [],
       createdAt: new Date().toISOString(),

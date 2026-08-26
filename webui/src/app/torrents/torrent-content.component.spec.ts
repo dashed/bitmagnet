@@ -24,6 +24,7 @@ describe("TorrentContentComponent", () => {
         size: 10,
         filesStatus: "no_info",
         hasFilesInfo: false,
+        fileExtensions: [],
         magnetUri: `magnet:?xt=urn:btih:${infoHash}`,
         sources: [],
         tagNames: [],

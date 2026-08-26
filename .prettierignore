@@ -6,6 +6,21 @@ webui/src/app/graphql/generated/**/*.*
 webui/src/app/i18n/translations/*.json
 webui/.angular
 
-# Generated Go→Rust tokenizer parity fixture (fts.TokenizeFlat ground-truth); not hand-edited
-bitmagnet-rs/crates/bitmagnet-search/tests/fixtures/tokenizer_fixtures.json
-webui-react/pnpm-lock.yaml
+# Rust migration contracts and byte-exact fixtures are reviewed by Rust/parity
+# gates rather than the root JavaScript formatter.
+bitmagnet-rs/**/*.md
+bitmagnet-rs/**/fixtures/**/*.json
+
+# Evidence, parity corpora, and operator handoffs are provenance-sensitive.
+bench/graphql-rss/
+docs/dev/rust-rewrite/
+observability/grafana-dashboards/
+testdata/parity/
+SITEM_SPEC.md
+handoff-*.md
+
+# The React workspace owns a newer Prettier and its own configuration.
+webui-react/
+
+# Dockerfiles use role suffixes; `.graphql` is not a GraphQL document.
+bitmagnet-rs/docker/Dockerfile.*

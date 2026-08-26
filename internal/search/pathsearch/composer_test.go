@@ -438,9 +438,9 @@ func TestComposer_CandidateBudget_DeepPaginationGrows(t *testing.T) {
 		{"page1 limit 100 capped", 100, 0, 200},
 		{"shallow offset 40", 20, 40, 200},
 		// Deep: need > 200 lifts the floor and grows toward the memory ceiling.
-		{"deep offset 400", 50, 400, 1800},    // need=450 -> 450*4=1800, under 2000
-		{"deep offset 1000", 50, 1000, 2000},  // need=1050 -> 4200 -> capped to 2000
-		{"deep small limit", 20, 400, 1680},   // need=420 -> 1680, servable (was 200)
+		{"deep offset 400", 50, 400, 1800},   // need=450 -> 450*4=1800, under 2000
+		{"deep offset 1000", 50, 1000, 2000}, // need=1050 -> 4200 -> capped to 2000
+		{"deep small limit", 20, 400, 1680},  // need=420 -> 1680, servable (was 200)
 	} {
 		if got := c.candidateBudget(tc.limit, tc.offset); got != tc.want {
 			t.Errorf("%s: budget(limit=%d, offset=%d) = %d, want %d", tc.name, tc.limit, tc.offset, got, tc.want)

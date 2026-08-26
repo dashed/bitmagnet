@@ -381,8 +381,8 @@ func TestTorrentTokenMatch_SingleTokenIdenticalToLegacyKeep(t *testing.T) {
 		{Query: "inception"},
 		{Query: "inception", Extensions: []string{"mkv"}},
 		{Query: "inception", Extensions: []string{"avi"}},
-		{Query: "readme"}, // matches a file path, not the name
-		{Query: "bluray"}, // matches the name only (rescue)
+		{Query: "readme"},                              // matches a file path, not the name
+		{Query: "bluray"},                              // matches the name only (rescue)
 		{Query: "bluray", Extensions: []string{"mkv"}}, // rescue disabled by ext filter
 		{Query: "inception", MinSize: 1000},
 		{Query: "inception", MinSize: 2000},
