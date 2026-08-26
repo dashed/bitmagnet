@@ -3,11 +3,14 @@
 //! The ignored test requires an exact disposable database-name sentinel before
 //! it truncates or seeds any row. It never targets the production database.
 
+use std::collections::BTreeMap;
+
 use bitmagnet_processor::{
-    load_writer_torrents, project_unattached_persistence, TorrentContentWrite, WriterLoadError,
-    WriterLoadedTorrent,
+    load_writer_plan, load_writer_torrents, project_unattached_persistence, Materializer,
+    TorrentContentWrite, WriterLoadError, WriterLoadedTorrent,
 };
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
+use serde_json::Value;
 use sqlx::{PgPool, Row};
 
 const TEST_DATABASE_URL: &str = "BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL";
@@ -52,6 +55,19 @@ fn content_row(torrent: &WriterLoadedTorrent) -> TorrentContentWrite {
         release_group: None,
         size: torrent.loaded.classifier_input.size,
         files_count: torrent.loaded.classifier_input.files_count.map(u64::from),
+    }
+}
+
+fn supported_params(info_hashes: Vec<ProtocolId>) -> ProcessTorrentParams {
+    ProcessTorrentParams {
+        info_hashes,
+        classifier_workflow: "default".to_owned(),
+        classifier_flags: Some(BTreeMap::from([
+            ("apis_enabled".to_owned(), Value::Bool(false)),
+            ("local_search_enabled".to_owned(), Value::Bool(false)),
+            ("tmdb_enabled".to_owned(), Value::Bool(false)),
+        ])),
+        ..ProcessTorrentParams::default()
     }
 }
 
@@ -178,6 +194,44 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
     assert_eq!(
         cutoff.published_at_micros, 946_684_800_000_001,
         "exact cutoff falls back to created_at while cutoff + 1 is accepted"
+    );
+
+    let materializer = Materializer::from_core().expect("compile core classifier");
+    let plan = load_writer_plan(&pool, &materializer, &supported_params(vec![id_a]))
+        .await
+        .expect("compose one disconnected writer plan from PostgreSQL");
+    assert_eq!(plan.write_set().torrent_contents.len(), 1);
+    assert!(plan.retry_info_hashes().is_empty());
+    let planned_row = &plan.write_set().torrent_contents[0];
+    let planned_metadata = plan
+        .persistence()
+        .get(&planned_row.id)
+        .expect("materialized row has exact persistence metadata");
+    assert_eq!(planned_metadata.seeders, Some(8));
+    assert_eq!(planned_metadata.leechers, Some(9));
+    assert_eq!(planned_metadata.published_at_micros, -876_544);
+
+    let persisted_counts = sqlx::query(
+        "SELECT \
+           (SELECT count(*)::bigint FROM torrent_contents) AS torrent_contents, \
+           (SELECT count(*)::bigint FROM torrent_tags) AS torrent_tags",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count writer-owned rows after disconnected planning");
+    assert_eq!(
+        persisted_counts
+            .try_get::<i64, _>("torrent_contents")
+            .expect("decode torrent_contents count"),
+        0,
+        "writer planning must not persist torrent_contents"
+    );
+    assert_eq!(
+        persisted_counts
+            .try_get::<i64, _>("torrent_tags")
+            .expect("decode torrent_tags count"),
+        0,
+        "writer planning must not persist torrent_tags"
     );
 
     sqlx::query(

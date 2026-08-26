@@ -23,8 +23,8 @@ This milestone intentionally stops before DB behavior:
 - `LoadedTorrent.classifier_input` must already contain the effective hint from
   the read/hydration stage;
 - runtime classifier overrides currently accept the core bool flags only;
-- attached-content enrichment is rejected because Lane C's normalized JSON
-  exposes only `contentAttached`, not the `Content` row; and
+- attached-content persistence is rejected because the current writer image
+  does not carry the base content TSV and association rows; and
 - persistence, Tantivy dual-write, queue polling/mirroring, live-row diffing,
   and the SELECT-only role negative control require the Coder+PG milestone.
 
@@ -68,12 +68,25 @@ regression test freezes that correctness improvement. Exact parity is claimed
 for the pre-transaction blocking boundary once Go reaches `persist`, not for
 that Go orchestration bug.
 
+The disconnected writer-plan checkpoint now composes the bounded writer loader,
+the real materializer, and the pure volatile-field projection into the exact
+`WriteSet` plus `torrent_contents.id`-keyed metadata image accepted by
+`persist_write_set`. It borrows hydrated classifier inputs rather than cloning
+their potentially large file lists, requires unique matching source keys, and
+requires an explicit `default` workflow with all three attach flags false. It
+fails closed on any unresolved hint/enrichment path, attached content,
+incomplete projection keyset, or transaction-kernel input validation error.
+The immutable plan retains failed hashes as retry intent; matching Go requires
+the future runtime to enqueue those retries successfully before persisting its
+successful rows. Neither the composer nor its loader wrapper calls persistence
+or has an active runtime caller.
+
 This is not yet the complete runtime persistence milestone:
 
-- attached `content` remains rejected until Lane C exposes the structured
-  content row and its associations;
-- the runtime loader still needs to carry the volatile persistence metadata and
-  construct the weighted FTS vector;
+- attached `content` remains rejected until the writer projection carries the
+  base content TSV and the persistence kernel owns its association rows;
+- the disconnected plan still needs a writer runtime and queue lifecycle after
+  the remaining safety gates pass;
 - application composition still needs to share the manager across callers and
   flush it after all producers stop but before the PostgreSQL pool closes; and
 - at milestone 2, queue retry wiring, post-commit Tantivy dual-write, the

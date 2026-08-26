@@ -31,7 +31,9 @@ pub mod load;
 mod persist;
 mod runtime;
 mod shadow;
+mod supported_subset;
 mod writer_load;
+mod writer_plan;
 mod writer_projection;
 
 pub use compare::{
@@ -47,6 +49,7 @@ pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
 };
 pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
+pub use writer_plan::{compose_writer_plan, load_writer_plan, WriterPlan, WriterPlanError};
 pub use writer_projection::{
     project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
 };
@@ -176,6 +179,20 @@ impl Materializer {
         params: &ProcessTorrentParams,
         torrents: Vec<LoadedTorrent>,
     ) -> Result<WriteSet, MaterializeError> {
+        self.materialize_borrowed(params, torrents.iter())
+    }
+
+    /// Materialize without cloning the hydrated classifier inputs.
+    ///
+    /// The disconnected writer-plan composer retains the source snapshots
+    /// beside each [`LoadedTorrent`]. Borrowing here lets it project volatile
+    /// persistence metadata after classification without copying bounded but
+    /// potentially large file lists.
+    fn materialize_borrowed<'a>(
+        &self,
+        params: &ProcessTorrentParams,
+        torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
+    ) -> Result<WriteSet, MaterializeError> {
         let workflow = if params.classifier_workflow.is_empty() {
             "default"
         } else {
@@ -243,7 +260,7 @@ impl Materializer {
         validate_info_hash(&torrent.info_hash)?;
 
         let mut write_set = WriteSet::default();
-        append_classification_write(&mut write_set, torrent, result, outcome, true)?;
+        append_classification_write(&mut write_set, &torrent, result, outcome, true)?;
         write_set.canonicalize();
         Ok(write_set)
     }
@@ -251,7 +268,7 @@ impl Materializer {
 
 fn append_classification_write(
     write_set: &mut WriteSet,
-    torrent: LoadedTorrent,
+    torrent: &LoadedTorrent,
     result: Classification,
     outcome: Outcome,
     include_identifiers: bool,
@@ -281,10 +298,10 @@ fn append_classification_write(
                     .add_tags
                     .insert(info_hash.clone(), result.tags.iter().cloned().collect());
             }
-            let tc = torrent_content_write(&torrent, result);
-            for existing_id in torrent.existing_content_ids {
-                if existing_id != tc.id {
-                    write_set.delete_ids.push(existing_id);
+            let tc = torrent_content_write(torrent, result);
+            for existing_id in &torrent.existing_content_ids {
+                if existing_id != &tc.id {
+                    write_set.delete_ids.push(existing_id.clone());
                 }
             }
             write_set.torrent_contents.push(tc);

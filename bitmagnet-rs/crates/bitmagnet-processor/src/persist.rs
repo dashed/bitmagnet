@@ -1,11 +1,12 @@
 //! PostgreSQL persistence for the currently supported processor write image.
 //!
 //! Go persists attached `content` rows, stale-content deletes, classified
-//! `torrent_contents`, tags, and whole-torrent deletes in that order. Lane P M1
-//! cannot yet materialize attached content and deliberately excludes volatile
-//! source snapshots and the FTS vector from its comparison image. This module
-//! therefore refuses attached-content writes and requires those omitted values
-//! explicitly before it opens a transaction.
+//! `torrent_contents`, tags, and whole-torrent deletes in that order. The
+//! current writer image does not carry the base content TSV and associations,
+//! and its stable comparison image deliberately excludes volatile source
+//! snapshots and the FTS vector. This module therefore refuses attached-content
+//! writes and requires those omitted volatile values explicitly before it opens
+//! a transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -49,7 +50,8 @@ pub struct TorrentContentPersistence {
 /// The transaction order mirrors `internal/processor/persist.go`: delete stale
 /// `torrent_contents`, upsert the classified rows in batches of 100, insert tags
 /// with `ON CONFLICT DO NOTHING`, then delete whole torrents. Attached content
-/// is rejected until Lane C exposes the full structured content image.
+/// is rejected until the writer projection carries the base content TSV and
+/// the kernel owns its association rows.
 pub async fn persist_write_set<B>(
     pool: &PgPool,
     write_set: &WriteSet,
@@ -100,9 +102,17 @@ where
     Ok(())
 }
 
+/// Run every pure persistence-input check without blocking or touching the DB.
+pub(crate) fn validate_persistence_input(
+    write_set: &WriteSet,
+    persistence: &BTreeMap<String, TorrentContentPersistence>,
+) -> Result<(), PersistError> {
+    PreparedWriteSet::new(write_set, persistence).map(drop)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersistError {
-    #[error("attached content persistence is not supported by the Lane P M1 image")]
+    #[error("attached content persistence is not supported by the current writer image")]
     AttachedContentUnsupported,
     #[error("missing persistence metadata for torrent_content '{0}'")]
     MissingPersistenceMetadata(String),

@@ -16,8 +16,7 @@ use super::{
     ComparisonVerdict, LoadError, MaterializeError, Materializer, ShadowComparison,
     ShadowReadError,
 };
-
-const REQUIRED_FALSE_FLAGS: [&str; 3] = ["local_search_enabled", "apis_enabled", "tmdb_enabled"];
+use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
 
 /// A read-only processor for jobs from `process_torrent_shadow`.
 pub struct ShadowRuntime {
@@ -97,14 +96,7 @@ fn unique_hashes(ids: &[ProtocolId]) -> Vec<String> {
 }
 
 fn require_flags_off(params: &ProcessTorrentParams) -> Result<(), ShadowRuntimeError> {
-    let flags = params
-        .classifier_flags
-        .as_ref()
-        .ok_or(ShadowRuntimeError::AttachFlagsNotExplicitlyDisabled)?;
-    if REQUIRED_FALSE_FLAGS
-        .iter()
-        .all(|name| flags.get(*name).and_then(serde_json::Value::as_bool) == Some(false))
-    {
+    if has_explicit_attach_flags_off(params) {
         Ok(())
     } else {
         Err(ShadowRuntimeError::AttachFlagsNotExplicitlyDisabled)
@@ -112,7 +104,7 @@ fn require_flags_off(params: &ProcessTorrentParams) -> Result<(), ShadowRuntimeE
 }
 
 fn require_default_workflow(params: &ProcessTorrentParams) -> Result<(), ShadowRuntimeError> {
-    if params.classifier_workflow == "default" {
+    if has_explicit_default_workflow(params) {
         Ok(())
     } else {
         Err(ShadowRuntimeError::ClassifierWorkflowUnsupported)
