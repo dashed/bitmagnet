@@ -97,11 +97,6 @@ func (t TorrentQuery) filesFromBlob(
 		return search.TorrentFilesResult{}, errors.New("filesFromBlob: Dao not wired")
 	}
 
-	limit := uint(10)
-	if in.Limit.Valid {
-		limit = in.Limit.Uint
-	}
-
 	dao := t.Dao.Torrent.WithContext(ctx)
 
 	if len(in.InfoHashes) > 0 {
@@ -150,6 +145,18 @@ func (t TorrentQuery) filesFromBlob(
 		}
 	}
 
+	return torrentFilesResult(files, in), nil
+}
+
+// torrentFilesResult is the pure ordering/paging projection shared by the live
+// blob path and the cross-language oracle. The caller owns blob decoding and
+// path-derived extension canonicalization.
+func torrentFilesResult(files []model.TorrentFile, in TorrentFilesQueryInput) search.TorrentFilesResult {
+	limit := uint(10)
+	if in.Limit.Valid {
+		limit = in.Limit.Uint
+	}
+
 	sortTorrentFiles(files, in.OrderBy)
 
 	total := uint(len(files))
@@ -186,7 +193,7 @@ func (t TorrentQuery) filesFromBlob(
 		result.HasNextPage = end < total
 	}
 
-	return result, nil
+	return result
 }
 
 // sortTorrentFiles applies the requested order(s) to an in-memory file slice,
