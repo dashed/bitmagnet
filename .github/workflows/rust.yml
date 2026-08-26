@@ -652,7 +652,6 @@ jobs:
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_TEST_DATABASE_URL: postgres://bitmagnet_graphql_reader_ci:graphql-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
-      BITMAGNET_GRAPHQL_QUEUE_TEST_DATABASE_URL: postgres://bitmagnet_graphql_queue_reader_ci:graphql-queue-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_TORZNAB_TEST_DATABASE_URL: postgres://bitmagnet_torznab_reader_ci:torznab-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
@@ -701,16 +700,10 @@ jobs:
             CONNECTION LIMIT 4;
           GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_graphql_reader_ci;
           GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_reader_ci;
-          GRANT SELECT ON goose_db_version, torrents, torrent_file_summary, torrent_sources, torrent_tags
+          -- Current direct-reader union for the one runtime pool. Search-reader
+          -- activation remains blocked on its later, separately reviewed expansion.
+          GRANT SELECT ON goose_db_version, queue_jobs, torrents, torrent_file_summary, torrent_sources, torrent_tags
             TO bitmagnet_graphql_reader_ci;
-          CREATE ROLE bitmagnet_graphql_queue_reader_ci
-            LOGIN PASSWORD 'graphql-queue-reader-ci-only'
-            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT 4;
-          GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_graphql_queue_reader_ci;
-          GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_queue_reader_ci;
-          GRANT SELECT ON goose_db_version, queue_jobs
-            TO bitmagnet_graphql_queue_reader_ci;
           SQL
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \
             -p bitmagnet-graphql --test torrent_files_pg -- \

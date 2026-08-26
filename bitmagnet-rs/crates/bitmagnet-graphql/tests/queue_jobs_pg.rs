@@ -1,9 +1,10 @@
 //! Disposable-PostgreSQL parity and admission for `queue.jobs`.
 //!
 //! The Go fixture generator owns all mutations. This test authenticates the
-//! production schema as a dedicated two-table SELECT-only role, fingerprints
-//! every public table through a separate read-only admin pool, and proves the
-//! full oracle replay is nonmutating.
+//! production schema as the shared current direct-reader SELECT-only role,
+//! fingerprints every public table through a separate read-only admin pool,
+//! and proves the full oracle replay is nonmutating. This exact six-table union
+//! is not the later search-reader activation contract.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,7 +22,7 @@ use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 
 const EXPECTED_GOOSE_VERSION: i64 = 33;
-const READER_ROLE: &str = "bitmagnet_graphql_queue_reader_ci";
+const READER_ROLE: &str = "bitmagnet_graphql_reader_ci";
 
 #[derive(Debug, Deserialize)]
 struct OracleCase {
@@ -33,10 +34,8 @@ struct OracleCase {
 #[tokio::test]
 #[ignore = "requires Go-seeded disposable PostgreSQL 16"]
 async fn real_pg_queue_jobs_matches_go_without_mutation() {
-    let Some(reader_dsn) = test_dsn("BITMAGNET_GRAPHQL_QUEUE_TEST_DATABASE_URL") else {
-        eprintln!(
-            "BITMAGNET_GRAPHQL_QUEUE_TEST_DATABASE_URL not set; skipping queue.jobs PG parity"
-        );
+    let Some(reader_dsn) = test_dsn("BITMAGNET_GRAPHQL_TEST_DATABASE_URL") else {
+        eprintln!("BITMAGNET_GRAPHQL_TEST_DATABASE_URL not set; skipping queue.jobs PG parity");
         return;
     };
     let admin_dsn = test_dsn("POSTGRES_DSN")
@@ -131,7 +130,7 @@ async fn assert_exact_select_only_reader(dsn: &str) {
         .max_connections(1)
         .connect(dsn)
         .await
-        .expect("connect as the dedicated queue GraphQL reader");
+        .expect("connect as the shared direct GraphQL reader");
     let attributes = sqlx::query_as::<_, (String, bool, bool, bool, bool, bool, bool, bool)>(
         "SELECT current_user::text, rolcanlogin, rolinherit, rolsuper, rolcreatedb, \
          rolcreaterole, rolreplication, rolbypassrls \
@@ -168,19 +167,23 @@ async fn assert_exact_select_only_reader(dsn: &str) {
         [
             ("goose_db_version".to_owned(), "SELECT".to_owned()),
             ("queue_jobs".to_owned(), "SELECT".to_owned()),
+            ("torrent_file_summary".to_owned(), "SELECT".to_owned()),
+            ("torrent_sources".to_owned(), "SELECT".to_owned()),
+            ("torrent_tags".to_owned(), "SELECT".to_owned()),
+            ("torrents".to_owned(), "SELECT".to_owned()),
         ]
     );
 
     let write_error = sqlx::query("UPDATE queue_jobs SET priority = priority WHERE FALSE")
         .execute(&pool)
         .await
-        .expect_err("the dedicated queue reader must not hold UPDATE");
+        .expect_err("the direct GraphQL reader must not hold UPDATE");
     assert_sqlstate_42501(write_error, "queue_jobs UPDATE");
-    let unrelated_read = sqlx::query("SELECT count(*) FROM torrents")
+    let unrelated_read = sqlx::query("SELECT count(*) FROM content")
         .fetch_one(&pool)
         .await
-        .expect_err("the dedicated queue reader must not read unrelated tables");
-    assert_sqlstate_42501(unrelated_read, "torrents SELECT");
+        .expect_err("the direct GraphQL reader must not read unrelated tables");
+    assert_sqlstate_42501(unrelated_read, "content SELECT");
 
     pool.close().await;
 }

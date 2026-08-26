@@ -1,9 +1,10 @@
 //! Disposable-PostgreSQL parity and admission for bounded torrent reads.
 //!
 //! The Go fixture generator owns all mutations. This Rust test authenticates
-//! the production schema as a dedicated SELECT-only role, fingerprints every
-//! public table through a separate read-only admin pool, and proves replay is
-//! nonmutating.
+//! the production schema as the shared current direct-reader SELECT-only role,
+//! fingerprints every public table through a separate read-only admin pool,
+//! and proves replay is nonmutating. This exact six-table union is not the
+//! later search-reader activation contract.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -145,7 +146,7 @@ async fn assert_select_only_reader(dsn: &str) {
         .max_connections(1)
         .connect(dsn)
         .await
-        .expect("connect as the dedicated GraphQL reader");
+        .expect("connect as the shared direct GraphQL reader");
 
     let attributes = sqlx::query_as::<_, (String, bool, bool, bool, bool, bool, bool, bool)>(
         "SELECT current_user::text, rolcanlogin, rolinherit, rolsuper, rolcreatedb, \
@@ -182,6 +183,7 @@ async fn assert_select_only_reader(dsn: &str) {
         grants,
         [
             ("goose_db_version".to_owned(), "SELECT".to_owned()),
+            ("queue_jobs".to_owned(), "SELECT".to_owned()),
             ("torrent_file_summary".to_owned(), "SELECT".to_owned()),
             ("torrent_sources".to_owned(), "SELECT".to_owned()),
             ("torrent_tags".to_owned(), "SELECT".to_owned()),
@@ -192,11 +194,20 @@ async fn assert_select_only_reader(dsn: &str) {
     let write_error = sqlx::query("UPDATE torrents SET name = name WHERE FALSE")
         .execute(&pool)
         .await
-        .expect_err("the dedicated GraphQL reader must not hold UPDATE");
+        .expect_err("the direct GraphQL reader must not hold UPDATE");
     let sqlx::Error::Database(write_error) = write_error else {
         panic!("expected a PostgreSQL permission error, got {write_error}");
     };
     assert_eq!(write_error.code().as_deref(), Some("42501"));
+
+    let unrelated_read = sqlx::query("SELECT count(*) FROM content")
+        .fetch_one(&pool)
+        .await
+        .expect_err("the direct GraphQL reader must not read unrelated tables");
+    let sqlx::Error::Database(unrelated_read) = unrelated_read else {
+        panic!("expected a PostgreSQL permission error, got {unrelated_read}");
+    };
+    assert_eq!(unrelated_read.code().as_deref(), Some("42501"));
 
     pool.close().await;
 }
