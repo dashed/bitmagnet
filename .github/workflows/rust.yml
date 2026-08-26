@@ -746,6 +746,9 @@ jobs:
           -- PostgreSQL grants EXECUTE to PUBLIC by default. Remove that
           -- disposable-CI shortcut from every public routine so the role's
           -- sole explicit budgeted_count grant is the complete contract.
+          -- Production activation requires a separate audited global ACL
+          -- transition; adding the reader grant alone would leave SECURITY
+          -- DEFINER mutation routines executable through PUBLIC.
           REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
           REVOKE EXECUTE ON ALL PROCEDURES IN SCHEMA public FROM PUBLIC;
           GRANT EXECUTE ON FUNCTION public.budgeted_count(text, double precision)
