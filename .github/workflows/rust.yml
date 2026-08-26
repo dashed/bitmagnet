@@ -142,7 +142,9 @@ jobs:
     name: docker build and smoke (GraphQL read API)
     runs-on: ubuntu-latest
     outputs:
+      artifact-name: ${{ steps.export.outputs.artifact-name }}
       archive-sha256: ${{ steps.export.outputs.archive-sha256 }}
+      builder-attempt: ${{ steps.export.outputs.builder-attempt }}
       image-id: ${{ steps.export.outputs.image-id }}
       source-commit: ${{ steps.source.outputs.commit }}
       source-tree: ${{ steps.source.outputs.tree }}
@@ -205,6 +207,9 @@ jobs:
         run: |
           artifact_dir="$RUNNER_TEMP/bitmagnet-graphql-image"
           archive="$artifact_dir/bitmagnet-graphql.tar"
+          builder_attempt="$GITHUB_RUN_ATTEMPT"
+          artifact_name="graphql-image-${SOURCE_COMMIT}-attempt-${builder_attempt}"
+          printf '%s' "$builder_attempt" | grep -Eq '^[1-9][0-9]*$'
           mkdir -p "$artifact_dir"
           docker image save --output "$archive" bitmagnet-graphql:ci
           image_id="$(docker image inspect --format '{{.Id}}' bitmagnet-graphql:ci)"
@@ -215,23 +220,29 @@ jobs:
             --arg sourceTree "$SOURCE_TREE" \
             --arg imageId "$image_id" \
             --arg archiveSha256 "$archive_sha256" \
+            --argjson builderAttempt "$builder_attempt" \
             '{
               schema: $schema,
               sourceCommit: $sourceCommit,
               sourceTree: $sourceTree,
               imageId: $imageId,
-              archiveSha256: $archiveSha256
+              archiveSha256: $archiveSha256,
+              builderAttempt: $builderAttempt
             }' > "$artifact_dir/build-receipt.json"
           printf '%s  %s\n' "$archive_sha256" "bitmagnet-graphql.tar" \
             > "$artifact_dir/bitmagnet-graphql.tar.sha256"
-          echo "archive-sha256=$archive_sha256" >> "$GITHUB_OUTPUT"
-          echo "image-id=$image_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "artifact-name=$artifact_name"
+            echo "archive-sha256=$archive_sha256"
+            echo "builder-attempt=$builder_attempt"
+            echo "image-id=$image_id"
+          } >> "$GITHUB_OUTPUT"
       - name: Upload verified image artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           # A rerun gets a fresh artifact even if cancellation interrupted a
           # previous attempt after its upload completed.
-          name: graphql-image-${{ steps.source.outputs.commit }}-attempt-${{ github.run_attempt }}
+          name: ${{ steps.export.outputs.artifact-name }}
           path: ${{ runner.temp }}/bitmagnet-graphql-image
           if-no-files-found: error
           retention-days: 1
@@ -255,6 +266,8 @@ jobs:
       packages: write
     env:
       IMAGE_REPOSITORY: ghcr.io/dashed/bitmagnet-graphql
+      BUILD_ARTIFACT_NAME: ${{ needs.docker-graphql.outputs.artifact-name }}
+      BUILDER_ATTEMPT: ${{ needs.docker-graphql.outputs.builder-attempt }}
       SOURCE_COMMIT: ${{ needs.docker-graphql.outputs.source-commit }}
       SOURCE_TREE: ${{ needs.docker-graphql.outputs.source-tree }}
       EXPECTED_ARCHIVE_SHA256: ${{ needs.docker-graphql.outputs.archive-sha256 }}
@@ -263,12 +276,17 @@ jobs:
       - name: Download verified image artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: graphql-image-${{ needs.docker-graphql.outputs.source-commit }}-attempt-${{ github.run_attempt }}
+          # Use the builder's output verbatim. A failed-job retry increments the
+          # publisher attempt without rerunning a successful builder.
+          name: ${{ needs.docker-graphql.outputs.artifact-name }}
           path: ${{ runner.temp }}/bitmagnet-graphql-image
       - name: Verify and load exact smoked image
         working-directory: ${{ runner.temp }}/bitmagnet-graphql-image
         run: |
           test "$SOURCE_COMMIT" = "$GITHUB_SHA"
+          printf '%s' "$BUILDER_ATTEMPT" | grep -Eq '^[1-9][0-9]*$'
+          test "$BUILD_ARTIFACT_NAME" \
+            = "graphql-image-${SOURCE_COMMIT}-attempt-${BUILDER_ATTEMPT}"
           printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$SOURCE_TREE" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$EXPECTED_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
@@ -280,11 +298,13 @@ jobs:
             --arg tree "$SOURCE_TREE" \
             --arg imageId "$EXPECTED_IMAGE_ID" \
             --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
             '.schema == "bitmagnet.graphql-image-build/v1" and
              .sourceCommit == $commit and
              .sourceTree == $tree and
              .imageId == $imageId and
-             .archiveSha256 == $archiveSha256' \
+             .archiveSha256 == $archiveSha256 and
+             .builderAttempt == $builderAttempt' \
             build-receipt.json
           docker image load --input bitmagnet-graphql.tar
           test "$(docker image inspect --format '{{.Id}}' bitmagnet-graphql:ci)" \
@@ -300,7 +320,7 @@ jobs:
         working-directory: ${{ runner.temp }}/bitmagnet-graphql-image
         run: |
           image_ref="$IMAGE_REPOSITORY:$SOURCE_COMMIT"
-          tag_state=created
+          tag_state=pushed
           inspect_error="$(mktemp)"
           # The full-SHA tag is a mutable convenience reference. A prior
           # attempt may already have pushed it before cancellation, so reuse is
@@ -364,7 +384,8 @@ jobs:
             --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
             --arg tagState "$tag_state" \
             --arg workflowRun "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --argjson workflowRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            --argjson publisherAttempt "$GITHUB_RUN_ATTEMPT" \
             '{
               schema: $schema,
               imageRepository: $imageRepository,
@@ -380,7 +401,8 @@ jobs:
               archiveSha256: $archiveSha256,
               tagState: $tagState,
               workflowRun: $workflowRun,
-              workflowRunAttempt: $workflowRunAttempt
+              builderAttempt: $builderAttempt,
+              publisherAttempt: $publisherAttempt
             }' > publication-receipt.json
           {
             echo '### GraphQL image publication'
@@ -389,7 +411,8 @@ jobs:
             echo "- Source tree: \`$SOURCE_TREE\`"
             echo "- Deployment authority: \`$immutable_ref\`"
             echo "- Full-SHA tag (mutable convenience): \`$image_ref\` (\`$tag_state\`)"
-            echo "- Workflow attempt: \`$GITHUB_RUN_ATTEMPT\`"
+            echo "- Builder attempt: \`$BUILDER_ATTEMPT\`"
+            echo "- Publisher attempt: \`$GITHUB_RUN_ATTEMPT\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "immutable-ref=$immutable_ref" >> "$GITHUB_OUTPUT"
