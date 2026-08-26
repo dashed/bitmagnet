@@ -11,6 +11,12 @@ import (
 	"strconv"
 )
 
+const (
+	torznabQueryKindCaps   = "caps"
+	torznabQueryKindSearch = "search"
+	torznabQueryKindError  = "error"
+)
+
 // CorpusQuery is one ordered query from the shared Torznab parity corpus.
 type CorpusQuery struct {
 	ID        string
@@ -24,7 +30,7 @@ type CorpusQuery struct {
 
 // GoldenName returns the committed golden filename for the query.
 func (query CorpusQuery) GoldenName() string {
-	if query.ID == "caps" {
+	if query.ID == torznabQueryKindCaps {
 		return "caps.golden.xml"
 	}
 
@@ -105,7 +111,7 @@ func LoadTorznabCorpus(path string) ([]CorpusQuery, error) {
 			return fmt.Errorf("duplicate id %q (first seen on line %d)", wire.ID, firstLine)
 		}
 		switch wire.Kind {
-		case "caps", "search", "error":
+		case torznabQueryKindCaps, torznabQueryKindSearch, torznabQueryKindError:
 		default:
 			return fmt.Errorf("query %q has invalid kind %q", wire.ID, wire.Kind)
 		}
@@ -118,7 +124,7 @@ func LoadTorznabCorpus(path string) ([]CorpusQuery, error) {
 			Dims: wire.Dims,
 		}
 		if wire.ExpectIDs != nil {
-			if wire.Kind != "search" {
+			if wire.Kind != torznabQueryKindSearch {
 				return fmt.Errorf("query %q has expectIds but kind is %q", wire.ID, wire.Kind)
 			}
 			if err := json.Unmarshal(wire.ExpectIDs, &query.ExpectIDs); err != nil {

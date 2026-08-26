@@ -46,7 +46,7 @@ func TestTorznabReplayOffline(t *testing.T) {
 					[]byte("--- go\n"+string(gn)+"\n--- rust\n"+string(rn)+"\n"), 0o644)
 			}
 		}
-		if q.Kind != "search" { //nolint:goconst // Shared wire value is intentionally owned by production parsing.
+		if q.Kind != torznabQueryKindSearch {
 			continue
 		}
 		d, err := DiffXMLPair(q.ID, goXML, rsXML)

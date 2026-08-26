@@ -153,7 +153,7 @@ func RunReplay(
 
 	report := ReplayReport{}
 	for _, query := range corpus {
-		if query.Kind != "search" {
+		if query.Kind != torznabQueryKindSearch {
 			continue
 		}
 

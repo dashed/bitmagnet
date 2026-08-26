@@ -10,8 +10,6 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/torznab"
 )
 
-const capsQueryID = "caps"
-
 func TestNormalizeTorznabXML(t *testing.T) {
 	raw := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <rss xmlns:torznab="http://torznab.com/schemas/2015/feed" version="2.0">
@@ -129,7 +127,7 @@ func TestTorznabCorpusAndFixtureLoaders(t *testing.T) {
 	if len(corpus) != 67 {
 		t.Fatalf("corpus length = %d, want 67", len(corpus))
 	}
-	if corpus[0].ID != capsQueryID || corpus[0].GoldenName() != "caps.golden.xml" {
+	if corpus[0].ID != torznabQueryKindCaps || corpus[0].GoldenName() != "caps.golden.xml" {
 		t.Fatalf("first corpus query = %+v, want caps query", corpus[0])
 	}
 	if corpus[4].ID != "search-q-none" || !corpus[4].HasExpect || len(corpus[4].ExpectIDs) != 0 {
