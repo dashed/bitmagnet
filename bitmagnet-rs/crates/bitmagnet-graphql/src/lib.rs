@@ -29,4 +29,8 @@ pub use schema::{
     PgTorrentSourcesRuntime, TorrentSourceRecord, TorrentSourcesError, TorrentSourcesRuntime,
     TorrentSourcesRuntimeData, MAX_TORRENT_SOURCES,
 };
+pub use schema::{
+    PgTorrentTagsRuntime, SuggestTagsRequest, SuggestedTagRecord, TorrentTagsError,
+    TorrentTagsRuntime, TorrentTagsRuntimeData,
+};
 pub use schema::{SearchRuntime, SearchRuntimeData};

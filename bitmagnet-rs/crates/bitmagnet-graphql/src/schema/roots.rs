@@ -169,10 +169,11 @@ impl TorrentQuery {
 
     async fn suggest_tags(
         &self,
+        ctx: &Context<'_>,
         input: Option<SuggestTagsQueryInput>,
     ) -> async_graphql::Result<TorrentSuggestTagsResult> {
-        let _ = &input;
-        unserved("torrent.suggestTags")
+        let runtime = ctx.data::<super::torrent_tags::TorrentTagsRuntimeData>()?;
+        super::torrent_tags::resolve(runtime, input).await
     }
 }
 
