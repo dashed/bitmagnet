@@ -138,6 +138,60 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  docker-graphql:
+    name: docker build and smoke (GraphQL read API)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: bitmagnet-rs
+          file: bitmagnet-rs/docker/Dockerfile.graphql
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bitmagnet-graphql:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=graphql
+          cache-to: type=gha,mode=max,scope=graphql
+      - name: Verify image contract and executable smoke
+        working-directory: ${{ github.workspace }}
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          image=bitmagnet-graphql:ci
+          inspect="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-graphql"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            (.[0].Config.ExposedPorts | keys) == ["3337/tcp", "9090/tcp"] and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.graphql-mode"] == "read-only" and
+            .[0].Config.Labels["io.bitmagnet.graphql-read-contract"] == "read-only/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+          ' "$inspect"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 "$image" --help \
+            | grep -F 'Usage: bitmagnet-graphql'
+
   docker-ingest-shadow:
     name: docker build (ingest shadow)
     runs-on: ubuntu-latest

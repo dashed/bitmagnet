@@ -3,11 +3,16 @@
 # Multi-stage build for the Phase-2 PostgreSQL-backed GraphQL read service.
 #
 #   docker build -f bitmagnet-rs/docker/Dockerfile.graphql \
+#     --build-arg REVISION="$(git rev-parse HEAD)" \
+#     --build-arg SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
 #     -t bitmagnet-graphql bitmagnet-rs
 #
 # Builder and runtime use Debian bookworm so the linked glibc matches. The
 # runtime is deliberately small and non-root; Kubernetes supplies every
 # endpoint and credential through environment variables.
+
+ARG REVISION
+ARG SOURCE_TREE
 
 # ---- builder ----------------------------------------------------------------
 FROM rust:1.97-slim-bookworm AS builder
@@ -38,6 +43,22 @@ RUN cargo build --locked --release -p bitmagnet-graphql \
 
 # ---- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
+ARG REVISION
+ARG SOURCE_TREE
+
+# Reject unbound or ambiguous source identity at image-build time.
+RUN set -eu; \
+    test "${#REVISION}" -eq 40; \
+    case "${REVISION}" in *[!0-9a-f]*) echo "REVISION must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac; \
+    test "${#SOURCE_TREE}" -eq 40; \
+    case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${REVISION}" \
+      io.bitmagnet.source-tree="${SOURCE_TREE}" \
+      io.bitmagnet.graphql-mode="read-only" \
+      io.bitmagnet.graphql-read-contract="read-only/v1"
 
 # SQLx and the federated-health HTTP client use rustls; only CA roots are
 # needed. No compiler, shell tooling, or database migration binary is shipped.
@@ -50,8 +71,12 @@ RUN apt-get update \
 COPY --from=builder /out/bitmagnet-graphql /usr/local/bin/bitmagnet-graphql
 
 # Prometheus remains disabled unless BITMAGNET_METRICS_ADDR is set.
-ENV LISTEN_ADDR=0.0.0.0:3337
+ENV BITMAGNET_SOURCE_COMMIT="${REVISION}" \
+    BITMAGNET_SOURCE_TREE="${SOURCE_TREE}" \
+    LISTEN_ADDR=0.0.0.0:3337
 
 USER 65532:65532
-EXPOSE 3337 9090
+EXPOSE 3337/tcp 9090/tcp
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/bitmagnet-graphql"]
+CMD []
