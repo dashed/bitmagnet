@@ -32,8 +32,13 @@ struct Args {
     listen_addr: String,
 
     /// Goose migration version the database must have applied.
-    #[arg(long, env = "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION")]
-    expected_goose_version: Option<i64>,
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
+        allow_hyphen_values = true,
+        value_parser = parse_positive_i64
+    )]
+    expected_goose_version: i64,
 
     /// Comma-delimited peer GraphQL endpoints used for federated health.
     #[arg(long, env = "HEALTH_PEER_GRAPHQL_URLS", value_delimiter = ',')]
@@ -510,8 +515,12 @@ async fn main() -> anyhow::Result<()> {
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid listen address {:?}", args.listen_addr))?;
 
-    let pool = bitmagnet_db::connect(&bitmagnet_db::DbConfig::from_env()?).await?;
-    assert_goose_version(&pool, args.expected_goose_version).await?;
+    let pool = bitmagnet_db::connect(&bitmagnet_db::DbConfig::from_compatible_env()?).await?;
+    let goose_head = bitmagnet_graphql::admit_pg(&pool, args.expected_goose_version).await?;
+    info!(
+        goose_version = goose_head.version,
+        "goose schema version confirmed"
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Register both C6 metric families exactly once, even while the serving
@@ -614,45 +623,14 @@ async fn status(State(state): State<AppState>) -> Result<Json<StatusResponse>, S
     }))
 }
 
-async fn assert_goose_version(pool: &PgPool, expected: Option<i64>) -> anyhow::Result<()> {
-    let Some(expected) = expected else {
-        warn!(
-            "goose schema version assertion skipped; no \
-             BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION configured"
-        );
-        return Ok(());
-    };
-
-    let detected =
-        match sqlx::query_scalar::<_, Option<i64>>("SELECT max(version_id) FROM goose_db_version")
-            .fetch_one(pool)
-            .await
-        {
-            Ok(detected) => detected,
-            Err(error) => anyhow::bail!(
-                "goose schema version assertion failed: detected=unavailable, \
-             expected={expected}: {error}"
-            ),
-        };
-
-    if let Some(message) = goose_mismatch(expected, detected) {
-        anyhow::bail!(message);
+fn parse_positive_i64(value: &str) -> Result<i64, String> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|error| format!("invalid positive integer {value:?}: {error}"))?;
+    if parsed <= 0 {
+        return Err(format!("value must be positive, got {parsed}"));
     }
-
-    info!(goose_version = expected, "goose schema version confirmed");
-    Ok(())
-}
-
-fn goose_mismatch(expected: i64, detected: Option<i64>) -> Option<String> {
-    match detected {
-        Some(detected) if detected == expected => None,
-        Some(detected) => Some(format!(
-            "goose schema version mismatch: detected={detected}, expected={expected}"
-        )),
-        None => Some(format!(
-            "goose schema version mismatch: detected=none, expected={expected}"
-        )),
-    }
+    Ok(parsed)
 }
 
 fn parse_go_duration(value: &str) -> Result<Duration, String> {
@@ -750,7 +728,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        app, build_search_runtime, goose_mismatch, parse_go_duration, AppState, Args,
+        app, build_search_runtime, parse_go_duration, AppState, Args,
         GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
@@ -841,15 +819,32 @@ mod tests {
         assert!(micros > 0, "GraphQL handler duration must be positive");
     }
 
+    fn default_args() -> Args {
+        Args::try_parse_from(["bitmagnet-graphql", "--expected-goose-version", "33"])
+            .expect("GraphQL arguments with an explicit Goose version parse")
+    }
+
     #[test]
     fn args_parse_defaults_and_overrides() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _restore = ArgsEnvRestore::clear();
 
-        let defaults =
-            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse");
+        let missing =
+            Args::try_parse_from(["bitmagnet-graphql"]).expect_err("the Goose version is required");
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        for invalid in ["0", "-1"] {
+            let error =
+                Args::try_parse_from(["bitmagnet-graphql", "--expected-goose-version", invalid])
+                    .expect_err("non-positive Goose versions are rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+
+        let defaults = default_args();
         assert_eq!(defaults.listen_addr, "0.0.0.0:3337");
-        assert_eq!(defaults.expected_goose_version, None);
+        assert_eq!(defaults.expected_goose_version, 33);
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
             defaults.health_peer_timeout,
@@ -913,7 +908,7 @@ mod tests {
         ])
         .expect("explicit GraphQL arguments parse");
         assert_eq!(overridden.listen_addr, "127.0.0.1:43337");
-        assert_eq!(overridden.expected_goose_version, Some(2_026_071_201));
+        assert_eq!(overridden.expected_goose_version, 2_026_071_201);
         assert_eq!(
             overridden.health_peer_graphql_urls,
             ["http://peer-a/graphql", "http://peer-b/graphql"]
@@ -966,8 +961,7 @@ mod tests {
             std::env::set_var(name, value);
         }
 
-        let args = Args::try_parse_from(["bitmagnet-graphql"])
-            .expect("Go-compatible search environment parses");
+        let args = default_args();
         assert!(args.search.file_search_enabled);
         assert_eq!(args.search.file_search_address, "files.test:15052");
         assert!(args.search.file_search_timeout.is_zero());
@@ -1007,7 +1001,7 @@ mod tests {
         let mut args = {
             let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
             let _restore = ArgsEnvRestore::clear();
-            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+            default_args()
         };
         args.search.features_drop_compatible_reads = true;
         args.search.features_file_search_enabled = true;
@@ -1046,7 +1040,7 @@ mod tests {
         let mut args = {
             let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
             let _restore = ArgsEnvRestore::clear();
-            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+            default_args()
         };
         args.search.pathsearch_enabled = true;
         args.search.pathsearch_address = "127.0.0.1:1".to_owned();
@@ -1109,7 +1103,7 @@ mod tests {
         let mut args = {
             let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
             let _restore = ArgsEnvRestore::clear();
-            Args::try_parse_from(["bitmagnet-graphql"]).expect("default GraphQL arguments parse")
+            default_args()
         };
         args.search.pathsearch_enabled = true;
         args.search.pathsearch_address = "127.0.0.1:1".to_owned();
@@ -1127,19 +1121,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.shutdown())
             .await
             .expect("health poller shutdown must not detach or hang");
-    }
-
-    #[test]
-    fn goose_mismatch_reports_missing_and_wrong_versions() {
-        assert_eq!(goose_mismatch(42, Some(42)), None);
-        assert_eq!(
-            goose_mismatch(42, Some(41)).as_deref(),
-            Some("goose schema version mismatch: detected=41, expected=42")
-        );
-        assert_eq!(
-            goose_mismatch(42, None).as_deref(),
-            Some("goose schema version mismatch: detected=none, expected=42")
-        );
     }
 
     #[test]

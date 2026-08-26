@@ -5,9 +5,11 @@
 
 mod health;
 pub mod normalize;
+mod pg;
 pub mod schema;
 
 pub use health::RuntimeConfig;
+pub use pg::{admit_pg, PgAdmissionError};
 pub use schema::file_search_client::{
     DisabledFileSearchBackend, FileSearchClientConfig, L2FileHit, L2FileRowsResult,
     L2FileSearchBackend, TonicFileSearchClient, MAX_L2_FILE_WINDOW,
