@@ -1,8 +1,8 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
-//! This test truncates queue, torrent, and content tables; point it only at a
-//! disposable goose-33 database and invoke it explicitly with
-//! `--ignored --test-threads=1`.
+//! This test truncates queue, torrent, and content tables. It requires the exact
+//! disposable Goose-33 database name `bitmagnet_processor_writer_load_test`
+//! and explicit invocation with `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::str::FromStr;
@@ -22,6 +22,8 @@ use prometheus::Encoder as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 use tokio::sync::{oneshot, Mutex};
+
+const TEST_DATABASE_NAME: &str = "bitmagnet_processor_writer_load_test";
 
 async fn reset(pool: &PgPool) {
     sqlx::query(
@@ -121,6 +123,14 @@ async fn queue_runtime_matches_go_contract() {
     let pool = PgPool::connect(&database_url)
         .await
         .expect("connect disposable PostgreSQL");
+    let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .expect("read disposable database sentinel");
+    assert_eq!(
+        database_name, TEST_DATABASE_NAME,
+        "ignored queue gate refuses a database without its exact disposable-name sentinel"
+    );
     let store = QueueStore::new(pool.clone());
 
     // Terminal-row cleanup uses Go's strict status, cutoff, and null
