@@ -10,9 +10,9 @@ use bitmagnet_dht::{
 use clap::Parser;
 
 use crate::{
-    DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError, DhtCrawlerDownstreamLaneConfig,
-    DhtCrawlerObserveOnlyConfig, DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig,
-    DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
+    DhtCrawlerClassifierQueue, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError,
+    DhtCrawlerDownstreamLaneConfig, DhtCrawlerObserveOnlyConfig, DhtInfoHashTriageConfig,
+    DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
 };
 
 /// Go's ordered `dht_crawler.bootstrap_nodes` default.
@@ -262,6 +262,17 @@ pub struct DhtCrawlerAppConfig {
     )]
     expected_goose_version: i64,
 
+    /// Required classifier queue target for newly persisted torrents.
+    ///
+    /// `shadow` isolates classifier consumption but does not disable the
+    /// crawler's PostgreSQL torrent, source, file, pieces, or queue writes.
+    #[arg(
+        long = "classifier-queue",
+        env = "BITMAGNET_DHT_CRAWLER_CLASSIFIER_QUEUE",
+        value_enum
+    )]
+    classifier_queue: DhtCrawlerClassifierQueue,
+
     /// Go-compatible crawler scaling factor.
     #[arg(
         long = "dht-crawler-scaling-factor",
@@ -422,6 +433,7 @@ impl DhtCrawlerAppConfig {
                     save_files_threshold: self.save_files_threshold,
                     save_pieces: self.save_pieces,
                 },
+                classifier_queue: self.classifier_queue,
                 ..DhtPersistTorrentWorkerConfig::default()
             },
             metainfo_requester: DhtPeerWireMetaInfoRequesterConfig {
@@ -478,6 +490,10 @@ impl DhtCrawlerAppConfig {
 
     pub const fn expected_goose_version(&self) -> i64 {
         self.expected_goose_version
+    }
+
+    pub const fn classifier_queue(&self) -> DhtCrawlerClassifierQueue {
+        self.classifier_queue
     }
 
     pub const fn dht_server_port(&self) -> u16 {
@@ -761,8 +777,8 @@ mod tests {
 
     use super::{
         parse_go_duration, parse_go_http_listen_addr, DhtCrawlerAppConfig,
-        DhtCrawlerAppConfigErrorKind, DhtCrawlerAppProjection, DhtCrawlerDownstreamConfig,
-        DhtCrawlerDownstreamLaneConfig, DhtCrawlerObserveOnlyAppConfig,
+        DhtCrawlerAppConfigErrorKind, DhtCrawlerAppProjection, DhtCrawlerClassifierQueue,
+        DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamLaneConfig, DhtCrawlerObserveOnlyAppConfig,
         DhtCrawlerObserveOnlyAppProjection, DhtCrawlerObserveOnlyConfig, DhtInfoHashTriageConfig,
         DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
         DEFAULT_BOOTSTRAP_NODES, DEFAULT_METAINFO_KEY_MUTEX_SIZE, DEFAULT_METAINFO_REQUEST_TIMEOUT,
@@ -805,6 +821,8 @@ mod tests {
             "1m30.5s",
             "--expected-goose-version",
             "29",
+            "--classifier-queue",
+            "shadow",
             "--dht-crawler-scaling-factor",
             "10",
             "--dht-crawler-bootstrap-nodes",
@@ -925,6 +943,13 @@ mod tests {
         assert!(
             forbidden.is_err(),
             "observe-only CLI must expose no Goose pin"
+        );
+        let forbidden = DhtCrawlerObserveOnlyAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None))
+            .try_get_matches_from(["bitmagnet-dht-observe", "--classifier-queue", "shadow"]);
+        assert!(
+            forbidden.is_err(),
+            "observe-only CLI must expose no classifier queue target"
         );
     }
 
@@ -1050,8 +1075,13 @@ mod tests {
 
     #[test]
     fn clap_defaults_match_the_effective_supported_contract() {
-        let config =
-            parse_without_environment(&["bitmagnet-dht-crawler", "--expected-goose-version", "29"]);
+        let config = parse_without_environment(&[
+            "bitmagnet-dht-crawler",
+            "--expected-goose-version",
+            "29",
+            "--classifier-queue",
+            "live",
+        ]);
 
         let projection = config.projection().expect("default config is supported");
         assert_eq!(config.dht_server_port(), 3334);
@@ -1066,6 +1096,7 @@ mod tests {
         );
         assert_eq!(config.save_files_threshold(), DEFAULT_SAVE_FILES_THRESHOLD);
         assert_eq!(config.save_pieces(), DEFAULT_SAVE_PIECES);
+        assert_eq!(config.classifier_queue(), DhtCrawlerClassifierQueue::Live);
         assert_eq!(config.rescrape_threshold(), DEFAULT_RESCRAPE_THRESHOLD);
         assert_eq!(
             config.metainfo_request_timeout(),
@@ -1093,6 +1124,7 @@ mod tests {
         let projection = config.projection().expect("complete projection");
 
         assert_eq!(config.expected_goose_version(), 29);
+        assert_eq!(config.classifier_queue(), DhtCrawlerClassifierQueue::Shadow);
         assert_eq!(config.scaling_factor(), DEFAULT_SCALING_FACTOR);
         assert_eq!(
             config.bootstrap_nodes(),
@@ -1127,6 +1159,10 @@ mod tests {
             projection.downstream
         );
         assert_eq!(config.downstream_config().unwrap(), projection.downstream);
+        assert_eq!(
+            projection.downstream.persist_torrent.classifier_queue,
+            DhtCrawlerClassifierQueue::Shadow
+        );
         assert_eq!(
             runtime.bind_addr,
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4444)
@@ -1165,6 +1201,10 @@ mod tests {
                 (
                     "dht_server_query_timeout".to_owned(),
                     "DHT_SERVER_QUERY_TIMEOUT".to_owned()
+                ),
+                (
+                    "classifier_queue".to_owned(),
+                    "BITMAGNET_DHT_CRAWLER_CLASSIFIER_QUEUE".to_owned()
                 ),
                 (
                     "expected_goose_version".to_owned(),
@@ -1258,6 +1298,7 @@ mod tests {
                         save_files_threshold: threshold,
                         save_pieces,
                     },
+                    classifier_queue: DhtCrawlerClassifierQueue::Shadow,
                     ..DhtPersistTorrentWorkerConfig::default()
                 }
             );
@@ -1326,6 +1367,8 @@ mod tests {
                 "bitmagnet-dht-crawler",
                 "--expected-goose-version",
                 "29",
+                "--classifier-queue",
+                "live",
             ]);
             config.scaling_factor = scaling_factor;
             let projection = config.projection().expect("bounded scaling projection");
@@ -1403,8 +1446,13 @@ mod tests {
 
     #[test]
     fn scaling_failures_are_typed_borrowed_and_have_deterministic_precedence() {
-        let mut config =
-            parse_without_environment(&["bitmagnet-dht-crawler", "--expected-goose-version", "29"]);
+        let mut config = parse_without_environment(&[
+            "bitmagnet-dht-crawler",
+            "--expected-goose-version",
+            "29",
+            "--classifier-queue",
+            "live",
+        ]);
         config.scaling_factor = 0;
         config.metainfo_key_mutex_size = DEFAULT_METAINFO_KEY_MUTEX_SIZE + 1;
         let unchanged = config.clone();
@@ -1527,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn goose_version_is_required_and_positive() {
+    fn goose_version_and_classifier_queue_are_required_and_typed() {
         let command = DhtCrawlerAppConfig::command();
         let expected_goose_version = command
             .get_arguments()
@@ -1535,6 +1583,45 @@ mod tests {
             .expect("expected Goose argument");
         assert!(expected_goose_version.is_required_set());
         assert!(expected_goose_version.get_default_values().is_empty());
+        let classifier_queue = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "classifier_queue")
+            .expect("classifier queue argument");
+        assert!(classifier_queue.is_required_set());
+        assert!(classifier_queue.get_default_values().is_empty());
+
+        for (value, expected) in [
+            ("shadow", DhtCrawlerClassifierQueue::Shadow),
+            ("live", DhtCrawlerClassifierQueue::Live),
+        ] {
+            let mut args = supported_args();
+            let value_index = args
+                .iter()
+                .position(|argument| *argument == "--classifier-queue")
+                .unwrap()
+                + 1;
+            args[value_index] = value;
+            assert_eq!(
+                DhtCrawlerAppConfig::try_parse_from(args)
+                    .expect("supported classifier queue")
+                    .classifier_queue(),
+                expected
+            );
+        }
+        let missing = DhtCrawlerAppConfig::try_parse_from([
+            "bitmagnet-dht-crawler",
+            "--expected-goose-version",
+            "29",
+        ]);
+        assert!(missing.is_err());
+        let mut invalid_args = supported_args();
+        let classifier_value = invalid_args
+            .iter()
+            .position(|argument| *argument == "--classifier-queue")
+            .unwrap()
+            + 1;
+        invalid_args[classifier_value] = "other";
+        assert!(DhtCrawlerAppConfig::try_parse_from(invalid_args).is_err());
 
         let mut args = supported_args();
         let value_index = args

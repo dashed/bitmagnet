@@ -102,12 +102,12 @@ pub use persist_source_route::{
     DhtPersistSourceReceiver, DhtPersistSourceRequest, DHT_PERSIST_SOURCE_ROUTE_CAPACITY,
 };
 pub use persist_torrent::{
-    plan_dht_torrent_batch, DhtResolvedExistingV2, DhtTorrentFileSummaryWrite, DhtTorrentFileWrite,
-    DhtTorrentPersistPlan, DhtTorrentPiecesWrite, DhtTorrentPlanConfig, DhtTorrentPlanCounts,
-    DhtTorrentPlanDiagnostic, DhtTorrentPlanner, DhtTorrentProjectionError,
-    DhtTorrentProjectionFailure, DhtTorrentSourceLinkWrite, DhtTorrentTransactionPlan,
-    DhtTorrentWrite, DHT_TORRENT_CLASSIFIER_BATCH_LIMIT, DHT_TORRENT_CLASSIFIER_DELAY,
-    DHT_TORRENT_DEFAULT_SAVE_FILES_THRESHOLD, DHT_TORRENT_SOURCE,
+    plan_dht_torrent_batch, DhtCrawlerClassifierQueue, DhtResolvedExistingV2,
+    DhtTorrentFileSummaryWrite, DhtTorrentFileWrite, DhtTorrentPersistPlan, DhtTorrentPiecesWrite,
+    DhtTorrentPlanConfig, DhtTorrentPlanCounts, DhtTorrentPlanDiagnostic, DhtTorrentPlanner,
+    DhtTorrentProjectionError, DhtTorrentProjectionFailure, DhtTorrentSourceLinkWrite,
+    DhtTorrentTransactionPlan, DhtTorrentWrite, DHT_TORRENT_CLASSIFIER_BATCH_LIMIT,
+    DHT_TORRENT_CLASSIFIER_DELAY, DHT_TORRENT_DEFAULT_SAVE_FILES_THRESHOLD, DHT_TORRENT_SOURCE,
 };
 pub use persist_torrent_route::{
     dht_persist_torrent_channel, DhtPersistTorrentInput, DhtPersistTorrentInputClosed,

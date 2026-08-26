@@ -2406,6 +2406,8 @@ mod tests {
                 "bitmagnet-dht-crawler".to_owned(),
                 "--expected-goose-version".to_owned(),
                 "29".to_owned(),
+                "--classifier-queue".to_owned(),
+                "shadow".to_owned(),
                 "--dht-crawler-scaling-factor".to_owned(),
                 scaling_factor.to_string(),
             ])

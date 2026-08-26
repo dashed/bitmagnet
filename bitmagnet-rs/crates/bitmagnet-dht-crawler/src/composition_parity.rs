@@ -1113,6 +1113,8 @@ mod tests {
                 "bitmagnet-dht-crawler".to_owned(),
                 "--expected-goose-version".to_owned(),
                 "29".to_owned(),
+                "--classifier-queue".to_owned(),
+                "shadow".to_owned(),
                 "--dht-crawler-scaling-factor".to_owned(),
                 scaling_factor.to_string(),
             ])
@@ -1267,7 +1269,10 @@ mod tests {
             );
             assert_eq!(
                 projection.downstream.persist_torrent,
-                crate::DhtPersistTorrentWorkerConfig::default(),
+                crate::DhtPersistTorrentWorkerConfig {
+                    classifier_queue: crate::DhtCrawlerClassifierQueue::Shadow,
+                    ..crate::DhtPersistTorrentWorkerConfig::default()
+                },
                 "ScalingFactor must not change persistence policy"
             );
         }

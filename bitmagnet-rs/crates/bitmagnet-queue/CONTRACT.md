@@ -39,6 +39,18 @@ therefore cannot replay a process-local stale cursor or skip committed source
 rows. When the active cap blocks a sampled candidate, the transaction does not
 advance past that candidate.
 
+The DHT crawler crate exposes a source-level classifier target seam that can
+construct a byte-identical Go-default payload directly for
+`process_torrent_shadow`. This is not a second admitted shadow producer. Such a
+job omits the explicit workflow and flags required by the current mirror and
+consumer contract, bypasses the mirror's sampling/depth/cursor gates, and is
+settled as unsupported by `ShadowRuntime`. The crawler's atomic writer also
+uses a plain queue insert, so an active shadow fingerprint conflict rolls back
+the surrounding torrent transaction instead of behaving like the mirror's
+`ON CONFLICT DO NOTHING`. Direct DHT Shadow routing must remain inactive until
+exclusive queue ownership, admission, payload compatibility, capacity, and
+collision policy are resolved and tested.
+
 The production-safe bootstrap creates a new mirror identity at
 `clock_timestamp()` and does not silently replay the retained archive. Scanning
 from the oldest retained row or from an explicit `(ran_at,id)` position requires

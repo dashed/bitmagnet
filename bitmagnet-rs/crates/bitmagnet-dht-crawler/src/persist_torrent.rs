@@ -17,7 +17,8 @@ use bitmagnet_model::{
     TorrentFileSummary,
 };
 use bitmagnet_queue::{
-    process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions,
+    new_queue_job, process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob,
+    QueueJobOptions, PROCESS_TORRENT_SHADOW,
 };
 
 use crate::DhtPersistTorrentRequest;
@@ -30,6 +31,33 @@ pub const DHT_TORRENT_CLASSIFIER_BATCH_LIMIT: usize = 100;
 pub const DHT_TORRENT_CLASSIFIER_DELAY: Duration = Duration::from_secs(60);
 /// Source key seeded by the production migration.
 pub const DHT_TORRENT_SOURCE: &str = "dht";
+
+/// Classifier queue selected for jobs emitted with persisted DHT torrents.
+///
+/// `Shadow` isolates classifier consumption from Go's live queue, but it does
+/// not make torrent persistence itself read-only: the surrounding transaction
+/// still writes every planned torrent, source, file, pieces, and queue row. It
+/// also bypasses the existing mirror's admission/depth/cursor policy, and the
+/// current shadow consumer rejects Go-default DHT payloads as unsupported.
+/// Shadow activation therefore requires a separate ownership, compatibility,
+/// and active-fingerprint collision gate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DhtCrawlerClassifierQueue {
+    Shadow,
+    #[default]
+    Live,
+}
+
+impl DhtCrawlerClassifierQueue {
+    /// Exact PostgreSQL queue name selected by this target.
+    #[must_use]
+    pub const fn queue_name(self) -> &'static str {
+        match self {
+            Self::Shadow => PROCESS_TORRENT_SHADOW,
+            Self::Live => bitmagnet_queue::PROCESS_TORRENT,
+        }
+    }
+}
 
 /// An already-resolved full-v2-to-primary snapshot supplied by a later lookup
 /// adapter. The planner neither queries nor resolves conflicting database rows.
@@ -55,19 +83,40 @@ impl Default for DhtTorrentPlanConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DhtTorrentPlanner {
     config: DhtTorrentPlanConfig,
+    classifier_queue: DhtCrawlerClassifierQueue,
 }
 
 impl DhtTorrentPlanner {
     /// Construct a planner. This performs no lookup or other external effect.
     #[must_use]
     pub const fn new(config: DhtTorrentPlanConfig) -> Self {
-        Self { config }
+        Self::with_classifier_queue(config, DhtCrawlerClassifierQueue::Live)
+    }
+
+    /// Construct a planner with an explicit classifier queue target.
+    ///
+    /// This performs no lookup or other external effect.
+    #[must_use]
+    pub const fn with_classifier_queue(
+        config: DhtTorrentPlanConfig,
+        classifier_queue: DhtCrawlerClassifierQueue,
+    ) -> Self {
+        Self {
+            config,
+            classifier_queue,
+        }
     }
 
     /// Return the immutable projection policy.
     #[must_use]
     pub const fn config(&self) -> DhtTorrentPlanConfig {
         self.config
+    }
+
+    /// Return the immutable classifier queue target.
+    #[must_use]
+    pub const fn classifier_queue(&self) -> DhtCrawlerClassifierQueue {
+        self.classifier_queue
     }
 
     /// Produce the sorted, unique full-v2 keys carried by identity-valid
@@ -96,7 +145,7 @@ impl DhtTorrentPlanner {
             existing_v2,
             self.config,
             &mut |files| serialize_files(files).map_err(|error| error.to_string()),
-            &mut build_classifier_job,
+            &mut |hashes| build_classifier_job(hashes, self.classifier_queue),
         )
     }
 }
@@ -682,7 +731,10 @@ fn checked_file_summary(
     })
 }
 
-fn build_classifier_job(hashes: &[Id20]) -> Result<QueueJob, String> {
+fn build_classifier_job(
+    hashes: &[Id20],
+    classifier_queue: DhtCrawlerClassifierQueue,
+) -> Result<QueueJob, String> {
     let params = ProcessTorrentParams {
         info_hashes: hashes
             .iter()
@@ -690,10 +742,13 @@ fn build_classifier_job(hashes: &[Id20]) -> Result<QueueJob, String> {
             .collect(),
         ..ProcessTorrentParams::default()
     };
-    process_torrent_job(
-        &params,
-        QueueJobOptions::default().with_delay(DHT_TORRENT_CLASSIFIER_DELAY),
-    )
+    let options = QueueJobOptions::default().with_delay(DHT_TORRENT_CLASSIFIER_DELAY);
+    match classifier_queue {
+        DhtCrawlerClassifierQueue::Shadow => {
+            new_queue_job(PROCESS_TORRENT_SHADOW, &params, options.with_max_retries(2))
+        }
+        DhtCrawlerClassifierQueue::Live => process_torrent_job(&params, options),
+    }
     .map_err(|error| error.to_string())
 }
 
@@ -704,7 +759,9 @@ mod tests {
 
     use bitmagnet_metainfo::parse_info_bytes;
     use bitmagnet_model::{deserialize_files, FileType};
-    use bitmagnet_queue::{QueueJobStatus, DEFAULT_ARCHIVAL_DURATION};
+    use bitmagnet_queue::{
+        fingerprint, QueueJobStatus, DEFAULT_ARCHIVAL_DURATION, PROCESS_TORRENT,
+    };
     use serde_json::Value;
     use sha1::Sha1;
     use sha2::Digest;
@@ -745,7 +802,9 @@ mod tests {
         assert_eq!(value.len() % 2, 0);
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
             .collect()
     }
@@ -1089,6 +1148,15 @@ mod tests {
                 save_files_threshold: 100,
             }
         );
+        assert_eq!(planner.classifier_queue(), DhtCrawlerClassifierQueue::Live);
+        assert_eq!(
+            DhtCrawlerClassifierQueue::default().queue_name(),
+            PROCESS_TORRENT
+        );
+        assert_eq!(
+            DhtCrawlerClassifierQueue::Shadow.queue_name(),
+            PROCESS_TORRENT_SHADOW
+        );
         assert_eq!(DHT_TORRENT_CLASSIFIER_BATCH_LIMIT, 100);
         assert_eq!(DHT_TORRENT_CLASSIFIER_DELAY, Duration::from_secs(60));
         assert_eq!(DHT_TORRENT_SOURCE, "dht");
@@ -1232,7 +1300,7 @@ mod tests {
 
         let jobs: Vec<_> = groups
             .iter()
-            .map(|group| build_classifier_job(group).unwrap())
+            .map(|group| build_classifier_job(group, DhtCrawlerClassifierQueue::Live).unwrap())
             .collect();
         for (actual, expected) in jobs.iter().zip(expected["queueJobs"].as_array().unwrap()) {
             assert_eq!(actual.queue, text(expected, "queue"));
@@ -1261,12 +1329,40 @@ mod tests {
     }
 
     #[test]
+    fn classifier_queue_target_changes_only_queue_and_fingerprint() {
+        let hashes = [id_from_number(1), id_from_number(2)];
+        let live = build_classifier_job(&hashes, DhtCrawlerClassifierQueue::Live).unwrap();
+        let shadow = build_classifier_job(&hashes, DhtCrawlerClassifierQueue::Shadow).unwrap();
+
+        assert_eq!(live.queue, PROCESS_TORRENT);
+        assert_eq!(shadow.queue, PROCESS_TORRENT_SHADOW);
+        assert_eq!(live.payload, shadow.payload);
+        assert_eq!(live.status, shadow.status);
+        assert_eq!(live.max_retries, 2);
+        assert_eq!(live.max_retries, shadow.max_retries);
+        assert_eq!(live.priority, shadow.priority);
+        assert_eq!(live.archival_duration, shadow.archival_duration);
+        assert_eq!(live.delay, DHT_TORRENT_CLASSIFIER_DELAY);
+        assert_eq!(live.delay, shadow.delay);
+        assert_eq!(
+            live.fingerprint,
+            fingerprint(PROCESS_TORRENT, &live.payload)
+        );
+        assert_eq!(
+            shadow.fingerprint,
+            fingerprint(PROCESS_TORRENT_SHADOW, &shadow.payload)
+        );
+        assert_ne!(live.fingerprint, shadow.fingerprint);
+    }
+
+    #[test]
     fn blob_failure_keeps_relational_projection_and_classifier() {
         let rows = fixture_rows();
         let case = &rows[2]["input"]["cases"][0];
         let request = fixture_request(case, "127.0.0.1:6881".parse().unwrap());
         let mut encoder = |_files: &[BlobFile]| Err("scripted encoder failure".to_owned());
-        let mut jobs = build_classifier_job;
+        let mut jobs =
+            |hashes: &[Id20]| build_classifier_job(hashes, DhtCrawlerClassifierQueue::Live);
         let plan = plan_with(
             &[request],
             &DhtResolvedExistingV2::new(),

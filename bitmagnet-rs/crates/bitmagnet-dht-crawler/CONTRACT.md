@@ -277,6 +277,27 @@ a 60-second delay. Blob encoding failure retains the relational projection and
 classifier group while leaving blob, file extensions, and compressed byte
 count null.
 
+`DhtCrawlerClassifierQueue` makes the classifier destination explicit. The
+low-level planner and worker default to `Live`, retaining the exact Go
+`process_torrent` payload, retry limit two, priority zero, seven-day archival,
+and 60-second delay. An explicit `Shadow` target preserves all of those bytes
+and policies while changing only the queue to `process_torrent_shadow` and
+recomputing the fingerprint over that queue plus the same payload. The full
+application config deliberately has no target default: it requires
+`--classifier-queue shadow|live` or
+`BITMAGNET_DHT_CRAWLER_CLASSIFIER_QUEUE` so a writer-capable process cannot
+silently choose a classifier destination.
+
+Shadow is only a routing-isolation seam at this checkpoint. It is not
+observe-only: torrent, file, summary, source, pieces, and queue rows remain one
+shared canonical PostgreSQL transaction. The direct DHT job also bypasses the
+existing processed-row mirror's sampling, eligibility, active-depth, and cursor
+admission contract. Its Go-default payload omits `ClassifierWorkflow` and
+`ClassifierFlags`, so the current `bitmagnet-ingest-shadow` runtime classifies
+it as unsupported and settles it without an A/B comparison. Mutating that
+payload to satisfy the flags-off consumer would break the byte-identical live
+producer contract and is outside this checkpoint.
+
 The planner performs no lookup, route receive, clock read, database transaction,
 queue insertion, scrape send, retry, metric, logging, lifecycle, or shutdown
 work. Its deterministic scrape order is a Rust hardening over Go's unspecified
@@ -383,6 +404,15 @@ The SQL conflict policy is source-derived from Go:
   `created_at`; and
 - `queue_jobs` is a plain insert with no conflict suppression, so an active
   fingerprint conflict fails and rolls back the whole transaction.
+
+That collision behavior is an activation blocker for direct Shadow routing.
+The mirror normally admits scratch jobs with a bounded depth and ignores an
+already-active fingerprint, while this atomic writer neither owns those gates
+nor suppresses the conflict. A mirror-created or undrained direct Shadow job
+with the same queue-plus-payload fingerprint can therefore roll back the whole
+six-collection DHT transaction. Shadow must remain inactive until one producer
+owns the queue and its admission, consumer compatibility, capacity, and
+collision policy are explicitly proven.
 
 Hashes are bound directly as 20- or 32-byte `bytea`. `files_data = None` binds
 SQL `NULL`. Blob and extension presence must agree: `None`/`None` is the
@@ -1837,6 +1867,9 @@ The following remain deliberately outside this checkpoint:
 - production construction and supervision of the owned torrent-persistence
   worker, ownership transfer of the unique receiver, scrape-route close order,
   shutdown wiring, metrics export, retry/operator policy, and health reporting;
+- activation of direct `process_torrent_shadow` routing, including exclusive
+  producer ownership, mirror coordination, bounded admission, compatible
+  consumer payload semantics, and active-fingerprint collision policy;
 - production construction, supervision, shutdown wiring, metrics, retry, and
   operator failure policy for the existing Rust request-metainfo worker;
 - a producer-side `closed()` waiter on the typed triage input route;

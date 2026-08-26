@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use bitmagnet_dht::{DhtScrapeInput, Id20};
 
 use crate::{
-    DhtPersistTorrentReceiver, DhtPersistTorrentRequest, DhtTorrentPersistPlan,
-    DhtTorrentPlanConfig, DhtTorrentPlanDiagnostic, DhtTorrentPlanner, DhtTorrentTransactionPlan,
+    DhtCrawlerClassifierQueue, DhtPersistTorrentReceiver, DhtPersistTorrentRequest,
+    DhtTorrentPersistPlan, DhtTorrentPlanConfig, DhtTorrentPlanDiagnostic, DhtTorrentPlanner,
+    DhtTorrentTransactionPlan,
 };
 
 /// Maximum raw requests in one production torrent-persistence batch.
@@ -144,6 +145,8 @@ pub struct DhtPersistTorrentWorkerConfig {
     pub lookup_chunk_limit: NonZeroUsize,
     /// Immutable deterministic planner policy used for every batch.
     pub plan_config: DhtTorrentPlanConfig,
+    /// Classifier queue target for jobs committed with torrent writes.
+    pub classifier_queue: DhtCrawlerClassifierQueue,
 }
 
 impl Default for DhtPersistTorrentWorkerConfig {
@@ -153,6 +156,7 @@ impl Default for DhtPersistTorrentWorkerConfig {
             batch_interval: DHT_PERSIST_TORRENT_BATCH_INTERVAL,
             lookup_chunk_limit: NonZeroUsize::new(DHT_PERSIST_TORRENT_LOOKUP_CHUNK_LIMIT).unwrap(),
             plan_config: DhtTorrentPlanConfig::default(),
+            classifier_queue: DhtCrawlerClassifierQueue::Live,
         }
     }
 }
@@ -498,7 +502,10 @@ impl DhtPersistTorrentWorker {
                 scrape,
                 lookup,
                 writer,
-                planner: DhtTorrentPlanner::new(config.plan_config),
+                planner: DhtTorrentPlanner::with_classifier_queue(
+                    config.plan_config,
+                    config.classifier_queue,
+                ),
                 config,
                 stats: stats.clone(),
             },
@@ -958,6 +965,7 @@ mod tests {
             batch_interval: Duration::from_secs(3_600),
             lookup_chunk_limit: NonZeroUsize::new(lookup_chunk_limit).unwrap(),
             plan_config: DhtTorrentPlanConfig::default(),
+            classifier_queue: DhtCrawlerClassifierQueue::Live,
         }
     }
 
@@ -1057,6 +1065,7 @@ mod tests {
         sources: usize,
         pieces: usize,
         queue_jobs: usize,
+        classifier_queues: Vec<String>,
     }
 
     enum WriteStep {
@@ -1117,6 +1126,11 @@ mod tests {
                 sources: plan.sources.len(),
                 pieces: plan.pieces.len(),
                 queue_jobs: plan.queue_jobs.len(),
+                classifier_queues: plan
+                    .queue_jobs
+                    .iter()
+                    .map(|job| job.queue.clone())
+                    .collect(),
             });
             match self.steps.lock().unwrap().pop_front() {
                 Some(WriteStep::Rejected(message)) => Err(DhtTorrentBatchWriteError::rejected(
@@ -1229,6 +1243,7 @@ mod tests {
         assert_eq!(config.batch_interval, Duration::from_secs(60));
         assert_eq!(config.lookup_chunk_limit.get(), 1_000);
         assert_eq!(config.plan_config, DhtTorrentPlanConfig::default());
+        assert_eq!(config.classifier_queue, DhtCrawlerClassifierQueue::Live);
 
         let rejected = DhtTorrentBatchWriteError::rejected(io::Error::other("no"));
         assert_eq!(rejected.to_string(), "DHT torrent batch rejected: no");
@@ -1297,6 +1312,33 @@ mod tests {
         assert_eq!(snapshot.writer_calls, 1);
         assert_eq!(snapshot.scrape_sent, 1);
         assert_conservation(snapshot);
+    }
+
+    #[tokio::test]
+    async fn shadow_target_writes_torrent_and_source_with_only_shadow_classifier_jobs() {
+        let (input, receiver) = dht_persist_torrent_channel();
+        enqueue(&input, [v1_request(1)]).await;
+        drop(input);
+        let lookup = ScriptLookup::new([]);
+        let writer = ScriptWriter::new([]);
+        let mut worker_config = config(10, 10);
+        worker_config.classifier_queue = DhtCrawlerClassifierQueue::Shadow;
+        let (worker, stats, _scrape) = worker(receiver, lookup, writer.clone(), worker_config);
+
+        assert_eq!(
+            worker.run(std::future::pending()).await,
+            DhtPersistTorrentWorkerExit::InputClosed
+        );
+        let calls = writer.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].torrents.len(), 1);
+        assert_eq!(calls[0].sources, 1);
+        assert_eq!(calls[0].queue_jobs, 1);
+        assert_eq!(
+            calls[0].classifier_queues,
+            [bitmagnet_queue::PROCESS_TORRENT_SHADOW]
+        );
+        assert_eq!(stats.snapshot().writer_successes, 1);
     }
 
     #[tokio::test]
@@ -1452,6 +1494,7 @@ mod tests {
                 sources: 0,
                 pieces: 0,
                 queue_jobs: 0,
+                classifier_queues: Vec::new(),
             }]
         );
         assert_eq!(scrape.recv().await.unwrap().source_node_addr, expected);

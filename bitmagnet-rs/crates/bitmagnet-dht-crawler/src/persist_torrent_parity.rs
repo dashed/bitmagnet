@@ -901,7 +901,7 @@ fn assert_lower_hex(value: &str, bytes: usize) {
 fn decode_lower_hex<const N: usize>(value: &str) -> [u8; N] {
     assert_lower_hex(value, N);
     let mut output = [0; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let digit = |byte| match byte {
             b'0'..=b'9' => byte - b'0',
             b'a'..=b'f' => byte - b'a' + 10,
