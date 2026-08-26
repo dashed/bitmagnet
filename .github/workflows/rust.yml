@@ -30,6 +30,7 @@ on:
       - "testdata/parity/graphql-torrent-files/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/queue/**"
+      - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
@@ -53,6 +54,7 @@ on:
       - "testdata/parity/graphql-torrent-files/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/queue/**"
+      - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
@@ -652,6 +654,7 @@ jobs:
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_TEST_DATABASE_URL: postgres://bitmagnet_graphql_reader_ci:graphql-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_GRAPHQL_FULL_READER_TEST_DATABASE_URL: postgres://bitmagnet_graphql_full_reader_ci:graphql-full-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_TORZNAB_TEST_DATABASE_URL: postgres://bitmagnet_torznab_reader_ci:torznab-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
@@ -712,6 +715,45 @@ jobs:
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \
             -p bitmagnet-graphql --test queue_jobs_pg -- \
             --ignored --exact real_pg_queue_jobs_matches_go_without_mutation \
+            --test-threads=1
+      - name: Run full GraphQL reader authority gate
+        working-directory: ${{ github.workspace }}
+        run: |
+          go test -tags integration -count=1 ./internal/parity \
+            -run '^TestGeneratePhase2SearchQueryParityFixtures$'
+          psql -X "$POSTGRES_DSN" -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE bitmagnet_graphql_full_reader_ci
+            LOGIN PASSWORD 'graphql-full-reader-ci-only'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
+            CONNECTION LIMIT 4;
+          GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_graphql_full_reader_ci;
+          GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_full_reader_ci;
+          GRANT SELECT ON
+            content,
+            content_attributes,
+            content_collections,
+            content_collections_content,
+            goose_db_version,
+            queue_jobs,
+            torrent_contents,
+            torrent_file_summary,
+            torrent_files,
+            torrent_sources,
+            torrent_tags,
+            torrents,
+            torrents_torrent_sources
+            TO bitmagnet_graphql_full_reader_ci;
+          -- PostgreSQL grants EXECUTE to PUBLIC by default. Remove that
+          -- disposable-CI shortcut from every public routine so the role's
+          -- sole explicit budgeted_count grant is the complete contract.
+          REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+          REVOKE EXECUTE ON ALL PROCEDURES IN SCHEMA public FROM PUBLIC;
+          GRANT EXECUTE ON FUNCTION public.budgeted_count(text, double precision)
+            TO bitmagnet_graphql_full_reader_ci;
+          SQL
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-graphql --test full_reader_pg -- \
+            --ignored --exact full_router_uses_one_exact_reader_without_mutation \
             --test-threads=1
       # Run last: the Go oracle deliberately recreates and leaves the disposable
       # schema for the Rust real-router process.
