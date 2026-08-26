@@ -184,6 +184,14 @@ pub struct DhtCrawlerPipelineLifecycleHandle {
 }
 
 impl DhtCrawlerPipelineLifecycleHandle {
+    pub(crate) fn channel() -> (
+        watch::Sender<DhtCrawlerPipelineLifecycle>,
+        DhtCrawlerPipelineLifecycleHandle,
+    ) {
+        let (sender, receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
+        (sender, DhtCrawlerPipelineLifecycleHandle { receiver })
+    }
+
     /// Return the most recently published lifecycle state.
     #[must_use]
     pub fn snapshot(&self) -> DhtCrawlerPipelineLifecycle {
@@ -415,10 +423,7 @@ impl DhtCrawlerPipelineSupervisor {
             blocking_manager,
         } = downstream;
         let finalizer: Arc<dyn BlockingFinalizer> = blocking_manager;
-        let (lifecycle, lifecycle_receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
-        let lifecycle_handle = DhtCrawlerPipelineLifecycleHandle {
-            receiver: lifecycle_receiver,
-        };
+        let (lifecycle, lifecycle_handle) = DhtCrawlerPipelineLifecycleHandle::channel();
         let observability = DhtCrawlerPipelineObservabilityHandle {
             lifecycle: lifecycle_handle.clone(),
             runtime_health: runtime.health(),

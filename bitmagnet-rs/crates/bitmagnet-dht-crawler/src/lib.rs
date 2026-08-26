@@ -15,6 +15,7 @@ mod downstream_composition;
 mod get_peers;
 mod info_hash_triage;
 mod observe_info_hash;
+mod observe_only_supervisor;
 mod peer_wire_meta_info_requester;
 mod persist_source;
 mod persist_source_route;
@@ -76,6 +77,11 @@ pub use info_hash_triage::{
 pub use observe_info_hash::{
     DhtInfoHashObservationStats, DhtInfoHashObservationStatsHandle, DhtInfoHashObservationWorker,
     DhtInfoHashObservationWorkerExit,
+};
+pub use observe_only_supervisor::{
+    DhtCrawlerObserveOnlyConfig, DhtCrawlerObserveOnlyConfigError, DhtCrawlerObserveOnlyExit,
+    DhtCrawlerObserveOnlyObservabilityHandle, DhtCrawlerObserveOnlyObservabilitySnapshot,
+    DhtCrawlerObserveOnlyStartError, DhtCrawlerObserveOnlySupervisor, DhtCrawlerObserveOnlyTrigger,
 };
 pub use peer_wire_meta_info_requester::{
     random_metainfo_peer_id, DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
