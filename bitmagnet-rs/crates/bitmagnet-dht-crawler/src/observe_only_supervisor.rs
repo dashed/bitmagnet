@@ -101,7 +101,7 @@ pub enum DhtCrawlerObserveOnlyStartError {
     /// Maintenance construction failed after runtime start. The runtime was
     /// explicitly shut down and its exact cleanup result is retained.
     Maintenance {
-        source: DhtCrawlerMaintenanceWithConfigError,
+        source: Box<DhtCrawlerMaintenanceWithConfigError>,
         runtime_cleanup: Result<DhtRuntimeExit, JoinError>,
     },
 }
@@ -127,7 +127,7 @@ impl Error for DhtCrawlerObserveOnlyStartError {
         match self {
             Self::Config(source) => Some(source),
             Self::Runtime(source) => Some(source),
-            Self::Maintenance { source, .. } => Some(source),
+            Self::Maintenance { source, .. } => Some(source.as_ref()),
         }
     }
 }
@@ -334,7 +334,7 @@ impl DhtCrawlerObserveOnlySupervisor {
                 drop((client, table, root_triage_input, observation));
                 let runtime_cleanup = runtime.shutdown().await;
                 return Err(DhtCrawlerObserveOnlyStartError::Maintenance {
-                    source,
+                    source: Box::new(source),
                     runtime_cleanup,
                 });
             }

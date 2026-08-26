@@ -56,7 +56,7 @@ pub struct DhtPersistSourceInput {
 /// A request rejected because the unique receiver closed or was dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DhtPersistSourceInputClosed {
-    request: DhtPersistSourceRequest,
+    request: Box<DhtPersistSourceRequest>,
 }
 
 impl fmt::Display for DhtPersistSourceInputClosed {
@@ -71,7 +71,7 @@ impl DhtPersistSourceInputClosed {
     /// Recover the exact request that was not queued.
     #[must_use]
     pub fn into_request(self) -> DhtPersistSourceRequest {
-        self.request
+        *self.request
     }
 }
 
@@ -87,7 +87,9 @@ impl DhtPersistSourceInput {
         self.sender
             .send(request)
             .await
-            .map_err(|error| DhtPersistSourceInputClosed { request: error.0 })
+            .map_err(|error| DhtPersistSourceInputClosed {
+                request: Box::new(error.0),
+            })
     }
 }
 
