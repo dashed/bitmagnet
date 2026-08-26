@@ -1,5 +1,14 @@
 //! HTTP health, status, and Prometheus projections for the observe-only soak.
 
+mod process;
+
+pub use process::{
+    supervise_observe_only_process, DhtObserveForcedStopReason, DhtObserveProcessExit,
+    DhtObserveProcessSignal, DhtObserveProcessTrigger, DhtObserveShutdownTimeout,
+    DhtObserveShutdownTimeoutError, DhtObserveSignalReceiver, DhtObserveTaskExit,
+    DHT_OBSERVE_DEFAULT_SHUTDOWN_TIMEOUT_SECONDS, DHT_OBSERVE_MAX_SHUTDOWN_TIMEOUT_SECONDS,
+};
+
 use std::time::Duration;
 
 use axum::extract::State;
@@ -361,6 +370,14 @@ mod tests {
         assert_eq!(ready.lifecycle, "ready");
         assert_eq!(ready.runtime.health, "up");
         assert_eq!(ready.runtime.health_failure, None);
+
+        let mut stopping_snapshot = snapshot.clone();
+        stopping_snapshot.lifecycle = DhtCrawlerPipelineObservedLifecycle::Stopping;
+        let stopping = DhtCrawlerObserveOnlyStatusResponse::from_snapshot(stopping_snapshot);
+        assert!(!stopping.ready);
+        assert_eq!(stopping.status, "not_ready");
+        assert_eq!(stopping.lifecycle, "stopping");
+        assert_eq!(stopping.runtime.health, "up");
 
         snapshot.runtime.health.last_success_ago = Some(Duration::from_secs(61));
         let stale = DhtCrawlerObserveOnlyStatusResponse::from_snapshot(snapshot);
