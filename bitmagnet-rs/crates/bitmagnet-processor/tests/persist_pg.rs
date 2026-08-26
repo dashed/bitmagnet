@@ -717,7 +717,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     for status in ["pending", "retry"] {
         sqlx::query(
             "UPDATE queue_jobs \
-             SET status = $1, ran_at = NULL, \
+             SET status = $1::queue_job_status, ran_at = NULL, \
                  run_after = clock_timestamp() + interval '1 year' \
              WHERE id = 'shadow-runtime-later'",
         )
