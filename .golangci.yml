@@ -179,7 +179,7 @@ linters:
       - linters:
           - staticcheck
         path: (_parity(_gen)?|_oracle_gen)_test\.go$
-        text: '^(QF1003|QF1008|S1009|SA1019|ST1008|ST1012|SA6001):'
+        text: "^(QF1003|QF1008|S1009|SA1019|ST1008|ST1012|SA6001):"
     paths:
       - third_party$
       - builtin$
