@@ -28,6 +28,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
+      - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
@@ -50,6 +51,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
+      - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
@@ -454,7 +456,7 @@ jobs:
           cargo test -p bitmagnet-dht-crawler --test pipeline_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test persist_pg -- --ignored --test-threads=1
-      - name: Run GraphQL torrent.files PostgreSQL parity
+      - name: Run GraphQL PostgreSQL read parity
         working-directory: ${{ github.workspace }}
         run: |
           go test -tags integration -count=1 ./internal/gql/gqlmodel \
@@ -466,12 +468,12 @@ jobs:
             CONNECTION LIMIT 4;
           GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_graphql_reader_ci;
           GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_reader_ci;
-          GRANT SELECT ON goose_db_version, torrents, torrent_file_summary, torrent_sources
+          GRANT SELECT ON goose_db_version, torrents, torrent_file_summary, torrent_sources, torrent_tags
             TO bitmagnet_graphql_reader_ci;
           SQL
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \
             -p bitmagnet-graphql --test torrent_files_pg -- \
-            --ignored --exact real_pg_torrent_files_matches_go_without_mutation \
+            --ignored --exact real_pg_graphql_reads_match_go_without_mutation \
             --test-threads=1
       # Run last: the Go oracle deliberately recreates and leaves the disposable
       # schema for the Rust real-router process.

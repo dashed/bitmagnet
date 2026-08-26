@@ -76,6 +76,7 @@ func TestGenerateTorrentFilesParityPgFixtures(t *testing.T) {
 		Path:  "mismatched/bytes.txt",
 		Size:  2,
 	}}, true, 1)
+	seedTorrentTagsAndVerifyGoOracle(t, gormDB, db)
 }
 
 func seedTorrentFilesBlob(

@@ -1,4 +1,4 @@
-//! Disposable-PostgreSQL parity and admission for `torrent.files`.
+//! Disposable-PostgreSQL parity and admission for bounded torrent reads.
 //!
 //! The Go fixture generator owns all mutations. This Rust test authenticates
 //! the production schema as a dedicated SELECT-only role, fingerprints every
@@ -36,9 +36,16 @@ struct OracleCase {
     expected: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct TagOracleCase {
+    id: String,
+    input: Value,
+    expected: Value,
+}
+
 #[tokio::test]
 #[ignore = "requires Go-seeded disposable PostgreSQL"]
-async fn real_pg_torrent_files_matches_go_without_mutation() {
+async fn real_pg_graphql_reads_match_go_without_mutation() {
     let Some(reader_dsn) = test_dsn("BITMAGNET_GRAPHQL_TEST_DATABASE_URL") else {
         eprintln!("BITMAGNET_GRAPHQL_TEST_DATABASE_URL not set; skipping GraphQL PG parity");
         return;
@@ -100,6 +107,7 @@ async fn real_pg_torrent_files_matches_go_without_mutation() {
     }
 
     assert_source_list_matches_go(&schema).await;
+    assert_tag_suggestions_match_go(&schema).await;
     assert_empty_blob_with_zero_summary(&schema).await;
     assert_metadata_error(&schema, MISSING_SUMMARY_HASH, "file_count is NULL").await;
     assert_metadata_error(&schema, MISMATCHED_BYTES_HASH, "compressed-byte mismatch").await;
@@ -176,6 +184,7 @@ async fn assert_select_only_reader(dsn: &str) {
             ("goose_db_version".to_owned(), "SELECT".to_owned()),
             ("torrent_file_summary".to_owned(), "SELECT".to_owned()),
             ("torrent_sources".to_owned(), "SELECT".to_owned()),
+            ("torrent_tags".to_owned(), "SELECT".to_owned()),
             ("torrents".to_owned(), "SELECT".to_owned()),
         ]
     );
@@ -190,6 +199,34 @@ async fn assert_select_only_reader(dsn: &str) {
     assert_eq!(write_error.code().as_deref(), Some("42501"));
 
     pool.close().await;
+}
+
+async fn assert_tag_suggestions_match_go(schema: &bitmagnet_graphql::Schema) {
+    for case in load_tag_cases(&tags_parity_dir().join("corpus.jsonl")) {
+        let response = schema
+            .execute(
+                Request::new(
+                    "query TorrentTagsParity($input: SuggestTagsQueryInput) {\
+                     torrent { suggestTags(input: $input) { suggestions { name count } } } }",
+                )
+                .variables(Variables::from_json(
+                    serde_json::json!({ "input": case.input }),
+                )),
+            )
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "tag oracle case {:?} returned errors: {:?}",
+            case.id,
+            response.errors
+        );
+        assert_eq!(
+            serde_json::to_value(response.data).expect("encode tag response data"),
+            serde_json::json!({ "torrent": { "suggestTags": case.expected } }),
+            "tag oracle case {:?}",
+            case.id
+        );
+    }
 }
 
 async fn assert_source_list_matches_go(schema: &bitmagnet_graphql::Schema) {
@@ -363,8 +400,23 @@ fn load_cases(path: &Path) -> Vec<OracleCase> {
         .collect()
 }
 
+fn load_tag_cases(path: &Path) -> Vec<TagOracleCase> {
+    fs::read_to_string(path)
+        .expect("read torrent.suggestTags corpus")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("decode torrent.suggestTags oracle line"))
+        .collect()
+}
+
 fn parity_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .join("testdata/parity/graphql-torrent-files")
+}
+
+fn tags_parity_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("testdata/parity/graphql-torrent-tags")
 }

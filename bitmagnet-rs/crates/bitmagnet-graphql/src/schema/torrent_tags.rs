@@ -30,8 +30,10 @@ pub struct SuggestTagsRequest {
 pub struct SuggestedTagRecord {
     /// Tag name.
     pub name: String,
-    /// Number of torrent-tag rows with this name.
+    /// Go-visible count. The current Go scan leaves this at zero.
     pub count: i64,
+    /// Aggregate count used by Go's SQL ordering before its zero-value scan.
+    pub rank_count: i64,
 }
 
 /// Typed failures from the tag-suggestion adapter.
@@ -87,12 +89,12 @@ impl TorrentTagsRuntime for PgTorrentTagsRuntime {
         request: SuggestTagsRequest,
     ) -> std::result::Result<Vec<SuggestedTagRecord>, TorrentTagsError> {
         Ok(sqlx::query_as::<_, SuggestedTagRecord>(
-            "SELECT name, count(*)::bigint AS count \
+            "SELECT name, 0::bigint AS count, count(*)::bigint AS rank_count \
              FROM torrent_tags \
              WHERE ($1::text = '' OR name LIKE ($1 || '%')) \
                AND (cardinality($2::text[]) = 0 OR NOT (name = ANY($2::text[]))) \
              GROUP BY name \
-             ORDER BY count ASC, name ASC \
+             ORDER BY rank_count ASC, name ASC \
              LIMIT $3",
         )
         .bind(request.prefix)
@@ -138,8 +140,8 @@ pub(super) async fn resolve(
         .await
         .map_err(|error| Error::new(error.to_string()))?;
     suggestions.sort_by(|left, right| {
-        left.count
-            .cmp(&right.count)
+        left.rank_count
+            .cmp(&right.rank_count)
             .then_with(|| left.name.cmp(&right.name))
     });
     suggestions.truncate(usize::try_from(SUGGESTION_LIMIT).unwrap_or(10));
@@ -207,18 +209,20 @@ mod tests {
             Ok(vec![
                 SuggestedTagRecord {
                     name: "movie-new".to_owned(),
-                    count: 4,
+                    count: 0,
+                    rank_count: 4,
                 },
                 SuggestedTagRecord {
                     name: "movie".to_owned(),
-                    count: 2,
+                    count: 0,
+                    rank_count: 2,
                 },
             ])
         }
     }
 
     #[tokio::test]
-    async fn schema_preserves_go_like_input_and_count_order() {
+    async fn schema_preserves_go_like_input_rank_order_and_zero_counts() {
         let runtime: Arc<dyn TorrentTagsRuntime> = Arc::new(FakeRuntime);
         let schema = async_graphql::Schema::build(Query, Mutation, EmptySubscription)
             .data(TorrentTagsRuntimeData::new(runtime))
@@ -235,8 +239,8 @@ mod tests {
             response.data,
             value!({
                 "torrent": { "suggestTags": { "suggestions": [
-                    { "name": "movie", "count": 2 },
-                    { "name": "movie-new", "count": 4 },
+                    { "name": "movie", "count": 0 },
+                    { "name": "movie-new", "count": 0 },
                 ] } }
             })
         );
