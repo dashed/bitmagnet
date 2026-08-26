@@ -428,8 +428,8 @@ fn graphql_job(item: QueueJobRecord) -> Result<QueueJob> {
         status: graphql_status(&item.status)?,
         payload: item.payload,
         priority: item.priority,
-        retries: item.retries,
-        max_retries: item.max_retries,
+        retries: graphql_nonnegative(item.retries, "retries")?,
+        max_retries: graphql_nonnegative(item.max_retries, "maxRetries")?,
         run_after: graphql_datetime(item.run_after),
         ran_at: item.ran_at.map(graphql_datetime),
         error: item.error,
@@ -459,6 +459,15 @@ fn graphql_i32(value: i64, field: &str) -> Result<i32> {
             "queue.jobs {field} is outside the GraphQL Int range"
         ))
     })
+}
+
+fn graphql_nonnegative(value: i32, field: &str) -> Result<i32> {
+    if value < 0 {
+        return Err(Error::new(format!(
+            "queue.jobs {field} must be nonnegative"
+        )));
+    }
+    Ok(value)
 }
 
 fn normalize_input(input: QueueJobsQueryInput) -> Result<QueueJobsRequest> {
@@ -730,5 +739,32 @@ mod tests {
             .await;
         assert_eq!(response.errors.len(), 1);
         assert!(response.errors[0].message.contains("limit must be between"));
+    }
+
+    #[test]
+    fn impossible_negative_queue_counters_fail_closed() {
+        let mut item = QueueJobRecord {
+            id: "invalid".to_owned(),
+            queue: "process_torrent".to_owned(),
+            status: "pending".to_owned(),
+            payload: "{}".to_owned(),
+            priority: 0,
+            retries: -1,
+            max_retries: 0,
+            run_after: "2024-06-01T00:00:00Z".parse().expect("run_after"),
+            ran_at: None,
+            error: None,
+            created_at: "2024-06-01T00:00:00Z".parse().expect("created_at"),
+        };
+        let Err(error) = graphql_job(item.clone()) else {
+            panic!("negative retries must fail");
+        };
+        assert!(error.message.contains("retries must be nonnegative"));
+        item.retries = 0;
+        item.max_retries = -1;
+        let Err(error) = graphql_job(item) else {
+            panic!("negative max retries must fail");
+        };
+        assert!(error.message.contains("maxRetries must be nonnegative"));
     }
 }
