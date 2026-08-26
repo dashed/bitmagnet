@@ -947,9 +947,17 @@ dependencies = [
 name = "bitmagnet-dht-crawler-app"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "bitmagnet-common",
+ "bitmagnet-db",
+ "bitmagnet-dht",
  "bitmagnet-dht-crawler",
  "clap",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

@@ -338,7 +338,7 @@ impl DhtCrawlerPipelineLifecycleHandle {
 }
 
 /// Fixed-shape runtime observations owned by the crawler pipeline.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DhtCrawlerPipelineRuntimeObservabilitySnapshot {
     pub health: DhtRuntimeHealthSnapshot,
     pub inbound: DhtInboundStatsSnapshot,
@@ -347,7 +347,7 @@ pub struct DhtCrawlerPipelineRuntimeObservabilitySnapshot {
 
 /// Fixed-shape maintenance observations excluding the canonical discovery
 /// counters already present in the runtime snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DhtCrawlerPipelineMaintenanceObservabilitySnapshot {
     pub scheduler: DhtDiscoveredNodeSchedulerStats,
     pub ping: DhtDiscoveredNodePingStats,
@@ -360,7 +360,7 @@ pub struct DhtCrawlerPipelineMaintenanceObservabilitySnapshot {
 }
 
 /// Fixed-shape observations for all six downstream workers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DhtCrawlerPipelineDownstreamObservabilitySnapshot {
     pub triage: DhtInfoHashTriageStats,
     pub get_peers: DhtGetPeersWorkerStats,

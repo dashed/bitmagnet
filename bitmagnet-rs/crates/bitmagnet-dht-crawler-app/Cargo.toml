@@ -8,9 +8,20 @@ repository.workspace = true
 description = "Bounded process ownership for the writer-capable Rust DHT crawler."
 
 [dependencies]
+bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-db = { path = "../bitmagnet-db" }
+bitmagnet-dht = { path = "../bitmagnet-dht" }
 bitmagnet-dht-crawler = { path = "../bitmagnet-dht-crawler" }
+axum = "0.8"
 clap.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
