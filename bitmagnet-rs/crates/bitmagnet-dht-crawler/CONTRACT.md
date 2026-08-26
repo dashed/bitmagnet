@@ -34,8 +34,9 @@ instead falls back to the runtime's aborting `Drop` behavior and carries no
 joined-cleanup proof. The source-only `bitmagnet-dht-crawler` executable invokes
 this constructor behind an overall startup deadline; deadline cancellation
 therefore also carries no joined-cleanup proof. The adapters and full graph have
-not been validated against live PostgreSQL. This is not a live-database or
-production-readiness claim.
+only the bounded migration-backed admission and transaction evidence described
+below: the gate does not poll the full worker graph or establish production
+readiness.
 
 The application process installs and polls one signal owner before its first
 listener bind, carries that same owner through database and graph startup, and
@@ -403,7 +404,8 @@ PostgreSQL array codecs, schema or index state, query plans, result order,
 server-side cancellation, or production readiness. The adapter creates and
 closes no pool, starts no task, and retries nothing. The library start seam
 wires it around a caller-owned pool, and the source writer executable invokes
-that complete graph. No live PostgreSQL validation has been completed.
+that complete graph. No live PostgreSQL validation of this array lookup has
+been completed.
 
 ### Atomic PostgreSQL torrent persistence
 
@@ -478,14 +480,29 @@ is `OutcomeUnknown`. A commit error is also `OutcomeUnknown`. Execute errors
 retain the exact stage, zero-based chunk index, row offset, and row count. The
 worker separately owns dropped-future abandonment and scrape-fanout policy.
 
-Offline tests freeze all six SQL shapes, bind counts and PostgreSQL types,
+Unit tests freeze all six SQL shapes, bind counts and PostgreSQL types,
 non-persistent dynamic statements, stage and chunk order, conflict/update
 lists, nullable blob and JSON-array normalization, queue defaults, validation
 and deliberate nonvalidation boundaries, error context, type traits, and
-closed-pool `BEGIN` behavior for both empty and nonempty valid plans. They do
-not execute live PostgreSQL and therefore do not establish schema, foreign-key
-or enum compatibility, triggers, codecs, query plans, locks, rollback, commit
-acknowledgement, durability, cancellation, timestamp values, or affected rows.
+closed-pool `BEGIN` behavior for both empty and nonempty valid plans.
+
+The ignored migration-backed `pipeline_pg` gate additionally executes one
+successful six-stage plan against a disposable Goose-33 PostgreSQL database. It
+asserts one keyed row for the torrent, file, summary, source, and pieces stages,
+plus the Shadow queue row's queue, pending status, payload, retry policy,
+priority, and transaction-stable 60-second delay. A second gate seeds the same
+active Shadow fingerprint, proves the queue stage returns typed
+`ExecuteRolledBack` with the expected PostgreSQL uniqueness error and
+constraint, and asserts that all five preceding table stages leave zero keyed
+rows while the preexisting queue row remains. Both gates require the exact
+`bitmagnet_writer_gate` disposable-database sentinel and use run-unique keyed
+fixtures. They establish live encoding for the submitted plan, decoding for the
+asserted queue fields, enum and foreign-key compatibility, acknowledgement, and
+transaction rollback for those exact plans. They do not establish round-trip
+values for the other written columns, other constraint failures, trigger
+notifications, query plans, lock behavior, cancellation, ambiguous commit
+handling, crash durability, production data compatibility, or affected-row
+accounting.
 
 ### Scraped-source handoff route
 
@@ -1868,10 +1885,12 @@ above. No gate alone establishes production composition or readiness.
 
 The following remain deliberately outside this checkpoint:
 
-- disposable-Goose-schema integration for the complete graph, including exact
-  missing/wrong/reapplied head admission; live codecs, constraints, triggers,
-  plans, transaction rollback, commit acknowledgement, statement auditing, and
-  durability for every concrete PostgreSQL adapter;
+- broader disposable-Goose-schema integration for the complete graph. Exact
+  Goose-33 admission, one wrong requested head, one six-stage commit, and the
+  active-Shadow-fingerprint rollback path are covered. Missing and reapplied
+  head admission; every remaining adapter; further constraints and triggers;
+  query plans, statement auditing, ambiguous acknowledgement, and durability
+  remain unproven;
 - live process validation for the source executable's environment-only database
   loading, eager pool creation, signal and bounded-timeout policy, HTTP
   liveness/readiness/diagnostics, metrics, pool-close ownership, and abnormal
