@@ -31,6 +31,7 @@ pub mod load;
 mod persist;
 mod runtime;
 mod shadow;
+mod writer_projection;
 
 pub use compare::{
     compare_write_set, CompareError, ComparisonVerdict, DriftField, ShadowComparison,
@@ -43,6 +44,9 @@ pub use persist::{
 pub use runtime::{MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError};
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
+};
+pub use writer_projection::{
+    project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
 };
 
 /// A torrent after the processor's read/hydration step.

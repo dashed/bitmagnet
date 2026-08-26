@@ -1113,6 +1113,7 @@ dependencies = [
  "bitmagnet-classifier",
  "bitmagnet-common",
  "bitmagnet-content-search",
+ "bitmagnet-fts",
  "bitmagnet-model",
  "bitmagnet-queue",
  "bitmagnet-release",
