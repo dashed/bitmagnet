@@ -21,6 +21,7 @@ use bitmagnet_dht::{
     DHT_INFO_HASH_TRIAGE_DEFAULT_CAPACITY, DHT_SCRAPE_ROUTE_CAPACITY,
 };
 
+use crate::rate_limited_meta_info_requester::DhtRateLimitedMetaInfoRequester;
 use crate::{
     dht_persist_source_channel, dht_persist_torrent_channel,
     dht_request_meta_info_channel_with_capacity, DefaultDhtMetaInfoBanningChecker,
@@ -385,7 +386,10 @@ impl DhtCrawlerDownstreamComposition {
         let torrent_writer: Arc<dyn DhtTorrentBatchWriter> =
             Arc::new(PgDhtTorrentBatchWriter::new(pool.clone()));
         let requester: Arc<dyn DhtMetaInfoRequester> = Arc::new(
-            DhtPeerWireMetaInfoRequester::with_config(metainfo_peer_id, config.metainfo_requester),
+            DhtRateLimitedMetaInfoRequester::new(DhtPeerWireMetaInfoRequester::with_config(
+                metainfo_peer_id,
+                config.metainfo_requester,
+            )),
         );
         let checker: Arc<dyn DhtMetaInfoBanningChecker> =
             Arc::new(DefaultDhtMetaInfoBanningChecker);
@@ -854,7 +858,10 @@ mod tests {
                 .peer_wire_config_for_test(),
             Some(config.metainfo_requester)
         );
-
+        assert!(composition
+            .workers
+            .request_meta_info
+            .is_rate_limited_for_test());
         drop(composition);
         assert_eq!(blocked.await.unwrap_err().into_request(), blocked_request);
         drop((client, table));

@@ -38,6 +38,11 @@ pub trait DhtMetaInfoRequester: Send + Sync {
     fn peer_wire_config_for_test(&self) -> Option<crate::DhtPeerWireMetaInfoRequesterConfig> {
         None
     }
+
+    #[cfg(test)]
+    fn is_rate_limited_for_test(&self) -> bool {
+        false
+    }
 }
 
 /// Side-effect-free policy check applied to verified metainfo.
@@ -292,6 +297,11 @@ impl DhtRequestMetaInfoWorker {
         &self,
     ) -> Option<crate::DhtPeerWireMetaInfoRequesterConfig> {
         self.requester.peer_wire_config_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_rate_limited_for_test(&self) -> bool {
+        self.requester.is_rate_limited_for_test()
     }
 
     pub fn new(
@@ -686,6 +696,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize as TestAtomicUsize, Ordering as TestOrdering};
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use tokio::sync::{oneshot, Semaphore};
 
@@ -713,6 +724,7 @@ mod tests {
     >;
     type CheckerFn = dyn Fn(&Info) -> Result<(), RequestMetaInfoCollaboratorError> + Send + Sync;
 
+    #[derive(Clone)]
     struct TestRequester {
         request: Arc<dyn Fn(Id20, SocketAddr) -> RequestFuture + Send + Sync>,
     }
@@ -1340,6 +1352,78 @@ mod tests {
         assert_eq!(snapshot.shutdown_peer_occurrences_dropped, 2);
         assert_eq!(snapshot.shutdown_request_attempts_cancelled, 1);
         assert_shutdown_conservation(snapshot);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_a_real_limiter_wait_and_rolls_back_its_reservation() {
+        use crate::rate_limited_meta_info_requester::DhtRateLimitedMetaInfoRequester;
+
+        let calls = Arc::new(TestAtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let delegate = TestRequester {
+            request: Arc::new(move |_, _| {
+                observed.fetch_add(1, TestOrdering::Relaxed);
+                Box::pin(ready(Err(boxed_error("peer failed"))))
+            }),
+        };
+        let limited = DhtRateLimitedMetaInfoRequester::new(delegate);
+        let retained = limited.clone();
+        let requester: Arc<dyn DhtMetaInfoRequester> = Arc::new(limited);
+        let (input, worker, stats, _, _) =
+            worker(5, requester, allowing_checker(), successful_blocker());
+        let same_ip = Ipv4Addr::new(192, 0, 2, 40);
+        for value in 1..=5 {
+            input
+                .send(request(
+                    value,
+                    vec![SocketAddr::new(same_ip.into(), 10_000 + value)],
+                ))
+                .await
+                .unwrap();
+        }
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let run = tokio::spawn(worker.run(async move {
+            let _ = shutdown_rx.await;
+        }));
+        yield_until(|| {
+            calls.load(TestOrdering::Relaxed) == 4 && stats.snapshot().request_attempts_started == 5
+        })
+        .await;
+        shutdown_tx.send(()).unwrap();
+
+        assert_eq!(
+            run.await.unwrap(),
+            DhtRequestMetaInfoWorkerExit::Shutdown {
+                queued_dropped: 0,
+                tasks_cancelled: 1,
+                peer_occurrences_dropped: 1,
+                request_attempts_cancelled: 1,
+                block_calls_cancelled: 0,
+                persist_requests_dropped: 0,
+            }
+        );
+        assert_eq!(calls.load(TestOrdering::Relaxed), 4);
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.tasks_completed, 4);
+        assert_eq!(snapshot.all_peers_failed, 4);
+        assert_eq!(snapshot.request_attempts_failed, 4);
+        assert_shutdown_conservation(snapshot);
+
+        let replacement_peer = SocketAddr::new(same_ip.into(), 20_000);
+        let replacement =
+            tokio::spawn(async move { retained.request(id(6), replacement_peer).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(499)).await;
+        tokio::task::yield_now().await;
+        assert!(!replacement.is_finished());
+        assert_eq!(calls.load(TestOrdering::Relaxed), 4);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        replacement
+            .await
+            .expect("replacement task")
+            .expect_err("delegate is reached after the restored wait");
+        assert_eq!(calls.load(TestOrdering::Relaxed), 5);
     }
 
     #[tokio::test]

@@ -916,6 +916,16 @@ parsing already executing in one poll cannot be preempted and may finish after
 the wall-clock budget. Dropping the request future cancels its in-flight
 connect or I/O and starts no retry or detached task.
 
+The taskless downstream composition installs one shared outer rate-limiting
+decorator in front of this requester. It keys on the remote IP string without
+the port, starts each key with a burst of four, refills one token every 500
+milliseconds, bounds the lazy cache at 1,000 keys, and replaces entries after
+a fixed 20-second insertion TTL. The wait occurs before IPv4 validation and
+before the inner six-second request timeout begins, matching Go's wrapper
+order. Clones share the cache; separate compositions do not. Dropping a blocked
+request cancels its pending reservation as far as later reservations permit,
+and lazy expiry owns no cleanup task.
+
 The requester accepts only `SocketAddr::V4`; IPv6 is rejected before socket
 construction. It creates `TcpSocket::new_v4`, enables `TCP_NODELAY`, enables
 zero linger with `set_zero_linger`, and only then starts the timed connect. It
@@ -965,13 +975,15 @@ piece classifications, final requested-hash parsing, and the three controlled
 Go hazards. The source row is inspection-only; it is not upgraded to Rust
 runtime execution.
 
-The implementation and tests make no claim of retry, requester factories,
-concurrency limiters, logging, metrics, DNS or hostname support, application
-construction, worker supervision, deployment, or production readiness. Tests
-use deterministic in-memory streams and no external peer. The fixture does not
-prove integrated Go forwarding from extension negotiation into piece requests,
-v2/hybrid parse identity, transport fragmentation scheduling, or acceptance of
-Go's duplicate-piece hole by the full request path.
+The standalone peer-wire fixture makes no claim of retry, logging, metrics,
+DNS or hostname support, worker supervision, deployment, or production
+readiness. Separate paused-time tests execute the Rust limiter, including
+worker-shutdown cancellation, while the taskless composition test proves the
+decorator is installed around the concrete requester. No test uses an external
+peer or proves live traffic. The fixture does not prove integrated Go
+forwarding from extension negotiation into piece requests, v2/hybrid parse
+identity, transport fragmentation scheduling, or acceptance of Go's
+duplicate-piece hole by the full request path.
 
 ### PostgreSQL lookup adapter
 
@@ -1812,9 +1824,9 @@ The following remain deliberately outside this checkpoint:
   `PgDhtSourceBatchWriter`; ownership of the unique scraped-source receiver;
   and live schema, codec, transaction, rollback, query-plan, observability, and
   durability validation for that adapter;
-- production construction, supervision, configuration loading, concurrency
-  limiting, metrics, logging, retry/operator policy, and live-peer validation
-  for the existing concrete `DhtPeerWireMetaInfoRequester`;
+- production supervision, configuration loading, limiter metrics, logging,
+  retry/operator policy, and live-peer validation for the existing concrete
+  `DhtPeerWireMetaInfoRequester` and its taskless outer limiter;
 - production construction and sharing of the existing direct
   `DhtInfoHashBlocker` implementation for `BlockingManager`, including final
   flush and failure policy;
@@ -1847,10 +1859,10 @@ polling them, but no current production application path constructs or
 supervises the triage, get-peers, scrape, and source-persistence workers as a
 pipeline. The request-metainfo route has the get-peers worker as a producer and
 the owned Rust request-metainfo worker as its consumer; allowed results flow
-through the typed torrent-persistence route. No production application
-constructs or supervises either worker, no production application construction
-of the concrete peer-wire requester or persistent blocker supplies the request
-stage, and no production application supplies the owned persistence worker with
-the existing concrete PostgreSQL atomic writer. The concrete peer-wire requester,
-blocking-manager adapter, writer, and read-only full-v2 lookup are not
-application-wired.
+through the typed torrent-persistence route. The taskless downstream
+composition supplies the rate-limited concrete peer-wire requester and
+persistent blocker, but no production application constructs or supervises
+that composition. No production application supplies the owned persistence
+worker with the existing concrete PostgreSQL atomic writer. The concrete
+peer-wire requester, blocking-manager adapter, writer, and read-only full-v2
+lookup are not executable-application-wired.

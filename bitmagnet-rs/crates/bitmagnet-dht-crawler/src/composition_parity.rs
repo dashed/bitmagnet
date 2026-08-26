@@ -192,7 +192,7 @@ const RUST_EXECUTION_PARTITION: [(&str, &str); 1] = [(
 
 const RUST_OWNED_HARDENINGS: [&str; 5] = [
     "Rust_injected_stable_peer_ID_is_not_Go_random_factory_parity",
-    "Rust_does_not_implement_the_Go_request_limiter_logger_or_Prometheus_wrapper_stack",
+    "Rust_request_limiter_uses_lazy_expiry_without_the_Go_cleanup_task_and_omits_logger_and_Prometheus_wrappers",
     "Rust_joined_staged_drain_and_blocking_finalization_are_hardening_not_Go_OnStop_parity",
     "Rust_source_writer_whole_transaction_contract_differs_from_Go_possible_prior_chunk_commits",
     "Rust_rejects_zero_overflowing_and_Tokio_out_of_range_scaling_before_graph_construction",
@@ -1293,7 +1293,7 @@ mod tests {
 
         assert_eq!(RUST_OWNED_HARDENINGS, [
             "Rust_injected_stable_peer_ID_is_not_Go_random_factory_parity",
-            "Rust_does_not_implement_the_Go_request_limiter_logger_or_Prometheus_wrapper_stack",
+            "Rust_request_limiter_uses_lazy_expiry_without_the_Go_cleanup_task_and_omits_logger_and_Prometheus_wrappers",
             "Rust_joined_staged_drain_and_blocking_finalization_are_hardening_not_Go_OnStop_parity",
             "Rust_source_writer_whole_transaction_contract_differs_from_Go_possible_prior_chunk_commits",
             "Rust_rejects_zero_overflowing_and_Tokio_out_of_range_scaling_before_graph_construction",

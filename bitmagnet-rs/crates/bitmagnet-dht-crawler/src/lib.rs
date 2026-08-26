@@ -25,6 +25,7 @@ mod pg_torrent_batch_writer;
 mod pg_torrent_triage_lookup;
 mod pg_torrent_v2_lookup;
 mod pipeline_supervisor;
+mod rate_limited_meta_info_requester;
 mod request_meta_info;
 mod request_meta_info_route;
 mod scrape;
