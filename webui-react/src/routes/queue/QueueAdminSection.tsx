@@ -33,6 +33,8 @@ function ScopeChips<TValue extends string>({
   options: ReadonlyArray<{ label: string; value: TValue }>;
   selected: readonly TValue[];
 }) {
+  const selectedSet = new Set(selected);
+
   return (
     <div className={styles["facetGroup"]}>
       <span>{legend}</span>
@@ -48,7 +50,7 @@ function ScopeChips<TValue extends string>({
         {options.map((option) => (
           <button
             className={styles["chip"]}
-            data-active={selected.includes(option.value)}
+            data-active={selectedSet.has(option.value)}
             key={option.value}
             onClick={() => onToggle(option.value)}
             type="button"
