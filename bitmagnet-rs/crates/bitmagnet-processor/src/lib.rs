@@ -5,7 +5,8 @@
 //! C's classifier, and materialize the canonical write-set that Go constructs
 //! before opening its persistence transaction. The supported unattached-content
 //! path can be persisted in one PostgreSQL transaction, and the shadow path can
-//! read a stable live-row comparison image under the frozen restricted role.
+//! read stable and volatile-writer live comparison images under the frozen
+//! restricted role.
 //! The durable supported-subset dark shadow runtime is included; attached
 //! content enrichment, post-commit Tantivy dual-write, and production-safe
 //! row-scoped queue privileges remain later milestones. Contract:
@@ -32,6 +33,7 @@ mod persist;
 mod runtime;
 mod shadow;
 mod supported_subset;
+mod writer_compare;
 mod writer_load;
 mod writer_plan;
 mod writer_projection;
@@ -44,9 +46,14 @@ pub use load::{load_torrents, LoadError};
 pub use persist::{
     persist_write_set, BlockingManager, BoxError, PersistError, TorrentContentPersistence,
 };
-pub use runtime::{MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError};
+pub use runtime::{
+    CausalShadowComparison, MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError,
+};
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
+};
+pub use writer_compare::{
+    WriterCompareError, WriterComparison, WriterDriftField, WriterRowComparison,
 };
 pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
 pub use writer_plan::{compose_writer_plan, load_writer_plan, WriterPlan, WriterPlanError};
@@ -86,7 +93,8 @@ pub struct LoadedTorrent {
 /// The stable, classification-derived projection of a `torrent_contents` row.
 ///
 /// Volatile source snapshots and generated `tsv` values are deliberately not
-/// part of the comparison image (contract §5.2(c)).
+/// part of this stable comparison image (contract §5.2(c)); the writer
+/// comparator checks their separately projected persistence values.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TorrentContentWrite {

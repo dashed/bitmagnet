@@ -9,16 +9,35 @@ use bitmagnet_queue::{
     ShadowJobEnvelopeV1, PROCESS_TORRENT, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 use prometheus::{IntCounter, IntCounterVec, Opts};
+use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool, Row};
 
 use super::{
     compare_write_set, shadow::read_live_snapshot_in, CompareError, ComparisonVerdict,
-    MaterializeError, Materializer, ShadowComparison, ShadowReadError, WriterLoadError,
-    WriterPlanError,
+    MaterializeError, Materializer, ShadowComparison, ShadowReadError, WriterCompareError,
+    WriterComparison, WriterDriftField, WriterLoadError, WriterPlanError,
 };
 use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
+use crate::writer_compare::compare_writer_persistence_in;
 use crate::writer_load::load_writer_torrents_in;
 use crate::writer_plan::compose_writer_plan;
+
+/// Causally anchored stable and writer evidence from one database snapshot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CausalShadowComparison {
+    pub source_job_id: String,
+    pub source_ran_at: String,
+    pub stable: ShadowComparison,
+    pub writer: WriterComparison,
+}
+
+impl CausalShadowComparison {
+    /// True only when both comparison planes match.
+    pub fn is_match(&self) -> bool {
+        self.stable.is_match() && self.writer.is_match()
+    }
+}
 
 /// A read-only processor for jobs from `process_torrent_shadow`.
 pub struct ShadowRuntime {
@@ -52,7 +71,8 @@ impl ShadowRuntime {
     }
 
     /// Decode the exact-source envelope, prove its live causal boundary, compose
-    /// the writer plan, read the settled Go image, and compare its stable fields.
+    /// the writer plan, and compare stable plus volatile writer evidence from
+    /// one read-only repeatable-read snapshot.
     ///
     /// The runtime rejects ordinary default-flag jobs. Rust does not yet
     /// implement the four attach actions, while Go defaults their controlling
@@ -60,7 +80,7 @@ impl ShadowRuntime {
     pub async fn process_job(
         &self,
         job: &DequeuedJob,
-    ) -> Result<ShadowComparison, ShadowRuntimeError> {
+    ) -> Result<CausalShadowComparison, ShadowRuntimeError> {
         if job.queue != PROCESS_TORRENT_SHADOW {
             return Err(ShadowRuntimeError::WrongQueue(job.queue.clone()));
         }
@@ -86,9 +106,15 @@ impl ShadowRuntime {
         let writer_plan = compose_writer_plan(&self.materializer, &params, &loaded)?;
         let info_hashes = unique_hashes(&params.info_hashes);
         let live = read_live_snapshot_in(&mut tx, &info_hashes).await?;
-        let comparison = compare_write_set(writer_plan.write_set(), &live)?;
+        let stable = compare_write_set(writer_plan.write_set(), &live)?;
+        let writer = compare_writer_persistence_in(&mut tx, writer_plan.persistence()).await?;
         tx.commit().await?;
-        Ok(comparison)
+        Ok(CausalShadowComparison {
+            source_job_id: envelope.source_job_id,
+            source_ran_at: envelope.source_ran_at,
+            stable,
+            writer,
+        })
     }
 }
 
@@ -285,6 +311,8 @@ pub enum ShadowRuntimeError {
     #[error(transparent)]
     WriterPlan(#[from] WriterPlanError),
     #[error(transparent)]
+    WriterCompare(#[from] WriterCompareError),
+    #[error(transparent)]
     Materialize(#[from] MaterializeError),
     #[error(transparent)]
     Read(#[from] ShadowReadError),
@@ -330,6 +358,9 @@ impl ShadowRuntimeError {
             Self::WriterPlan(WriterPlanError::Materialize(
                 crate::MaterializeError::UnsupportedFlag { .. },
             )) => Some("unsupported_classifier_flag"),
+            Self::WriterCompare(WriterCompareError::TooManyRows { .. }) => {
+                Some("writer_compare_row_limit")
+            }
             Self::Materialize(MaterializeError::AttachedContentUnsupported { .. }) => {
                 Some("attached_content")
             }
@@ -347,6 +378,8 @@ impl ShadowRuntimeError {
 pub struct ShadowMetrics {
     results: IntCounterVec,
     drift: IntCounterVec,
+    writer_results: IntCounterVec,
+    writer_drift: IntCounterVec,
     unsupported: IntCounterVec,
 }
 
@@ -373,18 +406,42 @@ impl ShadowMetrics {
             ),
             &["reason"],
         )?;
+        let writer_results = IntCounterVec::new(
+            Opts::new(
+                "bitmagnet_ingest_shadow_writer_results_total",
+                "Volatile writer-row ingest-shadow comparison outcomes.",
+            ),
+            &["verdict"],
+        )?;
+        let writer_drift = IntCounterVec::new(
+            Opts::new(
+                "bitmagnet_ingest_shadow_writer_field_drift_total",
+                "Volatile writer fields that differed during ingest-shadow comparison.",
+            ),
+            &["field"],
+        )?;
         registry().register(Box::new(results.clone()))?;
         registry().register(Box::new(drift.clone()))?;
+        registry().register(Box::new(writer_results.clone()))?;
+        registry().register(Box::new(writer_drift.clone()))?;
         registry().register(Box::new(unsupported.clone()))?;
+        for verdict in ["match", "mismatch"] {
+            writer_results.with_label_values(&[verdict]);
+        }
+        for field in WriterDriftField::ALL {
+            writer_drift.with_label_values(&[field.as_str()]);
+        }
         Ok(Self {
             results,
             drift,
+            writer_results,
+            writer_drift,
             unsupported,
         })
     }
 
-    pub fn observe(&self, comparison: &ShadowComparison) {
-        for torrent in &comparison.torrents {
+    pub fn observe(&self, comparison: &CausalShadowComparison) {
+        for torrent in &comparison.stable.torrents {
             let content_type = torrent.content_type.as_deref().unwrap_or("unclassified");
             let verdict = match torrent.verdict {
                 ComparisonVerdict::Match => "match",
@@ -397,6 +454,16 @@ impl ShadowMetrics {
                 self.drift
                     .with_label_values(&[field.as_str(), content_type])
                     .inc();
+            }
+        }
+        for row in &comparison.writer.rows {
+            let verdict = match row.verdict {
+                ComparisonVerdict::Match => "match",
+                ComparisonVerdict::Mismatch => "mismatch",
+            };
+            self.writer_results.with_label_values(&[verdict]).inc();
+            for field in &row.drift_fields {
+                self.writer_drift.with_label_values(&[field.as_str()]).inc();
             }
         }
     }
@@ -503,7 +570,11 @@ mod tests {
     use bitmagnet_classifier::core_config_digest;
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{require_default_workflow, require_flags_off, ShadowRuntime, ShadowRuntimeError};
+    use super::{
+        require_default_workflow, require_flags_off, CausalShadowComparison, ShadowComparison,
+        ShadowMetrics, ShadowRuntime, ShadowRuntimeError, WriterCompareError, WriterComparison,
+        WriterDriftField,
+    };
 
     #[tokio::test]
     async fn classifier_config_digest_is_required_and_must_match_before_consumption() {
@@ -527,6 +598,52 @@ mod tests {
         let digest = core_config_digest().expect("digest embedded classifier");
         ShadowRuntime::from_core(pool, Some(&digest))
             .expect("matching effective config digest permits startup");
+    }
+
+    #[test]
+    fn causal_result_serializes_source_and_both_evidence_planes() {
+        let result = CausalShadowComparison {
+            source_job_id: "source-1".to_owned(),
+            source_ran_at: "2026-08-26 12:34:56.123456+00".to_owned(),
+            stable: ShadowComparison::default(),
+            writer: WriterComparison::default(),
+        };
+        assert!(result.is_match());
+        assert_eq!(
+            serde_json::to_value(result).expect("serialize causal result"),
+            serde_json::json!({
+                "sourceJobId": "source-1",
+                "sourceRanAt": "2026-08-26 12:34:56.123456+00",
+                "stable": {"torrents": []},
+                "writer": {"rows": []}
+            })
+        );
+    }
+
+    #[test]
+    fn writer_metrics_are_eager_and_stable_metric_names_are_preserved() {
+        let metrics = ShadowMetrics::register().expect("register shadow metrics once");
+        metrics
+            .results
+            .with_label_values(&["match", "unclassified"]);
+        metrics
+            .drift
+            .with_label_values(&["torrent_content.rows", "unclassified"]);
+
+        let gathered = bitmagnet_common::metrics::gather_text();
+        assert!(gathered.contains("bitmagnet_ingest_shadow_results_total"));
+        assert!(gathered.contains("bitmagnet_ingest_shadow_field_drift_total"));
+        for verdict in ["match", "mismatch"] {
+            assert!(gathered.contains(&format!(
+                "bitmagnet_ingest_shadow_writer_results_total{{verdict=\"{verdict}\"}} 0"
+            )));
+        }
+        for field in WriterDriftField::ALL {
+            assert!(gathered.contains(&format!(
+                "bitmagnet_ingest_shadow_writer_field_drift_total{{field=\"{}\"}} 0",
+                field.as_str()
+            )));
+        }
     }
 
     #[test]
@@ -594,5 +711,13 @@ mod tests {
         for (error, reason) in cases {
             assert_eq!(error.unsupported_reason(), Some(reason));
         }
+        assert_eq!(
+            ShadowRuntimeError::WriterCompare(WriterCompareError::TooManyRows {
+                actual: 101,
+                limit: 100,
+            })
+            .unsupported_reason(),
+            Some("writer_compare_row_limit")
+        );
     }
 }

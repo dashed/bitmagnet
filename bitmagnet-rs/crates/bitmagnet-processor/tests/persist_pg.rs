@@ -9,8 +9,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bitmagnet_processor::{
-    load_torrents, persist_write_set, read_live_snapshot, BlockingManager, BoxError,
-    LiveTorrentState, ShadowRuntime, TorrentContentPersistence, TorrentContentWrite, WriteSet,
+    load_torrents, load_writer_plan, persist_write_set, read_live_snapshot, BlockingManager,
+    BoxError, LiveTorrentState, Materializer, ShadowRuntime, TorrentContentPersistence,
+    TorrentContentWrite, WriteSet, WriterDriftField,
 };
 use bitmagnet_queue::{
     DequeuedJob, ProcessTorrentParams, ProtocolId, QueueJobStatus, ShadowJobEnvelopeV1,
@@ -374,6 +375,44 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         info_hashes: vec![ProtocolId::from_hex(HASH_A).unwrap()],
         ..ProcessTorrentParams::default()
     };
+    let runtime_materializer = Materializer::from_core().expect("compile runtime classifier");
+    let runtime_plan = load_writer_plan(&pool, &runtime_materializer, &params)
+        .await
+        .expect("compose exact runtime writer plan for the PostgreSQL fixture");
+    assert_eq!(runtime_plan.persistence().len(), 1);
+    let (writer_id, writer_metadata) = runtime_plan
+        .persistence()
+        .first_key_value()
+        .map(|(id, metadata)| (id.clone(), metadata.clone()))
+        .expect("one runtime writer row");
+    let runtime_calls = Arc::new(Mutex::new(Vec::new()));
+    let runtime_observed = Arc::new(Mutex::new(false));
+    let runtime_blocker = RecordingBlocker {
+        pool: pool.clone(),
+        calls: Arc::clone(&runtime_calls),
+        observed_before_delete: Arc::clone(&runtime_observed),
+    };
+    persist_write_set(
+        &pool,
+        runtime_plan.write_set(),
+        runtime_plan.persistence(),
+        &runtime_blocker,
+    )
+    .await
+    .expect("seed the exact live writer projection");
+    let stale_write_set = WriteSet {
+        torrent_contents: vec![rows[0].clone()],
+        ..WriteSet::default()
+    };
+    persist_write_set(
+        &pool,
+        &stale_write_set,
+        &metadata(&stale_write_set.torrent_contents),
+        &runtime_blocker,
+    )
+    .await
+    .expect("restore one stale stable row outside writer-comparison ownership");
+
     let digest =
         bitmagnet_classifier::core_config_digest().expect("digest embedded classifier config");
     let source_payload = serde_json::to_value(&params).expect("encode source payload");
@@ -412,8 +451,112 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         .process_job(&shadow_job)
         .await
         .expect("run the read-only shadow pipeline end to end");
-    assert_eq!(comparison.torrents.len(), 1);
-    assert_eq!(comparison.mismatch_count(), 1);
+    assert_eq!(comparison.source_job_id, envelope.source_job_id);
+    assert_eq!(comparison.source_ran_at, source_ran_at);
+    assert_eq!(comparison.stable.torrents.len(), 1);
+    assert_eq!(comparison.stable.mismatch_count(), 1);
+    assert!(comparison.writer.is_match());
+    assert_eq!(comparison.writer.rows[0].id, writer_id);
+    assert!(writer_metadata.seeders.is_none());
+    assert!(writer_metadata.leechers.is_none());
+    let exact_writer_row = sqlx::query(
+        "SELECT seeders, leechers, \
+           (EXTRACT(EPOCH FROM published_at) * 1000000)::bigint \
+             AS published_at_micros, \
+           tsv::text AS tsv_text, $2::tsvector::text AS expected_tsv_text, \
+           tsv = $2::tsvector AS tsv_matches \
+         FROM torrent_contents WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .bind(&writer_metadata.tsv)
+    .fetch_one(&pool)
+    .await
+    .expect("read the exact persisted writer row");
+    assert!(exact_writer_row
+        .try_get::<Option<i32>, _>("seeders")
+        .unwrap()
+        .is_none());
+    assert!(exact_writer_row
+        .try_get::<Option<i32>, _>("leechers")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        exact_writer_row
+            .try_get::<i64, _>("published_at_micros")
+            .unwrap(),
+        writer_metadata.published_at_micros
+    );
+    assert_eq!(
+        exact_writer_row.try_get::<String, _>("tsv_text").unwrap(),
+        exact_writer_row
+            .try_get::<String, _>("expected_tsv_text")
+            .unwrap()
+    );
+    assert!(exact_writer_row.try_get::<bool, _>("tsv_matches").unwrap());
+
+    sqlx::query(
+        "UPDATE torrent_contents \
+         SET seeders = coalesce(seeders, 0) + 1, \
+             leechers = coalesce(leechers, 0) + 1, \
+             published_at = published_at + interval '1 microsecond', \
+             tsv = ''::tsvector, updated_at = $2::timestamptz \
+         WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("drift every live writer field without crossing the causal timestamp");
+    let writer_drift = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect("writer-field drift remains comparable");
+    assert_eq!(
+        writer_drift.writer.rows[0].drift_fields,
+        vec![
+            WriterDriftField::Seeders,
+            WriterDriftField::Leechers,
+            WriterDriftField::PublishedAt,
+            WriterDriftField::Tsv,
+        ]
+    );
+    sqlx::query(
+        "UPDATE torrent_contents \
+         SET seeders = $2, leechers = $3, \
+             published_at = $4 * interval '1 microsecond' + timestamptz 'epoch', \
+             tsv = $5::tsvector, updated_at = $6::timestamptz \
+         WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .bind(
+        writer_metadata
+            .seeders
+            .map(|value| i32::try_from(value).expect("validated seeders fit i32")),
+    )
+    .bind(
+        writer_metadata
+            .leechers
+            .map(|value| i32::try_from(value).expect("validated leechers fit i32")),
+    )
+    .bind(writer_metadata.published_at_micros)
+    .bind(&writer_metadata.tsv)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("restore exact writer fields through the persistence cast contract");
+    sqlx::query("DELETE FROM torrent_contents WHERE id = $1")
+        .bind(&writer_id)
+        .execute(&pool)
+        .await
+        .expect("remove the expected writer row");
+    let missing_writer = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect("a deleted expected row remains comparable live-state evidence");
+    assert_eq!(
+        missing_writer.writer.rows[0].drift_fields,
+        vec![WriterDriftField::RowPresence]
+    );
 
     let mut missing_source = envelope.clone();
     missing_source.source_job_id = "missing-source".to_owned();

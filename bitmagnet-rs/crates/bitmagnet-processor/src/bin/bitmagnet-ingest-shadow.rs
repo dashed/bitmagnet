@@ -139,11 +139,15 @@ async fn main() -> Result<()> {
                             if comparison.is_match() {
                                 tracing::info!(
                                     job_id = %job.id,
-                                    torrents = comparison.torrents.len(),
+                                    source_job_id = %comparison.source_job_id,
+                                    source_ran_at = %comparison.source_ran_at,
+                                    torrents = comparison.stable.torrents.len(),
+                                    writer_rows = comparison.writer.rows.len(),
                                     "ingest shadow matched"
                                 );
                             } else {
                                 for mismatch in comparison
+                                    .stable
                                     .torrents
                                     .iter()
                                     .filter(|item| {
@@ -154,10 +158,31 @@ async fn main() -> Result<()> {
                                 {
                                     tracing::warn!(
                                         job_id = %job.id,
+                                        source_job_id = %comparison.source_job_id,
+                                        source_ran_at = %comparison.source_ran_at,
                                         info_hash = %mismatch.info_hash,
                                         content_type = mismatch.content_type.as_deref().unwrap_or("unclassified"),
                                         drift = ?mismatch.drift_fields,
                                         "ingest shadow mismatch"
+                                    );
+                                }
+                                for mismatch in comparison
+                                    .writer
+                                    .rows
+                                    .iter()
+                                    .filter(|item| {
+                                        item.verdict
+                                            == bitmagnet_processor::ComparisonVerdict::Mismatch
+                                    })
+                                    .take(10)
+                                {
+                                    tracing::warn!(
+                                        job_id = %job.id,
+                                        source_job_id = %comparison.source_job_id,
+                                        source_ran_at = %comparison.source_ran_at,
+                                        torrent_content_id = %mismatch.id,
+                                        drift = ?mismatch.drift_fields,
+                                        "ingest shadow writer mismatch"
                                     );
                                 }
                             }

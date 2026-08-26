@@ -126,12 +126,23 @@ low-cardinality per-field metrics. Row-level drift is retained alongside
 field-level labels so changes in field association cannot be hidden by equal
 column multisets.
 
-The comparator's types contain only the frozen stable image: content identity
+The stable comparator's types contain only the frozen stable image: content identity
 and metadata, `torrent_contents` classification fields including `InferID()`,
 canonical languages/episodes, tags, and the delete outcome. Volatile database
 and crawl fields (`created_at`/`updated_at`, generated `tsv`,
 seeders/leechers/published-at snapshots, and unrelated surrogate IDs) never
-enter the API.
+enter that API.
+
+A separate bounded writer comparator keys the plan's persistence image by exact
+`torrent_contents.id` and compares expected-row presence, seeders, leechers,
+published-at microseconds, and generated `tsv`. PostgreSQL evaluates the text
+projection using `tc.tsv = expected.tsv::tsvector`, matching the transaction
+kernel's `::tsvector` persistence cast; it does not run `to_tsvector` over
+already-serialized tsvector text. The writer reader selects only expected IDs.
+Missing expected rows are writer `row_presence` drift, while unexpected or stale
+rows remain solely in the stable comparator's ownership. Writer verdict and
+drift metrics add only closed labels and do not alter the existing stable metric
+names.
 
 Expected tags use additive semantics: every tag Rust would add must exist in
 the live set, while unrelated pre-existing tags remain valid because Go never
@@ -172,19 +183,21 @@ guard closes the interval where Go is executing a handler but its row has not
 yet committed a terminal status or `ran_at`. The runtime also rejects post-source
 `updated_at` values in `torrents`, `torrents_torrent_sources`,
 `torrent_contents`, and `torrent_tags`; hint presence is already a categorical
-rejection. Source validation, bounded writer loading, `WriterPlan`
-composition inputs, and the stable live comparison share one read-only
-repeatable-read snapshot, preventing a concurrent Go transaction from creating
-a torn or cross-run image. This is causal live-state evidence, not historical
-event replay: row deletion has no tombstone, and volatile writer fields are not
-yet compared.
+rejection. Source validation, bounded writer loading, `WriterPlan` composition
+inputs, stable live comparison, and volatile writer comparison share one
+read-only repeatable-read snapshot, preventing a concurrent Go transaction from
+creating a torn or cross-run image. The returned causal result binds both
+evidence planes to the envelope's exact source job ID and `ran_at`. This is
+causal live-state evidence, not historical event replay: row deletion has no
+tombstone.
 
 The version-1 rollout can be staged with mirror sampling fixed at zero: the new
 consumer remains non-persisting and the only DB mutation is still scoped scratch
 settlement. Before enabling a nonzero sample, deployment must grant SELECT on
 `torrents_torrent_sources`, confirm the scratch queue is empty of legacy raw
 payloads, and re-run the existing row-boundary negative controls. This checkpoint
-does not authorize a live writer, a second queue consumer, or a nonzero sample.
+does not authorize persistence, live-queue ownership, a second queue consumer,
+or a nonzero sample.
 
 Migration 29 already supplies the deployed `SECURITY DEFINER` cursor and
 scratch-queue mutation boundary, so this checkpoint is not waiting on direct
