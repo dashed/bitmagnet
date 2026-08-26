@@ -34,13 +34,20 @@ func New(p Params) Result {
 			if err != nil {
 				return nil, err
 			}
-			logger := p.Logger.Named("migrator")
-			initGoose(logger)
-			return &migrator{
-				db:     db,
-				logger: logger,
-			}, nil
+			return NewForSQLDB(db, p.Logger), nil
 		}),
+	}
+}
+
+// NewForSQLDB constructs the same embedded-Goose migrator used by the
+// development CLI without assembling the full application Fx graph. It is the
+// production composition seam for one-shot schema migration jobs.
+func NewForSQLDB(db *sql.DB, logger *zap.SugaredLogger) Migrator {
+	logger = logger.Named("migrator")
+	initGoose(logger)
+	return &migrator{
+		db:     db,
+		logger: logger,
 	}
 }
 
