@@ -438,7 +438,18 @@ fn graphql_job(item: QueueJobRecord) -> Result<QueueJob> {
 }
 
 fn graphql_datetime(value: ChronoDateTime<Utc>) -> DateTime {
-    DateTime(value.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+    let mut encoded = value.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let suffix = encoded
+        .strip_suffix('Z')
+        .expect("UTC RFC3339 values always use the Z suffix");
+    let trimmed = suffix.trim_end_matches('0');
+    let end = if trimmed.ends_with('.') {
+        trimmed.len() - 1
+    } else {
+        trimmed.len()
+    };
+    encoded.replace_range(end..encoded.len() - 1, "");
+    DateTime(encoded)
 }
 
 fn graphql_status(value: &str) -> Result<QueueJobStatus> {
@@ -766,5 +777,21 @@ mod tests {
             panic!("negative max retries must fail");
         };
         assert!(error.message.contains("maxRetries must be nonnegative"));
+    }
+
+    #[test]
+    fn graphql_datetime_matches_gqlgen_rfc3339_nano_trimming() {
+        for (input, expected) in [
+            ("2024-06-01T00:00:00Z", "2024-06-01T00:00:00Z"),
+            ("2024-06-01T00:00:00.123Z", "2024-06-01T00:00:00.123Z"),
+            ("2024-06-01T00:00:00.123400Z", "2024-06-01T00:00:00.1234Z"),
+            (
+                "2024-06-01T00:00:00.123456789Z",
+                "2024-06-01T00:00:00.123456789Z",
+            ),
+        ] {
+            let parsed = input.parse().expect("RFC3339 timestamp");
+            assert_eq!(graphql_datetime(parsed).0, expected);
+        }
     }
 }

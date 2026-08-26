@@ -161,7 +161,7 @@ func seedQueueJobsAndVerifyGoOracle(t *testing.T, gormDB *gorm.DB, db *sql.DB) {
 			decodeQueueJobsOracleInput(t, cases[i].Input),
 		)
 		require.NoError(t, queryErr, "oracle case %q", cases[i].ID)
-		cases[i].Expected = queueJobsOracleExpectedFromGo(actual)
+		cases[i].Expected = queueJobsOracleExpectedFromGo(t, actual)
 	}
 	reconcileQueueJobsCorpus(t, cases)
 }
@@ -179,6 +179,7 @@ func queueJobsOracleCases() []queueJobsOracleCase {
 		{ID: "ran-at-desc-nulls-first", Input: json.RawMessage(`{"limit":5,"orderBy":[{"field":"ran_at","descending":true},{"field":"created_at","descending":true}]}`)},
 		{ID: "explicit-empty-filter", Input: json.RawMessage(`{"queues":[],"statuses":[],"limit":100,"totalCount":true,"hasNextPage":true,"facets":{"queue":{"aggregate":true,"filter":[]},"status":{"aggregate":true,"filter":[]}}}`)},
 		{ID: "false-count-flags", Input: json.RawMessage(`{"limit":3,"totalCount":false,"hasNextPage":false,"orderBy":[{"field":"created_at"}]}`)},
+		{ID: "fractional-timestamp-wire-format", Input: json.RawMessage(`{"limit":1,"offset":1,"orderBy":[{"field":"created_at"}]}`)},
 	}
 }
 
@@ -246,12 +247,13 @@ func decodeQueueJobsOracleInput(t *testing.T, raw json.RawMessage) QueueJobsQuer
 	return result
 }
 
-func queueJobsOracleExpectedFromGo(result QueueJobsQueryResult) queueJobsOracleExpectedResult {
+func queueJobsOracleExpectedFromGo(t *testing.T, result QueueJobsQueryResult) queueJobsOracleExpectedResult {
+	t.Helper()
 	items := make([]queueJobsOracleExpectedItem, 0, len(result.Items))
 	for _, item := range result.Items {
 		var ranAt, itemError *string
 		if item.RanAt.Valid {
-			value := item.RanAt.Time.UTC().Format(time.RFC3339)
+			value := marshalQueueJobsGraphQLTime(t, item.RanAt.Time)
 			ranAt = &value
 		}
 		if item.Error.Valid {
@@ -261,8 +263,8 @@ func queueJobsOracleExpectedFromGo(result QueueJobsQueryResult) queueJobsOracleE
 		items = append(items, queueJobsOracleExpectedItem{
 			ID: item.ID, Queue: item.Queue, Status: item.Status.String(), Payload: item.Payload,
 			Priority: item.Priority, Retries: item.Retries, MaxRetries: item.MaxRetries,
-			RunAfter: item.RunAfter.UTC().Format(time.RFC3339), RanAt: ranAt, Error: itemError,
-			CreatedAt: item.CreatedAt.UTC().Format(time.RFC3339),
+			RunAfter: marshalQueueJobsGraphQLTime(t, item.RunAfter), RanAt: ranAt, Error: itemError,
+			CreatedAt: marshalQueueJobsGraphQLTime(t, item.CreatedAt),
 		})
 	}
 	var queueAggs []queueJobsOracleExpectedStringAgg
@@ -285,6 +287,17 @@ func queueJobsOracleExpectedFromGo(result QueueJobsQueryResult) queueJobsOracleE
 		TotalCount: result.TotalCount, HasNextPage: result.HasNextPage, Items: items,
 		Aggregations: queueJobsOracleExpectedAggs{Queue: queueAggs, Status: statusAggs},
 	}
+}
+
+func marshalQueueJobsGraphQLTime(t *testing.T, value time.Time) string {
+	t.Helper()
+	var encoded bytes.Buffer
+	// Preserve the queue oracle's UTC wire contract and keep regeneration stable
+	// when a developer machine uses another local time zone.
+	graphql.MarshalTime(value.UTC()).MarshalGQL(&encoded)
+	var decoded string
+	require.NoError(t, json.Unmarshal(encoded.Bytes(), &decoded))
+	return decoded
 }
 
 func loadQueueJobFixtures(t *testing.T) []queueJobFixture {
