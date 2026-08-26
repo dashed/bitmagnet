@@ -10,8 +10,8 @@
 ARG REVISION
 ARG SOURCE_TREE
 
-FROM rust:1.97-slim-bookworm AS builder
-ENV RUSTUP_TOOLCHAIN=1.97.0
+FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+ENV RUSTUP_TOOLCHAIN=1.97.1
 
 # The workspace contains tonic crates whose shared build script requires
 # protoc even though this executable exposes only HTTP and UDP.

@@ -35,8 +35,8 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
         -ldflags "-s -w -X github.com/bitmagnet-io/bitmagnet/internal/version.GitTag=${REVISION}" \
         -o /out/bitmagnet ./main.go
 
-FROM rust:1.97-slim-bookworm AS rust-builder
-ENV RUSTUP_TOOLCHAIN=1.97.0
+FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS rust-builder
+ENV RUSTUP_TOOLCHAIN=1.97.1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
