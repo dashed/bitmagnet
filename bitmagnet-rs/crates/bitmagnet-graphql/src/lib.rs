@@ -23,6 +23,6 @@ pub use schema::{
 };
 pub use schema::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
-    TorrentFilesRuntime, TorrentFilesRuntimeData,
+    TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };
 pub use schema::{SearchRuntime, SearchRuntimeData};

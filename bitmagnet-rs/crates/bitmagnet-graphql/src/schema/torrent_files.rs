@@ -23,6 +23,35 @@ use super::scalars::{DateTime, Hash20};
 const DEFAULT_LIMIT: u32 = 10;
 const ZERO_DATETIME: &str = "0001-01-01T00:00:00Z";
 
+/// The production SELECT used by [`PgTorrentFilesRuntime`].
+///
+/// The only torrent selector is `t.info_hash = ANY($1::bytea[])`, which is
+/// indexable by the `torrents` primary key. Blob materialization remains behind
+/// summary-derived per-blob and request-wide caps.
+pub const TORRENT_FILES_SQL: &str = "WITH requested AS (\
+\n  SELECT t.info_hash, t.files_data IS NULL AS files_data_is_null,\
+\n         s.file_count::bigint AS file_count,\
+\n         s.compressed_bytes::bigint AS compressed_bytes\
+\n  FROM torrents AS t\
+\n  LEFT JOIN torrent_file_summary AS s USING (info_hash)\
+\n  WHERE t.info_hash = ANY($1::bytea[])\
+\n), bounded AS (\
+\n  SELECT requested.*,\
+\n         sum(coalesce(file_count, 0)) OVER ()::bigint AS request_file_count,\
+\n         sum(coalesce(compressed_bytes, 0)) OVER ()::bigint\
+\n           AS request_compressed_bytes\
+\n  FROM requested\
+\n)\
+\nSELECT bounded.*,\
+\n       CASE WHEN file_count <= $2\
+\n                  AND request_file_count <= $3\
+\n                  AND compressed_bytes <= $4\
+\n                  AND request_compressed_bytes <= $5\
+\n            THEN t.files_data END AS files_data\
+\nFROM bounded\
+\nJOIN torrents AS t USING (info_hash)\
+\nORDER BY info_hash";
+
 /// Fail-closed resource limits for one file-browser request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TorrentFilesLimits {
@@ -119,6 +148,18 @@ pub enum TorrentFilesError {
         /// Actual decoded rows.
         decoded: usize,
     },
+    /// Summary byte metadata and the selected blob disagree.
+    #[error(
+        "torrent.files compressed-byte mismatch for {info_hash}: summary={summary}, actual={actual}"
+    )]
+    CompressedBytesMismatch {
+        /// Torrent owning the inconsistent blob.
+        info_hash: InfoHash,
+        /// Denormalized compressed byte count.
+        summary: usize,
+        /// Actual selected blob length.
+        actual: usize,
+    },
 }
 
 /// Runtime seam used by the GraphQL resolver.
@@ -169,38 +210,14 @@ impl TorrentFilesRuntime for PgTorrentFilesRuntime {
             .iter()
             .map(|hash| hash.as_slice().to_vec())
             .collect::<Vec<_>>();
-        let rows = sqlx::query(
-            "WITH requested AS (\
-             \n  SELECT t.info_hash, t.files_data IS NULL AS files_data_is_null,\
-             \n         s.file_count::bigint AS file_count,\
-             \n         s.compressed_bytes::bigint AS compressed_bytes\
-             \n  FROM torrents AS t\
-             \n  LEFT JOIN torrent_file_summary AS s USING (info_hash)\
-             \n  WHERE t.info_hash = ANY($1::bytea[])\
-             \n), bounded AS (\
-             \n  SELECT requested.*,\
-             \n         sum(coalesce(file_count, 0)) OVER ()::bigint AS request_file_count,\
-             \n         sum(coalesce(compressed_bytes, 0)) OVER ()::bigint\
-             \n           AS request_compressed_bytes\
-             \n  FROM requested\
-             \n)\
-             \nSELECT bounded.*,\
-             \n       CASE WHEN file_count <= $2\
-             \n                  AND request_file_count <= $3\
-             \n                  AND compressed_bytes <= $4\
-             \n                  AND request_compressed_bytes <= $5\
-             \n            THEN t.files_data END AS files_data\
-             \nFROM bounded\
-             \nJOIN torrents AS t USING (info_hash)\
-             \nORDER BY info_hash",
-        )
-        .bind(hashes)
-        .bind(limit_i64(limits.max_files_per_blob))
-        .bind(limit_i64(limits.max_files_per_request))
-        .bind(limit_i64(limits.max_compressed_bytes_per_blob))
-        .bind(limit_i64(limits.max_compressed_bytes_per_request))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(TORRENT_FILES_SQL)
+            .bind(hashes)
+            .bind(limit_i64(limits.max_files_per_blob))
+            .bind(limit_i64(limits.max_files_per_request))
+            .bind(limit_i64(limits.max_compressed_bytes_per_blob))
+            .bind(limit_i64(limits.max_compressed_bytes_per_request))
+            .fetch_all(&self.pool)
+            .await?;
 
         rows.into_iter()
             .map(|row| row_to_blob(row, limits))
@@ -219,12 +236,10 @@ fn row_to_blob(
         info_hash,
         "torrent_file_summary.file_count",
     )?;
-    let compressed_bytes = required_nonnegative(
-        &row,
-        "compressed_bytes",
-        info_hash,
-        "torrent_file_summary.compressed_bytes",
-    )?;
+    let compressed_bytes = row
+        .try_get::<Option<i64>, _>("compressed_bytes")?
+        .map(nonnegative)
+        .transpose()?;
     let request_file_count = nonnegative(row.try_get::<i64, _>("request_file_count")?)?;
     let request_compressed_bytes = nonnegative(row.try_get::<i64, _>("request_compressed_bytes")?)?;
 
@@ -235,11 +250,6 @@ fn row_to_blob(
         limits.max_files_per_request,
     )?;
     enforce_limit(
-        "blob compressed bytes",
-        compressed_bytes,
-        limits.max_compressed_bytes_per_blob,
-    )?;
-    enforce_limit(
         "request compressed bytes",
         request_compressed_bytes,
         limits.max_compressed_bytes_per_request,
@@ -247,7 +257,30 @@ fn row_to_blob(
 
     let files_data_is_null = row.try_get::<bool, _>("files_data_is_null")?;
     let files_data = row.try_get::<Option<Vec<u8>>, _>("files_data")?;
-    if !files_data_is_null && files_data.is_none() {
+    if files_data_is_null {
+        if let Some(summary) = compressed_bytes.filter(|bytes| *bytes != 0) {
+            return Err(TorrentFilesError::CompressedBytesMismatch {
+                info_hash,
+                summary,
+                actual: 0,
+            });
+        }
+        return Ok(TorrentFilesBlob {
+            info_hash,
+            files_data: None,
+            file_count,
+        });
+    }
+    let compressed_bytes = compressed_bytes.ok_or(TorrentFilesError::MissingMetadata {
+        info_hash,
+        field: "torrent_file_summary.compressed_bytes",
+    })?;
+    enforce_limit(
+        "blob compressed bytes",
+        compressed_bytes,
+        limits.max_compressed_bytes_per_blob,
+    )?;
+    if files_data.is_none() {
         return Err(TorrentFilesError::LimitExceeded {
             resource: "files_data materialization",
             actual: compressed_bytes,
@@ -256,10 +289,10 @@ fn row_to_blob(
     }
     if let Some(data) = &files_data {
         if data.len() != compressed_bytes {
-            return Err(TorrentFilesError::LimitExceeded {
-                resource: "files_data metadata mismatch",
+            return Err(TorrentFilesError::CompressedBytesMismatch {
+                info_hash,
+                summary: compressed_bytes,
                 actual: data.len(),
-                limit: compressed_bytes,
             });
         }
     }

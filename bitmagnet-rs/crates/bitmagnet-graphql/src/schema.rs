@@ -19,7 +19,7 @@ pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
 pub use torrent_files::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
-    TorrentFilesRuntime, TorrentFilesRuntimeData,
+    TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };
 
 /// Runtime version data available to GraphQL resolvers.
