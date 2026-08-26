@@ -8,8 +8,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::num::NonZeroU8;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bitmagnet_dht::{
@@ -61,14 +60,8 @@ impl TransactionIdIssuer for Issuer {
     }
 }
 
-struct NoopWake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
-    let waker = Waker::from(Arc::new(NoopWake));
-    future.poll(&mut Context::from_waker(&waker))
+    future.poll(&mut Context::from_waker(std::task::Waker::noop()))
 }
 
 fn fixtures() -> Vec<Fixture> {

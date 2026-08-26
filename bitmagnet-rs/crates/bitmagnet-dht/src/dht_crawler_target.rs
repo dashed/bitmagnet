@@ -159,7 +159,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Barrier;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll};
 
     use super::*;
 
@@ -566,15 +566,8 @@ mod tests {
         assert_send::<DhtCrawlerTargetRotator>();
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        future.poll(&mut Context::from_waker(&waker))
+        future.poll(&mut Context::from_waker(std::task::Waker::noop()))
     }
 
     struct TrackedPending {

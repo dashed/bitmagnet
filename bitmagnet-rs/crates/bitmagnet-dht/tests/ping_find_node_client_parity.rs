@@ -11,7 +11,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bitmagnet_dht::{
@@ -391,15 +391,8 @@ impl DatagramSender for GateSender {
     }
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
-    let waker = Waker::from(Arc::new(NoopWake));
-    future.poll(&mut Context::from_waker(&waker))
+    future.poll(&mut Context::from_waker(std::task::Waker::noop()))
 }
 
 #[tokio::test(start_paused = true)]
