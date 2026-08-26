@@ -197,7 +197,13 @@ pub(crate) fn decode_samples(value: &[u8]) -> Result<Vec<Id20>, CompactCodecErro
     if !value.len().is_multiple_of(20) {
         return Err(CompactCodecError::MisalignedInfoHashes(value.len()));
     }
-    value.chunks_exact(20).map(Id20::from_slice).collect()
+    Ok(value
+        .as_chunks::<20>()
+        .0
+        .iter()
+        .copied()
+        .map(Id20)
+        .collect())
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
