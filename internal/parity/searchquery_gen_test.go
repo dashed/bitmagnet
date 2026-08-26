@@ -309,6 +309,11 @@ func setupSearchQueryParityDB(t *testing.T, ctx context.Context) *gorm.DB {
 	if err != nil {
 		t.Fatalf("get fixture sql.DB: %v", err)
 	}
+	// The real Go facet builder fans queries out concurrently. Bound the
+	// disposable oracle pool so an all-facets fixture cannot exhaust the
+	// PostgreSQL service's default max_connections before queued queries run.
+	sqlDB.SetMaxOpenConns(16)
+	sqlDB.SetMaxIdleConns(4)
 
 	if _, err := sqlDB.ExecContext(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); err != nil {
 		t.Fatalf("reset public schema: %v", err)
