@@ -28,16 +28,23 @@ use std::task::Poll;
 
 use bitmagnet_blocking::{BlockingError, BlockingFinalizeOutcome, BlockingFinalizer};
 use bitmagnet_dht::{
-    DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit, DhtInfoHashTriageInput,
-    DhtRuntime, DhtRuntimeExit,
+    DhtBootstrapPingProducerStats, DhtCrawlerMaintenanceStatsHandle,
+    DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit,
+    DhtDiscoveredNodeFindStats, DhtDiscoveredNodePingStats, DhtDiscoveredNodeSchedulerStats,
+    DhtDiscoveryStats, DhtDiscoveryStatsHandle, DhtInboundStats, DhtInboundStatsSnapshot,
+    DhtInfoHashTriageInput, DhtOldestNodeFindProducerStats, DhtOldestNodePingProducerStats,
+    DhtRuntime, DhtRuntimeExit, DhtRuntimeHealthHandle, DhtRuntimeHealthSnapshot,
+    DhtRuntimeHealthStatus, DhtSampleInfoHashesProducerStats, DhtSampleInfoHashesWorkerStats,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::{Id, JoinError, JoinSet};
 
 use crate::{
     DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamStatsHandle, DhtCrawlerDownstreamWorkers,
-    DhtGetPeersWorkerExit, DhtInfoHashTriageWorkerExit, DhtPersistSourceWorkerExit,
-    DhtPersistTorrentWorkerExit, DhtRequestMetaInfoWorkerExit, DhtScrapeWorkerExit,
+    DhtGetPeersWorkerExit, DhtGetPeersWorkerStats, DhtInfoHashTriageStats,
+    DhtInfoHashTriageWorkerExit, DhtPersistSourceWorkerExit, DhtPersistSourceWorkerStats,
+    DhtPersistTorrentWorkerExit, DhtPersistTorrentWorkerStats, DhtRequestMetaInfoWorkerExit,
+    DhtRequestMetaInfoWorkerStats, DhtScrapeWorkerExit, DhtScrapeWorkerStats,
 };
 
 /// One downstream child with a stable identity in terminal evidence.
@@ -144,6 +151,28 @@ pub enum DhtCrawlerPipelineLifecycle {
     Stopped,
 }
 
+/// Lifecycle projected with channel closure made explicit.
+///
+/// A closed publisher is normal only after `Stopped`. Any other final value is
+/// cancellation evidence; the last published lifecycle is retained without
+/// pretending staged cleanup completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DhtCrawlerPipelineObservedLifecycle {
+    /// Publisher is live and has not established readiness.
+    Starting,
+    /// Publisher is live and every required child entered its run future.
+    Ready,
+    /// Publisher is live and staged cleanup has begun.
+    Stopping,
+    /// Staged cleanup completed; publisher closure is also normal here.
+    Stopped,
+    /// Publisher closed without completing staged cleanup.
+    Cancelled {
+        /// Final lifecycle value published before cancellation.
+        last: DhtCrawlerPipelineLifecycle,
+    },
+}
+
 /// Cloneable sender-free view of the pipeline lifecycle.
 ///
 /// Channel closure without `Stopped` means the consuming run future was
@@ -167,7 +196,36 @@ impl DhtCrawlerPipelineLifecycleHandle {
     /// the ready state.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.snapshot() == DhtCrawlerPipelineLifecycle::Ready && self.receiver.has_changed().is_ok()
+        self.observed() == DhtCrawlerPipelineObservedLifecycle::Ready
+    }
+
+    /// Project publisher closure without leaving a stale `Ready` value.
+    #[must_use]
+    pub fn observed(&self) -> DhtCrawlerPipelineObservedLifecycle {
+        let mut last = self.snapshot();
+        match self.receiver.has_changed() {
+            Err(_) => {
+                // Once closed, the publisher's final value is stable.
+                last = self.snapshot();
+                return if last == DhtCrawlerPipelineLifecycle::Stopped {
+                    DhtCrawlerPipelineObservedLifecycle::Stopped
+                } else {
+                    DhtCrawlerPipelineObservedLifecycle::Cancelled { last }
+                };
+            }
+            Ok(true) => {
+                // A publication may have raced the first borrow. Re-read it so
+                // readiness cannot survive an already-visible transition.
+                last = self.snapshot();
+            }
+            Ok(false) => {}
+        }
+        match last {
+            DhtCrawlerPipelineLifecycle::Starting => DhtCrawlerPipelineObservedLifecycle::Starting,
+            DhtCrawlerPipelineLifecycle::Ready => DhtCrawlerPipelineObservedLifecycle::Ready,
+            DhtCrawlerPipelineLifecycle::Stopping => DhtCrawlerPipelineObservedLifecycle::Stopping,
+            DhtCrawlerPipelineLifecycle::Stopped => DhtCrawlerPipelineObservedLifecycle::Stopped,
+        }
     }
 
     /// Wait for a lifecycle change and return its new value.
@@ -177,6 +235,122 @@ impl DhtCrawlerPipelineLifecycleHandle {
     pub async fn changed(&mut self) -> Option<DhtCrawlerPipelineLifecycle> {
         self.receiver.changed().await.ok()?;
         Some(*self.receiver.borrow_and_update())
+    }
+}
+
+/// Fixed-shape runtime observations owned by the crawler pipeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtCrawlerPipelineRuntimeObservabilitySnapshot {
+    pub health: DhtRuntimeHealthSnapshot,
+    pub inbound: DhtInboundStatsSnapshot,
+    pub discovery: DhtDiscoveryStats,
+}
+
+/// Fixed-shape maintenance observations excluding the canonical discovery
+/// counters already present in the runtime snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtCrawlerPipelineMaintenanceObservabilitySnapshot {
+    pub scheduler: DhtDiscoveredNodeSchedulerStats,
+    pub ping: DhtDiscoveredNodePingStats,
+    pub find_node: DhtDiscoveredNodeFindStats,
+    pub sample_infohashes_worker: DhtSampleInfoHashesWorkerStats,
+    pub oldest_find: DhtOldestNodeFindProducerStats,
+    pub oldest_ping: DhtOldestNodePingProducerStats,
+    pub bootstrap_ping: DhtBootstrapPingProducerStats,
+    pub sample_infohashes_producer: DhtSampleInfoHashesProducerStats,
+}
+
+/// Fixed-shape observations for all six downstream workers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtCrawlerPipelineDownstreamObservabilitySnapshot {
+    pub triage: DhtInfoHashTriageStats,
+    pub get_peers: DhtGetPeersWorkerStats,
+    pub request_meta_info: DhtRequestMetaInfoWorkerStats,
+    pub persist_torrent: DhtPersistTorrentWorkerStats,
+    pub scrape: DhtScrapeWorkerStats,
+    pub persist_source: DhtPersistSourceWorkerStats,
+}
+
+/// One non-transactional, fixed-shape crawler observability snapshot.
+///
+/// Constituent atomics are read independently. The shape preserves each
+/// worker's typed semantics; it does not flatten counters, infer queue depth,
+/// or classify normal peer/query failures as application health failures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DhtCrawlerPipelineObservabilitySnapshot {
+    pub lifecycle: DhtCrawlerPipelineObservedLifecycle,
+    pub runtime: DhtCrawlerPipelineRuntimeObservabilitySnapshot,
+    pub maintenance: DhtCrawlerPipelineMaintenanceObservabilitySnapshot,
+    pub downstream: DhtCrawlerPipelineDownstreamObservabilitySnapshot,
+}
+
+impl DhtCrawlerPipelineObservabilitySnapshot {
+    /// Whether the pipeline is live, fully started, and within the outbound DHT
+    /// success-freshness policy.
+    ///
+    /// This is not application or deployment readiness: database/schema
+    /// preflight, writer mode, and outer process ownership remain separate.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.lifecycle == DhtCrawlerPipelineObservedLifecycle::Ready
+            && self.runtime.health.status() == DhtRuntimeHealthStatus::Up
+    }
+}
+
+/// Cloneable sender-free lifecycle and counter observations for one pipeline.
+///
+/// This handle retains no runtime client, route, worker, task, table, pool, or
+/// blocking-finalization capability. It aggregates existing Rust observation
+/// seams; it is not a claim of Go Prometheus parity and does not fabricate
+/// absent KTable, query-duration, concurrency, or response-drop metrics.
+#[derive(Clone)]
+pub struct DhtCrawlerPipelineObservabilityHandle {
+    lifecycle: DhtCrawlerPipelineLifecycleHandle,
+    runtime_health: DhtRuntimeHealthHandle,
+    runtime_inbound: DhtInboundStats,
+    discovery: DhtDiscoveryStatsHandle,
+    maintenance: DhtCrawlerMaintenanceStatsHandle,
+    downstream: DhtCrawlerDownstreamStatsHandle,
+}
+
+impl DhtCrawlerPipelineObservabilityHandle {
+    /// Read every fixed constituent without spawning work.
+    #[must_use]
+    pub fn snapshot(&self) -> DhtCrawlerPipelineObservabilitySnapshot {
+        DhtCrawlerPipelineObservabilitySnapshot {
+            lifecycle: self.lifecycle.observed(),
+            runtime: DhtCrawlerPipelineRuntimeObservabilitySnapshot {
+                health: self.runtime_health.snapshot(),
+                inbound: self.runtime_inbound.snapshot(),
+                discovery: self.discovery.snapshot(),
+            },
+            maintenance: DhtCrawlerPipelineMaintenanceObservabilitySnapshot {
+                scheduler: self.maintenance.scheduler.snapshot(),
+                ping: self.maintenance.ping.snapshot(),
+                find_node: self.maintenance.find_node.snapshot(),
+                sample_infohashes_worker: self.maintenance.sample_infohashes_worker.snapshot(),
+                oldest_find: self.maintenance.oldest_find.snapshot(),
+                oldest_ping: self.maintenance.oldest_ping.snapshot(),
+                bootstrap_ping: self.maintenance.bootstrap_ping.snapshot(),
+                sample_infohashes_producer: self.maintenance.sample_infohashes_producer.snapshot(),
+            },
+            downstream: DhtCrawlerPipelineDownstreamObservabilitySnapshot {
+                triage: self.downstream.triage.snapshot(),
+                get_peers: self.downstream.get_peers.snapshot(),
+                request_meta_info: self.downstream.request_meta_info.snapshot(),
+                persist_torrent: self.downstream.persist_torrent.snapshot(),
+                scrape: self.downstream.scrape.snapshot(),
+                persist_source: self.downstream.persist_source.snapshot(),
+            },
+        }
+    }
+
+    /// Evaluate only fresh lifecycle and runtime-health observations, without
+    /// loading unrelated counters.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.lifecycle.observed() == DhtCrawlerPipelineObservedLifecycle::Ready
+            && self.runtime_health.snapshot().status() == DhtRuntimeHealthStatus::Up
     }
 }
 
@@ -214,6 +388,7 @@ pub struct DhtCrawlerPipelineSupervisor {
     downstream: DhtCrawlerDownstreamWorkers,
     finalizer: Arc<dyn BlockingFinalizer>,
     lifecycle: watch::Sender<DhtCrawlerPipelineLifecycle>,
+    observability: DhtCrawlerPipelineObservabilityHandle,
 }
 
 impl DhtCrawlerPipelineSupervisor {
@@ -223,6 +398,10 @@ impl DhtCrawlerPipelineSupervisor {
     /// receiver consumed by `downstream`; maintenance already owns its own
     /// clone. The constructor cannot detect unrelated clones. Retaining another
     /// clone outside this supervisor can prevent the graceful EOF cascade.
+    /// Likewise, `runtime`, `maintenance`, and `downstream` must come from one
+    /// composition; this constructor cannot verify that pairing. The aggregate
+    /// observability surface treats the runtime's discovery handle as canonical
+    /// and intentionally omits maintenance's duplicate view.
     #[must_use = "the supervisor and its recovery/statistics handles must be retained"]
     pub fn new(
         runtime: DhtRuntime,
@@ -237,12 +416,21 @@ impl DhtCrawlerPipelineSupervisor {
         } = downstream;
         let finalizer: Arc<dyn BlockingFinalizer> = blocking_manager;
         let (lifecycle, lifecycle_receiver) = watch::channel(DhtCrawlerPipelineLifecycle::Starting);
+        let lifecycle_handle = DhtCrawlerPipelineLifecycleHandle {
+            receiver: lifecycle_receiver,
+        };
+        let observability = DhtCrawlerPipelineObservabilityHandle {
+            lifecycle: lifecycle_handle.clone(),
+            runtime_health: runtime.health(),
+            runtime_inbound: runtime.inbound_stats(),
+            discovery: runtime.discovery_stats(),
+            maintenance: maintenance.stats_handle(),
+            downstream: stats.clone(),
+        };
         let handles = DhtCrawlerPipelineHandles {
             downstream_stats: stats,
             blocking_finalizer: finalizer.clone(),
-            lifecycle: DhtCrawlerPipelineLifecycleHandle {
-                receiver: lifecycle_receiver,
-            },
+            lifecycle: lifecycle_handle,
         };
         (
             Self {
@@ -252,9 +440,17 @@ impl DhtCrawlerPipelineSupervisor {
                 downstream: workers,
                 finalizer,
                 lifecycle,
+                observability,
             },
             handles,
         )
+    }
+
+    /// Clone the sender-free aggregate observability surface before consuming
+    /// the supervisor with [`Self::run`].
+    #[must_use]
+    pub fn observability_handle(&self) -> DhtCrawlerPipelineObservabilityHandle {
+        self.observability.clone()
     }
 
     /// Run until external shutdown or the first observed component terminal
@@ -341,6 +537,7 @@ impl PipelineFactories {
                 },
             finalizer,
             lifecycle,
+            observability: _,
         } = supervisor;
         (
             Self {
@@ -1502,6 +1699,10 @@ mod tests {
 
         wait_for_lifecycle(&mut lifecycle, DhtCrawlerPipelineLifecycle::Ready).await;
         assert!(lifecycle.is_ready());
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Ready
+        );
         shutdown_tx.send(()).unwrap();
         timeout(Duration::from_secs(5), maintenance_stopping_rx)
             .await
@@ -1509,6 +1710,10 @@ mod tests {
             .unwrap();
         assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
         assert!(!lifecycle.is_ready());
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Stopping
+        );
 
         maintenance_release.notify_one();
         let exit = timeout(Duration::from_secs(5), run)
@@ -1518,6 +1723,10 @@ mod tests {
         assert!(matches!(exit, DhtCrawlerPipelineExit::Completed(_)));
         assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopped);
         assert!(!lifecycle.is_ready());
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Stopped
+        );
         assert_eq!(finalizer_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1585,6 +1794,36 @@ mod tests {
         assert!(run.await.unwrap_err().is_cancelled());
         while lifecycle.changed().await.is_some() {}
         assert_eq!(lifecycle.snapshot(), DhtCrawlerPipelineLifecycle::Stopping);
+        assert!(!lifecycle.is_ready());
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Cancelled {
+                last: DhtCrawlerPipelineLifecycle::Stopping,
+            }
+        );
+    }
+
+    #[test]
+    fn closed_lifecycle_distinguishes_cancellation_from_normal_stop() {
+        let (sender, lifecycle) = lifecycle_channel();
+        drop(sender);
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Cancelled {
+                last: DhtCrawlerPipelineLifecycle::Starting,
+            }
+        );
+        assert!(!lifecycle.is_ready());
+
+        let (sender, lifecycle) = lifecycle_channel();
+        sender
+            .send(DhtCrawlerPipelineLifecycle::Stopped)
+            .expect("test receiver remains live");
+        drop(sender);
+        assert_eq!(
+            lifecycle.observed(),
+            DhtCrawlerPipelineObservedLifecycle::Stopped
+        );
         assert!(!lifecycle.is_ready());
     }
 
@@ -2199,6 +2438,8 @@ mod tests {
     fn public_supervisor_and_recovery_handles_have_owned_task_traits() {
         assert_send::<DhtCrawlerPipelineSupervisor>();
         assert_send_sync::<DhtCrawlerPipelineHandles>();
+        assert_send_sync::<DhtCrawlerPipelineObservabilityHandle>();
+        assert_send_sync::<DhtCrawlerPipelineObservabilitySnapshot>();
         assert_send::<DhtCrawlerPipelineExit>();
     }
 
@@ -2286,7 +2527,57 @@ mod tests {
             .unwrap();
             let (supervisor, handles) =
                 DhtCrawlerPipelineSupervisor::new(runtime, maintenance, triage_input, downstream);
+            let observability = supervisor.observability_handle();
             drop((client, table));
+
+            let initial = observability.snapshot();
+            assert_eq!(
+                initial.lifecycle,
+                DhtCrawlerPipelineObservedLifecycle::Starting
+            );
+            assert_eq!(initial.runtime.health.status(), DhtRuntimeHealthStatus::Up);
+            assert_eq!(initial.runtime.inbound, DhtInboundStatsSnapshot::default());
+            assert_eq!(initial.runtime.discovery, expected_discovery_stats);
+            assert_eq!(
+                initial.maintenance,
+                DhtCrawlerPipelineMaintenanceObservabilitySnapshot {
+                    scheduler: DhtDiscoveredNodeSchedulerStats::default(),
+                    ping: DhtDiscoveredNodePingStats::default(),
+                    find_node: DhtDiscoveredNodeFindStats::default(),
+                    sample_infohashes_worker: DhtSampleInfoHashesWorkerStats::default(),
+                    oldest_find: DhtOldestNodeFindProducerStats::default(),
+                    oldest_ping: DhtOldestNodePingProducerStats::default(),
+                    bootstrap_ping: DhtBootstrapPingProducerStats::default(),
+                    sample_infohashes_producer: DhtSampleInfoHashesProducerStats::default(),
+                }
+            );
+            assert_eq!(
+                initial.downstream,
+                DhtCrawlerPipelineDownstreamObservabilitySnapshot {
+                    triage: DhtInfoHashTriageStats::default(),
+                    get_peers: DhtGetPeersWorkerStats::default(),
+                    request_meta_info: DhtRequestMetaInfoWorkerStats::default(),
+                    persist_torrent: DhtPersistTorrentWorkerStats::default(),
+                    scrape: DhtScrapeWorkerStats::default(),
+                    persist_source: DhtPersistSourceWorkerStats::default(),
+                }
+            );
+            assert!(!initial.is_ready());
+            assert!(!observability.is_ready());
+            assert!(DhtCrawlerPipelineObservabilitySnapshot {
+                lifecycle: DhtCrawlerPipelineObservedLifecycle::Ready,
+                ..initial.clone()
+            }
+            .is_ready());
+            assert!(!DhtCrawlerPipelineObservabilitySnapshot {
+                lifecycle: DhtCrawlerPipelineObservedLifecycle::Ready,
+                runtime: DhtCrawlerPipelineRuntimeObservabilitySnapshot {
+                    health: DhtRuntimeHealthSnapshot::default(),
+                    ..initial.runtime.clone()
+                },
+                ..initial.clone()
+            }
+            .is_ready());
 
             assert_eq!(pool.size(), 0, "construction must not acquire PostgreSQL");
             let exit = timeout(
@@ -2302,6 +2593,17 @@ mod tests {
                     blocking: Ok(Ok(BlockingFinalizeOutcome::NothingPending)),
                 }
             ));
+            let stopped = observability.snapshot();
+            assert_eq!(
+                stopped.lifecycle,
+                DhtCrawlerPipelineObservedLifecycle::Stopped
+            );
+            assert_eq!(
+                stopped.runtime.health.status(),
+                DhtRuntimeHealthStatus::Inactive
+            );
+            assert_eq!(stopped.runtime.discovery, expected_discovery_stats);
+            assert!(!stopped.is_ready());
 
             assert_eq!(
                 handles.downstream_stats.triage.snapshot(),
