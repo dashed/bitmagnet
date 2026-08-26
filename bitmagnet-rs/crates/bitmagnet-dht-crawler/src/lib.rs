@@ -14,6 +14,7 @@ mod blocking_manager_filter;
 mod downstream_composition;
 mod get_peers;
 mod info_hash_triage;
+mod observe_info_hash;
 mod peer_wire_meta_info_requester;
 mod persist_source;
 mod persist_source_route;
@@ -71,6 +72,10 @@ pub use info_hash_triage::{
     SystemDhtInfoHashTriageClock, TriageCollaboratorError, DHT_INFO_HASH_TRIAGE_BATCH_INTERVAL,
     DHT_INFO_HASH_TRIAGE_BATCH_LIMIT, DHT_INFO_HASH_TRIAGE_RESCRAPE_THRESHOLD,
     DHT_INFO_HASH_TRIAGE_SAVE_FILES_THRESHOLD,
+};
+pub use observe_info_hash::{
+    DhtInfoHashObservationStats, DhtInfoHashObservationStatsHandle, DhtInfoHashObservationWorker,
+    DhtInfoHashObservationWorkerExit,
 };
 pub use peer_wire_meta_info_requester::{
     random_metainfo_peer_id, DhtPeerWireMetaInfoRequester, DhtPeerWireMetaInfoRequesterConfig,
