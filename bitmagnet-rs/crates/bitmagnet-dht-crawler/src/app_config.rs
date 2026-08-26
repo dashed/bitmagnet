@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use clap::Parser;
 
 use crate::{
     DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError, DhtCrawlerDownstreamLaneConfig,
-    DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig,
-    DhtTorrentPlanConfig,
+    DhtCrawlerObserveOnlyConfig, DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig,
+    DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
 };
 
 /// Go's ordered `dht_crawler.bootstrap_nodes` default.
@@ -43,6 +43,153 @@ const DEFAULT_METAINFO_KEY_MUTEX_SIZE: usize = 1_000;
 /// Largest application scaling factor whose `100 * S` discovery route fits
 /// Tokio's bounded-channel limit.
 pub const DHT_CRAWLER_MAX_SCALING_FACTOR: usize = DHT_CHANNEL_MAX_CAPACITY / 100;
+
+/// Complete side-effect-free projection for the observe-only executable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DhtCrawlerObserveOnlyAppProjection {
+    /// HTTP health and diagnostics listener.
+    pub http_listen_addr: SocketAddr,
+    /// Closed runtime, maintenance, and counter-only observation graph.
+    pub graph: DhtCrawlerObserveOnlyConfig,
+}
+
+impl DhtCrawlerObserveOnlyAppProjection {
+    /// Consume the projection into its listener and closed graph policies.
+    #[must_use]
+    pub fn into_parts(self) -> (SocketAddr, DhtCrawlerObserveOnlyConfig) {
+        (self.http_listen_addr, self.graph)
+    }
+}
+
+/// Pure CLI and environment policy for the PostgreSQL-nonmutating DHT soak.
+///
+/// The absence of database, Goose, blocker, peer-wire, and persistence fields
+/// is deliberate. This type can project only the closed runtime-maintenance-
+/// observer graph plus its HTTP listener.
+#[derive(Clone, Debug, Parser, PartialEq, Eq)]
+#[command(
+    name = "bitmagnet-dht-observe",
+    about = "PostgreSQL-nonmutating Rust DHT network observer",
+    disable_help_subcommand = true
+)]
+pub struct DhtCrawlerObserveOnlyAppConfig {
+    /// Address for liveness, readiness, and diagnostic HTTP endpoints.
+    #[arg(
+        long = "http-server-local-address",
+        env = "HTTP_SERVER_LOCAL_ADDRESS",
+        default_value = ":3333",
+        value_parser = parse_go_http_listen_addr
+    )]
+    http_server_local_address: SocketAddr,
+
+    /// IPv4 UDP port used by the DHT server.
+    #[arg(
+        long = "dht-server-port",
+        env = "DHT_SERVER_PORT",
+        default_value_t = 3334
+    )]
+    dht_server_port: u16,
+
+    /// DHT query timeout in Go duration syntax (for example `1500ms` or `4s`).
+    #[arg(
+        long = "dht-server-query-timeout",
+        env = "DHT_SERVER_QUERY_TIMEOUT",
+        default_value = "4s",
+        value_parser = parse_go_duration
+    )]
+    dht_server_query_timeout: Duration,
+
+    /// Go-compatible crawler scaling factor.
+    #[arg(
+        long = "dht-crawler-scaling-factor",
+        env = "DHT_CRAWLER_SCALING_FACTOR",
+        default_value_t = DEFAULT_SCALING_FACTOR
+    )]
+    scaling_factor: usize,
+
+    /// Ordered, comma-delimited Go bootstrap node list.
+    #[arg(
+        long = "dht-crawler-bootstrap-nodes",
+        env = "DHT_CRAWLER_BOOTSTRAP_NODES",
+        value_delimiter = ',',
+        default_value = DEFAULT_BOOTSTRAP_NODES_CSV
+    )]
+    bootstrap_nodes: Vec<String>,
+
+    /// Fresh delay between completed bootstrap resolution rounds.
+    #[arg(
+        long = "dht-crawler-reseed-bootstrap-nodes-interval",
+        env = "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL",
+        default_value = "10m",
+        value_parser = parse_go_duration
+    )]
+    reseed_bootstrap_nodes_interval: Duration,
+}
+
+impl DhtCrawlerObserveOnlyAppConfig {
+    /// Project and validate the entire closed graph before binding a socket.
+    pub fn projection(
+        &self,
+    ) -> Result<DhtCrawlerObserveOnlyAppProjection, DhtCrawlerAppConfigError> {
+        if self.scaling_factor == 0 {
+            return Err(DhtCrawlerAppConfigError::new(
+                DhtCrawlerAppConfigErrorKind::ScalingFactorZero,
+            ));
+        }
+        let runtime = DhtRuntimeConfig {
+            bind_addr: SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, self.dht_server_port),
+            query_timeout: self.dht_server_query_timeout,
+            discovery_capacity: checked_scaled_capacity(self.scaling_factor, 100)?,
+            ..DhtRuntimeConfig::default()
+        };
+        runtime.validate().map_err(|source| {
+            DhtCrawlerAppConfigError::new(DhtCrawlerAppConfigErrorKind::Runtime(source))
+        })?;
+        let maintenance = DhtCrawlerMaintenanceConfig {
+            ping_capacity: checked_scaled_capacity(self.scaling_factor, 1)?,
+            find_node_capacity: checked_scaled_capacity(self.scaling_factor, 10)?,
+            sample_infohashes_capacity: checked_scaled_capacity(self.scaling_factor, 10)?,
+            bootstrap_ping: DhtBootstrapPingProducerConfig {
+                bootstrap_nodes: self.bootstrap_nodes.clone(),
+                reseed_interval: self.reseed_bootstrap_nodes_interval,
+            },
+        };
+        maintenance.validate().map_err(|source| {
+            DhtCrawlerAppConfigError::new(DhtCrawlerAppConfigErrorKind::Maintenance(source))
+        })?;
+        let graph = DhtCrawlerObserveOnlyConfig {
+            runtime,
+            maintenance,
+            observation_capacity: checked_scaled_capacity(self.scaling_factor, 10)?,
+        };
+        graph.validate().map_err(|source| match source {
+            crate::DhtCrawlerObserveOnlyConfigError::Runtime(source) => {
+                DhtCrawlerAppConfigError::new(DhtCrawlerAppConfigErrorKind::Runtime(source))
+            }
+            crate::DhtCrawlerObserveOnlyConfigError::Maintenance(source) => {
+                DhtCrawlerAppConfigError::new(DhtCrawlerAppConfigErrorKind::Maintenance(source))
+            }
+            crate::DhtCrawlerObserveOnlyConfigError::ObservationCapacityOutOfRange { .. } => {
+                DhtCrawlerAppConfigError::new(
+                    DhtCrawlerAppConfigErrorKind::ScalingCapacityOverflow {
+                        scaling_factor: self.scaling_factor,
+                        multiplier: 10,
+                    },
+                )
+            }
+        })?;
+        Ok(DhtCrawlerObserveOnlyAppProjection {
+            http_listen_addr: self.http_server_local_address,
+            graph,
+        })
+    }
+
+    #[must_use]
+    pub const fn http_server_local_address(&self) -> SocketAddr {
+        self.http_server_local_address
+    }
+}
 
 /// Complete side-effect-free policy for one owned DHT crawler graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -503,6 +650,16 @@ fn parse_positive_i64(value: &str) -> Result<i64, String> {
     Ok(value)
 }
 
+/// Parse Go's accepted bare-port listener form as an IPv4 wildcard address.
+fn parse_go_http_listen_addr(value: &str) -> Result<SocketAddr, String> {
+    let normalized = value
+        .strip_prefix(':')
+        .map_or_else(|| value.to_owned(), |port| format!("0.0.0.0:{port}"));
+    normalized
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid HTTP listener address {value:?}: {error}"))
+}
+
 /// Parse the positive subset of Go's `time.ParseDuration` syntax.
 ///
 /// All documented Go units (`ns`, `us`, `µs`, `μs`, `ms`, `s`, `m`, and `h`),
@@ -589,8 +746,10 @@ fn parse_go_duration(value: &str) -> Result<Duration, String> {
 mod tests {
     use std::collections::BTreeMap;
     use std::error::Error;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::ffi::OsString;
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::num::NonZeroUsize;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use bitmagnet_dht::{
@@ -601,14 +760,41 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches, Parser};
 
     use super::{
-        parse_go_duration, DhtCrawlerAppConfig, DhtCrawlerAppConfigErrorKind,
-        DhtCrawlerAppProjection, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamLaneConfig,
-        DhtInfoHashTriageConfig, DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig,
-        DhtTorrentPlanConfig, DEFAULT_BOOTSTRAP_NODES, DEFAULT_METAINFO_KEY_MUTEX_SIZE,
-        DEFAULT_METAINFO_REQUEST_TIMEOUT, DEFAULT_RESCRAPE_THRESHOLD, DEFAULT_SAVE_FILES_THRESHOLD,
-        DEFAULT_SAVE_PIECES, DEFAULT_SCALING_FACTOR, DHT_CRAWLER_MAX_SCALING_FACTOR,
+        parse_go_duration, parse_go_http_listen_addr, DhtCrawlerAppConfig,
+        DhtCrawlerAppConfigErrorKind, DhtCrawlerAppProjection, DhtCrawlerDownstreamConfig,
+        DhtCrawlerDownstreamLaneConfig, DhtCrawlerObserveOnlyAppConfig,
+        DhtCrawlerObserveOnlyAppProjection, DhtCrawlerObserveOnlyConfig, DhtInfoHashTriageConfig,
+        DhtPeerWireMetaInfoRequesterConfig, DhtPersistTorrentWorkerConfig, DhtTorrentPlanConfig,
+        DEFAULT_BOOTSTRAP_NODES, DEFAULT_METAINFO_KEY_MUTEX_SIZE, DEFAULT_METAINFO_REQUEST_TIMEOUT,
+        DEFAULT_RESCRAPE_THRESHOLD, DEFAULT_SAVE_FILES_THRESHOLD, DEFAULT_SAVE_PIECES,
+        DEFAULT_SCALING_FACTOR, DHT_CRAWLER_MAX_SCALING_FACTOR,
         EFFECTIVE_BOOTSTRAP_RESEED_INTERVAL,
     };
+
+    const HTTP_LISTEN_ENV: &str = "HTTP_SERVER_LOCAL_ADDRESS";
+    static OBSERVE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvironmentRestore {
+        name: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvironmentRestore {
+        fn set(name: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, original }
+        }
+    }
+
+    impl Drop for EnvironmentRestore {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     fn supported_args() -> Vec<&'static str> {
         vec![
@@ -645,6 +831,221 @@ mod tests {
             .try_get_matches_from(args)
             .expect("parse config without ambient environment");
         DhtCrawlerAppConfig::from_arg_matches(&matches).expect("build typed config")
+    }
+
+    fn parse_observe_without_environment(args: &[&str]) -> DhtCrawlerObserveOnlyAppConfig {
+        let command = DhtCrawlerObserveOnlyAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None));
+        let matches = command
+            .try_get_matches_from(args)
+            .expect("parse observe-only config without ambient environment");
+        DhtCrawlerObserveOnlyAppConfig::from_arg_matches(&matches)
+            .expect("build typed observe-only config")
+    }
+
+    #[test]
+    fn observe_only_defaults_project_only_the_closed_graph_and_http_listener() {
+        let config = parse_observe_without_environment(&["bitmagnet-dht-observe"]);
+        let projection = config
+            .projection()
+            .expect("default observe policy is valid");
+        let http_listen_addr = "0.0.0.0:3333".parse::<SocketAddr>().unwrap();
+
+        assert_eq!(config.http_server_local_address(), http_listen_addr);
+        assert_eq!(
+            projection,
+            DhtCrawlerObserveOnlyAppProjection {
+                http_listen_addr,
+                graph: DhtCrawlerObserveOnlyConfig::default(),
+            }
+        );
+        assert_eq!(
+            projection.clone().into_parts(),
+            (http_listen_addr, DhtCrawlerObserveOnlyConfig::default())
+        );
+    }
+
+    #[test]
+    fn observe_only_cli_projects_scaled_network_policy_without_writer_fields() {
+        let config = parse_observe_without_environment(&[
+            "bitmagnet-dht-observe",
+            "--http-server-local-address",
+            ":4445",
+            "--dht-server-port",
+            "4444",
+            "--dht-server-query-timeout",
+            "1500ms",
+            "--dht-crawler-scaling-factor",
+            "2",
+            "--dht-crawler-bootstrap-nodes",
+            "one.invalid:1,two.invalid:2",
+            "--dht-crawler-reseed-bootstrap-nodes-interval",
+            "1m30s",
+        ]);
+        let projection = config
+            .projection()
+            .expect("explicit observe policy is valid");
+
+        assert_eq!(
+            projection.http_listen_addr,
+            "0.0.0.0:4445".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            projection.graph.runtime.bind_addr,
+            SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 4444)
+        );
+        assert_eq!(
+            projection.graph.runtime.query_timeout,
+            Duration::from_millis(1_500)
+        );
+        assert_eq!(projection.graph.runtime.discovery_capacity.get(), 200);
+        assert_eq!(projection.graph.maintenance.ping_capacity.get(), 2);
+        assert_eq!(projection.graph.maintenance.find_node_capacity.get(), 20);
+        assert_eq!(
+            projection
+                .graph
+                .maintenance
+                .sample_infohashes_capacity
+                .get(),
+            20
+        );
+        assert_eq!(projection.graph.observation_capacity.get(), 20);
+        assert_eq!(
+            projection.graph.maintenance.bootstrap_ping.bootstrap_nodes,
+            ["one.invalid:1", "two.invalid:2"].map(str::to_owned)
+        );
+        assert_eq!(
+            projection.graph.maintenance.bootstrap_ping.reseed_interval,
+            Duration::from_secs(90)
+        );
+
+        let forbidden = DhtCrawlerObserveOnlyAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None))
+            .try_get_matches_from(["bitmagnet-dht-observe", "--expected-goose-version", "29"]);
+        assert!(
+            forbidden.is_err(),
+            "observe-only CLI must expose no Goose pin"
+        );
+    }
+
+    #[test]
+    fn observe_only_fields_have_exact_environment_keys_and_typed_addresses() {
+        let environment_by_id = DhtCrawlerObserveOnlyAppConfig::command()
+            .get_arguments()
+            .map(|argument| {
+                (
+                    argument.get_id().to_string(),
+                    argument
+                        .get_env()
+                        .expect("observe argument has an explicit environment key")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            environment_by_id,
+            BTreeMap::from([
+                (
+                    "bootstrap_nodes".to_owned(),
+                    "DHT_CRAWLER_BOOTSTRAP_NODES".to_owned(),
+                ),
+                ("dht_server_port".to_owned(), "DHT_SERVER_PORT".to_owned()),
+                (
+                    "dht_server_query_timeout".to_owned(),
+                    "DHT_SERVER_QUERY_TIMEOUT".to_owned(),
+                ),
+                (
+                    "http_server_local_address".to_owned(),
+                    "HTTP_SERVER_LOCAL_ADDRESS".to_owned(),
+                ),
+                (
+                    "reseed_bootstrap_nodes_interval".to_owned(),
+                    "DHT_CRAWLER_RESEED_BOOTSTRAP_NODES_INTERVAL".to_owned(),
+                ),
+                (
+                    "scaling_factor".to_owned(),
+                    "DHT_CRAWLER_SCALING_FACTOR".to_owned(),
+                ),
+            ])
+        );
+
+        let invalid = DhtCrawlerObserveOnlyAppConfig::command()
+            .mut_args(|argument| argument.env(Option::<&'static str>::None))
+            .try_get_matches_from([
+                "bitmagnet-dht-observe",
+                "--http-server-local-address",
+                "not-an-address",
+            ]);
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn observe_only_go_listener_syntax_is_shared_by_cli_and_environment() {
+        assert_eq!(
+            parse_go_http_listen_addr(":3333").unwrap(),
+            "0.0.0.0:3333".parse::<SocketAddr>().unwrap()
+        );
+
+        let _env_lock = OBSERVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = EnvironmentRestore::set(HTTP_LISTEN_ENV, ":4555");
+        let command = DhtCrawlerObserveOnlyAppConfig::command().mut_args(|argument| {
+            if argument.get_id() == "http_server_local_address" {
+                argument
+            } else {
+                argument.env(Option::<&'static str>::None)
+            }
+        });
+        let matches = command
+            .try_get_matches_from(["bitmagnet-dht-observe"])
+            .expect("Go listener environment syntax parses");
+        let config = DhtCrawlerObserveOnlyAppConfig::from_arg_matches(&matches)
+            .expect("build typed observe-only environment config");
+        assert_eq!(
+            config.http_server_local_address(),
+            "0.0.0.0:4555".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn observe_only_projection_rejects_invalid_scaling_and_reseed_policy() {
+        let mut config = parse_observe_without_environment(&["bitmagnet-dht-observe"]);
+        config.scaling_factor = 0;
+        assert_eq!(
+            config.projection().unwrap_err().into_kind(),
+            DhtCrawlerAppConfigErrorKind::ScalingFactorZero
+        );
+
+        config.scaling_factor = DHT_CRAWLER_MAX_SCALING_FACTOR + 1;
+        let over_max_capacity = NonZeroUsize::new(
+            config
+                .scaling_factor
+                .checked_mul(100)
+                .expect("one over Tokio's divided limit still fits usize"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.projection().unwrap_err().into_kind(),
+            DhtCrawlerAppConfigErrorKind::Runtime(
+                DhtRuntimeConfigError::DiscoveryCapacityOutOfRange {
+                    capacity: over_max_capacity,
+                    maximum: DHT_CHANNEL_MAX_CAPACITY,
+                }
+            )
+        );
+
+        config.scaling_factor = DHT_CRAWLER_MAX_SCALING_FACTOR;
+        config.reseed_bootstrap_nodes_interval = Duration::MAX;
+        assert_eq!(
+            config.projection().unwrap_err().into_kind(),
+            DhtCrawlerAppConfigErrorKind::Maintenance(
+                DhtCrawlerMaintenanceConfigError::BootstrapPing(
+                    DhtBootstrapPingProducerConfigError::ReseedIntervalOutOfRange
+                )
+            )
+        );
     }
 
     #[test]
