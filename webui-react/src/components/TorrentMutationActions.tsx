@@ -176,9 +176,11 @@ function TagActions({ infoHashes }: { infoHashes: readonly string[] }) {
       return [];
     }
 
+    const tagNameSet = new Set(tagNames);
+
     return (
       suggestionData?.torrent.suggestTags.suggestions.filter(
-        (suggestion) => !tagNames.includes(suggestion.name),
+        (suggestion) => !tagNameSet.has(suggestion.name),
       ) ?? []
     );
   }, [prefix, suggestionData, tagNames]);

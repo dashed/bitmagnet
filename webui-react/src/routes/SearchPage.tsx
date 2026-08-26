@@ -1629,6 +1629,7 @@ export function SearchPage() {
               <div className={styles["facetGroups"]}>
                 {relevantFacetKeys.map((key) => {
                   const selectedValues = sanitizedFacetSelections[key] ?? [];
+                  const selectedValueSet = new Set(selectedValues);
                   const options = getDynamicFacetOptions(
                     result?.aggregations,
                     key,
@@ -1693,7 +1694,7 @@ export function SearchPage() {
                               <li key={option.value}>
                                 <label className={styles["facetOption"]}>
                                   <input
-                                    checked={selectedValues.includes(option.value)}
+                                    checked={selectedValueSet.has(option.value)}
                                     onChange={(event) =>
                                       handleFacetValueChange(
                                         key,
