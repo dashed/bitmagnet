@@ -334,7 +334,7 @@ jobs:
       - run: cargo deny check licenses bans sources
 
   test-pg:
-    name: live-PG integration (bitmagnet-db + queue + processor)
+    name: live-PG integration (db + queue + processor + DHT crawler)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -356,6 +356,7 @@ jobs:
       BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
       - uses: actions/checkout@v4
@@ -388,5 +389,6 @@ jobs:
       - name: Run live-PG (ignored) tests
         run: |
           cargo test -p bitmagnet-db -- --ignored
+          cargo test -p bitmagnet-dht-crawler --test pipeline_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test persist_pg -- --ignored --test-threads=1
