@@ -22,6 +22,12 @@ pub use schema::{
     Schema,
 };
 pub use schema::{
+    PgQueueJobsRuntime, QueueJobRecord, QueueJobsAggRecord, QueueJobsError, QueueJobsFacetRequest,
+    QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
+    QueueJobsRuntimeData, MAX_QUEUE_JOBS_FILTER_VALUES, MAX_QUEUE_JOBS_LIMIT,
+    MAX_QUEUE_JOBS_OFFSET, MAX_QUEUE_NAME_CHARS,
+};
+pub use schema::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };
