@@ -128,7 +128,7 @@ func (f forbiddenRequester) Request(
 	f.t.Helper()
 	f.t.Fatalf("replay called the live TMDB API at %s", path)
 
-	return nil, nil
+	return nil, errors.New("unreachable after forbidden TMDB request")
 }
 
 func newTapeRunner(t *testing.T, deps dependencies, recorder *tape.Recorder) Runner {
@@ -321,6 +321,9 @@ func TestTapeRecordsTiedCandidateWindow(t *testing.T) {
 	}
 
 	var response localContentResponse
+	// localContentResponse is tagged, while its nested generated model graph is
+	// intentionally decoded through the production JSON contract.
+	//nolint:musttag
 	if err := json.Unmarshal(observation.Response, &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -942,7 +945,7 @@ func TestClassifierCorpusWithRecorderEnabled(t *testing.T) {
 }
 
 // tmdbBodies renders response bodies for a movie search and its details lookup.
-func tmdbBodies(t *testing.T, id int64, title string) ([]byte, []byte) {
+func tmdbBodies(t *testing.T, id int64, title string) (searchBody, detailsBody []byte) {
 	t.Helper()
 
 	searchBody, err := json.Marshal(tmdb.SearchMovieResponse{
@@ -970,7 +973,7 @@ func tmdbBodies(t *testing.T, id int64, title string) ([]byte, []byte) {
 	details.ReleaseDate = "1950-02-15"
 	details.IMDbID = "tt0042332"
 
-	detailsBody, err := json.Marshal(details)
+	detailsBody, err = json.Marshal(details)
 	if err != nil {
 		t.Fatalf("encode details body: %v", err)
 	}

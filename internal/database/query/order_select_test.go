@@ -68,7 +68,7 @@ func TestApplySelectAliasesColumnsFollowingQueryStringRank(t *testing.T) {
 	require.NoError(t, builder.applyPost(db))
 
 	db.Find(&[]model.Content{})
-	sql := db.Dialector.Explain(db.Statement.SQL.String(), db.Statement.Vars...)
+	sql := db.Explain(db.Statement.SQL.String(), db.Statement.Vars...)
 
 	require.Contains(t, sql, `ts_rank_cd(content.tsv, 'cinderella'::tsquery) AS _order_0`)
 	require.Contains(t, sql, `"content"."type" AS _order_1`)

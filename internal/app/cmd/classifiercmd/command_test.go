@@ -14,11 +14,15 @@ func TestWriteCreateOnlyJSON(t *testing.T) {
 
 	encoded, err := os.ReadFile(path)
 	require.NoError(t, err)
+	// Byte equality pins create-only output, including its trailing newline.
+	//nolint:testifylint
 	require.Equal(t, "{\"value\":\"<exact>\"}\n", string(encoded))
 
 	require.Error(t, writeCreateOnlyJSON(path, map[string]string{"value": "replacement"}))
 	encoded, err = os.ReadFile(path)
 	require.NoError(t, err)
+	// Byte equality also proves the failed replacement left the file untouched.
+	//nolint:testifylint
 	require.Equal(t, "{\"value\":\"<exact>\"}\n", string(encoded))
 }
 
@@ -30,6 +34,8 @@ func TestWriteCreateOnlyJSONUsesCanonicalUnicodeSeparatorEscapes(t *testing.T) {
 
 	encoded, err := os.ReadFile(path)
 	require.NoError(t, err)
+	// JSONEq would not prove the canonical separator escapes or final newline.
+	//nolint:testifylint
 	require.Equal(
 		t,
 		"{\"value\":\"before\\u2028between\\u2029after\"}\n",

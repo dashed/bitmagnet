@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const mutatedTestValue = "mutated"
+
 func TestActionEntriesRoundTripAndReplayInOrder(t *testing.T) {
 	recorder := newTestRecorder(t, 0)
 	session := SessionFrom(recorder.Begin(context.Background(), "s", "default", nil, nil))
@@ -146,7 +148,7 @@ func TestProcessorStateCapturedImmediatelyAndEmitsKnownEmpty(t *testing.T) {
 		nil,
 		ProcessorState{ExistingContentIDs: ids},
 	))
-	ids[0] = "mutated"
+	ids[0] = mutatedTestValue
 	session.End(RecordOutcome{Kind: RecordCompleted})
 
 	empty := SessionFrom(recorder.Begin(
@@ -332,9 +334,9 @@ func TestReplaySubjectsReturnsDeepCopies(t *testing.T) {
 	want := replay.Subjects()[0]
 	mutated := replay.Subjects()
 	mutated[0].Input[0] = 'x'
-	mutated[0].Flags["list"].([]any)[0] = "mutated"
-	mutated[0].ActionEntries[0].Name = "mutated"
-	mutated[0].ProcessorState.ExistingContentIDs[0] = "mutated"
+	mutated[0].Flags["list"].([]any)[0] = mutatedTestValue
+	mutated[0].ActionEntries[0].Name = mutatedTestValue
+	mutated[0].ProcessorState.ExistingContentIDs[0] = mutatedTestValue
 	mutated[0].Observations[0].Request[0] = 'x'
 	mutated[0].Observations[0].Response[0] = 'x'
 	mutated[0].Outcome.Kind = RecordDeleted

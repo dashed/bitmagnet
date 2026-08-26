@@ -51,7 +51,7 @@ func TestWorkerStartupValidatesOwnershipBeforeGettingQuery(t *testing.T) {
 		Query: lazy.New(func() (*dao.Query, error) {
 			queryGets++
 
-			return nil, nil
+			return nil, errors.New("query unexpectedly requested before ownership validation")
 		}),
 		Handlers: []RegisteredHandler{testRegistration("enabled", handlerGets)},
 		Logger:   zap.NewNop().Sugar(),

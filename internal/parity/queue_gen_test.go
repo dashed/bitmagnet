@@ -273,7 +273,7 @@ type queueBackoffExpected struct {
 
 func TestGenerateQueueBackoffFixtures(t *testing.T) {
 	fixtures := make([]Fixture, 0, 6)
-	for retries := 0; retries <= 5; retries++ {
+	for retries := range 6 {
 		deterministic := int(math.Round(math.Pow(float64(retries), 4))) + 15 + 1
 		// RandInt(30) returns an int in [0,29]; the jitter term is
 		// RandInt(30)*retries, so it lies in [0, 29*retries].
@@ -306,10 +306,10 @@ func TestGenerateQueueBackoffFixtures(t *testing.T) {
 // escapes the frozen [deterministic, deterministic+jitterMax] envelope, without
 // asserting the nondeterministic exact value.
 func TestQueueBackoffJitterWithinBounds(t *testing.T) {
-	for retries := uint(0); retries <= 5; retries++ {
+	for retries := range uint(6) {
 		deterministic := int(math.Round(math.Pow(float64(retries), 4))) + 15 + 1
 		jitterMax := 29 * int(retries)
-		for sample := 0; sample < 200; sample++ {
+		for range 200 {
 			before := time.Now().UTC()
 			got := queue.CalculateBackoff(retries)
 			// Lower bound uses `before`; upper bound must use a timestamp taken
@@ -378,14 +378,14 @@ func reconcileQueueFixtures(t *testing.T, filename string, fixtures []Fixture) {
 	)
 }
 
-func firstJSONLDifference(expected, actual []byte) (int, string, string) {
+func firstJSONLDifference(expected, actual []byte) (line int, want, got string) {
 	expectedLines := strings.Split(strings.TrimSuffix(string(expected), "\n"), "\n")
 	actualLines := strings.Split(strings.TrimSuffix(string(actual), "\n"), "\n")
 	lineCount := len(expectedLines)
 	if len(actualLines) < lineCount {
 		lineCount = len(actualLines)
 	}
-	for i := 0; i < lineCount; i++ {
+	for i := range lineCount {
 		if expectedLines[i] != actualLines[i] {
 			return i + 1, expectedLines[i], actualLines[i]
 		}

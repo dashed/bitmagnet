@@ -253,14 +253,14 @@ func encodeClassifierCorpus(t *testing.T, records []classifierCorpusRecord) []by
 	return buf.Bytes()
 }
 
-func firstClassifierCorpusDifference(expected, actual []byte) (int, string, string) {
+func firstClassifierCorpusDifference(expected, actual []byte) (line int, want, got string) {
 	expectedLines := strings.Split(strings.TrimSuffix(string(expected), "\n"), "\n")
 	actualLines := strings.Split(strings.TrimSuffix(string(actual), "\n"), "\n")
 	lineCount := len(expectedLines)
 	if len(actualLines) < lineCount {
 		lineCount = len(actualLines)
 	}
-	for i := 0; i < lineCount; i++ {
+	for i := range lineCount {
 		if expectedLines[i] != actualLines[i] {
 			return i + 1, expectedLines[i], actualLines[i]
 		}

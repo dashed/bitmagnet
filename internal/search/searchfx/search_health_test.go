@@ -65,7 +65,7 @@ func TestPollSearchHealthServingFreshIsEligible(t *testing.T) {
 
 	collectors := shadowMetrics.Collectors()
 	require.NotEmpty(t, collectors)
-	assert.Equal(t, float64(500), testutil.ToFloat64(collectors[len(collectors)-1]))
+	assert.InDelta(t, float64(500), testutil.ToFloat64(collectors[len(collectors)-1]), 0)
 }
 
 func TestPollSearchHealthFreshnessDenials(t *testing.T) {
@@ -144,7 +144,7 @@ func TestPollSearchHealthErrorPreservesLastKnown(t *testing.T) {
 
 	collectors := shadowMetrics.Collectors()
 	require.NotEmpty(t, collectors)
-	assert.Equal(t, float64(500), testutil.ToFloat64(collectors[len(collectors)-1]))
+	assert.InDelta(t, float64(500), testutil.ToFloat64(collectors[len(collectors)-1]), 0)
 }
 
 func TestPollSearchHealthNotServingIsIneligible(t *testing.T) {

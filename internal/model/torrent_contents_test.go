@@ -23,7 +23,7 @@ func TestUpdateTsv_BoundsOversizedFilePathBag(t *testing.T) {
 	const fileCount = 4000
 	longSeg := strings.Repeat("q", 260)
 	files := make([]TorrentFile, 0, fileCount)
-	for i := 0; i < fileCount; i++ {
+	for i := range fileCount {
 		// Lead with i so consecutive paths diverge at position 0 (defeats the
 		// prefix dedup) and embed i inside a long word-char run so each file
 		// contributes its own long, unique lexeme (a constant segment would be

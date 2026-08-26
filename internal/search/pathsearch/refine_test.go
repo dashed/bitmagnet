@@ -329,7 +329,7 @@ func TestFilesForRefine_NoInfoIsEmptyRefinableNotFailLoud(t *testing.T) {
 
 		// Unfiltered: kept by name rescue at the composer's keep-decision.
 		p := refinePredicate{substr: "sorefordays"}
-		if !(torrentMatches(files, p) || nameMatches(tor.Name, p)) {
+		if !torrentMatches(files, p) && !nameMatches(tor.Name, p) {
 			t.Fatalf("%s name-only torrent must be kept when unfiltered", status)
 		}
 

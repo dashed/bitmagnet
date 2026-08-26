@@ -315,11 +315,11 @@ func loadCoreTapePlanSource(t *testing.T) Source {
 	return source
 }
 
-func writeTapePlanTestFile(t *testing.T, raw []byte) (string, string) {
+func writeTapePlanTestFile(t *testing.T, raw []byte) (path, digest string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "acquisition-plan.json")
+	path = filepath.Join(t.TempDir(), "acquisition-plan.json")
 	require.NoError(t, os.WriteFile(path, raw, 0o600))
-	digest := tapePlanDigestForTest(raw)
+	digest = tapePlanDigestForTest(raw)
 	return path, digest
 }
 

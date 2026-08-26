@@ -21,7 +21,7 @@ func TestComputeRanges_PartitionsKeyspaceWithoutGaps(t *testing.T) {
 		// Adjacent ranges meet exactly: range i's upper == range i+1's lower, so
 		// the half-open (lower, upper] slices tile the keyspace gap-free and
 		// overlap-free.
-		for i := 0; i < k-1; i++ {
+		for i := range k - 1 {
 			assert.True(t, ranges[i].hasUpper)
 			assert.True(t, ranges[i+1].hasLower)
 			assert.Equal(t, ranges[i].upper, ranges[i+1].lower,

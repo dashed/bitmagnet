@@ -36,7 +36,7 @@ var canonicalEscapeCases = map[string]string{
 	"line_separator":     "a b",
 	"paragraph_sep":      "a b",
 	"both_separators":    "  ",
-	"cjk":                "日本語",
+	"cjk":                "\u65e5\u672c\u8a9e",
 	"emoji":              "🎬 clapper",
 	"combining":          "é", // e + combining acute
 	"nul":                "a\x00b",

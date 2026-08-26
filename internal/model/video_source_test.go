@@ -8,7 +8,7 @@ import (
 func TestCreateVideoSourceRegexPrefersSpecificAlias(t *testing.T) {
 	t.Parallel()
 
-	for i := 0; i < 128; i++ {
+	for range 128 {
 		match := createVideoSourceRegex().FindStringSubmatch(
 			"Another Hinted Movie (2005) 720p WEB-DL x265-GRP.mkv",
 		)

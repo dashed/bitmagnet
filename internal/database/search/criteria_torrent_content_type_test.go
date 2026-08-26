@@ -21,8 +21,8 @@ import (
 type renderDaoContext struct{ q *dao.Query }
 
 func (c renderDaoContext) Query() *dao.Query { return c.q }
-func (c renderDaoContext) TableName() string { return model.TableNameTorrentContent }
-func (c renderDaoContext) NewSubQuery(context.Context) query.SubQuery {
+func (renderDaoContext) TableName() string   { return model.TableNameTorrentContent }
+func (renderDaoContext) NewSubQuery(context.Context) query.SubQuery {
 	return nil
 }
 

@@ -88,7 +88,7 @@ func TestAddTextBounded(t *testing.T) {
 		v := fts.Tsvector{}
 		remaining := v.AddTextBounded("alpha bravo charlie", fts.TsvectorWeightD, fts.MaxTsvectorBytes)
 
-		assert.Greater(t, remaining, 0)
+		assert.Positive(t, remaining)
 		for _, lexeme := range []string{"alpha", "bravo", "charlie"} {
 			assert.Contains(t, v, lexeme)
 		}

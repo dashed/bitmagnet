@@ -50,10 +50,14 @@ func TestDualWriteEnabledConfigResolution(t *testing.T) {
 	}
 
 	t.Run("unset defaults true", func(t *testing.T) {
+		t.Parallel()
+
 		assert.True(t, resolve(t, nil).DualWriteEnabled)
 	})
 
 	t.Run("environment false", func(t *testing.T) {
+		t.Parallel()
+
 		resolved := resolve(t, map[string]string{"SEARCH_DUAL_WRITE_ENABLED": "false"})
 		assert.False(t, resolved.DualWriteEnabled)
 	})

@@ -209,7 +209,6 @@ func TestPostgresModeNeverBuildsTantivyRequest(t *testing.T) {
 	t.Parallel()
 
 	for _, mode := range []Mode{ModePostgres, Mode("bogus")} {
-		mode := mode
 		t.Run(string(mode), func(t *testing.T) {
 			t.Parallel()
 
@@ -323,7 +322,6 @@ func TestShadowOnlyModeSkipsBuildWhenUnsampled(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -957,7 +955,6 @@ func TestHealthyPostgresAndShadowModesNeverServe(t *testing.T) {
 	t.Parallel()
 
 	for _, mode := range []Mode{ModePostgres, ModeShadow} {
-		mode := mode
 		t.Run(string(mode), func(t *testing.T) {
 			t.Parallel()
 

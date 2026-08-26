@@ -124,6 +124,8 @@ func TestPathSearchLimitHelpers(t *testing.T) {
 
 	for _, tt := range clampTests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := clampPathSearchLimit(tt.limit); got != tt.want {
 				t.Fatalf("clampPathSearchLimit(%d) = %d, want %d", tt.limit, got, tt.want)
 			}

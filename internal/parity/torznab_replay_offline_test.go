@@ -29,7 +29,7 @@ func TestTorznabReplayOffline(t *testing.T) {
 		}
 	}
 
-	var diffs []QueryDiff
+	diffs := make([]QueryDiff, 0, len(corpus))
 	for _, q := range corpus {
 		goXML, gErr := os.ReadFile(filepath.Join(dir, "go", q.ID+".xml"))
 		rsXML, rErr := os.ReadFile(filepath.Join(dir, "rust", q.ID+".xml"))
@@ -46,7 +46,7 @@ func TestTorznabReplayOffline(t *testing.T) {
 					[]byte("--- go\n"+string(gn)+"\n--- rust\n"+string(rn)+"\n"), 0o644)
 			}
 		}
-		if q.Kind != "search" {
+		if q.Kind != "search" { //nolint:goconst // Shared wire value is intentionally owned by production parsing.
 			continue
 		}
 		d, err := DiffXMLPair(q.ID, goXML, rsXML)
