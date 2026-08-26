@@ -13,13 +13,17 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	logger, err := zap.NewProduction()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initialize logger: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer logger.Sync()
 
@@ -36,6 +40,7 @@ func main() {
 	})
 	if err := app.RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

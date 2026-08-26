@@ -34,18 +34,34 @@ func New(p Params) Result {
 			if err != nil {
 				return nil, err
 			}
-			return NewForSQLDB(db, p.Logger), nil
+			return newMigrator(db, p.Logger), nil
 		}),
 	}
 }
 
-// NewForSQLDB constructs the same embedded-Goose migrator used by the
-// development CLI without assembling the full application Fx graph. It is the
-// production composition seam for one-shot schema migration jobs.
-func NewForSQLDB(db *sql.DB, logger *zap.SugaredLogger) Migrator {
+func newMigrator(db *sql.DB, logger *zap.SugaredLogger) *migrator {
 	logger = logger.Named("migrator")
 	initGoose(logger)
 	return &migrator{
+		db:     db,
+		logger: logger,
+	}
+}
+
+// BoundedMigrator exposes only explicit migration targets. In particular, it
+// has no unbounded Up or single-step Down method.
+type BoundedMigrator interface {
+	UpTo(context.Context, int64) error
+	DownTo(context.Context, int64) error
+}
+
+// NewBoundedForSQLDB constructs a target-only migrator over the same embedded
+// Goose history used by the development CLI, without assembling the full
+// application Fx graph.
+func NewBoundedForSQLDB(db *sql.DB, logger *zap.SugaredLogger) BoundedMigrator {
+	logger = logger.Named("migrator")
+	initGoose(logger)
+	return &boundedMigrator{
 		db:     db,
 		logger: logger,
 	}
@@ -73,6 +89,11 @@ type migrator struct {
 	logger *zap.SugaredLogger
 }
 
+type boundedMigrator struct {
+	db     *sql.DB
+	logger *zap.SugaredLogger
+}
+
 func (m *migrator) Up(ctx context.Context) error {
 	m.logger.Info("checking and applying migrations...")
 	return goose.UpContext(ctx, m.db, ".")
@@ -87,5 +108,13 @@ func (m *migrator) Down(ctx context.Context) error {
 }
 
 func (m *migrator) DownTo(ctx context.Context, version int64) error {
+	return goose.DownToContext(ctx, m.db, ".", version)
+}
+
+func (m *boundedMigrator) UpTo(ctx context.Context, version int64) error {
+	return goose.UpToContext(ctx, m.db, ".", version)
+}
+
+func (m *boundedMigrator) DownTo(ctx context.Context, version int64) error {
 	return goose.DownToContext(ctx, m.db, ".", version)
 }

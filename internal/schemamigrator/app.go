@@ -178,7 +178,7 @@ func OpenPostgresSession(logger *zap.SugaredLogger) OpenSession {
 			return Session{}, err
 		}
 		return Session{
-			Migrator: migrations.NewForSQLDB(db, logger),
+			Migrator: migrations.NewBoundedForSQLDB(db, logger),
 			Close:    db.Close,
 		}, nil
 	}
