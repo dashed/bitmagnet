@@ -77,6 +77,7 @@ func TestGenerateTorrentFilesParityPgFixtures(t *testing.T) {
 		Size:  2,
 	}}, true, 1)
 	seedTorrentTagsAndVerifyGoOracle(t, gormDB, db)
+	seedQueueJobsAndVerifyGoOracle(t, gormDB, db)
 }
 
 func seedTorrentFilesBlob(
