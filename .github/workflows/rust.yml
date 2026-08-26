@@ -466,7 +466,7 @@ jobs:
             CONNECTION LIMIT 4;
           GRANT CONNECT ON DATABASE bitmagnet TO bitmagnet_graphql_reader_ci;
           GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_reader_ci;
-          GRANT SELECT ON goose_db_version, torrents, torrent_file_summary
+          GRANT SELECT ON goose_db_version, torrents, torrent_file_summary, torrent_sources
             TO bitmagnet_graphql_reader_ci;
           SQL
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \

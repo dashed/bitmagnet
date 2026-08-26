@@ -99,6 +99,7 @@ async fn real_pg_torrent_files_matches_go_without_mutation() {
         );
     }
 
+    assert_source_list_matches_go(&schema).await;
     assert_empty_blob_with_zero_summary(&schema).await;
     assert_metadata_error(&schema, MISSING_SUMMARY_HASH, "file_count is NULL").await;
     assert_metadata_error(&schema, MISMATCHED_BYTES_HASH, "compressed-byte mismatch").await;
@@ -174,6 +175,7 @@ async fn assert_select_only_reader(dsn: &str) {
         [
             ("goose_db_version".to_owned(), "SELECT".to_owned()),
             ("torrent_file_summary".to_owned(), "SELECT".to_owned()),
+            ("torrent_sources".to_owned(), "SELECT".to_owned()),
             ("torrents".to_owned(), "SELECT".to_owned()),
         ]
     );
@@ -188,6 +190,26 @@ async fn assert_select_only_reader(dsn: &str) {
     assert_eq!(write_error.code().as_deref(), Some("42501"));
 
     pool.close().await;
+}
+
+async fn assert_source_list_matches_go(schema: &bitmagnet_graphql::Schema) {
+    let response = schema
+        .execute("{ torrent { listSources { sources { key name } } } }")
+        .await;
+    assert!(
+        response.errors.is_empty(),
+        "torrent.listSources errors: {:?}",
+        response.errors
+    );
+    assert_eq!(
+        serde_json::to_value(response.data).expect("encode source-list response"),
+        serde_json::json!({
+            "torrent": { "listSources": { "sources": [
+                { "key": "dht", "name": "DHT" },
+                { "key": "rarbg", "name": "RARBG" },
+            ] } }
+        })
+    );
 }
 
 async fn assert_primary_key_bounded_plan(pool: &PgPool) {
