@@ -22,24 +22,30 @@
 
 use std::collections::HashMap;
 use std::future::{poll_fn, Future};
+use std::net::SocketAddrV4;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
 use bitmagnet_blocking::{BlockingError, BlockingFinalizeOutcome, BlockingFinalizer};
+use bitmagnet_db::{
+    assert_goose_applied_head, read_goose_applied_head, DbError, GooseHeadMismatch, PgPool,
+};
 use bitmagnet_dht::{
-    DhtBootstrapPingProducerStats, DhtCrawlerMaintenanceStatsHandle,
+    DhtBootstrapPingProducerStats, DhtCrawlerMaintenanceConfig, DhtCrawlerMaintenanceStatsHandle,
     DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit,
-    DhtDiscoveredNodeFindStats, DhtDiscoveredNodePingStats, DhtDiscoveredNodeSchedulerStats,
-    DhtDiscoveryStats, DhtDiscoveryStatsHandle, DhtInboundStats, DhtInboundStatsSnapshot,
-    DhtInfoHashTriageInput, DhtOldestNodeFindProducerStats, DhtOldestNodePingProducerStats,
-    DhtRuntime, DhtRuntimeExit, DhtRuntimeHealthHandle, DhtRuntimeHealthSnapshot,
-    DhtRuntimeHealthStatus, DhtSampleInfoHashesProducerStats, DhtSampleInfoHashesWorkerStats,
+    DhtCrawlerMaintenanceWithConfigError, DhtDiscoveredNodeFindStats, DhtDiscoveredNodePingStats,
+    DhtDiscoveredNodeSchedulerStats, DhtDiscoveryReceiver, DhtDiscoveryStats,
+    DhtDiscoveryStatsHandle, DhtInboundStats, DhtInboundStatsSnapshot, DhtInfoHashTriageInput,
+    DhtOldestNodeFindProducerStats, DhtOldestNodePingProducerStats, DhtRuntime, DhtRuntimeClient,
+    DhtRuntimeExit, DhtRuntimeHealthHandle, DhtRuntimeHealthSnapshot, DhtRuntimeHealthStatus,
+    DhtRuntimeStartError, DhtSampleInfoHashesProducerStats, DhtSampleInfoHashesWorkerStats, KTable,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::{Id, JoinError, JoinSet};
 
 use crate::{
+    random_metainfo_peer_id, DhtCrawlerAppProjection, DhtCrawlerAppProjectionError,
     DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamStatsHandle, DhtCrawlerDownstreamWorkers,
     DhtGetPeersWorkerExit, DhtGetPeersWorkerStats, DhtInfoHashTriageStats,
     DhtInfoHashTriageWorkerExit, DhtPersistSourceWorkerExit, DhtPersistSourceWorkerStats,
@@ -97,6 +103,41 @@ pub struct DhtCrawlerPipelineDownstreamExits {
 /// blocking-manager transaction outcome.
 pub type DhtCrawlerPipelineBlockingResult =
     Result<Result<BlockingFinalizeOutcome, BlockingError>, JoinError>;
+
+#[derive(Debug, thiserror::Error)]
+enum DhtCrawlerGooseAdmissionError {
+    #[error("could not read the applied Goose migration head: {0}")]
+    Read(#[source] DbError),
+    #[error(transparent)]
+    Head(GooseHeadMismatch),
+}
+
+#[async_trait::async_trait]
+trait DhtCrawlerGooseAdmission: Send + Sync {
+    async fn admit(
+        &self,
+        pool: &PgPool,
+        expected_version: i64,
+    ) -> Result<(), DhtCrawlerGooseAdmissionError>;
+}
+
+struct PgDhtCrawlerGooseAdmission;
+
+#[async_trait::async_trait]
+impl DhtCrawlerGooseAdmission for PgDhtCrawlerGooseAdmission {
+    async fn admit(
+        &self,
+        pool: &PgPool,
+        expected_version: i64,
+    ) -> Result<(), DhtCrawlerGooseAdmissionError> {
+        let actual = read_goose_applied_head(pool)
+            .await
+            .map_err(DhtCrawlerGooseAdmissionError::Read)?;
+        assert_goose_applied_head(actual, expected_version)
+            .map_err(DhtCrawlerGooseAdmissionError::Head)?;
+        Ok(())
+    }
+}
 
 /// Fixed terminal evidence from a started pipeline.
 #[derive(Debug)]
@@ -383,6 +424,79 @@ pub struct DhtCrawlerPipelineHandles {
     pub lifecycle: DhtCrawlerPipelineLifecycleHandle,
 }
 
+/// Typed failure to construct one complete crawler graph.
+///
+/// Projection, database-admission, and peer-identity failures happen before the
+/// UDP runtime binds. A returned failure after a successful bind retains the
+/// exact address and awaited runtime cleanup result. Cancelling the start
+/// future during cleanup instead drops and aborts the runtime and therefore
+/// carries no joined-cleanup proof.
+#[derive(Debug, thiserror::Error)]
+pub enum DhtCrawlerPipelineStartError {
+    #[error("invalid DHT crawler application projection: {0}")]
+    Projection(#[source] DhtCrawlerAppProjectionError),
+    #[error("could not read the applied Goose migration head: {0}")]
+    GooseRead(#[source] Box<DbError>),
+    #[error("database failed the exact Goose migration-head assertion: {0}")]
+    GooseHead(#[source] GooseHeadMismatch),
+    #[error("could not generate the process-local metainfo peer ID: {0}")]
+    MetaInfoPeerId(getrandom::Error),
+    #[error("could not start the DHT runtime: {0}")]
+    Runtime(#[source] Box<DhtRuntimeStartError>),
+    #[error(
+        "the DHT runtime bound at {local_addr} but exposed no live discovery producer; runtime cleanup: {runtime_cleanup:?}"
+    )]
+    DiscoveryUnavailable {
+        local_addr: SocketAddrV4,
+        runtime_cleanup: Result<DhtRuntimeExit, JoinError>,
+    },
+    #[error(
+        "could not construct crawler maintenance after binding {local_addr}: {source}; runtime cleanup: {runtime_cleanup:?}"
+    )]
+    Maintenance {
+        local_addr: SocketAddrV4,
+        #[source]
+        source: Box<DhtCrawlerMaintenanceWithConfigError>,
+        runtime_cleanup: Result<DhtRuntimeExit, JoinError>,
+    },
+}
+
+impl DhtCrawlerPipelineStartError {
+    /// Borrow the exact cleanup result when construction failed after the UDP
+    /// runtime had successfully bound and spawned.
+    #[must_use]
+    pub const fn runtime_cleanup(&self) -> Option<&Result<DhtRuntimeExit, JoinError>> {
+        match self {
+            Self::DiscoveryUnavailable {
+                runtime_cleanup, ..
+            }
+            | Self::Maintenance {
+                runtime_cleanup, ..
+            } => Some(runtime_cleanup),
+            Self::Projection(_)
+            | Self::GooseRead(_)
+            | Self::GooseHead(_)
+            | Self::MetaInfoPeerId(_)
+            | Self::Runtime(_) => None,
+        }
+    }
+
+    /// Return the exact address that was bound when post-bind construction
+    /// failed and cleanup completed.
+    #[must_use]
+    pub const fn bound_addr(&self) -> Option<SocketAddrV4> {
+        match self {
+            Self::DiscoveryUnavailable { local_addr, .. }
+            | Self::Maintenance { local_addr, .. } => Some(*local_addr),
+            Self::Projection(_)
+            | Self::GooseRead(_)
+            | Self::GooseHead(_)
+            | Self::MetaInfoPeerId(_)
+            | Self::Runtime(_) => None,
+        }
+    }
+}
+
 /// Concrete owner of the runtime, maintenance composition, root triage input,
 /// six downstream workers, and blocking-finalization capability.
 ///
@@ -400,6 +514,132 @@ pub struct DhtCrawlerPipelineSupervisor {
 }
 
 impl DhtCrawlerPipelineSupervisor {
+    /// Validate and construct one complete crawler graph around a caller-owned
+    /// PostgreSQL pool.
+    ///
+    /// The mutable projection is revalidated first. The exact applied Goose
+    /// head is then read and asserted without applying or rolling back a
+    /// migration. Only after that read-only admission and process-local
+    /// metainfo peer-ID generation succeed may the UDP runtime bind.
+    ///
+    /// If construction fails after the runtime binds, this method explicitly
+    /// requests shutdown and awaits the socket-owning task. The returned error
+    /// retains the exact bound address and cleanup result. Cancelling this
+    /// future during that cleanup falls back to the runtime's aborting `Drop`
+    /// behavior and does not return joined-cleanup evidence.
+    pub async fn start(
+        projection: DhtCrawlerAppProjection,
+        pool: &PgPool,
+    ) -> Result<(Self, DhtCrawlerPipelineHandles), DhtCrawlerPipelineStartError> {
+        Self::start_with_admission_and_maintenance_factory(
+            projection,
+            pool,
+            &PgDhtCrawlerGooseAdmission,
+            DhtCrawlerMaintenanceSupervisor::with_config,
+        )
+        .await
+    }
+
+    async fn start_with_admission_and_maintenance_factory<A, M>(
+        projection: DhtCrawlerAppProjection,
+        pool: &PgPool,
+        admission: &A,
+        maintenance_factory: M,
+    ) -> Result<(Self, DhtCrawlerPipelineHandles), DhtCrawlerPipelineStartError>
+    where
+        A: DhtCrawlerGooseAdmission,
+        M: FnOnce(
+            DhtDiscoveryReceiver,
+            &DhtRuntimeClient,
+            &KTable,
+            &DhtInfoHashTriageInput,
+            DhtCrawlerMaintenanceConfig,
+        ) -> Result<
+            (
+                DhtCrawlerMaintenanceSupervisor,
+                DhtCrawlerMaintenanceStatsHandle,
+            ),
+            DhtCrawlerMaintenanceWithConfigError,
+        >,
+    {
+        projection
+            .validate()
+            .map_err(DhtCrawlerPipelineStartError::Projection)?;
+        admission
+            .admit(pool, projection.expected_goose_version)
+            .await
+            .map_err(|source| match source {
+                DhtCrawlerGooseAdmissionError::Read(source) => {
+                    DhtCrawlerPipelineStartError::GooseRead(Box::new(source))
+                }
+                DhtCrawlerGooseAdmissionError::Head(source) => {
+                    DhtCrawlerPipelineStartError::GooseHead(source)
+                }
+            })?;
+
+        let metainfo_peer_id =
+            random_metainfo_peer_id().map_err(DhtCrawlerPipelineStartError::MetaInfoPeerId)?;
+        let DhtCrawlerAppProjection {
+            expected_goose_version: _,
+            runtime,
+            maintenance,
+            downstream,
+        } = projection;
+        let mut runtime = DhtRuntime::start(runtime)
+            .await
+            .map_err(|source| DhtCrawlerPipelineStartError::Runtime(Box::new(source)))?;
+        let local_addr = runtime.local_addr();
+        let discovery_receiver = runtime
+            .take_discovered_nodes()
+            .expect("a newly started private runtime exposes its discovery receiver once");
+        let Some(discovery) = discovery_receiver.try_sender() else {
+            drop(discovery_receiver);
+            let runtime_cleanup = runtime.shutdown().await;
+            return Err(DhtCrawlerPipelineStartError::DiscoveryUnavailable {
+                local_addr,
+                runtime_cleanup,
+            });
+        };
+
+        let client = runtime.client();
+        let table = runtime.table().clone();
+        let (root_triage_input, downstream) = DhtCrawlerDownstreamComposition::with_config(
+            discovery,
+            &client,
+            &table,
+            pool,
+            metainfo_peer_id,
+            downstream,
+        )
+        .expect("the downstream projection was revalidated before runtime bind");
+        let (maintenance, _) = match maintenance_factory(
+            discovery_receiver,
+            &client,
+            &table,
+            &root_triage_input,
+            maintenance,
+        ) {
+            Ok(composition) => composition,
+            Err(source) => {
+                drop((client, table, root_triage_input, downstream));
+                let runtime_cleanup = runtime.shutdown().await;
+                return Err(DhtCrawlerPipelineStartError::Maintenance {
+                    local_addr,
+                    source: Box::new(source),
+                    runtime_cleanup,
+                });
+            }
+        };
+        drop((client, table));
+
+        Ok(Self::new(
+            runtime,
+            maintenance,
+            root_triage_input,
+            downstream,
+        ))
+    }
+
     /// Assemble staged lifecycle ownership around already-constructed parts.
     ///
     /// `root_triage_input` must be the original producer paired with the
@@ -449,6 +689,12 @@ impl DhtCrawlerPipelineSupervisor {
             },
             handles,
         )
+    }
+
+    /// Return the actual bound IPv4 DHT address, including an OS-assigned port.
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddrV4 {
+        self.runtime.local_addr()
     }
 
     /// Clone the sender-free aggregate observability surface before consuming
@@ -1166,14 +1412,15 @@ mod tests {
     use std::error::Error;
     use std::fmt;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
     use bitmagnet_dht::{
-        DhtCrawlerMaintenanceSupervisor, DhtDiscoveryOffer, DhtDiscoveryStats,
-        DhtInfoHashTriageRequest, Id20, RoutingNode,
+        dht_discovery_channel, DhtCrawlerMaintenanceSupervisor, DhtDiscoveryOffer,
+        DhtDiscoveryStats, DhtInfoHashTriageRequest, Id20, RoutingNode,
     };
     use clap::{CommandFactory, FromArgMatches};
     use sqlx::postgres::PgPoolOptions;
@@ -1183,10 +1430,37 @@ mod tests {
 
     use super::*;
     use crate::{
-        DhtCrawlerAppConfig, DhtCrawlerAppProjection, DhtGetPeersWorkerStats,
-        DhtInfoHashTriageStats, DhtPersistSourceWorkerStats, DhtPersistTorrentWorkerStats,
-        DhtRequestMetaInfoWorkerStats, DhtScrapeWorkerStats,
+        DhtCrawlerAppConfig, DhtCrawlerAppProjection, DhtCrawlerClassifierQueue,
+        DhtGetPeersWorkerStats, DhtInfoHashTriageStats, DhtPersistSourceWorkerStats,
+        DhtPersistTorrentWorkerStats, DhtRequestMetaInfoWorkerStats, DhtScrapeWorkerStats,
     };
+
+    enum TestGooseAdmission {
+        Allow,
+        ReadFailure,
+        MissingHead,
+    }
+
+    #[async_trait::async_trait]
+    impl DhtCrawlerGooseAdmission for TestGooseAdmission {
+        async fn admit(
+            &self,
+            _pool: &PgPool,
+            expected_version: i64,
+        ) -> Result<(), DhtCrawlerGooseAdmissionError> {
+            match self {
+                Self::Allow => Ok(()),
+                Self::ReadFailure => Err(DhtCrawlerGooseAdmissionError::Read(DbError::Config(
+                    "scripted Goose read failure".to_owned(),
+                ))),
+                Self::MissingHead => Err(DhtCrawlerGooseAdmissionError::Head(
+                    GooseHeadMismatch::Missing {
+                        required: expected_version,
+                    },
+                )),
+            }
+        }
+    }
 
     #[derive(Default)]
     struct StartGate {
@@ -2444,6 +2718,7 @@ mod tests {
     #[test]
     fn public_supervisor_and_recovery_handles_have_owned_task_traits() {
         assert_send::<DhtCrawlerPipelineSupervisor>();
+        assert_send::<DhtCrawlerPipelineStartError>();
         assert_send_sync::<DhtCrawlerPipelineHandles>();
         assert_send_sync::<DhtCrawlerPipelineObservabilityHandle>();
         assert_send_sync::<DhtCrawlerPipelineObservabilitySnapshot>();
@@ -2451,9 +2726,271 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writer_start_revalidates_every_projection_before_admission_or_udp_bind() {
+        let occupied = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let occupied_addr = match occupied.local_addr().unwrap() {
+            SocketAddr::V4(addr) => addr,
+            SocketAddr::V6(_) => unreachable!("the test binds IPv4"),
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+
+        let mut invalid_goose = projected_app_config(2);
+        invalid_goose.runtime.bind_addr = occupied_addr;
+        invalid_goose.expected_goose_version = 0;
+        let error =
+            match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                invalid_goose,
+                &pool,
+                &TestGooseAdmission::ReadFailure,
+                DhtCrawlerMaintenanceSupervisor::with_config,
+            )
+            .await
+            {
+                Ok(_) => panic!("invalid Goose projection must fail"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            DhtCrawlerPipelineStartError::Projection(
+                DhtCrawlerAppProjectionError::ExpectedGooseVersion { version: 0 }
+            )
+        ));
+
+        let mut invalid_runtime = projected_app_config(2);
+        invalid_runtime.runtime.bind_addr = occupied_addr;
+        invalid_runtime.runtime.discovery_capacity =
+            NonZeroUsize::new(bitmagnet_dht::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let error =
+            match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                invalid_runtime,
+                &pool,
+                &TestGooseAdmission::ReadFailure,
+                DhtCrawlerMaintenanceSupervisor::with_config,
+            )
+            .await
+            {
+                Ok(_) => panic!("invalid runtime projection must fail"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            DhtCrawlerPipelineStartError::Projection(DhtCrawlerAppProjectionError::Runtime(_))
+        ));
+
+        let mut invalid_maintenance = projected_app_config(2);
+        invalid_maintenance.runtime.bind_addr = occupied_addr;
+        invalid_maintenance
+            .maintenance
+            .bootstrap_ping
+            .reseed_interval = Duration::ZERO;
+        let error =
+            match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                invalid_maintenance,
+                &pool,
+                &TestGooseAdmission::ReadFailure,
+                DhtCrawlerMaintenanceSupervisor::with_config,
+            )
+            .await
+            {
+                Ok(_) => panic!("invalid maintenance projection must fail"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            DhtCrawlerPipelineStartError::Projection(DhtCrawlerAppProjectionError::Maintenance(_))
+        ));
+
+        let mut invalid_downstream = projected_app_config(2);
+        invalid_downstream.runtime.bind_addr = occupied_addr;
+        invalid_downstream.downstream.root_triage_capacity =
+            NonZeroUsize::new(bitmagnet_dht::DHT_CHANNEL_MAX_CAPACITY + 1).unwrap();
+        let error =
+            match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                invalid_downstream,
+                &pool,
+                &TestGooseAdmission::ReadFailure,
+                DhtCrawlerMaintenanceSupervisor::with_config,
+            )
+            .await
+            {
+                Ok(_) => panic!("invalid downstream projection must fail"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            DhtCrawlerPipelineStartError::Projection(DhtCrawlerAppProjectionError::Downstream(_))
+        ));
+
+        assert_eq!(pool.size(), 0);
+        assert_eq!(
+            occupied.local_addr().unwrap(),
+            SocketAddr::V4(occupied_addr)
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn writer_start_admission_failures_precede_peer_entropy_and_udp_bind() {
+        let occupied = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let occupied_addr = match occupied.local_addr().unwrap() {
+            SocketAddr::V4(addr) => addr,
+            SocketAddr::V6(_) => unreachable!("the test binds IPv4"),
+        };
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+
+        for (admission, expected_read_failure) in [
+            (TestGooseAdmission::ReadFailure, true),
+            (TestGooseAdmission::MissingHead, false),
+        ] {
+            let mut projection = projected_app_config(2);
+            projection.runtime.bind_addr = occupied_addr;
+            let error =
+                match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                    projection,
+                    &pool,
+                    &admission,
+                    DhtCrawlerMaintenanceSupervisor::with_config,
+                )
+                .await
+                {
+                    Ok(_) => panic!("scripted admission must fail"),
+                    Err(error) => error,
+                };
+            if expected_read_failure {
+                assert!(matches!(&error, DhtCrawlerPipelineStartError::GooseRead(_)));
+            } else {
+                assert!(matches!(
+                    &error,
+                    DhtCrawlerPipelineStartError::GooseHead(GooseHeadMismatch::Missing {
+                        required: 29
+                    })
+                ));
+            }
+            assert_eq!(error.bound_addr(), None);
+            assert!(error.runtime_cleanup().is_none());
+        }
+
+        assert_eq!(pool.size(), 0);
+        assert_eq!(
+            occupied.local_addr().unwrap(),
+            SocketAddr::V4(occupied_addr)
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn writer_start_builds_the_projected_graph_without_worker_or_pool_activity() {
+        let mut projection = projected_app_config(2);
+        projection.runtime.bind_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+
+        let (supervisor, handles) =
+            DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                projection,
+                &pool,
+                &TestGooseAdmission::Allow,
+                DhtCrawlerMaintenanceSupervisor::with_config,
+            )
+            .await
+            .expect("the admitted offline graph starts");
+        let runtime_addr = supervisor.local_addr();
+        assert_eq!(
+            supervisor
+                .downstream
+                .persist_torrent
+                .config_for_test()
+                .classifier_queue,
+            DhtCrawlerClassifierQueue::Shadow
+        );
+        assert_eq!(pool.size(), 0, "the injected admission and graph are lazy");
+        assert_eq!(
+            handles.downstream_stats.triage.snapshot(),
+            DhtInfoHashTriageStats::default()
+        );
+
+        let exit = timeout(
+            Duration::from_secs(5),
+            supervisor.run(std::future::ready(())),
+        )
+        .await
+        .expect("pre-ready shutdown is bounded");
+        assert!(matches!(
+            exit,
+            DhtCrawlerPipelineExit::ShutdownBeforeStart {
+                runtime: Ok(DhtRuntimeExit::Shutdown),
+                blocking: Ok(Ok(BlockingFinalizeOutcome::NothingPending)),
+            }
+        ));
+        assert_eq!(pool.size(), 0);
+        assert!(UdpSocket::bind(runtime_addr).await.is_ok());
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn writer_start_post_bind_failure_joins_runtime_and_releases_exact_udp_addr() {
+        let mut projection = projected_app_config(2);
+        projection.runtime.bind_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+
+        let error =
+            match DhtCrawlerPipelineSupervisor::start_with_admission_and_maintenance_factory(
+                projection,
+                &pool,
+                &TestGooseAdmission::Allow,
+                |real_discovery, client, table, triage, config| {
+                    drop(real_discovery);
+                    let (closed_sender, closed_receiver) =
+                        dht_discovery_channel(NonZeroUsize::new(1).unwrap());
+                    drop(closed_sender);
+                    DhtCrawlerMaintenanceSupervisor::with_config(
+                        closed_receiver,
+                        client,
+                        table,
+                        triage,
+                        config,
+                    )
+                },
+            )
+            .await
+            {
+                Ok(_) => panic!("scripted maintenance construction must fail"),
+                Err(error) => error,
+            };
+        let DhtCrawlerPipelineStartError::Maintenance {
+            local_addr,
+            source,
+            runtime_cleanup,
+        } = error
+        else {
+            panic!("expected typed post-bind maintenance failure");
+        };
+        assert!(source.as_start_error().is_some());
+        assert!(matches!(runtime_cleanup, Ok(DhtRuntimeExit::Shutdown)));
+        assert_eq!(pool.size(), 0, "no downstream worker was started or polled");
+        let rebound = UdpSocket::bind(local_addr)
+            .await
+            .expect("returned cleanup proof must release the exact UDP address");
+        drop(rebound);
+        pool.close().await;
+    }
+
+    #[tokio::test]
     async fn projected_scaling_graphs_are_bounded_offline_and_release_runtime() {
         for scaling_factor in [2, 10] {
             let DhtCrawlerAppProjection {
+                expected_goose_version: _,
                 mut runtime,
                 maintenance,
                 downstream,

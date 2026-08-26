@@ -17,12 +17,23 @@ The get-peers worker publishes successful nonempty peer vectors through the
 metainfo-request handoff. The scrape worker publishes successful raw BEP-33
 Bloom filters through the scraped-source handoff. The request-metainfo worker
 publishes allowed verified metainfo through the torrent-persistence handoff.
-The crate now contains a concrete bounded IPv4 peer-wire metainfo requester,
-but no Rust production application constructs or supervises it. `BlockingManager`
-already implements both the triage filter and request-stage blocker boundaries,
-but no production application constructs, shares, flushes, or supervises it for
-this pipeline. The PostgreSQL adapters are not wired into an application or
-validated against live PostgreSQL. This is not a live-database integration.
+`DhtCrawlerPipelineSupervisor::start` now revalidates one mutable application
+projection, reads and asserts its exact already-applied Goose head, generates
+one process-stable peer-wire identity, binds the DHT runtime, and constructs the
+maintenance supervisor plus all six downstream workers around a caller-owned
+PostgreSQL pool. That graph includes the bounded peer-wire requester, one shared
+`BlockingManager`, and the concrete lookup and writer adapters. Construction
+starts only the already-owned DHT runtime task; downstream workers remain
+taskless until `run` owns them.
+
+The exact Goose assertion is read-only and happens before peer entropy or UDP
+bind. It neither creates the version table nor applies or rolls back a
+migration. A returned error after UDP bind contains the bound address and the
+awaited runtime-shutdown result. Cancelling the start future during that cleanup
+instead falls back to the runtime's aborting `Drop` behavior and carries no
+joined-cleanup proof. No executable invokes this writer-capable constructor,
+and the adapters and full graph have not been validated against live
+PostgreSQL. This is not a live-database or production-readiness claim.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -373,8 +384,9 @@ Offline tests freeze query shape, raw bindings, strict decoding, duplicate-row
 preservation, and collaborator error identity. They do not establish live
 PostgreSQL array codecs, schema or index state, query plans, result order,
 server-side cancellation, or production readiness. The adapter creates and
-closes no pool, starts no task, retries nothing, and is not application-wired in
-this checkpoint.
+closes no pool, starts no task, and retries nothing. The library start seam
+wires it around a caller-owned pool, but no executable invokes that seam and no
+live PostgreSQL validation has been completed.
 
 ### Atomic PostgreSQL torrent persistence
 
@@ -844,8 +856,9 @@ the blocker receives an ordered hash slice and explicit flush flag.
 `DhtPeerWireMetaInfoRequester` now concretely implements the requester seam;
 tests may continue to inject other implementations. Separately, the existing
 direct `BlockingManager` implementation supplies `DhtInfoHashBlocker`;
-production construction, sharing, final flush, and failure policy remain
-deferred.
+the library start seam constructs and shares it, and the pipeline run owns its
+finalization. Executable invocation, nonempty finalization evidence, and
+retry, abandon, and operator failure policy remain deferred.
 
 `with_config` accepts a `DhtRequestMetaInfoWorkerConfig`; its nonzero
 `max_inflight` defaults to 400, matching Go's configured callback concurrency
@@ -1836,66 +1849,36 @@ above. No gate alone establishes production composition or readiness.
 
 The following remain deliberately outside this checkpoint:
 
-- production application ownership and nonempty shutdown flushing of the
-  persistent blocking manager, plus metrics and operator-facing failure policy;
-- application construction of `PgDhtTorrentTriageLookup` with a configured
-  pool, plus live schema/codec/query-plan validation and database
-  observability;
-- ownership of the unique triage receiver by an application or higher-level
-  crawler supervisor;
-- application construction and shutdown wiring between the existing DHT
-  sample-infohashes maintenance path, the triage worker, and the get-peers
-  worker;
-- production application construction, supervision, metrics, and operator
-  policy for the existing Rust get-peers worker;
-- production application construction, supervision, shutdown wiring, metrics,
-  and operator failure policy for the existing Rust scrape and
-  source-persistence workers; application construction of
-  `PgDhtSourceBatchWriter`; ownership of the unique scraped-source receiver;
-  and live schema, codec, transaction, rollback, query-plan, observability, and
-  durability validation for that adapter;
-- production supervision, configuration loading, limiter metrics, logging,
-  retry/operator policy, and live-peer validation for the existing concrete
-  `DhtPeerWireMetaInfoRequester` and its taskless outer limiter;
-- production construction and sharing of the existing direct
-  `DhtInfoHashBlocker` implementation for `BlockingManager`, including final
-  flush and failure policy;
-- application construction of the concrete atomic torrent writer with a
-  configured pool, plus live schema, enum, codec, trigger, rollback, commit,
-  query-plan, observability, and durability validation; both the atomic writer
-  and read-only full-v2 lookup adapter exist offline;
-- production construction and supervision of the owned torrent-persistence
-  worker, ownership transfer of the unique receiver, scrape-route close order,
-  shutdown wiring, metrics export, retry/operator policy, and health reporting;
+- secret-only database configuration, eager pool creation, and pool-close
+  ownership in an executable; the library start seam accepts a caller-owned
+  pool and does not expose connection material through CLI or `Debug`;
+- disposable-Goose-schema integration for the complete graph, including exact
+  missing/wrong/reapplied head admission; live codecs, constraints, triggers,
+  plans, transaction rollback, commit acknowledgement, statement auditing, and
+  durability for every concrete PostgreSQL adapter;
+- an executable process owner with signal and bounded-timeout policy, HTTP
+  liveness/readiness/diagnostics, metric registration, logging, restart policy,
+  and operator treatment of abnormal worker, runtime, finalizer, and cancelled
+  start outcomes;
+- nonempty blocking-manager finalization and retry/abandon policy after the
+  graph has run; the existing external finalizer handle is an advisory recovery
+  capability and the type system does not prevent concurrent misuse;
+- live peer-wire, DNS, UDP, throughput, backpressure, and shutdown-soak
+  validation of the complete constructed graph;
 - activation of direct `process_torrent_shadow` routing, including exclusive
   producer ownership, mirror coordination, bounded admission, compatible
   consumer payload semantics, and active-fingerprint collision policy;
-- production construction, supervision, shutdown wiring, metrics, retry, and
-  operator failure policy for the existing Rust request-metainfo worker;
 - a producer-side `closed()` waiter on the typed triage input route;
-- configuration loading, health reporting, metrics export, and operator-facing
-  diagnostics; and
-- live traffic, deployment configuration, rollout, migration, or operational
-  readiness.
+- image and deployment admission, dedicated network identity and policy,
+  replicas-zero rollback rehearsal, fresh backup and isolated restore proof,
+  live traffic, rollout, migration, or operational readiness.
 
-The existing DHT maintenance supervisor borrows a triage input capability for
-the sample-infohashes worker but does not own this crate's unique triage
-receiver, construct `DhtInfoHashTriageWorker`, or monitor it as a child. The
-typed scrape input and scraped-source output routes now have an owned Rust
-scrape consumer between them, and the scraped-source route now has an owned
-source-persistence consumer plus a concrete PostgreSQL writer. No production
-application path constructs, runs, or supervises either worker or supplies the
-writer with its configured pool. The get-peers route likewise has an owned Rust
-consumer without production application ownership. The concrete offline test
-composes the isolated triage worker and its persistent collaborators without
-polling them, but no current production application path constructs or
-supervises the triage, get-peers, scrape, and source-persistence workers as a
-pipeline. The request-metainfo route has the get-peers worker as a producer and
-the owned Rust request-metainfo worker as its consumer; allowed results flow
-through the typed torrent-persistence route. The taskless downstream
-composition supplies the rate-limited concrete peer-wire requester and
-persistent blocker, but no production application constructs or supervises
-that composition. No production application supplies the owned persistence
-worker with the existing concrete PostgreSQL atomic writer. The concrete
-peer-wire requester, blocking-manager adapter, writer, and read-only full-v2
-lookup are not executable-application-wired.
+The library start seam now transfers the runtime's unique discovery receiver,
+one recovered discovery sender, the original root-triage input, its unique
+receiver, every internal route capability, all six workers, and one shared
+blocking manager into the existing staged supervisor. On success no route
+producer clone escapes through its sender-free stats and lifecycle handles.
+The supervisor still does no worker work until `run` is polled. There is no
+writer executable, deployment object, live-database gate result, or production
+call site, so source-level constructibility must not be described as activation
+or takeover readiness.

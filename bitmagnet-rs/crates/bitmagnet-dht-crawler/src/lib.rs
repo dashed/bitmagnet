@@ -55,8 +55,8 @@ mod scrape_parity;
 
 pub use app_config::{
     DhtCrawlerAppConfig, DhtCrawlerAppConfigError, DhtCrawlerAppConfigErrorKind,
-    DhtCrawlerAppProjection, DhtCrawlerObserveOnlyAppConfig, DhtCrawlerObserveOnlyAppProjection,
-    DEFAULT_BOOTSTRAP_NODES, DHT_CRAWLER_MAX_SCALING_FACTOR,
+    DhtCrawlerAppProjection, DhtCrawlerAppProjectionError, DhtCrawlerObserveOnlyAppConfig,
+    DhtCrawlerObserveOnlyAppProjection, DEFAULT_BOOTSTRAP_NODES, DHT_CRAWLER_MAX_SCALING_FACTOR,
 };
 pub use downstream_composition::{
     DhtCrawlerDownstreamComposition, DhtCrawlerDownstreamConfig, DhtCrawlerDownstreamConfigError,
@@ -136,8 +136,8 @@ pub use pipeline_supervisor::{
     DhtCrawlerPipelineHandles, DhtCrawlerPipelineLifecycle, DhtCrawlerPipelineLifecycleHandle,
     DhtCrawlerPipelineMaintenanceObservabilitySnapshot, DhtCrawlerPipelineObservabilityHandle,
     DhtCrawlerPipelineObservabilitySnapshot, DhtCrawlerPipelineObservedLifecycle,
-    DhtCrawlerPipelineRuntimeObservabilitySnapshot, DhtCrawlerPipelineSupervisor,
-    DhtCrawlerPipelineTrigger,
+    DhtCrawlerPipelineRuntimeObservabilitySnapshot, DhtCrawlerPipelineStartError,
+    DhtCrawlerPipelineSupervisor, DhtCrawlerPipelineTrigger,
 };
 pub use request_meta_info::{
     DefaultDhtMetaInfoBanningChecker, DhtInfoHashBlocker, DhtMetaInfoBanningChecker,

@@ -195,6 +195,8 @@ impl DhtCrawlerObserveOnlyAppConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DhtCrawlerAppProjection {
+    /// Exact already-applied Goose migration head required before runtime bind.
+    pub expected_goose_version: i64,
     /// UDP runtime and discovery-ingress policy.
     pub runtime: DhtRuntimeConfig,
     /// Discovery scheduler, maintenance workers, and bootstrap policy.
@@ -204,7 +206,28 @@ pub struct DhtCrawlerAppProjection {
 }
 
 impl DhtCrawlerAppProjection {
+    /// Revalidate the mutable public projection before any database or network
+    /// effect.
+    pub fn validate(&self) -> Result<(), DhtCrawlerAppProjectionError> {
+        if self.expected_goose_version <= 0 {
+            return Err(DhtCrawlerAppProjectionError::ExpectedGooseVersion {
+                version: self.expected_goose_version,
+            });
+        }
+        self.runtime
+            .validate()
+            .map_err(DhtCrawlerAppProjectionError::Runtime)?;
+        self.maintenance
+            .validate()
+            .map_err(DhtCrawlerAppProjectionError::Maintenance)?;
+        self.downstream
+            .validate()
+            .map_err(DhtCrawlerAppProjectionError::Downstream)
+    }
+
     /// Consume the atomic projection into its three construction policies.
+    /// The admission pin remains available from the projection before this
+    /// compatibility-preserving decomposition.
     #[must_use]
     pub fn into_parts(
         self,
@@ -215,6 +238,19 @@ impl DhtCrawlerAppProjection {
     ) {
         (self.runtime, self.maintenance, self.downstream)
     }
+}
+
+/// Invalid mutable writer-graph projection.
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum DhtCrawlerAppProjectionError {
+    #[error("expected Goose version must be positive, got {version}")]
+    ExpectedGooseVersion { version: i64 },
+    #[error(transparent)]
+    Runtime(DhtRuntimeConfigError),
+    #[error(transparent)]
+    Maintenance(DhtCrawlerMaintenanceConfigError),
+    #[error(transparent)]
+    Downstream(DhtCrawlerDownstreamConfigError),
 }
 
 /// Pure application configuration for the first owned DHT crawler process.
@@ -446,6 +482,7 @@ impl DhtCrawlerAppConfig {
         })?;
 
         Ok(DhtCrawlerAppProjection {
+            expected_goose_version: self.expected_goose_version,
             runtime,
             maintenance,
             downstream,
@@ -1107,8 +1144,18 @@ mod tests {
             DEFAULT_METAINFO_KEY_MUTEX_SIZE
         );
         assert_eq!(
+            projection.clone().into_parts(),
+            (
+                DhtRuntimeConfig::default(),
+                DhtCrawlerMaintenanceConfig::default(),
+                DhtCrawlerDownstreamConfig::default(),
+            ),
+            "the committed three-part decomposition remains source-compatible"
+        );
+        assert_eq!(
             projection,
             DhtCrawlerAppProjection {
+                expected_goose_version: 29,
                 runtime: DhtRuntimeConfig::default(),
                 maintenance: DhtCrawlerMaintenanceConfig::default(),
                 downstream: DhtCrawlerDownstreamConfig::default(),
