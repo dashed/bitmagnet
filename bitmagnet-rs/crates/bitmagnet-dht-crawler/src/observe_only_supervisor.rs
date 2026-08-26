@@ -14,11 +14,15 @@ use std::net::SocketAddrV4;
 use std::num::NonZeroUsize;
 
 use bitmagnet_dht::{
-    dht_info_hash_triage_channel, DhtCrawlerMaintenanceConfig, DhtCrawlerMaintenanceConfigError,
-    DhtCrawlerMaintenanceStatsHandle, DhtCrawlerMaintenanceSupervisor,
-    DhtCrawlerMaintenanceSupervisorExit, DhtCrawlerMaintenanceWithConfigError, DhtInboundStats,
-    DhtRuntime, DhtRuntimeConfig, DhtRuntimeConfigError, DhtRuntimeExit, DhtRuntimeHealthHandle,
-    DhtRuntimeHealthStatus, DhtRuntimeStartError, DHT_CHANNEL_MAX_CAPACITY,
+    dht_info_hash_triage_channel, DhtBootstrapPingProducerExit, DhtCrawlerMaintenanceConfig,
+    DhtCrawlerMaintenanceConfigError, DhtCrawlerMaintenanceStatsHandle,
+    DhtCrawlerMaintenanceSupervisor, DhtCrawlerMaintenanceSupervisorExit,
+    DhtCrawlerMaintenanceWithConfigError, DhtDiscoveredNodeFindWorkerExit,
+    DhtDiscoveredNodePingWorkerExit, DhtDiscoveredNodeSchedulerExit, DhtInboundStats,
+    DhtOldestNodeFindProducerExit, DhtOldestNodePingProducerExit, DhtRuntime, DhtRuntimeConfig,
+    DhtRuntimeConfigError, DhtRuntimeExit, DhtRuntimeHealthHandle, DhtRuntimeHealthStatus,
+    DhtRuntimeStartError, DhtSampleInfoHashesProducerExit, DhtSampleInfoHashesWorkerExit,
+    DHT_CHANNEL_MAX_CAPACITY,
 };
 use tokio::sync::{oneshot, watch};
 use tokio::task::{JoinError, JoinSet};
@@ -145,6 +149,57 @@ pub struct DhtCrawlerObserveOnlyExit {
     pub maintenance: Result<DhtCrawlerMaintenanceSupervisorExit, JoinError>,
     pub observation: DhtInfoHashObservationWorkerExit,
     pub runtime: Result<DhtRuntimeExit, JoinError>,
+}
+
+impl DhtCrawlerObserveOnlyExit {
+    /// Whether an external request produced the complete canonical drain.
+    ///
+    /// The outer maintenance `Shutdown` classification is insufficient by
+    /// itself because it deliberately retains any child result already ready
+    /// at that boundary. Every nested result is therefore checked explicitly.
+    #[must_use]
+    pub fn is_clean_external_shutdown(&self) -> bool {
+        self.first_trigger == DhtCrawlerObserveOnlyTrigger::External
+            && maintenance_shutdown_is_clean(&self.maintenance)
+            && self.observation == DhtInfoHashObservationWorkerExit::InputClosed
+            && matches!(&self.runtime, Ok(DhtRuntimeExit::Shutdown))
+    }
+}
+
+fn maintenance_shutdown_is_clean(
+    result: &Result<DhtCrawlerMaintenanceSupervisorExit, JoinError>,
+) -> bool {
+    match result {
+        Ok(DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart) => true,
+        Ok(DhtCrawlerMaintenanceSupervisorExit::Shutdown { children }) => {
+            matches!(
+                children.scheduler,
+                DhtDiscoveredNodeSchedulerExit::Shutdown { .. }
+            ) && matches!(
+                children.ping,
+                DhtDiscoveredNodePingWorkerExit::Shutdown { .. }
+            ) && matches!(
+                children.find_node,
+                DhtDiscoveredNodeFindWorkerExit::Shutdown { .. }
+            ) && matches!(
+                children.sample_infohashes_worker,
+                DhtSampleInfoHashesWorkerExit::Shutdown { .. }
+            ) && matches!(
+                children.oldest_find,
+                DhtOldestNodeFindProducerExit::Shutdown { .. }
+            ) && matches!(
+                children.oldest_ping,
+                DhtOldestNodePingProducerExit::Shutdown { .. }
+            ) && matches!(
+                children.bootstrap_ping,
+                DhtBootstrapPingProducerExit::Shutdown { .. }
+            ) && matches!(
+                children.sample_infohashes_producer,
+                DhtSampleInfoHashesProducerExit::Shutdown { .. }
+            ) && matches!(&children.target, Ok(()))
+        }
+        Ok(DhtCrawlerMaintenanceSupervisorExit::Failed { .. }) | Err(_) => false,
+    }
 }
 
 /// Fixed-shape observations for the closed PostgreSQL-nonmutating graph.
@@ -632,23 +687,29 @@ mod tests {
             .await
             .unwrap();
         let addr = supervisor.local_addr();
-        let exit = timeout(
+        let mut exit = timeout(
             Duration::from_secs(5),
             supervisor.run(std::future::ready(())),
         )
         .await
         .expect("pre-ready cleanup remains bounded");
 
+        assert!(exit.is_clean_external_shutdown());
         assert_eq!(exit.first_trigger, DhtCrawlerObserveOnlyTrigger::External);
         assert!(matches!(
-            exit.maintenance,
+            &exit.maintenance,
             Ok(DhtCrawlerMaintenanceSupervisorExit::ShutdownBeforeStart)
         ));
         assert_eq!(
             exit.observation,
             DhtInfoHashObservationWorkerExit::InputClosed
         );
-        assert!(matches!(exit.runtime, Ok(DhtRuntimeExit::Shutdown)));
+        assert!(matches!(&exit.runtime, Ok(DhtRuntimeExit::Shutdown)));
+        exit.first_trigger = DhtCrawlerObserveOnlyTrigger::Runtime;
+        assert!(!exit.is_clean_external_shutdown());
+        exit.first_trigger = DhtCrawlerObserveOnlyTrigger::External;
+        exit.observation = DhtInfoHashObservationWorkerExit::Shutdown { queued_dropped: 0 };
+        assert!(!exit.is_clean_external_shutdown());
         let snapshot = observability.snapshot();
         assert_eq!(
             snapshot.lifecycle,
@@ -682,20 +743,30 @@ mod tests {
         assert!(!ready.is_ready(), "startup grace is not success evidence");
 
         shutdown.send(()).unwrap();
-        let exit = timeout(Duration::from_secs(5), run)
+        let mut exit = timeout(Duration::from_secs(5), run)
             .await
             .expect("ready graph cleanup remains bounded")
             .unwrap();
+        assert!(exit.is_clean_external_shutdown());
         assert_eq!(exit.first_trigger, DhtCrawlerObserveOnlyTrigger::External);
         assert!(matches!(
-            exit.maintenance,
+            &exit.maintenance,
             Ok(DhtCrawlerMaintenanceSupervisorExit::Shutdown { .. })
         ));
         assert_eq!(
             exit.observation,
             DhtInfoHashObservationWorkerExit::InputClosed
         );
-        assert!(matches!(exit.runtime, Ok(DhtRuntimeExit::Shutdown)));
+        assert!(matches!(&exit.runtime, Ok(DhtRuntimeExit::Shutdown)));
+        let Ok(DhtCrawlerMaintenanceSupervisorExit::Shutdown { children }) = &mut exit.maintenance
+        else {
+            unreachable!("ready external shutdown retains child evidence")
+        };
+        children.scheduler = DhtDiscoveredNodeSchedulerExit::InputClosed;
+        assert!(
+            !exit.is_clean_external_shutdown(),
+            "an outer shutdown must not hide a non-shutdown child exit"
+        );
 
         let stopped = observability.snapshot();
         assert_eq!(
@@ -757,6 +828,7 @@ mod tests {
             .await
             .expect("panic cleanup remains bounded")
             .unwrap();
+        assert!(!exit.is_clean_external_shutdown());
         assert_eq!(
             exit.first_trigger,
             DhtCrawlerObserveOnlyTrigger::Maintenance
