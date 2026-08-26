@@ -144,10 +144,11 @@ pub(crate) struct TorrentQuery;
 impl TorrentQuery {
     async fn files(
         &self,
+        ctx: &Context<'_>,
         input: TorrentFilesQueryInput,
     ) -> async_graphql::Result<TorrentFilesQueryResult> {
-        let _ = &input;
-        unserved("torrent.files")
+        let runtime = ctx.data::<super::torrent_files::TorrentFilesRuntimeData>()?;
+        super::torrent_files::resolve(runtime, input).await
     }
 
     async fn list_sources(&self) -> async_graphql::Result<TorrentListSourcesResult> {

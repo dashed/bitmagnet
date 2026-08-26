@@ -9,6 +9,7 @@ pub mod runtime;
 pub(crate) mod scalars;
 pub mod search;
 mod search_resolvers;
+pub mod torrent_files;
 
 use async_graphql::EmptySubscription;
 
@@ -16,6 +17,9 @@ use crate::health::{HealthRuntime, RuntimeConfig};
 
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
+pub use torrent_files::{
+    PgTorrentFilesRuntime, TorrentFilesLimits, TorrentFilesRuntime, TorrentFilesRuntimeData,
+};
 
 /// Runtime version data available to GraphQL resolvers.
 pub struct Version(pub String);
@@ -26,7 +30,10 @@ pub type Schema = async_graphql::Schema<Query, Mutation, EmptySubscription>;
 /// Build the code-first GraphQL schema.
 #[must_use]
 pub fn schema() -> Schema {
-    async_graphql::Schema::build(Query, Mutation, EmptySubscription).finish()
+    async_graphql::Schema::build(Query, Mutation, EmptySubscription)
+        .data(SearchRuntimeData::disabled())
+        .data(TorrentFilesRuntimeData::disabled())
+        .finish()
 }
 
 /// Build the GraphQL schema with runtime version context attached.
@@ -35,6 +42,7 @@ pub fn build_schema(version: String) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::disabled())
+        .data(TorrentFilesRuntimeData::disabled())
         .finish()
 }
 
@@ -44,6 +52,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::new(search))
+        .data(TorrentFilesRuntimeData::disabled())
         .finish()
 }
 
@@ -57,8 +66,9 @@ pub fn build_runtime_schema(
 ) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
-        .data(HealthRuntime::new(pool, config))
+        .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::disabled())
+        .data(TorrentFilesRuntimeData::pg(pool))
         .finish()
 }
 
@@ -73,8 +83,9 @@ pub fn build_runtime_search_schema(
 ) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
-        .data(HealthRuntime::new(pool, config))
+        .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::new(search))
+        .data(TorrentFilesRuntimeData::pg(pool))
         .finish()
 }
 

@@ -19,4 +19,7 @@ pub use schema::{
     build_runtime_schema, build_runtime_search_schema, build_schema, build_search_schema, schema,
     Schema,
 };
+pub use schema::{
+    PgTorrentFilesRuntime, TorrentFilesLimits, TorrentFilesRuntime, TorrentFilesRuntimeData,
+};
 pub use schema::{SearchRuntime, SearchRuntimeData};
