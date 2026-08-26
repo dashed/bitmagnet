@@ -415,6 +415,7 @@ impl DhtCrawlerMaintenanceRunPublishers {
 /// component-owned child task. A Tokio blocking DNS lookup already dispatched
 /// by the bootstrap child may still finish internally after that child exits.
 pub struct DhtCrawlerMaintenanceSupervisor {
+    stats: DhtCrawlerMaintenanceStatsHandle,
     scheduler: DhtDiscoveredNodeScheduler,
     ping: DhtDiscoveredNodePingWorker,
     find_node: DhtDiscoveredNodeFindWorker,
@@ -427,6 +428,15 @@ pub struct DhtCrawlerMaintenanceSupervisor {
 }
 
 impl DhtCrawlerMaintenanceSupervisor {
+    /// Clone the exact sender-free statistics bundle owned by this composition.
+    ///
+    /// Retaining the handle cannot keep any maintenance route, worker, query
+    /// client, or runtime resource alive.
+    #[must_use]
+    pub fn stats_handle(&self) -> DhtCrawlerMaintenanceStatsHandle {
+        self.stats.clone()
+    }
+
     /// Construct and wire the exact-default partial maintenance composition.
     ///
     /// The client, table, and triage input are cloned; the discovery receiver
@@ -606,8 +616,20 @@ impl DhtCrawlerMaintenanceSupervisor {
         let (sample_infohashes_producer, sample_infohashes_producer_stats) =
             DhtSampleInfoHashesProducer::new(table.clone(), sample_infohashes_input);
 
+        let stats = DhtCrawlerMaintenanceStatsHandle {
+            discovery: discovery_stats,
+            scheduler: scheduler_stats,
+            ping: ping_stats,
+            find_node: find_node_stats,
+            sample_infohashes_worker: sample_infohashes_worker_stats,
+            oldest_find: oldest_find_stats,
+            oldest_ping: oldest_ping_stats,
+            bootstrap_ping: bootstrap_ping_stats,
+            sample_infohashes_producer: sample_infohashes_producer_stats,
+        };
         Ok((
             Self {
+                stats: stats.clone(),
                 scheduler,
                 ping,
                 find_node,
@@ -618,17 +640,7 @@ impl DhtCrawlerMaintenanceSupervisor {
                 sample_infohashes_producer,
                 target_rotator,
             },
-            DhtCrawlerMaintenanceStatsHandle {
-                discovery: discovery_stats,
-                scheduler: scheduler_stats,
-                ping: ping_stats,
-                find_node: find_node_stats,
-                sample_infohashes_worker: sample_infohashes_worker_stats,
-                oldest_find: oldest_find_stats,
-                oldest_ping: oldest_ping_stats,
-                bootstrap_ping: bootstrap_ping_stats,
-                sample_infohashes_producer: sample_infohashes_producer_stats,
-            },
+            stats,
         ))
     }
 
@@ -677,6 +689,7 @@ impl DhtCrawlerMaintenanceSupervisor {
         F: Future<Output = ()>,
     {
         let Self {
+            stats: _,
             scheduler,
             ping,
             find_node,
@@ -1345,6 +1358,7 @@ mod tests {
         let (supervisor, stats) =
             new_with_bootstrap_nodes(discovery, &client, runtime.table(), &triage, Vec::new())
                 .unwrap();
+        let owned_stats = supervisor.stats_handle();
 
         assert_eq!(stats.discovery.snapshot(), DhtDiscoveryStats::default());
         assert_eq!(
@@ -1392,6 +1406,10 @@ mod tests {
                 table_queries: 1,
                 ..DhtSampleInfoHashesProducerStats::default()
             }
+        );
+        assert_eq!(
+            owned_stats.sample_infohashes_producer.snapshot(),
+            stats.sample_infohashes_producer.snapshot()
         );
         assert_eq!(
             stats.sample_infohashes_worker.snapshot(),
