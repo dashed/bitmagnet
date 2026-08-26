@@ -143,16 +143,23 @@ jobs:
   docker-graphql:
     name: docker build and smoke (GraphQL read API)
     runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.export.outputs.artifact-name }}
+      archive-sha256: ${{ steps.export.outputs.archive-sha256 }}
+      builder-attempt: ${{ steps.export.outputs.builder-attempt }}
+      image-id: ${{ steps.export.outputs.image-id }}
+      source-commit: ${{ steps.source.outputs.commit }}
+      source-tree: ${{ steps.source.outputs.tree }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Resolve exact source identity
         id: source
         working-directory: ${{ github.workspace }}
         run: |
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: bitmagnet-rs
           file: bitmagnet-rs/docker/Dockerfile.graphql
@@ -193,6 +200,231 @@ jobs:
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user 65532:65532 "$image" --help \
             | grep -F 'Usage: bitmagnet-graphql'
+      - name: Export verified image for guarded publication
+        id: export
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          artifact_dir="$RUNNER_TEMP/bitmagnet-graphql-image"
+          archive="$artifact_dir/bitmagnet-graphql.tar"
+          builder_attempt="$GITHUB_RUN_ATTEMPT"
+          artifact_name="graphql-image-${SOURCE_COMMIT}-attempt-${builder_attempt}"
+          printf '%s' "$builder_attempt" | grep -Eq '^[1-9][0-9]*$'
+          mkdir -p "$artifact_dir"
+          docker image save --output "$archive" bitmagnet-graphql:ci
+          image_id="$(docker image inspect --format '{{.Id}}' bitmagnet-graphql:ci)"
+          archive_sha256="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          jq -n \
+            --arg schema "bitmagnet.graphql-image-build/v1" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$image_id" \
+            --arg archiveSha256 "$archive_sha256" \
+            --argjson builderAttempt "$builder_attempt" \
+            '{
+              schema: $schema,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              builderAttempt: $builderAttempt
+            }' > "$artifact_dir/build-receipt.json"
+          printf '%s  %s\n' "$archive_sha256" "bitmagnet-graphql.tar" \
+            > "$artifact_dir/bitmagnet-graphql.tar.sha256"
+          {
+            echo "artifact-name=$artifact_name"
+            echo "archive-sha256=$archive_sha256"
+            echo "builder-attempt=$builder_attempt"
+            echo "image-id=$image_id"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload verified image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # A rerun gets a fresh artifact even if cancellation interrupted a
+          # previous attempt after its upload completed.
+          name: ${{ steps.export.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-graphql-image
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-graphql:
+    name: publish digest-authoritative GraphQL read API image
+    if: >-
+      success() &&
+      github.repository == 'dashed/bitmagnet' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/alberto/my-fork'
+    needs:
+      - docker-graphql
+      - fmt
+      - clippy
+      - test
+      - cargo-deny
+      - test-pg
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/dashed/bitmagnet-graphql
+      BUILD_ARTIFACT_NAME: ${{ needs.docker-graphql.outputs.artifact-name }}
+      BUILDER_ATTEMPT: ${{ needs.docker-graphql.outputs.builder-attempt }}
+      SOURCE_COMMIT: ${{ needs.docker-graphql.outputs.source-commit }}
+      SOURCE_TREE: ${{ needs.docker-graphql.outputs.source-tree }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.docker-graphql.outputs.archive-sha256 }}
+      EXPECTED_IMAGE_ID: ${{ needs.docker-graphql.outputs.image-id }}
+    steps:
+      - name: Download verified image artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # Use the builder's output verbatim. A failed-job retry increments the
+          # publisher attempt without rerunning a successful builder.
+          name: ${{ needs.docker-graphql.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-graphql-image
+      - name: Verify and load exact smoked image
+        working-directory: ${{ runner.temp }}/bitmagnet-graphql-image
+        run: |
+          test "$SOURCE_COMMIT" = "$GITHUB_SHA"
+          printf '%s' "$BUILDER_ATTEMPT" | grep -Eq '^[1-9][0-9]*$'
+          test "$BUILD_ARTIFACT_NAME" \
+            = "graphql-image-${SOURCE_COMMIT}-attempt-${BUILDER_ATTEMPT}"
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$SOURCE_TREE" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$EXPECTED_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$EXPECTED_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "bitmagnet-graphql.tar" \
+            | sha256sum --check --strict -
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            '.schema == "bitmagnet.graphql-image-build/v1" and
+             .sourceCommit == $commit and
+             .sourceTree == $tree and
+             .imageId == $imageId and
+             .archiveSha256 == $archiveSha256 and
+             .builderAttempt == $builderAttempt' \
+            build-receipt.json
+          docker image load --input bitmagnet-graphql.tar
+          test "$(docker image inspect --format '{{.Id}}' bitmagnet-graphql:ci)" \
+            = "$EXPECTED_IMAGE_ID"
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish and verify immutable digest
+        id: publish
+        working-directory: ${{ runner.temp }}/bitmagnet-graphql-image
+        run: |
+          image_ref="$IMAGE_REPOSITORY:$SOURCE_COMMIT"
+          tag_state=pushed
+          inspect_error="$(mktemp)"
+          # The full-SHA tag is a mutable convenience reference. A prior
+          # attempt may already have pushed it before cancellation, so reuse is
+          # accepted only when the digest pull below matches the smoked image.
+          if remote_inspect="$(docker buildx imagetools inspect "$image_ref" 2>"$inspect_error")"; then
+            tag_state=reused
+          elif ! grep -Eqi 'manifest unknown|not found' "$inspect_error"; then
+            cat "$inspect_error" >&2
+            exit 1
+          else
+            docker image tag bitmagnet-graphql:ci "$image_ref"
+            docker image push "$image_ref"
+            remote_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          fi
+          printf '%s\n' "$remote_inspect"
+          digest="$(printf '%s\n' "$remote_inspect" | awk '$1 == "Digest:" { print $2; exit }')"
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+
+          # Only this digest-qualified reference is deployment authority.
+          immutable_ref="$IMAGE_REPOSITORY@$digest"
+          docker buildx imagetools inspect "$immutable_ref"
+          docker image pull "$immutable_ref"
+          inspect="$(mktemp)"
+          docker image inspect "$immutable_ref" | tee "$inspect"
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg immutableRef "$immutable_ref" '
+              length == 1 and
+              .[0].Id == $imageId and
+              (.[0].RepoDigests | index($immutableRef)) != null and
+              .[0].Os == "linux" and
+              .[0].Architecture == "amd64" and
+              .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+              .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+              .[0].Config.Labels["io.bitmagnet.graphql-mode"] == "read-only" and
+              .[0].Config.Labels["io.bitmagnet.graphql-read-contract"] == "read-only/v1" and
+              (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+              (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+            ' "$inspect"
+
+          final_tag_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          printf '%s\n' "$final_tag_inspect"
+          final_tag_digest="$(printf '%s\n' "$final_tag_inspect" \
+            | awk '$1 == "Digest:" { print $2; exit }')"
+          test "$final_tag_digest" = "$digest"
+
+          jq -n \
+            --arg schema "bitmagnet.graphql-image-publication/v2" \
+            --arg imageRepository "$IMAGE_REPOSITORY" \
+            --arg tag "$SOURCE_COMMIT" \
+            --arg tagRef "$image_ref" \
+            --arg tagPolicy "mutable-convenience-only" \
+            --arg deploymentAuthority "digest" \
+            --arg digest "$digest" \
+            --arg immutableRef "$immutable_ref" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --arg tagState "$tag_state" \
+            --arg workflowRun "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            --argjson publisherAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: $schema,
+              imageRepository: $imageRepository,
+              tag: $tag,
+              tagRef: $tagRef,
+              tagPolicy: $tagPolicy,
+              deploymentAuthority: $deploymentAuthority,
+              digest: $digest,
+              immutableRef: $immutableRef,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              tagState: $tagState,
+              workflowRun: $workflowRun,
+              builderAttempt: $builderAttempt,
+              publisherAttempt: $publisherAttempt
+            }' > publication-receipt.json
+          {
+            echo '### GraphQL image publication'
+            echo
+            echo "- Source commit: \`$SOURCE_COMMIT\`"
+            echo "- Source tree: \`$SOURCE_TREE\`"
+            echo "- Deployment authority: \`$immutable_ref\`"
+            echo "- Full-SHA tag (mutable convenience): \`$image_ref\` (\`$tag_state\`)"
+            echo "- Builder attempt: \`$BUILDER_ATTEMPT\`"
+            echo "- Publisher attempt: \`$GITHUB_RUN_ATTEMPT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "immutable-ref=$immutable_ref" >> "$GITHUB_OUTPUT"
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: graphql-publication-${{ needs.docker-graphql.outputs.source-commit }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bitmagnet-graphql-image/publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90
 
   docker-ingest-shadow:
     name: docker build (ingest shadow)
