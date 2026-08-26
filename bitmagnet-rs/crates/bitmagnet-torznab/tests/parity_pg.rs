@@ -5,7 +5,8 @@
 //! ```text
 //! POSTGRES_DSN=postgres://... go test -tags integration -count=1 \
 //!   ./internal/torznab -run '^TestGenerateTorznabParityPgFixtures$'
-//! BITMAGNET_TORZNAB_TEST_DATABASE_URL=postgres://... cargo test \
+//! # Provision the fixed SELECT-only reader shown in `.github/workflows/rust.yml`.
+//! BITMAGNET_TORZNAB_TEST_DATABASE_URL=postgres://bitmagnet_torznab_reader_ci:... cargo test \
 //!   -p bitmagnet-torznab --test parity_pg -- --ignored --test-threads=1
 //! ```
 //!
@@ -30,6 +31,7 @@ mod parity_support;
 use parity_support::{first_diff, goldens_dir, load_corpus, normalize};
 
 const EXPECTED_GOOSE_VERSION: i64 = 33;
+const READER_ROLE: &str = "bitmagnet_torznab_reader_ci";
 macro_rules! fingerprint_sql {
     ($table:literal) => {
         concat!(
@@ -68,12 +70,14 @@ const FINGERPRINT_QUERIES: [(&str, &str); 10] = [
 #[tokio::test]
 #[ignore = "requires Go-seeded disposable PostgreSQL (set BITMAGNET_TORZNAB_TEST_DATABASE_URL)"]
 async fn real_pg_router_matches_go_goldens_without_mutation() {
-    let Some(dsn) = test_dsn() else {
+    let Some(reader_dsn) = test_dsn() else {
         eprintln!("BITMAGNET_TORZNAB_TEST_DATABASE_URL not set; skipping Torznab PG parity");
         return;
     };
 
-    let pool = readonly_pool(&dsn).await;
+    assert_select_only_reader(&reader_dsn).await;
+
+    let pool = readonly_pool(&reader_dsn).await;
     let read_only: String = sqlx::query_scalar("SHOW default_transaction_read_only")
         .fetch_one(&pool)
         .await
@@ -93,7 +97,7 @@ async fn real_pg_router_matches_go_goldens_without_mutation() {
             actual: 33,
         }))
     ));
-    assert_goose_mismatch_precedes_listener_bind(&dsn).await;
+    assert_goose_mismatch_precedes_listener_bind(&reader_dsn).await;
 
     let app = pg_router(Config::default().merge_defaults(), pool.clone());
     let dir = goldens_dir();
@@ -194,6 +198,59 @@ async fn readonly_pool(dsn: &str) -> PgPool {
         .connect(dsn)
         .await
         .expect("connect to Go-seeded disposable PostgreSQL")
+}
+
+async fn assert_select_only_reader(dsn: &str) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(dsn)
+        .await
+        .expect("connect as the dedicated Torznab reader");
+
+    let attributes = sqlx::query_as::<_, (String, bool, bool, bool, bool, bool, bool, bool)>(
+        "SELECT current_user::text, rolcanlogin, rolinherit, rolsuper, rolcreatedb, \
+         rolcreaterole, rolreplication, rolbypassrls \
+         FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read the Torznab reader's role attributes");
+    assert_eq!(
+        attributes,
+        (
+            READER_ROLE.to_owned(),
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        ),
+        "the Torznab test DSN must authenticate as the dedicated unprivileged reader"
+    );
+
+    let table_privileges = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT privilege_type \
+         FROM information_schema.role_table_grants \
+         WHERE grantee = current_user \
+         ORDER BY privilege_type",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read effective table grants for the Torznab reader");
+    assert_eq!(table_privileges, ["SELECT"]);
+
+    let write_error = sqlx::query("UPDATE torrents SET name = name WHERE FALSE")
+        .execute(&pool)
+        .await
+        .expect_err("the dedicated Torznab reader must not hold UPDATE");
+    let sqlx::Error::Database(write_error) = write_error else {
+        panic!("expected a PostgreSQL permission error, got {write_error}");
+    };
+    assert_eq!(write_error.code().as_deref(), Some("42501"));
+
+    pool.close().await;
 }
 
 async fn table_fingerprints(pool: &PgPool) -> BTreeMap<&'static str, (i64, String)> {
