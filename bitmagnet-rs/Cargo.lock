@@ -900,6 +900,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -947,17 +949,24 @@ dependencies = [
 name = "bitmagnet-dht-crawler-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "axum",
+ "bitmagnet-blocking",
  "bitmagnet-common",
  "bitmagnet-db",
  "bitmagnet-dht",
  "bitmagnet-dht-crawler",
  "clap",
+ "hyper",
+ "hyper-util",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tracing",
 ]
 
 [[package]]

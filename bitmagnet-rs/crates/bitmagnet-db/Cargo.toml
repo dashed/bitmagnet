@@ -13,11 +13,13 @@ bitmagnet-model = { path = "../bitmagnet-model" }
 sqlx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 # Provides the multi-threaded runtime + `#[tokio::test]` macro for the
 # (DB-gated) async tests; the library itself drives no runtime of its own.
 tokio.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

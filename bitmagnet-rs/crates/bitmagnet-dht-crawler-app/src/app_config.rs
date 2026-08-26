@@ -11,6 +11,8 @@ use clap::Parser;
 
 /// Default budget for either application startup or graceful shutdown.
 pub const DHT_CRAWLER_WRITER_DEFAULT_PROCESS_TIMEOUT_SECONDS: u16 = 20;
+/// Smallest lifecycle budget that leaves a forced-cleanup and pool-close tail.
+pub const DHT_CRAWLER_WRITER_MIN_PROCESS_TIMEOUT_SECONDS: u16 = 10;
 /// Largest accepted application startup or graceful-shutdown budget.
 pub const DHT_CRAWLER_WRITER_MAX_PROCESS_TIMEOUT_SECONDS: u16 = 300;
 
@@ -26,8 +28,11 @@ impl DhtCrawlerWriterProcessTimeout {
 
     /// Validate a timeout expressed in whole seconds.
     pub const fn from_seconds(seconds: u64) -> Result<Self, DhtCrawlerWriterProcessTimeoutError> {
-        if seconds == 0 {
-            return Err(DhtCrawlerWriterProcessTimeoutError::Zero);
+        if seconds < DHT_CRAWLER_WRITER_MIN_PROCESS_TIMEOUT_SECONDS as u64 {
+            return Err(DhtCrawlerWriterProcessTimeoutError::TooSmall {
+                seconds,
+                minimum_seconds: DHT_CRAWLER_WRITER_MIN_PROCESS_TIMEOUT_SECONDS,
+            });
         }
         if seconds > DHT_CRAWLER_WRITER_MAX_PROCESS_TIMEOUT_SECONDS as u64 {
             return Err(DhtCrawlerWriterProcessTimeoutError::TooLarge {
@@ -80,8 +85,8 @@ impl FromStr for DhtCrawlerWriterProcessTimeout {
 pub enum DhtCrawlerWriterProcessTimeoutError {
     #[error("writer-process timeout must be an unsigned integer number of seconds")]
     NotUnsignedInteger,
-    #[error("writer-process timeout must be positive")]
-    Zero,
+    #[error("writer-process timeout {seconds}s is below minimum {minimum_seconds}s")]
+    TooSmall { seconds: u64, minimum_seconds: u16 },
     #[error("writer-process timeout {seconds}s exceeds maximum {maximum_seconds}s")]
     TooLarge { seconds: u64, maximum_seconds: u16 },
 }
@@ -217,7 +222,7 @@ mod tests {
             "--http-server-local-address",
             ":4321",
             "--startup-timeout-seconds",
-            "7",
+            "10",
             "--graceful-shutdown-timeout-seconds",
             "11",
         ]);
@@ -226,7 +231,7 @@ mod tests {
             .projection()
             .unwrap();
         assert_eq!(projection.http_listen_addr, "0.0.0.0:4321".parse().unwrap());
-        assert_eq!(projection.startup_timeout.seconds(), 7);
+        assert_eq!(projection.startup_timeout.seconds(), 10);
         assert_eq!(projection.shutdown_timeout.seconds(), 11);
     }
 
@@ -253,7 +258,7 @@ mod tests {
             "--startup-timeout-seconds",
             "--graceful-shutdown-timeout-seconds",
         ] {
-            for invalid in ["0", "301", "-1", "not-a-number"] {
+            for invalid in ["0", "9", "301", "-1", "not-a-number"] {
                 let mut args = required_args().to_vec();
                 args.extend([flag, invalid]);
                 assert!(DhtCrawlerWriterAppConfig::command()

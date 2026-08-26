@@ -31,9 +31,26 @@ bind. It neither creates the version table nor applies or rolls back a
 migration. A returned error after UDP bind contains the bound address and the
 awaited runtime-shutdown result. Cancelling the start future during that cleanup
 instead falls back to the runtime's aborting `Drop` behavior and carries no
-joined-cleanup proof. No executable invokes this writer-capable constructor,
-and the adapters and full graph have not been validated against live
-PostgreSQL. This is not a live-database or production-readiness claim.
+joined-cleanup proof. The source-only `bitmagnet-dht-crawler` executable invokes
+this constructor behind an overall startup deadline; deadline cancellation
+therefore also carries no joined-cleanup proof. The adapters and full graph have
+not been validated against live PostgreSQL. This is not a live-database or
+production-readiness claim.
+
+The application process installs and polls one signal owner before its first
+listener bind, carries that same owner through database and graph startup, and
+then biased-polls it at an activation gate before steady-state supervision can
+first-poll the worker graph. Startup cleanup is bounded. Steady-state graph and
+HTTP drain receive the main graceful budget, forced joins and caller-owned pool
+closure share the reserved tail, and no join is awaited past the hard process
+deadline. A forced owner that does not join in time has explicitly absent
+terminal evidence and makes the process abnormal; finalizer recovery is
+abandoned as unproven when supervisor evidence is absent. The executable owns
+its Tokio runtime behind an unwind-safe guard whose zero-wait shutdown prevents
+a blocking OS DNS resolver from extending process exit beyond the coordinator's
+evidence boundary. The compatible DSN boundary rejects unknown query keys
+before SQLx parsing can log their values and redacts all remaining parse
+failures.
 
 The crate boundary is intentional. `bitmagnet-dht` owns the typed
 `DhtInfoHashTriageRequest`, its bounded input route, and the bounded get-peers
@@ -385,8 +402,8 @@ preservation, and collaborator error identity. They do not establish live
 PostgreSQL array codecs, schema or index state, query plans, result order,
 server-side cancellation, or production readiness. The adapter creates and
 closes no pool, starts no task, and retries nothing. The library start seam
-wires it around a caller-owned pool, but no executable invokes that seam and no
-live PostgreSQL validation has been completed.
+wires it around a caller-owned pool, and the source writer executable invokes
+that complete graph. No live PostgreSQL validation has been completed.
 
 ### Atomic PostgreSQL torrent persistence
 
@@ -857,8 +874,10 @@ the blocker receives an ordered hash slice and explicit flush flag.
 tests may continue to inject other implementations. Separately, the existing
 direct `BlockingManager` implementation supplies `DhtInfoHashBlocker`;
 the library start seam constructs and shares it, and the pipeline run owns its
-finalization. Executable invocation, nonempty finalization evidence, and
-retry, abandon, and operator failure policy remain deferred.
+finalization. The source writer executable invokes the graph and retains the
+external finalizer only long enough to classify the run result; it never retries
+an ambiguous or unproven finalization. Nonempty live finalization evidence and
+deployed operator failure policy remain deferred.
 
 `with_config` accepts a `DhtRequestMetaInfoWorkerConfig`; its nonzero
 `max_inflight` defaults to 400, matching Go's configured callback concurrency
@@ -1849,20 +1868,18 @@ above. No gate alone establishes production composition or readiness.
 
 The following remain deliberately outside this checkpoint:
 
-- secret-only database configuration, eager pool creation, and pool-close
-  ownership in an executable; the library start seam accepts a caller-owned
-  pool and does not expose connection material through CLI or `Debug`;
 - disposable-Goose-schema integration for the complete graph, including exact
   missing/wrong/reapplied head admission; live codecs, constraints, triggers,
   plans, transaction rollback, commit acknowledgement, statement auditing, and
   durability for every concrete PostgreSQL adapter;
-- an executable process owner with signal and bounded-timeout policy, HTTP
-  liveness/readiness/diagnostics, metric registration, logging, restart policy,
-  and operator treatment of abnormal worker, runtime, finalizer, and cancelled
-  start outcomes;
-- nonempty blocking-manager finalization and retry/abandon policy after the
-  graph has run; the existing external finalizer handle is an advisory recovery
-  capability and the type system does not prevent concurrent misuse;
+- live process validation for the source executable's environment-only database
+  loading, eager pool creation, signal and bounded-timeout policy, HTTP
+  liveness/readiness/diagnostics, metrics, pool-close ownership, and abnormal
+  worker, runtime, finalizer, or cancelled-start outcomes;
+- nonempty blocking-manager finalization evidence after the graph has run. The
+  source process records completed, ambiguous, or unproven-quiescence
+  dispositions and performs zero automatic retries because an acknowledged
+  commit can be ambiguous and stable Bloom replay is not idempotent;
 - live peer-wire, DNS, UDP, throughput, backpressure, and shutdown-soak
   validation of the complete constructed graph;
 - activation of direct `process_torrent_shadow` routing, including exclusive
@@ -1878,7 +1895,8 @@ one recovered discovery sender, the original root-triage input, its unique
 receiver, every internal route capability, all six workers, and one shared
 blocking manager into the existing staged supervisor. On success no route
 producer clone escapes through its sender-free stats and lifecycle handles.
-The supervisor still does no worker work until `run` is polled. There is no
-writer executable, deployment object, live-database gate result, or production
-call site, so source-level constructibility must not be described as activation
-or takeover readiness.
+The supervisor still does no worker work until `run` is polled. The separate
+application crate now provides one source-level writer executable, but there is
+no deployment object, image admission, live-database gate result, restore proof,
+or production call site. Source-level process composition must not be described
+as activation or takeover readiness.

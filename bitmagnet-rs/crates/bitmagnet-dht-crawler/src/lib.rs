@@ -5,9 +5,11 @@
 //! policy-dependent routing decisions. The core worker still receives injected
 //! collaborators, while this crate supplies concrete adapters for PostgreSQL
 //! triage lookup and the persistent blocking manager. A staged pipeline
-//! supervisor owns the constructed crawler lifecycle. The pure application
-//! configuration contract is present; database-secret loading, executable,
-//! readiness, and deployment wiring remain deferred.
+//! supervisor owns the constructed crawler lifecycle. The separate
+//! `bitmagnet-dht-crawler-app` crate supplies secret-free CLI configuration,
+//! environment-only database loading, process supervision, health endpoints,
+//! and an executable. Live PostgreSQL, image, restore/rollback, and deployment
+//! admission remain deferred.
 
 mod app_config;
 mod blocking_manager_filter;

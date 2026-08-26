@@ -6,6 +6,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use url::Url;
 
 use crate::error::DbError;
 
@@ -204,7 +205,9 @@ impl DbConfig {
     /// Derives SQLx [`PgConnectOptions`] from this config.
     pub(crate) fn connect_options(&self) -> Result<PgConnectOptions, DbError> {
         if !self.dsn.is_empty() {
-            return PgConnectOptions::from_str(&self.dsn).map_err(DbError::from);
+            validate_dsn_query_parameters(&self.dsn)?;
+            return PgConnectOptions::from_str(&self.dsn)
+                .map_err(|_| DbError::Config("invalid PostgreSQL DSN".to_owned()));
         }
 
         let mut options = PgConnectOptions::new()
@@ -231,6 +234,42 @@ impl DbConfig {
             "<dsn>".to_owned()
         }
     }
+}
+
+fn validate_dsn_query_parameters(dsn: &str) -> Result<(), DbError> {
+    let url =
+        Url::parse(dsn).map_err(|_| DbError::Config("invalid PostgreSQL DSN URL".to_owned()))?;
+    let all_supported = url.query_pairs().all(|(key, _)| {
+        matches!(
+            key.as_ref(),
+            "sslmode"
+                | "ssl-mode"
+                | "sslrootcert"
+                | "ssl-root-cert"
+                | "ssl-ca"
+                | "sslcert"
+                | "ssl-cert"
+                | "sslkey"
+                | "ssl-key"
+                | "statement-cache-capacity"
+                | "host"
+                | "hostaddr"
+                | "port"
+                | "dbname"
+                | "user"
+                | "password"
+                | "application_name"
+                | "options"
+        ) || key
+            .strip_prefix("options[")
+            .is_some_and(|key| key.strip_suffix(']').is_some())
+    });
+    if !all_supported {
+        return Err(DbError::Config(
+            "PostgreSQL DSN contains an unsupported query parameter".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn compatibility_env_value(key: &str) -> Result<Option<String>, DbError> {
@@ -314,9 +353,33 @@ where
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    struct LogCaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCaptureWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            LogCaptureWriter(self.0.clone())
+        }
+    }
 
     #[test]
     fn defaults_match_go() {
@@ -342,11 +405,72 @@ mod tests {
     #[test]
     fn connect_options_from_dsn_url() {
         let cfg = DbConfig {
-            dsn: "postgres://u:p@db.example:6432/mydb".to_owned(),
+            dsn: "postgres://u:p@db.example:6432/mydb?sslmode=require&application_name=bitmagnet&options%5Bsearch_path%5D=public".to_owned(),
             ..DbConfig::default()
         };
         assert!(cfg.connect_options().is_ok());
         assert_eq!(cfg.log_target(), "<dsn>");
+    }
+
+    #[test]
+    fn dsn_rejects_unknown_query_keys_without_parsing_or_exposing_values() {
+        let secret = "sentinel-secret-that-must-not-be-logged";
+        for dsn in [
+            format!("postgres://u:p@db.example/mydb?typo={secret}"),
+            format!("postgres://u:p@db.example/mydb?ty%70o={secret}"),
+        ] {
+            let cfg = DbConfig {
+                dsn,
+                ..DbConfig::default()
+            };
+            let rendered = cfg.connect_options().unwrap_err().to_string();
+            assert_eq!(
+                rendered,
+                "configuration error: PostgreSQL DSN contains an unsupported query parameter"
+            );
+            assert!(!rendered.contains(secret));
+            assert!(!rendered.contains("typo"));
+        }
+    }
+
+    #[test]
+    fn unknown_dsn_value_never_reaches_tracing() {
+        let secret = "sentinel-secret-that-must-not-reach-tracing";
+        let cfg = DbConfig {
+            dsn: format!("postgres://u:p@db.example/mydb?typo={secret}"),
+            ..DbConfig::default()
+        };
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(capture.clone())
+            .finish();
+
+        let rendered = tracing::subscriber::with_default(subscriber, || {
+            cfg.connect_options().unwrap_err().to_string()
+        });
+        let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+
+        assert!(!rendered.contains(secret));
+        assert!(!logs.contains(secret));
+        assert!(
+            logs.is_empty(),
+            "unknown DSN must fail before SQLx logs: {logs}"
+        );
+    }
+
+    #[test]
+    fn dsn_parse_errors_are_redacted() {
+        let secret = "sentinel-secret-that-must-not-be-exposed";
+        let cfg = DbConfig {
+            dsn: format!("postgres://u:p@db.example/mydb?sslmode={secret}"),
+            ..DbConfig::default()
+        };
+        let rendered = cfg.connect_options().unwrap_err().to_string();
+        assert_eq!(rendered, "configuration error: invalid PostgreSQL DSN");
+        assert!(!rendered.contains(secret));
     }
 
     #[test]

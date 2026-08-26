@@ -80,6 +80,7 @@ zstd = "0.13"
 # JSON — currently test-only (the tokenizer parity fixtures); pinned centrally
 # so member crates reference it via `serde_json.workspace = true`.
 serde_json = "1"
+url = "2"
 
 # Layered config provider-stack selected in
 # docs/dev/rust-rewrite/03-ecosystem-mapping.md §7 (defaults < file < env).
