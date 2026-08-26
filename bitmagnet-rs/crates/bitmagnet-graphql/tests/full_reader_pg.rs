@@ -4,6 +4,11 @@
 //! This Rust test then authenticates one exact least-privilege role, gives the
 //! complete runtime schema one read-only pool, and exercises search, facet,
 //! hydration, direct-torrent, and queue reads without changing any public row.
+//!
+//! This is an authority contract, not production identity provisioning. A
+//! production activation must separately audit and revoke PUBLIC execution on
+//! every public routine before granting only `budgeted_count`; granting the
+//! reader alone leaves SECURITY DEFINER mutation routines publicly executable.
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
