@@ -151,8 +151,12 @@ impl TorrentQuery {
         super::torrent_files::resolve(runtime, input).await
     }
 
-    async fn list_sources(&self) -> async_graphql::Result<TorrentListSourcesResult> {
-        unserved("torrent.listSources")
+    async fn list_sources(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<TorrentListSourcesResult> {
+        let runtime = ctx.data::<super::torrent_sources::TorrentSourcesRuntimeData>()?;
+        super::torrent_sources::resolve(runtime).await
     }
 
     async fn metrics(

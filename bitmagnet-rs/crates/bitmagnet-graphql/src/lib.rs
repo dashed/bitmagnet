@@ -25,4 +25,8 @@ pub use schema::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };
+pub use schema::{
+    PgTorrentSourcesRuntime, TorrentSourceRecord, TorrentSourcesError, TorrentSourcesRuntime,
+    TorrentSourcesRuntimeData, MAX_TORRENT_SOURCES,
+};
 pub use schema::{SearchRuntime, SearchRuntimeData};

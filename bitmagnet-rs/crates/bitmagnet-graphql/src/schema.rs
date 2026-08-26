@@ -10,6 +10,7 @@ pub(crate) mod scalars;
 pub mod search;
 mod search_resolvers;
 pub mod torrent_files;
+pub mod torrent_sources;
 
 use async_graphql::EmptySubscription;
 
@@ -20,6 +21,10 @@ pub use search::{SearchRuntime, SearchRuntimeData};
 pub use torrent_files::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
+};
+pub use torrent_sources::{
+    PgTorrentSourcesRuntime, TorrentSourceRecord, TorrentSourcesError, TorrentSourcesRuntime,
+    TorrentSourcesRuntimeData, MAX_TORRENT_SOURCES,
 };
 
 /// Runtime version data available to GraphQL resolvers.
@@ -34,6 +39,7 @@ pub fn schema() -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(SearchRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentSourcesRuntimeData::disabled())
         .finish()
 }
 
@@ -44,6 +50,7 @@ pub fn build_schema(version: String) -> Schema {
         .data(Version(version))
         .data(SearchRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentSourcesRuntimeData::disabled())
         .finish()
 }
 
@@ -54,6 +61,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
         .data(Version(version))
         .data(SearchRuntimeData::new(search))
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentSourcesRuntimeData::disabled())
         .finish()
 }
 
@@ -69,7 +77,8 @@ pub fn build_runtime_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::disabled())
-        .data(TorrentFilesRuntimeData::pg(pool))
+        .data(TorrentFilesRuntimeData::pg(pool.clone()))
+        .data(TorrentSourcesRuntimeData::pg(pool))
         .finish()
 }
 
@@ -86,7 +95,8 @@ pub fn build_runtime_search_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::new(search))
-        .data(TorrentFilesRuntimeData::pg(pool))
+        .data(TorrentFilesRuntimeData::pg(pool.clone()))
+        .data(TorrentSourcesRuntimeData::pg(pool))
         .finish()
 }
 
