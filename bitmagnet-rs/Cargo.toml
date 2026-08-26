@@ -33,6 +33,7 @@ members = [
     "crates/bitmagnet-metainfo",
     "crates/bitmagnet-dht",
     "crates/bitmagnet-dht-crawler",
+    "crates/bitmagnet-dht-observe",
 ]
 
 [workspace.package]

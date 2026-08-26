@@ -944,6 +944,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitmagnet-dht-observe"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bitmagnet-common",
+ "bitmagnet-dht",
+ "bitmagnet-dht-crawler",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "bitmagnet-diff"
 version = "0.1.0"
 dependencies = [
