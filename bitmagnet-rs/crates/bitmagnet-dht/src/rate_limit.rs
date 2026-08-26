@@ -139,6 +139,20 @@ pub enum DhtRateLimitWaitError {
     WouldExceedDeadline,
 }
 
+/// Invalid configurable refill interval for an outbound keyed limiter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DhtOutboundRateLimiterConfigError {
+    /// A zero interval cannot define a finite token rate.
+    #[error("outbound keyed rate-limit interval must be nonzero")]
+    ZeroInterval,
+    /// This seam accepts only policies at least as fast as the DHT default.
+    #[error("outbound keyed rate-limit interval {interval:?} exceeds the DHT default {maximum:?}")]
+    IntervalExceedsDhtDefault {
+        interval: Duration,
+        maximum: Duration,
+    },
+}
+
 impl DhtOutboundRateLimiter {
     /// Construct the deployed outbound policy with initially full buckets.
     #[must_use]
@@ -149,6 +163,35 @@ impl DhtOutboundRateLimiter {
             KEY_CAPACITY,
             KEY_TTL,
         )
+    }
+
+    /// Construct the outbound keyed policy with a caller-selected refill
+    /// interval and the production burst-four, 1,000-key, 20-second-TTL
+    /// bounds.
+    ///
+    /// This narrow seam supports protocols whose per-address rate is faster
+    /// than the DHT query default without exposing cache bounds or
+    /// slower/extreme timer policies as application knobs.
+    pub fn try_with_interval(
+        interval: Duration,
+    ) -> Result<Self, DhtOutboundRateLimiterConfigError> {
+        if interval.is_zero() {
+            return Err(DhtOutboundRateLimiterConfigError::ZeroInterval);
+        }
+        if interval > PER_IP_INTERVAL {
+            return Err(
+                DhtOutboundRateLimiterConfigError::IntervalExceedsDhtDefault {
+                    interval,
+                    maximum: PER_IP_INTERVAL,
+                },
+            );
+        }
+        Ok(Self::with_policy(
+            interval,
+            OUTBOUND_PER_IP_BURST,
+            KEY_CAPACITY,
+            KEY_TTL,
+        ))
     }
 
     /// Wait until one outbound admission for `addr` is available.
@@ -682,6 +725,55 @@ mod tests {
             pending::<()>().await;
         };
         limiter.wait_with(IPV4_A, None, cancellation).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn checked_interval_constructor_preserves_fixed_outbound_bounds() {
+        assert!(matches!(
+            DhtOutboundRateLimiter::try_with_interval(Duration::ZERO),
+            Err(DhtOutboundRateLimiterConfigError::ZeroInterval)
+        ));
+        assert!(matches!(
+            DhtOutboundRateLimiter::try_with_interval(Duration::MAX),
+            Err(
+                DhtOutboundRateLimiterConfigError::IntervalExceedsDhtDefault {
+                    interval: Duration::MAX,
+                    maximum: PER_IP_INTERVAL,
+                }
+            )
+        ));
+        assert!(matches!(
+            DhtOutboundRateLimiter::try_with_interval(
+                PER_IP_INTERVAL + Duration::from_nanos(1)
+            ),
+            Err(
+                DhtOutboundRateLimiterConfigError::IntervalExceedsDhtDefault {
+                    interval,
+                    maximum: PER_IP_INTERVAL,
+                }
+            ) if interval == PER_IP_INTERVAL + Duration::from_nanos(1)
+        ));
+        assert!(
+            DhtOutboundRateLimiter::try_with_interval(PER_IP_INTERVAL).is_ok(),
+            "the existing DHT interval remains accepted"
+        );
+
+        let limiter =
+            DhtOutboundRateLimiter::try_with_interval(Duration::from_millis(500)).unwrap();
+        for _ in 0..4 {
+            limiter.wait(IPV4_A).await;
+        }
+
+        let fifth = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.wait(IPV4_A).await }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(499)).await;
+        tokio::task::yield_now().await;
+        assert!(!fifth.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        fifth.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]

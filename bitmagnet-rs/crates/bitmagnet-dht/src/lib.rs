@@ -167,7 +167,8 @@ pub use ping_find_node_send::{send_ping_find_node_reply, DatagramSender, PingFin
 pub use ping_find_node_supervisor::{PingFindNodeSupervisor, PingFindNodeSupervisorExit};
 pub use query_send::{register_and_send_query, QuerySendError};
 pub use rate_limit::{
-    DhtInboundRateLimitDenial, DhtInboundRateLimiter, DhtOutboundRateLimiter, DhtRateLimitWaitError,
+    DhtInboundRateLimitDenial, DhtInboundRateLimiter, DhtOutboundRateLimiter,
+    DhtOutboundRateLimiterConfigError, DhtRateLimitWaitError,
 };
 pub use receive::{
     DatagramReceiver, ReceiveDispatchError, ReceiveDispatchOutcome, ReceiveDispatcher,
