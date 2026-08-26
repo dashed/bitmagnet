@@ -15,7 +15,7 @@ use bitmagnet_dht::DhtInfoHashTriageReceiver;
 /// Terminal state of one observation-worker run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DhtInfoHashObservationWorkerExit {
-    /// Every producer was dropped and every queued observation was consumed.
+    /// The route reached EOF and every queued observation was consumed.
     InputClosed,
     /// External shutdown won before another observation was consumed.
     Shutdown {
@@ -48,7 +48,7 @@ pub struct DhtInfoHashObservationStatsHandle {
 pub struct DhtInfoHashObservationStats {
     /// Occurrences removed from the route and deliberately discarded.
     pub observed: u64,
-    /// Runs that reached natural producer EOF.
+    /// Runs whose input route reached EOF.
     pub input_closed: u64,
     /// Runs whose external shutdown signal won.
     pub shutdowns: u64,
@@ -94,6 +94,10 @@ impl DhtInfoHashObservationWorker {
     /// Shutdown has deterministic priority. It closes the bounded route to
     /// later sends and drains every already accepted occurrence before
     /// returning, without retaining any hash or source address.
+    ///
+    /// Dropping this future returns no exit and makes no drain or accounting
+    /// claim. Accepted queued observations may then be dropped with the owned
+    /// receiver without contributing to either terminal counter.
     pub async fn run<F>(mut self, shutdown: F) -> DhtInfoHashObservationWorkerExit
     where
         F: Future<Output = ()>,
@@ -231,6 +235,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_after_an_observed_prefix_conserves_the_accepted_suffix() {
+        let (input, receiver) = dht_info_hash_triage_channel(NonZeroUsize::new(3).unwrap());
+        let (worker, stats) = DhtInfoHashObservationWorker::new(receiver);
+        for value in 1..=3 {
+            input.send(request(value)).await.unwrap();
+        }
+
+        let shutdown_stats = stats.clone();
+        let exit = worker
+            .run(async move {
+                while shutdown_stats.snapshot().observed == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+
+        assert_eq!(
+            exit,
+            DhtInfoHashObservationWorkerExit::Shutdown { queued_dropped: 2 }
+        );
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.observed, 1);
+        assert_eq!(snapshot.shutdown_queued_dropped, 2);
+        assert_eq!(
+            snapshot
+                .observed
+                .saturating_add(snapshot.shutdown_queued_dropped),
+            3
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_recovers_a_blocked_sender_commit_before_finishing_drain() {
         let (input, receiver) = dht_info_hash_triage_channel(NonZeroUsize::new(1).unwrap());
         let (worker, stats) = DhtInfoHashObservationWorker::new(receiver);
@@ -253,12 +289,13 @@ mod tests {
         let (worker, stats) = DhtInfoHashObservationWorker::new(receiver);
         let mut run = Box::pin(worker.run(pending()));
         assert_pending(run.as_mut()).await;
+        input.send(request(1)).await.unwrap();
         drop(run);
 
         assert_eq!(stats.snapshot(), DhtInfoHashObservationStats::default());
         assert_eq!(
-            input.send(request(1)).await.unwrap_err().into_request(),
-            request(1)
+            input.send(request(2)).await.unwrap_err().into_request(),
+            request(2)
         );
     }
 }
