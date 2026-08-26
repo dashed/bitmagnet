@@ -46,7 +46,7 @@ pub use message::{
 pub use pg::{
     ConsumeOutcome, Consumer, ConsumerConfig, DequeuedJob, MirrorBootstrap, MirrorConfig,
     MirrorCursor, MirrorIneligibleReason, MirrorReport, QueuePgError, QueueStore,
-    PROCESS_TORRENT_SHADOW,
+    ShadowJobEnvelopeV1, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 pub use producer_pg::{prepare_pg_queue_job_values, PgQueueJobValues, PreparedQueueJob};
 pub use status_pg::{

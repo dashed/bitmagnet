@@ -1,10 +1,11 @@
-//! Disconnected composition of the supported processor writer intent.
+//! Composition of the supported processor writer intent.
 //!
 //! The loader, classifier materializer, volatile-field projection, and
 //! transaction kernel deliberately landed as separate parity gates. This
 //! module joins the first three into the exact input image expected by
-//! [`crate::persist_write_set`] without calling that function or wiring a
-//! runtime, queue consumer, database writer, or blocking-manager lifecycle.
+//! [`crate::persist_write_set`] without calling that function. The
+//! ingest-shadow runtime consumes the plan for stable comparison only; it does
+//! not wire a live database writer or blocking-manager lifecycle.
 
 use std::collections::BTreeMap;
 
@@ -27,8 +28,8 @@ use crate::{
 /// value performs no database mutation.
 ///
 /// Failed hashes remain in the write-set as retry intent. Matching Go requires
-/// a future runtime to enqueue that retry successfully before persisting the
-/// successful portion of the same plan.
+/// any persisting runtime to enqueue that retry successfully before persisting
+/// the successful portion of the same plan.
 #[derive(Debug, PartialEq, Eq)]
 pub struct WriterPlan {
     write_set: WriteSet,
@@ -48,7 +49,7 @@ impl WriterPlan {
         &self.persistence
     }
 
-    /// Hashes that a future writer must republish before persisting successes.
+    /// Hashes that a persisting writer must republish before persisting successes.
     #[must_use]
     pub fn retry_info_hashes(&self) -> &[String] {
         &self.write_set.failed_info_hashes
@@ -61,7 +62,7 @@ impl WriterPlan {
     }
 }
 
-/// Read one stable source image and compose its disconnected writer intent.
+/// Read one stable source image and compose its non-persisting writer intent.
 ///
 /// The database work is limited to [`load_writer_torrents`]' read-only,
 /// repeatable-read transaction. The returned plan is not persisted.
@@ -189,7 +190,7 @@ fn project_persistence(
     Ok(persistence)
 }
 
-/// Fail-closed errors from disconnected writer-plan composition.
+/// Fail-closed errors from writer-plan composition.
 #[derive(Debug, thiserror::Error)]
 pub enum WriterPlanError {
     #[error(transparent)]

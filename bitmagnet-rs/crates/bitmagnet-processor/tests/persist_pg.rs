@@ -13,7 +13,8 @@ use bitmagnet_processor::{
     LiveTorrentState, ShadowRuntime, TorrentContentPersistence, TorrentContentWrite, WriteSet,
 };
 use bitmagnet_queue::{
-    DequeuedJob, ProcessTorrentParams, ProtocolId, QueueJobStatus, PROCESS_TORRENT_SHADOW,
+    DequeuedJob, ProcessTorrentParams, ProtocolId, QueueJobStatus, ShadowJobEnvelopeV1,
+    PROCESS_TORRENT_SHADOW,
 };
 use futures::future::BoxFuture;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -301,7 +302,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         .expect("grant schema usage");
     sqlx::query(
         "GRANT SELECT ON content, torrent_contents, torrent_tags, torrents, torrent_hints, \
-           queue_jobs \
+           torrents_torrent_sources, queue_jobs \
          TO bitmagnet_shadow_test",
     )
     .execute(&pool)
@@ -375,23 +376,212 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     };
     let digest =
         bitmagnet_classifier::core_config_digest().expect("digest embedded classifier config");
+    let source_payload = serde_json::to_value(&params).expect("encode source payload");
+    let source_ran_at: String = sqlx::query_scalar(
+        "INSERT INTO queue_jobs \
+           (id, fingerprint, queue, status, payload, retries, max_retries, run_after, \
+            ran_at, archival_duration, created_at, priority) \
+         VALUES \
+           ('shadow-runtime-source', 'shadow-runtime-source', 'process_torrent', \
+            'processed', $1::jsonb, 0, 2, clock_timestamp(), clock_timestamp(), \
+            interval '1 hour', clock_timestamp(), 0) \
+         RETURNING ran_at::text",
+    )
+    .bind(serde_json::to_string(&source_payload).expect("serialize source payload"))
+    .fetch_one(&pool)
+    .await
+    .expect("seed exact runtime source job");
+    let envelope = ShadowJobEnvelopeV1::new(
+        "shadow-runtime-source".to_owned(),
+        source_ran_at.clone(),
+        source_payload,
+    );
     let runtime = ShadowRuntime::from_core(shadow_pool.clone(), Some(&digest))
         .expect("compile shadow runtime");
+    let shadow_job = DequeuedJob {
+        id: "shadow-runtime-test".into(),
+        fingerprint: "shadow-runtime-test".into(),
+        queue: PROCESS_TORRENT_SHADOW.into(),
+        original_status: QueueJobStatus::Pending,
+        payload: serde_json::to_string(&envelope).unwrap(),
+        retries: 0,
+        max_retries: 2,
+        priority: 0,
+    };
     let comparison = runtime
-        .process_job(&DequeuedJob {
-            id: "shadow-runtime-test".into(),
-            fingerprint: "shadow-runtime-test".into(),
-            queue: PROCESS_TORRENT_SHADOW.into(),
-            original_status: QueueJobStatus::Pending,
-            payload: serde_json::to_string(&params).unwrap(),
-            retries: 0,
-            max_retries: 2,
-            priority: 0,
-        })
+        .process_job(&shadow_job)
         .await
         .expect("run the read-only shadow pipeline end to end");
     assert_eq!(comparison.torrents.len(), 1);
     assert_eq!(comparison.mismatch_count(), 1);
+
+    let mut missing_source = envelope.clone();
+    missing_source.source_job_id = "missing-source".to_owned();
+    let mut missing_job = shadow_job.clone();
+    missing_job.payload = serde_json::to_string(&missing_source).unwrap();
+    let missing_error = runtime
+        .process_job(&missing_job)
+        .await
+        .expect_err("an envelope without its exact source row is non-comparable");
+    assert!(matches!(
+        missing_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceJobChangedOrMissing
+    ));
+
+    sqlx::query(
+        "UPDATE torrents SET updated_at = $2::timestamptz + interval '1 microsecond' \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("make the source torrent newer than its captured run");
+    let changed_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("post-run torrent changes are non-comparable");
+    assert!(matches!(
+        changed_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceTorrentUpdatedAfterRun
+    ));
+    sqlx::query(
+        "UPDATE torrents SET updated_at = $2::timestamptz \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("restore the captured source boundary");
+
+    sqlx::query(
+        "INSERT INTO torrents_torrent_sources \
+           (source, info_hash, seeders, leechers, created_at, updated_at) \
+         VALUES \
+           ('dht', decode($1, 'hex'), 1, 2, $2::timestamptz, \
+            $2::timestamptz + interval '1 microsecond')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("seed a source row newer than the captured run");
+    let source_changed_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("post-run source-row changes are non-comparable");
+    assert!(matches!(
+        source_changed_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceRowsUpdatedAfterRun
+    ));
+    sqlx::query(
+        "DELETE FROM torrents_torrent_sources \
+         WHERE info_hash = decode($1, 'hex') AND source = 'dht'",
+    )
+    .bind(HASH_A)
+    .execute(&pool)
+    .await
+    .expect("remove the post-run source-row fixture");
+
+    sqlx::query(
+        "UPDATE torrent_contents \
+         SET updated_at = $2::timestamptz + interval '1 microsecond' \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("make the content row newer than its captured run");
+    let content_changed_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("post-run content-row changes are non-comparable");
+    assert!(matches!(
+        content_changed_error,
+        bitmagnet_processor::ShadowRuntimeError::TorrentContentUpdatedAfterRun
+    ));
+    sqlx::query(
+        "UPDATE torrent_contents SET updated_at = $2::timestamptz \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("restore the captured content-row boundary");
+
+    sqlx::query(
+        "UPDATE torrent_tags \
+         SET updated_at = $2::timestamptz + interval '1 microsecond' \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("make the tag row newer than its captured run");
+    let tag_changed_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("post-run tag-row changes are non-comparable");
+    assert!(matches!(
+        tag_changed_error,
+        bitmagnet_processor::ShadowRuntimeError::TorrentTagUpdatedAfterRun
+    ));
+    sqlx::query(
+        "UPDATE torrent_tags SET updated_at = $2::timestamptz \
+         WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("restore the captured tag-row boundary");
+
+    sqlx::query(
+        "INSERT INTO queue_jobs \
+           (id, fingerprint, queue, status, payload, retries, max_retries, run_after, \
+            ran_at, archival_duration, created_at, priority) \
+         VALUES \
+           ('shadow-runtime-later', 'shadow-runtime-later', 'process_torrent', \
+            'failed', $1::jsonb, 0, 2, clock_timestamp(), $2::timestamptz, \
+            interval '1 hour', clock_timestamp(), 0)",
+    )
+    .bind(serde_json::to_string(&envelope.source_payload).unwrap())
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("seed a same-timestamp overlapping source attempt");
+    let overlap_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("a same-timestamp overlapping attempt is non-comparable");
+    assert!(matches!(
+        overlap_error,
+        bitmagnet_processor::ShadowRuntimeError::LaterOverlappingSourceAttempt
+    ));
+    for status in ["pending", "retry"] {
+        sqlx::query(
+            "UPDATE queue_jobs \
+             SET status = $1, ran_at = NULL, \
+                 run_after = clock_timestamp() + interval '1 year' \
+             WHERE id = 'shadow-runtime-later'",
+        )
+        .bind(status)
+        .execute(&pool)
+        .await
+        .expect("make the overlapping attempt nonterminal and not yet due");
+        let active_overlap_error = runtime
+            .process_job(&shadow_job)
+            .await
+            .expect_err("an overlapping nonterminal attempt is non-comparable");
+        assert!(matches!(
+            active_overlap_error,
+            bitmagnet_processor::ShadowRuntimeError::LaterOverlappingSourceAttempt
+        ));
+    }
 
     let live_write_error =
         sqlx::query("UPDATE torrents SET name = name WHERE info_hash = decode($1, 'hex')")

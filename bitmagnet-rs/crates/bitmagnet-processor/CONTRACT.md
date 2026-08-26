@@ -68,7 +68,7 @@ regression test freezes that correctness improvement. Exact parity is claimed
 for the pre-transaction blocking boundary once Go reaches `persist`, not for
 that Go orchestration bug.
 
-The disconnected writer-plan checkpoint now composes the bounded writer loader,
+The writer-plan checkpoint composes the bounded writer loader,
 the real materializer, and the pure volatile-field projection into the exact
 `WriteSet` plus `torrent_contents.id`-keyed metadata image accepted by
 `persist_write_set`. It borrows hydrated classifier inputs rather than cloning
@@ -77,15 +77,16 @@ requires an explicit `default` workflow with all three attach flags false. It
 fails closed on any unresolved hint/enrichment path, attached content,
 incomplete projection keyset, or transaction-kernel input validation error.
 The immutable plan retains failed hashes as retry intent; matching Go requires
-the future runtime to enqueue those retries successfully before persisting its
-successful rows. Neither the composer nor its loader wrapper calls persistence
-or has an active runtime caller.
+the future persisting runtime to enqueue those retries successfully before
+persisting its successful rows. The ingest-shadow runtime now calls the composer
+inside its read-only comparison transaction, but neither the composer nor that
+runtime calls persistence.
 
 This is not yet the complete runtime persistence milestone:
 
 - attached `content` remains rejected until the writer projection carries the
   base content TSV and the persistence kernel owns its association rows;
-- the disconnected plan still needs a writer runtime and queue lifecycle after
+- the plan still needs a persisting writer runtime and live-queue lifecycle after
   the remaining safety gates pass;
 - application composition still needs to share the manager across callers and
   flush it after all producers stop but before the PostgreSQL pool closes; and
@@ -102,13 +103,13 @@ languages, episodes, content rows, and tags, and
 represents a Go-deleted torrent as the first-class `live_absent` outcome.
 
 The PostgreSQL gate creates a restricted test role with SELECT on those five
-live tables and direct SELECT/INSERT/UPDATE on `queue_jobs`. It proves the
-runtime can read the snapshot, insert and settle a scratch job, and cannot
-update a live torrent: PostgreSQL rejects the negative control with
+stable-image tables, `torrents_torrent_sources` for the writer projection, and
+`queue_jobs` for exact source identity. It proves the runtime can read and plan
+inside that boundary, settle a scratch job through the scoped functions, and
+cannot update a live torrent: PostgreSQL rejects the negative control with
 `insufficient_privilege` (`42501`). It also proves the role cannot read the
-undeclared `content_attributes` table. The direct queue-table grants are a test
-harness capability, not a production-safe isolation claim; §5.4 requires a
-reviewed row-scoped queue boundary before deployment.
+undeclared `content_attributes` table. Direct queue-table writes are absent;
+§5.4's reviewed row-scoped functions remain the only mutation boundary.
 
 Attached-content identifiers remain intentionally empty in the snapshot. The
 identifiers live in `content_attributes`, but §5.4 grants the shadow role no
@@ -147,9 +148,12 @@ settlement remain the shadow-consumer milestone.
 The runtime now supplies a bounded read/hydration path, a durable processed-row
 mirror, a non-persisting comparator consumer, low-cardinality outcome metrics,
 and the `bitmagnet-ingest-shadow` executable with separate `mirror` and
-`consume` subcommands. Migration 28 owns the database cursor. The loader uses
-per-torrent and per-job compressed/decompressed/file-count limits and rejects
-oversized inputs before transferring their blob.
+`consume` subcommands. Migration 28 owns the database cursor. The mirror wraps
+each admitted payload in a strict version-1 envelope containing the exact source
+job ID, settled `ran_at`, and unnormalized JSONB payload; the scratch fingerprint
+covers that full envelope. The loader uses per-torrent and per-job
+compressed/decompressed/file-count limits and rejects oversized inputs before
+transferring their blob.
 
 Admission and runtime checks deliberately support only payloads whose workflow
 is explicitly `default`, whose three attach flags are explicitly false, whose
@@ -159,18 +163,37 @@ source-backed `torrent_contents` association. Unsupported inputs settle only
 their scratch job and are counted by a closed reason vocabulary; transient
 database/runtime errors retain queue retry behavior. Rematch preserves explicit
 Go hint semantics internally while disabling only content-association reuse,
-although all explicit hints remain excluded from this milestone. Hydration and
-the live comparison share one read-only repeatable-read snapshot, preventing a
-concurrent Go transaction from creating a torn multi-table image.
+although all explicit hints remain excluded from this milestone. The consumer
+revalidates the envelope against the exact retained `process_torrent` row and
+rejects a missing/changed source, any other overlapping attempted run at or
+after the captured timestamp, any overlapping nonterminal `pending`/`retry` job
+regardless of its `run_after`, or a newly ineligible live input. The nonterminal
+guard closes the interval where Go is executing a handler but its row has not
+yet committed a terminal status or `ran_at`. The runtime also rejects post-source
+`updated_at` values in `torrents`, `torrents_torrent_sources`,
+`torrent_contents`, and `torrent_tags`; hint presence is already a categorical
+rejection. Source validation, bounded writer loading, `WriterPlan`
+composition inputs, and the stable live comparison share one read-only
+repeatable-read snapshot, preventing a concurrent Go transaction from creating
+a torn or cross-run image. This is causal live-state evidence, not historical
+event replay: row deletion has no tombstone, and volatile writer fields are not
+yet compared.
 
-This milestone is code-complete but not production-deployable. Direct
-`INSERT`/`UPDATE` privileges on `queue_jobs` would allow a faulty shadow process
-to mutate live `process_torrent` rows. Production needs reviewed RLS or
-security-definer queue operations, negative controls against live-queue
-mutation, and coordinated application of migrations 27 and 28 (including the
-Go services' expected goose head). Deleted-input parity also remains
+The version-1 rollout can be staged with mirror sampling fixed at zero: the new
+consumer remains non-persisting and the only DB mutation is still scoped scratch
+settlement. Before enabling a nonzero sample, deployment must grant SELECT on
+`torrents_torrent_sources`, confirm the scratch queue is empty of legacy raw
+payloads, and re-run the existing row-boundary negative controls. This checkpoint
+does not authorize a live writer, a second queue consumer, or a nonzero sample.
+
+Migration 29 already supplies the deployed `SECURITY DEFINER` cursor and
+scratch-queue mutation boundary, so this checkpoint is not waiting on direct
+`queue_jobs` privileges and can deploy with sampling fixed at zero. A nonzero
+production sample remains proof-gated: the runtime role and function ownership
+must be catalog-verified, direct live-queue mutation must remain denied, and the
+negative controls above must pass in-cluster. Deleted-input parity also remains
 unmeasurable without pre-delete hydration or a durable write-set ledger. A
-nonzero soak also requires proof that Go's effective merged classifier
+nonzero soak additionally requires proof that Go's effective merged classifier
 configuration matches Rust's embedded core source and defaults. The
 authoritative value is the structured Go log emitted when the live processor
 initializes the exact cached source used by its classifier runner:

@@ -6,17 +6,19 @@ use bitmagnet_classifier::{core_config_digest, SourceError};
 use bitmagnet_common::metrics::registry;
 use bitmagnet_queue::{
     DequeuedJob, MirrorIneligibleReason, MirrorReport, ProcessTorrentParams, ProtocolId,
-    PROCESS_TORRENT_SHADOW,
+    ShadowJobEnvelopeV1, PROCESS_TORRENT, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 use prometheus::{IntCounter, IntCounterVec, Opts};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Row};
 
 use super::{
-    compare_write_set, load::load_torrents_in, shadow::read_live_snapshot_in, CompareError,
-    ComparisonVerdict, LoadError, MaterializeError, Materializer, ShadowComparison,
-    ShadowReadError,
+    compare_write_set, shadow::read_live_snapshot_in, CompareError, ComparisonVerdict,
+    MaterializeError, Materializer, ShadowComparison, ShadowReadError, WriterLoadError,
+    WriterPlanError,
 };
 use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
+use crate::writer_load::load_writer_torrents_in;
+use crate::writer_plan::compose_writer_plan;
 
 /// A read-only processor for jobs from `process_torrent_shadow`.
 pub struct ShadowRuntime {
@@ -49,7 +51,8 @@ impl ShadowRuntime {
         })
     }
 
-    /// Decode, hydrate, materialize, read the settled Go image, and compare.
+    /// Decode the exact-source envelope, prove its live causal boundary, compose
+    /// the writer plan, read the settled Go image, and compare its stable fields.
     ///
     /// The runtime rejects ordinary default-flag jobs. Rust does not yet
     /// implement the four attach actions, while Go defaults their controlling
@@ -61,30 +64,154 @@ impl ShadowRuntime {
         if job.queue != PROCESS_TORRENT_SHADOW {
             return Err(ShadowRuntimeError::WrongQueue(job.queue.clone()));
         }
-        let params: ProcessTorrentParams = serde_json::from_str(&job.payload)?;
+        let envelope: ShadowJobEnvelopeV1 = serde_json::from_str(&job.payload)?;
+        if envelope.schema_version != SHADOW_JOB_ENVELOPE_VERSION {
+            return Err(ShadowRuntimeError::EnvelopeVersionUnsupported(
+                envelope.schema_version,
+            ));
+        }
+        let params: ProcessTorrentParams = serde_json::from_value(envelope.source_payload.clone())?;
         require_default_workflow(&params)?;
         require_flags_off(&params)?;
+        if params.info_hashes.is_empty() {
+            return Err(ShadowRuntimeError::NoInfoHashes);
+        }
 
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
-        let loaded = load_torrents_in(&mut tx, &params).await?;
-        if let Some(torrent) = loaded
-            .iter()
-            .find(|torrent| torrent.attach_hint_unsupported)
-        {
-            return Err(ShadowRuntimeError::AttachHintUnsupported(
-                torrent.info_hash.clone(),
-            ));
-        }
-        let write_set = self.materializer.materialize(&params, loaded)?;
+        validate_causal_source_in(&mut tx, &envelope, &params).await?;
+        let loaded = load_writer_torrents_in(&mut tx, &params).await?;
+        let writer_plan = compose_writer_plan(&self.materializer, &params, &loaded)?;
         let info_hashes = unique_hashes(&params.info_hashes);
         let live = read_live_snapshot_in(&mut tx, &info_hashes).await?;
-        let comparison = compare_write_set(&write_set, &live)?;
+        let comparison = compare_write_set(writer_plan.write_set(), &live)?;
         tx.commit().await?;
         Ok(comparison)
     }
+}
+
+async fn validate_causal_source_in(
+    connection: &mut PgConnection,
+    envelope: &ShadowJobEnvelopeV1,
+    params: &ProcessTorrentParams,
+) -> Result<(), ShadowRuntimeError> {
+    let source_payload = serde_json::to_string(&envelope.source_payload)?;
+    let source_is_exact: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM queue_jobs AS source_job \
+           WHERE source_job.id = $1 \
+             AND source_job.queue = $2 \
+             AND source_job.status = 'processed' \
+             AND source_job.ran_at = $3::timestamptz \
+             AND source_job.ran_at <= transaction_timestamp() \
+             AND source_job.payload = $4::jsonb \
+         )",
+    )
+    .bind(&envelope.source_job_id)
+    .bind(PROCESS_TORRENT)
+    .bind(&envelope.source_ran_at)
+    .bind(&source_payload)
+    .fetch_one(&mut *connection)
+    .await?;
+    if !source_is_exact {
+        return Err(ShadowRuntimeError::SourceJobChangedOrMissing);
+    }
+
+    let info_hashes = unique_hashes(&params.info_hashes);
+    let later_overlap: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM queue_jobs AS later_job \
+           WHERE later_job.queue = $1 \
+             AND later_job.id <> $2 \
+             AND (later_job.status IN ('pending', 'retry') \
+                  OR later_job.ran_at >= $3::timestamptz) \
+             AND EXISTS ( \
+               SELECT 1 \
+               FROM jsonb_array_elements( \
+                 CASE WHEN jsonb_typeof(later_job.payload->'InfoHashes') = 'array' \
+                      THEN later_job.payload->'InfoHashes' ELSE '[]'::jsonb END \
+               ) AS requested(value) \
+               WHERE jsonb_typeof(requested.value) = 'string' \
+                 AND lower(requested.value #>> '{}') = ANY($4::text[]) \
+             ) \
+         )",
+    )
+    .bind(PROCESS_TORRENT)
+    .bind(&envelope.source_job_id)
+    .bind(&envelope.source_ran_at)
+    .bind(&info_hashes)
+    .fetch_one(&mut *connection)
+    .await?;
+    if later_overlap {
+        return Err(ShadowRuntimeError::LaterOverlappingSourceAttempt);
+    }
+
+    let decoded = params
+        .info_hashes
+        .iter()
+        .map(|id| id.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let admission = sqlx::query(
+        "SELECT \
+           coalesce(bool_or(source_torrent.info_hash IS NULL), false) AS torrent_missing, \
+           coalesce(bool_or(source_torrent.updated_at > $2::timestamptz), false) \
+             AS torrent_updated_after_ran_at, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrent_hints AS source_hint \
+             WHERE source_hint.info_hash = source_torrent.info_hash \
+           )), false) AS has_hint, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrent_contents AS source_content \
+             WHERE source_content.info_hash = source_torrent.info_hash \
+               AND source_content.content_source IS NOT NULL \
+           )), false) AS has_content_source, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrents_torrent_sources AS source_row \
+             WHERE source_row.info_hash = source_torrent.info_hash \
+               AND source_row.updated_at > $2::timestamptz \
+           )), false) AS source_updated_after_ran_at, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrent_contents AS source_content \
+             WHERE source_content.info_hash = source_torrent.info_hash \
+               AND source_content.updated_at > $2::timestamptz \
+           )), false) AS content_updated_after_ran_at, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrent_tags AS source_tag \
+             WHERE source_tag.info_hash = source_torrent.info_hash \
+               AND source_tag.updated_at > $2::timestamptz \
+           )), false) AS tag_updated_after_ran_at \
+         FROM unnest($1::bytea[]) AS requested(info_hash) \
+         LEFT JOIN torrents AS source_torrent \
+           ON source_torrent.info_hash = requested.info_hash",
+    )
+    .bind(&decoded)
+    .bind(&envelope.source_ran_at)
+    .fetch_one(&mut *connection)
+    .await?;
+    if admission.try_get("torrent_missing")? {
+        return Err(ShadowRuntimeError::SourceTorrentMissing);
+    }
+    if admission.try_get("torrent_updated_after_ran_at")? {
+        return Err(ShadowRuntimeError::SourceTorrentUpdatedAfterRun);
+    }
+    if admission.try_get("has_hint")? {
+        return Err(ShadowRuntimeError::SourceHintPresent);
+    }
+    if admission.try_get("has_content_source")? {
+        return Err(ShadowRuntimeError::SourceBackedContentPresent);
+    }
+    if admission.try_get("source_updated_after_ran_at")? {
+        return Err(ShadowRuntimeError::SourceRowsUpdatedAfterRun);
+    }
+    if admission.try_get("content_updated_after_ran_at")? {
+        return Err(ShadowRuntimeError::TorrentContentUpdatedAfterRun);
+    }
+    if admission.try_get("tag_updated_after_ran_at")? {
+        return Err(ShadowRuntimeError::TorrentTagUpdatedAfterRun);
+    }
+    Ok(())
 }
 
 fn unique_hashes(ids: &[ProtocolId]) -> Vec<String> {
@@ -115,6 +242,28 @@ fn require_default_workflow(params: &ProcessTorrentParams) -> Result<(), ShadowR
 pub enum ShadowRuntimeError {
     #[error("shadow runtime refuses queue '{0}'")]
     WrongQueue(String),
+    #[error("shadow runtime does not support scratch envelope version {0}")]
+    EnvelopeVersionUnsupported(u8),
+    #[error("shadow runtime requires at least one source info hash")]
+    NoInfoHashes,
+    #[error("shadow source job is missing or no longer matches its exact captured identity")]
+    SourceJobChangedOrMissing,
+    #[error("a nonterminal or later process_torrent attempt overlaps the captured source hashes")]
+    LaterOverlappingSourceAttempt,
+    #[error("a captured source torrent is no longer present")]
+    SourceTorrentMissing,
+    #[error("a captured source torrent changed after the source job settled")]
+    SourceTorrentUpdatedAfterRun,
+    #[error("a captured source torrent now has an explicit hint")]
+    SourceHintPresent,
+    #[error("a captured source torrent now has a source-backed content association")]
+    SourceBackedContentPresent,
+    #[error("a captured torrent source row changed after the source job settled")]
+    SourceRowsUpdatedAfterRun,
+    #[error("a captured torrent_content row changed after the source job settled")]
+    TorrentContentUpdatedAfterRun,
+    #[error("a captured torrent tag changed after the source job settled")]
+    TorrentTagUpdatedAfterRun,
     #[error("shadow runtime requires the live Go effective classifier configuration digest")]
     ClassifierConfigDigestMissing,
     #[error(
@@ -127,14 +276,14 @@ pub enum ShadowRuntimeError {
         "shadow runtime requires local_search_enabled, apis_enabled, and tmdb_enabled to be explicitly false"
     )]
     AttachFlagsNotExplicitlyDisabled,
-    #[error("shadow runtime cannot reproduce the complete Go hint/enrichment path for {0}")]
-    AttachHintUnsupported(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
-    Load(#[from] LoadError),
+    WriterLoad(#[from] WriterLoadError),
+    #[error(transparent)]
+    WriterPlan(#[from] WriterPlanError),
     #[error(transparent)]
     Materialize(#[from] MaterializeError),
     #[error(transparent)]
@@ -152,12 +301,35 @@ impl ShadowRuntimeError {
     #[must_use]
     pub fn unsupported_reason(&self) -> Option<&'static str> {
         match self {
+            Self::EnvelopeVersionUnsupported(_) | Self::Json(_) => Some("invalid_envelope"),
+            Self::NoInfoHashes => Some("no_infohashes"),
+            Self::SourceJobChangedOrMissing => Some("source_job_changed_or_missing"),
+            Self::LaterOverlappingSourceAttempt => Some("later_overlapping_attempt"),
+            Self::SourceTorrentMissing => Some("torrent_missing"),
+            Self::SourceTorrentUpdatedAfterRun => Some("torrent_updated_after_ran_at"),
+            Self::SourceHintPresent => Some("has_hint"),
+            Self::SourceBackedContentPresent => Some("has_content_source"),
+            Self::SourceRowsUpdatedAfterRun => Some("source_updated_after_ran_at"),
+            Self::TorrentContentUpdatedAfterRun => Some("content_updated_after_ran_at"),
+            Self::TorrentTagUpdatedAfterRun => Some("tag_updated_after_ran_at"),
             Self::ClassifierWorkflowUnsupported => Some("classifier_workflow"),
             Self::AttachFlagsNotExplicitlyDisabled => Some("attach_flags_enabled"),
-            Self::AttachHintUnsupported(_) => Some("attach_hint"),
-            Self::Load(LoadError::CompressedBlobTooLarge { .. }) => Some("compressed_blob_limit"),
-            Self::Load(LoadError::JobBudgetExceeded { .. }) => Some("job_decode_budget"),
-            Self::Load(LoadError::Blob(_)) => Some("invalid_or_oversized_file_blob"),
+            Self::WriterLoad(WriterLoadError::Load(crate::LoadError::CompressedBlobTooLarge {
+                ..
+            })) => Some("compressed_blob_limit"),
+            Self::WriterLoad(WriterLoadError::Load(crate::LoadError::JobBudgetExceeded {
+                ..
+            })) => Some("job_decode_budget"),
+            Self::WriterLoad(WriterLoadError::Load(crate::LoadError::Blob(_))) => {
+                Some("invalid_or_oversized_file_blob")
+            }
+            Self::WriterPlan(WriterPlanError::AttachHintUnsupported { .. }) => Some("attach_hint"),
+            Self::WriterPlan(WriterPlanError::Materialize(
+                crate::MaterializeError::AttachedContentUnsupported { .. },
+            )) => Some("attached_content"),
+            Self::WriterPlan(WriterPlanError::Materialize(
+                crate::MaterializeError::UnsupportedFlag { .. },
+            )) => Some("unsupported_classifier_flag"),
             Self::Materialize(MaterializeError::AttachedContentUnsupported { .. }) => {
                 Some("attached_content")
             }
@@ -397,5 +569,30 @@ mod tests {
             ShadowRuntimeError::ClassifierWorkflowUnsupported.unsupported_reason(),
             Some("classifier_workflow")
         );
+    }
+
+    #[test]
+    fn causal_guard_failures_have_closed_metric_reasons() {
+        let cases = [
+            (
+                ShadowRuntimeError::LaterOverlappingSourceAttempt,
+                "later_overlapping_attempt",
+            ),
+            (
+                ShadowRuntimeError::SourceRowsUpdatedAfterRun,
+                "source_updated_after_ran_at",
+            ),
+            (
+                ShadowRuntimeError::TorrentContentUpdatedAfterRun,
+                "content_updated_after_ran_at",
+            ),
+            (
+                ShadowRuntimeError::TorrentTagUpdatedAfterRun,
+                "tag_updated_after_ran_at",
+            ),
+        ];
+        for (error, reason) in cases {
+            assert_eq!(error.unsupported_reason(), Some(reason));
+        }
     }
 }

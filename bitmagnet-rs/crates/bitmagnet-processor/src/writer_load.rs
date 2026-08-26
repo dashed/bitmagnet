@@ -1,10 +1,10 @@
-//! Disconnected read boundary for the processor writer projection.
+//! Bounded read boundary for the processor writer projection.
 //!
-//! This module deliberately has no caller in the active shadow runtime. It
-//! joins the existing classifier hydration image to the raw volatile rows that
-//! [`crate::project_unattached_persistence`] needs, but does so under one
-//! read-only repeatable-read transaction so a future writer cannot observe a
-//! torn source/torrent image.
+//! This module joins the existing classifier hydration image to the raw
+//! volatile rows that [`crate::project_unattached_persistence`] needs. The
+//! public loader owns a read-only repeatable-read transaction; the ingest-shadow
+//! runtime uses the in-transaction form so source validation, planning, and
+//! comparison cannot observe a torn source/torrent image.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,10 +68,25 @@ struct WriterPersistenceSnapshots {
 ///
 /// Missing requested torrents retain [`crate::load_torrents`] semantics: they
 /// are omitted. Request duplicates count toward the fail-closed input ceiling,
-/// then are deduplicated and sorted before any query. This function is
-/// intentionally disconnected from [`crate::ShadowRuntime`] and persistence.
+/// then are deduplicated and sorted before any query. This standalone entry
+/// point owns its read-only repeatable-read transaction and does not persist.
 pub async fn load_writer_torrents(
     pool: &PgPool,
+    params: &ProcessTorrentParams,
+) -> Result<Vec<WriterLoadedTorrent>, WriterLoadError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let result = load_writer_torrents_in(&mut tx, params).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Load the classifier and writer snapshots from the caller's existing
+/// transaction. The caller owns its isolation/read-only contract.
+pub(crate) async fn load_writer_torrents_in(
+    connection: &mut PgConnection,
     params: &ProcessTorrentParams,
 ) -> Result<Vec<WriterLoadedTorrent>, WriterLoadError> {
     validate_request_cardinality(params.info_hashes.len())?;
@@ -86,15 +101,9 @@ pub async fn load_writer_torrents(
     let mut deduplicated_params = params.clone();
     deduplicated_params.info_hashes.clone_from(&info_hashes);
 
-    let mut tx = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
-        .await?;
-    let loaded = load_torrents_in(&mut tx, &deduplicated_params).await?;
-    let snapshots = load_writer_snapshots_in(&mut tx, &info_hashes).await?;
-    let result = associate_loaded_torrents(loaded, snapshots)?;
-    tx.commit().await?;
-    Ok(result)
+    let loaded = load_torrents_in(&mut *connection, &deduplicated_params).await?;
+    let snapshots = load_writer_snapshots_in(&mut *connection, &info_hashes).await?;
+    associate_loaded_torrents(loaded, snapshots)
 }
 
 async fn load_writer_snapshots_in(
@@ -243,7 +252,7 @@ fn optional_nonnegative_u64(
         .transpose()
 }
 
-/// Fail-closed errors from the disconnected writer loader.
+/// Fail-closed errors from the bounded writer loader.
 #[derive(Debug, thiserror::Error)]
 pub enum WriterLoadError {
     #[error(transparent)]

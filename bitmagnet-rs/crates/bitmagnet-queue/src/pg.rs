@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
@@ -15,7 +17,37 @@ use crate::backoff::calculate_backoff;
 use crate::{fingerprint, QueueJobStatus, PROCESS_TORRENT_BATCH};
 
 pub const PROCESS_TORRENT_SHADOW: &str = "process_torrent_shadow";
+pub const SHADOW_JOB_ENVELOPE_VERSION: u8 = 1;
 const DEADLINE_ERROR: &str = "the job did not complete before its deadline";
+
+/// Exact identity of the settled Go job mirrored into the scratch queue.
+///
+/// The raw JSON payload is retained instead of normalizing it through
+/// [`crate::ProcessTorrentParams`], so the consumer can prove that the archived
+/// source row still has exactly the payload that the mirror observed. The
+/// workflow, flags, classify mode, and requested hashes remain inside that
+/// source-owned document.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShadowJobEnvelopeV1 {
+    pub schema_version: u8,
+    pub source_job_id: String,
+    /// PostgreSQL's exact textual `timestamptz` representation.
+    pub source_ran_at: String,
+    pub source_payload: Value,
+}
+
+impl ShadowJobEnvelopeV1 {
+    #[must_use]
+    pub fn new(source_job_id: String, source_ran_at: String, source_payload: Value) -> Self {
+        Self {
+            schema_version: SHADOW_JOB_ENVELOPE_VERSION,
+            source_job_id,
+            source_ran_at,
+            source_payload,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueuePgError {
@@ -715,14 +747,23 @@ impl QueueStore {
                     break;
                 }
                 report.sampled += 1;
-                let scratch_fingerprint = fingerprint(&config.shadow_queue, &candidate.payload);
+                let source_payload = serde_json::from_str(&candidate.payload)
+                    .map_err(|source| QueuePgError::InvalidProducerPayload { source })?;
+                let envelope = ShadowJobEnvelopeV1::new(
+                    candidate.cursor.id.clone(),
+                    candidate.cursor.ran_at.clone(),
+                    source_payload,
+                );
+                let scratch_payload = serde_json::to_string(&envelope)
+                    .map_err(|source| QueuePgError::InvalidProducerPayload { source })?;
+                let scratch_fingerprint = fingerprint(&config.shadow_queue, &scratch_payload);
                 let inserted: bool = sqlx::query_scalar(
                     "SELECT public.ingest_shadow_enqueue_job(\
                        $1, $2::jsonb, $3, $4, $5, $6\
                      )",
                 )
                 .bind(scratch_fingerprint)
-                .bind(&candidate.payload)
+                .bind(&scratch_payload)
                 .bind(i64::from(candidate.max_retries))
                 .bind(i64::try_from(config.delay.as_secs()).unwrap_or(i64::MAX))
                 .bind(i64::try_from(config.archival_duration.as_secs()).unwrap_or(i64::MAX))
@@ -795,6 +836,7 @@ mod tests {
 
     use super::{
         sampled, validate_mirror, MirrorConfig, MirrorEligibility, MirrorIneligibleReason,
+        ShadowJobEnvelopeV1, SHADOW_JOB_ENVELOPE_VERSION,
     };
 
     const ELIGIBLE: MirrorEligibility = MirrorEligibility {
@@ -805,6 +847,32 @@ mod tests {
         has_hint: false,
         has_content_source: false,
     };
+
+    #[test]
+    fn shadow_envelope_round_trips_exact_source_json_and_rejects_schema_drift() {
+        let source_payload = serde_json::json!({
+            "ClassifierWorkflow": "default",
+            "ClassifierFlags": {
+                "local_search_enabled": false,
+                "apis_enabled": false,
+                "tmdb_enabled": false
+            },
+            "InfoHashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        });
+        let envelope = ShadowJobEnvelopeV1::new(
+            "source-job".to_owned(),
+            "2026-08-26 12:34:56.123456+00".to_owned(),
+            source_payload.clone(),
+        );
+        let encoded = serde_json::to_string(&envelope).expect("encode envelope");
+        let decoded: ShadowJobEnvelopeV1 = serde_json::from_str(&encoded).expect("decode envelope");
+        assert_eq!(decoded, envelope);
+        assert_eq!(decoded.schema_version, SHADOW_JOB_ENVELOPE_VERSION);
+        assert_eq!(decoded.source_payload, source_payload);
+
+        let with_unknown = encoded.replacen('{', "{\"unexpected\":true,", 1);
+        assert!(serde_json::from_str::<ShadowJobEnvelopeV1>(&with_unknown).is_err());
+    }
 
     #[test]
     fn reason_labels_are_a_bounded_distinct_set() {

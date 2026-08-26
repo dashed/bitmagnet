@@ -14,7 +14,8 @@ use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
     fingerprint, new_queue_job, ConsumeOutcome, Consumer, ConsumerConfig, MirrorConfig,
     MirrorIneligibleReason, PreparedQueueJob, ProtocolId, QueueJobOptions, QueueJobStatus,
-    QueuePgError, QueueStore, PROCESS_TORRENT, PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW,
+    QueuePgError, QueueStore, ShadowJobEnvelopeV1, PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
+    PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 use chrono::Utc;
 use prometheus::Encoder as _;
@@ -2153,7 +2154,8 @@ async fn queue_runtime_matches_go_contract() {
     );
     let scratch = sqlx::query(
         "SELECT fingerprint, payload::text AS payload, \
-                payload = (SELECT payload FROM queue_jobs WHERE id = 'source-a') AS same_payload, \
+                (SELECT ran_at::text FROM queue_jobs WHERE id = 'source-a') \
+                  AS source_ran_at, \
                 run_after > created_at AS delayed \
          FROM queue_jobs WHERE queue = $1",
     )
@@ -2162,15 +2164,29 @@ async fn queue_runtime_matches_go_contract() {
     .await
     .expect("read scratch row");
     let scratch_payload: String = scratch.try_get("payload").expect("scratch payload");
-    assert!(scratch
-        .try_get::<bool, _>("same_payload")
-        .expect("same payload"));
+    let envelope: ShadowJobEnvelopeV1 =
+        serde_json::from_str(&scratch_payload).expect("decode exact-source envelope");
+    assert_eq!(envelope.schema_version, SHADOW_JOB_ENVELOPE_VERSION);
+    assert_eq!(envelope.source_job_id, "source-a");
+    assert_eq!(
+        envelope.source_payload,
+        serde_json::from_str::<serde_json::Value>(payload_a).unwrap()
+    );
+    assert_eq!(
+        envelope.source_ran_at,
+        scratch
+            .try_get::<String, _>("source_ran_at")
+            .expect("source timestamp")
+    );
     assert!(scratch.try_get::<bool, _>("delayed").expect("delayed"));
     assert_eq!(
         scratch
             .try_get::<String, _>("fingerprint")
             .expect("fingerprint"),
-        fingerprint(PROCESS_TORRENT_SHADOW, &scratch_payload)
+        fingerprint(
+            PROCESS_TORRENT_SHADOW,
+            &serde_json::to_string(&envelope).expect("re-encode exact-source envelope")
+        )
     );
     let capped = store
         .mirror_processed_page(&config)
@@ -2236,7 +2252,7 @@ async fn queue_runtime_matches_go_contract() {
     let unsupported_scratch: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM queue_jobs \
          WHERE queue = $1 \
-           AND payload IN ($2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb)",
+           AND payload->'sourcePayload' IN ($2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb)",
     )
     .bind(PROCESS_TORRENT_SHADOW)
     .bind(payload_default)
@@ -2330,7 +2346,9 @@ async fn queue_runtime_matches_go_contract() {
     );
     let scratch_payload_count: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM queue_jobs \
-         WHERE queue = $1 AND payload = $2::jsonb",
+         WHERE queue = $1 \
+           AND payload->>'sourceJobId' = 'cursor-eligible' \
+           AND payload->'sourcePayload' = $2::jsonb",
     )
     .bind(PROCESS_TORRENT_SHADOW)
     .bind(payload_b)
@@ -2354,7 +2372,7 @@ async fn queue_runtime_matches_go_contract() {
     // though both begin with no process-local cursor, page_size=1 makes them
     // claim consecutive source positions without replay or omission.
     reset(&pool).await;
-    for (id, payload) in [("concurrent-a", payload_a), ("concurrent-b", payload_b)] {
+    for id in ["concurrent-a", "concurrent-b"] {
         seed(
             &pool,
             id,
@@ -2364,7 +2382,7 @@ async fn queue_runtime_matches_go_contract() {
             -1,
             0,
             2,
-            payload,
+            payload_a,
         )
         .await;
     }
@@ -2396,15 +2414,15 @@ async fn queue_runtime_matches_go_contract() {
     let report_b = report_b.expect("second concurrent mirror");
     assert_eq!(report_a.scanned + report_b.scanned, 2);
     assert_eq!(report_a.inserted + report_b.inserted, 2);
-    let concurrent_scratch: i64 = sqlx::query_scalar(
-        "SELECT count(*)::bigint FROM queue_jobs \
+    let concurrent_scratch: (i64, i64) = sqlx::query_as(
+        "SELECT count(*)::bigint, count(DISTINCT fingerprint)::bigint FROM queue_jobs \
          WHERE queue = $1 AND status IN ('pending','retry')",
     )
     .bind(PROCESS_TORRENT_SHADOW)
     .fetch_one(&pool)
     .await
     .expect("count concurrent scratch rows");
-    assert_eq!(concurrent_scratch, 2);
+    assert_eq!(concurrent_scratch, (2, 2));
 
     // A minimally granted runtime role can use the reviewed shadow
     // capabilities, but it cannot directly write either queue or any cursor
