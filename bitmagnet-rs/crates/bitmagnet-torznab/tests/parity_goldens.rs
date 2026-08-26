@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bitmagnet_search_query::{ContentType, Episodes, VideoResolution};
 use bitmagnet_torznab::{
@@ -29,13 +29,13 @@ use bitmagnet_torznab::{
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 
+mod parity_support;
+
+use parity_support::{first_diff, goldens_dir, load_corpus, normalize, read_jsonl, CorpusQuery};
+
 /// Seconds from the Unix epoch to 2020-01-01T00:00:00Z — the base Lane G's seed
 /// adds `pub * 24h` to for each fixture's `published_at`.
 const PUBLISHED_AT_BASE: i64 = 1_577_836_800;
-
-fn goldens_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/parity/torznab")
-}
 
 #[test]
 fn torznab_goldens_are_byte_exact_after_normalization() {
@@ -269,230 +269,4 @@ fn load_fixtures(path: &Path) -> BTreeMap<String, Fixture> {
         .into_iter()
         .map(|fixture| (fixture.id.clone(), fixture))
         .collect()
-}
-
-fn load_corpus(path: &Path) -> Vec<CorpusQuery> {
-    read_jsonl::<CorpusQuery>(path)
-}
-
-fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Vec<T> {
-    let text = fs::read_to_string(path).expect("jsonl is readable");
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("jsonl line parses"))
-        .collect()
-}
-
-#[derive(Debug, Deserialize)]
-struct CorpusQuery {
-    id: String,
-    kind: String,
-    path: String,
-    #[serde(default, rename = "expectIds")]
-    expect_ids: Option<Vec<String>>,
-}
-
-impl CorpusQuery {
-    fn golden_name(&self) -> String {
-        if self.id == "caps" {
-            "caps.golden.xml".to_owned()
-        } else {
-            format!("q-{}.golden.xml", self.id)
-        }
-    }
-}
-
-// ---- canonical XML normalizer (port of internal/parity/torznab_xml.go) ------
-
-#[derive(Debug)]
-enum Child {
-    Element(Element),
-    Text(String),
-}
-
-#[derive(Debug)]
-struct Element {
-    name: String,
-    attrs: Vec<(String, String)>,
-    children: Vec<Child>,
-}
-
-fn normalize(raw: &[u8]) -> Vec<u8> {
-    use quick_xml::events::Event;
-    use quick_xml::reader::Reader;
-
-    let mut reader = Reader::from_reader(raw);
-    let mut buf = Vec::new();
-    let mut stack: Vec<Element> = Vec::new();
-    let mut root: Option<Element> = None;
-
-    loop {
-        match reader.read_event_into(&mut buf).expect("valid XML") {
-            Event::Eof => break,
-            Event::Start(start) => stack.push(element_from(&start)),
-            Event::Empty(empty) => {
-                let element = element_from(&empty);
-                attach(&mut stack, &mut root, element);
-            }
-            Event::End(_) => {
-                let element = stack.pop().expect("balanced end tag");
-                attach(&mut stack, &mut root, element);
-            }
-            Event::Text(text) => {
-                let value = unescape_bytes(&text.into_inner());
-                if value.trim().is_empty() {
-                    continue;
-                }
-                let parent = stack.last_mut().expect("text within an element");
-                parent.children.push(Child::Text(value));
-            }
-            Event::CData(cdata) => {
-                let value =
-                    String::from_utf8(cdata.into_inner().into_owned()).expect("utf-8 cdata");
-                if let Some(parent) = stack.last_mut() {
-                    parent.children.push(Child::Text(value));
-                }
-            }
-            // XML declaration, comments, processing instructions, doctype: the
-            // canonical tree carries only elements and text.
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    let root = root.expect("document has a root element");
-    let mut out = String::new();
-    write_element(&mut out, &root, 0);
-    out.into_bytes()
-}
-
-fn element_from(start: &quick_xml::events::BytesStart<'_>) -> Element {
-    let name = String::from_utf8(start.name().as_ref().to_vec()).expect("utf-8 element name");
-    let attrs = start
-        .attributes()
-        .map(|attr| {
-            let attr = attr.expect("well-formed attribute");
-            let key = String::from_utf8(attr.key.as_ref().to_vec()).expect("utf-8 attr name");
-            let value = unescape_bytes(&attr.value);
-            (key, value)
-        })
-        .collect();
-    Element {
-        name,
-        attrs,
-        children: Vec::new(),
-    }
-}
-
-/// Decode an escaped XML byte run to its text. `quick_xml::escape::unescape`
-/// resolves the five predefined entities plus decimal/hex numeric character
-/// references (`&#34;`, `&#x9;`) — exactly the forms Go's `encoding/xml` writes.
-fn unescape_bytes(bytes: &[u8]) -> String {
-    let raw = std::str::from_utf8(bytes).expect("utf-8 xml text");
-    quick_xml::escape::unescape(raw)
-        .expect("valid xml escapes")
-        .into_owned()
-}
-
-fn attach(stack: &mut [Element], root: &mut Option<Element>, element: Element) {
-    match stack.last_mut() {
-        Some(parent) => parent.children.push(Child::Element(element)),
-        None => *root = Some(element),
-    }
-}
-
-fn write_element(out: &mut String, element: &Element, depth: usize) {
-    let indent = "  ".repeat(depth);
-    out.push_str(&indent);
-    out.push('<');
-    out.push_str(&element.name);
-
-    let mut attrs = element.attrs.clone();
-    attrs.sort_by(|left, right| left.0.cmp(&right.0));
-    for (name, value) in &attrs {
-        out.push(' ');
-        out.push_str(name);
-        out.push_str("=\"");
-        push_escaped(out, value, true);
-        out.push('"');
-    }
-
-    if element.children.is_empty() {
-        out.push_str("/>\n");
-        return;
-    }
-
-    let has_text = element
-        .children
-        .iter()
-        .any(|child| matches!(child, Child::Text(_)));
-    let has_element = element
-        .children
-        .iter()
-        .any(|child| matches!(child, Child::Element(_)));
-    assert!(
-        !(has_text && has_element),
-        "mixed content in <{}> is unsupported",
-        element.name
-    );
-
-    if has_text {
-        out.push('>');
-        for child in &element.children {
-            if let Child::Text(text) = child {
-                push_escaped(out, text, false);
-            }
-        }
-        out.push_str("</");
-        out.push_str(&element.name);
-        out.push_str(">\n");
-        return;
-    }
-
-    out.push_str(">\n");
-    for child in &element.children {
-        if let Child::Element(element) = child {
-            write_element(out, element, depth + 1);
-        }
-    }
-    out.push_str(&indent);
-    out.push_str("</");
-    out.push_str(&element.name);
-    out.push_str(">\n");
-}
-
-/// Canonical escaping (Go `writeCanonicalXMLEscaped`): `& < >` always; `"` only
-/// in attribute values; everything else — including `'`, tab and newline — is
-/// written verbatim.
-fn push_escaped(out: &mut String, value: &str, attribute: bool) {
-    for character in value.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' if attribute => out.push_str("&quot;"),
-            _ => out.push(character),
-        }
-    }
-}
-
-fn first_diff(actual: &[u8], expected: &[u8]) -> String {
-    let actual = String::from_utf8_lossy(actual);
-    let expected = String::from_utf8_lossy(expected);
-    for (index, (a, e)) in actual.lines().zip(expected.lines()).enumerate() {
-        if a != e {
-            return format!(
-                "  first diff at line {}:\n  actual:   {a:?}\n  expected: {e:?}",
-                index + 1
-            );
-        }
-    }
-    if actual.lines().count() != expected.lines().count() {
-        return format!(
-            "  line count differs: actual {} vs expected {}",
-            actual.lines().count(),
-            expected.lines().count(),
-        );
-    }
-    "  (bytes differ only in trailing whitespace)".to_owned()
 }

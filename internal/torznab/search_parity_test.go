@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func setupV2TestDB(t *testing.T) *gorm.DB {
+func setupV2TestDB(t *testing.T, cleanup bool) *gorm.DB {
 	t.Helper()
 
 	dsn := os.Getenv("POSTGRES_DSN")
@@ -68,9 +68,11 @@ func setupV2TestDB(t *testing.T) *gorm.DB {
 	goose.SetLogger(goose.NopLogger())
 	require.NoError(t, goose.UpContext(context.Background(), sqlDB, "."))
 
-	t.Cleanup(func() {
-		cleanupV2Schema(t, sqlDB)
-	})
+	if cleanup {
+		t.Cleanup(func() {
+			cleanupV2Schema(t, sqlDB)
+		})
+	}
 
 	return db
 }
@@ -83,7 +85,7 @@ func cleanupV2Schema(t *testing.T, sqlDB *sql.DB) {
 }
 
 func TestTorznabSearchGoldens(t *testing.T) {
-	db := setupV2TestDB(t)
+	db := setupV2TestDB(t, true)
 	fixtureInfohashes := seedTorznabFixtures(t, db)
 
 	corpusPath := filepath.Join(repoRootTorznab(t), torznabParityDir, "corpus.jsonl")
@@ -140,6 +142,16 @@ func TestTorznabSearchGoldens(t *testing.T) {
 			writeOrAssertTorznabGolden(t, goldenPath, normalized)
 		})
 	}
+}
+
+// TestGenerateTorznabParityPgFixtures prepares the shared disposable database
+// for the Rust real-router parity test. It deliberately leaves the migrated and
+// seeded schema in place so a subsequent process can consume it; select this
+// test explicitly and never point POSTGRES_DSN at a persistent database.
+func TestGenerateTorznabParityPgFixtures(t *testing.T) {
+	db := setupV2TestDB(t, false)
+	fixtureInfohashes := seedTorznabFixtures(t, db)
+	require.Len(t, fixtureInfohashes, 25)
 }
 
 func seedTorznabFixtures(t *testing.T, db *gorm.DB) map[string]string {
