@@ -162,6 +162,8 @@ func (ps *searchPollState) logState(eligible bool, log func()) {
 // metric facades. nowEpoch is injected so freshness behavior is deterministic in
 // tests. Failed polls preserve the last-known doc count, watermark, and success
 // time while immediately closing the serve gate.
+//
+//nolint:revive // Direct dependency arguments keep this deterministic test seam explicit.
 func pollSearchHealth(
 	ctx context.Context,
 	hc searchHealthChecker,

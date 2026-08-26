@@ -535,8 +535,8 @@ func (c *Composer) decodeLatencyCap() uint {
 // before. (F5)
 func (c *Composer) facetIDs(refined []search.TorrentContentResultItem) []protocol.ID {
 	ids := infoHashesOf(refined)
-	if cap := c.decodeLatencyCap(); uint(len(ids)) > cap {
-		ids = ids[:cap]
+	if decodeCap := c.decodeLatencyCap(); uint(len(ids)) > decodeCap {
+		ids = ids[:decodeCap]
 	}
 
 	return ids

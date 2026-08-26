@@ -259,13 +259,13 @@ func (s *Session) ObserveErrorDetail(kind string, request any, errKind, message 
 	})
 }
 
-func marshalPair(request, response any) (json.RawMessage, json.RawMessage, error) {
-	requestJSON, err := Marshal(request)
+func marshalPair(request, response any) (requestJSON, responseJSON json.RawMessage, err error) {
+	requestJSON, err = Marshal(request)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	responseJSON, err := Marshal(response)
+	responseJSON, err = Marshal(response)
 	if err != nil {
 		return nil, nil, err
 	}

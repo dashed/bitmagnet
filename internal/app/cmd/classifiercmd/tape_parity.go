@@ -166,6 +166,8 @@ func runTapeParity(ctx context.Context, options tapeParityOptions) error {
 		return err
 	}
 	if goReportDigestAfterRust != goReportDigest {
+		// "Go" is the proper language name and part of the parity receipt contract.
+		//nolint:staticcheck
 		return fmt.Errorf(
 			"Go tape rerun report changed while Rust ran: before %s, after %s",
 			goReportDigest,
@@ -177,6 +179,8 @@ func runTapeParity(ctx context.Context, options tapeParityOptions) error {
 		return err
 	}
 	if goReportDigest != rustReportDigest {
+		// "Go" and "Rust" are proper language names in this operator-facing error.
+		//nolint:staticcheck
 		return fmt.Errorf(
 			"Go and Rust tape rerun reports differ: Go %s, Rust %s",
 			goReportDigest,

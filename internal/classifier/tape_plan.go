@@ -158,8 +158,8 @@ func validateTapeEvidenceFlags(flags Flags) error {
 		return fmt.Errorf("must contain exactly the five fail-closed classifier flags")
 	}
 	for _, name := range []string{"local_search_enabled", "apis_enabled", "tmdb_enabled", "delete_xxx"} {
-		value, present := flags[name]
-		if !present || value != false {
+		value, present := flags[name].(bool)
+		if !present || value {
 			return fmt.Errorf("%s must be explicitly false", name)
 		}
 	}
@@ -365,7 +365,7 @@ func (e *TapeAcquisitionPlanExecutor) Run(ctx context.Context) error {
 
 	for entryIndex, entry := range e.plan.Entries {
 		quota := tapeEvidenceWorkflowQuotas[entryIndex]
-		for iteration := 0; iteration < entry.Repeat; iteration++ {
+		for iteration := range entry.Repeat {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -382,8 +382,16 @@ func (e *TapeAcquisitionPlanExecutor) Run(ctx context.Context) error {
 			runCtx := withTapeEvidenceCapability(tape.WithSubject(ctx, subject), tapeEvidencePlanCapability)
 			_, runErr := e.runner.Run(runCtx, entry.Workflow, entry.Flags, torrent)
 			if !tapePlanOutcomeMatches(quota.outcome, runErr) {
+				if runErr == nil {
+					return fmt.Errorf(
+						"classifier tape acquisition plan %s iteration %d ended without an error, want %s",
+						entry.Workflow,
+						iteration,
+						quota.outcome,
+					)
+				}
 				return fmt.Errorf(
-					"classifier tape acquisition plan %s iteration %d ended with %v, want %s",
+					"classifier tape acquisition plan %s iteration %d ended with %w, want %s",
 					entry.Workflow,
 					iteration,
 					runErr,

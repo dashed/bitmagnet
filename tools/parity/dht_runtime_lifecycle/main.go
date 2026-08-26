@@ -117,6 +117,13 @@ type parsedSource struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, "dht_runtime_lifecycle:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	rootFlag := flag.String("root", "", "repository root (defaults to walking up from the current directory)")
 	outFlag := flag.String("out", fixtureRelativePath, "fixture path, relative to repository root")
 	writeFlag := flag.Bool("write", false, "replace the fixture instead of checking it")
@@ -125,14 +132,16 @@ func main() {
 
 	root, err := resolveRoot(*rootFlag)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	data, err := generate(root)
 	if err != nil {
-		fatal(err)
+		return err
 	}
 	if *printFlag {
-		_, _ = os.Stdout.Write(data)
+		if _, err := os.Stdout.Write(data); err != nil {
+			return fmt.Errorf("write generated fixture to stdout: %w", err)
+		}
 	}
 
 	fixturePath := *outFlag
@@ -141,23 +150,30 @@ func main() {
 	}
 	if *writeFlag {
 		if err := os.MkdirAll(filepath.Dir(fixturePath), 0o755); err != nil {
-			fatal(fmt.Errorf("create fixture directory: %w", err))
+			return fmt.Errorf("create fixture directory: %w", err)
 		}
 		if err := os.WriteFile(fixturePath, data, 0o644); err != nil {
-			fatal(fmt.Errorf("write fixture: %w", err))
+			return fmt.Errorf("write fixture: %w", err)
 		}
-		fmt.Printf("wrote %s sha256=%x\n", fixturePath, sha256.Sum256(data))
-		return
+		if _, err := fmt.Fprintf(os.Stdout, "wrote %s sha256=%x\n", fixturePath, sha256.Sum256(data)); err != nil {
+			return fmt.Errorf("report written fixture: %w", err)
+		}
+
+		return nil
 	}
 
 	want, err := os.ReadFile(fixturePath)
 	if err != nil {
-		fatal(fmt.Errorf("read fixture (run with -write to create it): %w", err))
+		return fmt.Errorf("read fixture (run with -write to create it): %w", err)
 	}
 	if !bytes.Equal(want, data) {
-		fatal(errors.New("fixture is stale; run with -write and review the byte-for-byte diff"))
+		return errors.New("fixture is stale; run with -write and review the byte-for-byte diff")
 	}
-	fmt.Printf("fresh %s sha256=%x\n", fixturePath, sha256.Sum256(data))
+	if _, err := fmt.Fprintf(os.Stdout, "fresh %s sha256=%x\n", fixturePath, sha256.Sum256(data)); err != nil {
+		return fmt.Errorf("report fresh fixture: %w", err)
+	}
+
+	return nil
 }
 
 func generate(root string) ([]byte, error) {
@@ -713,9 +729,4 @@ func resolveRoot(explicit string) (string, error) {
 		}
 		directory = parent
 	}
-}
-
-func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "dht_runtime_lifecycle:", err)
-	os.Exit(1)
 }

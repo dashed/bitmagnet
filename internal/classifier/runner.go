@@ -89,7 +89,7 @@ func (r runner) Run(
 	// each holds its own session, so the interleaving between them cannot
 	// disturb the sequence within one.
 	if r.recorder != nil {
-		subject := r.subject(ctx, t)
+		subject := classifierSubject(ctx, t)
 		ctx = r.recorder.Begin(
 			ctx,
 			subject,
@@ -163,7 +163,7 @@ func classificationOutcome(ctx context.Context, err error) tape.RecordOutcome {
 // subject identifies the classification in the tape. The info hash is the
 // natural key in production; corpora whose fixtures share a placeholder info
 // hash stamp their own id with tape.WithSubject.
-func (r runner) subject(ctx context.Context, t model.Torrent) string {
+func classifierSubject(ctx context.Context, t model.Torrent) string {
 	if subject, ok := tape.SubjectFrom(ctx); ok {
 		return subject
 	}

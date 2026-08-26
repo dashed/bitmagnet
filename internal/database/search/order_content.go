@@ -53,7 +53,7 @@ func ContentOrderByIdentity() query.Option {
 // ordering; the identity columns only order rows of equal rank.
 func ContentOrderByQueryStringRankThenIdentity() query.Option {
 	return query.OrderBy(append(
-		[]query.OrderByColumn{query.QueryStringRankOrderByColumn()},
+		[]query.OrderByColumn{query.StringRankOrderByColumn()},
 		ContentIdentityOrderByColumns()...,
 	)...)
 }

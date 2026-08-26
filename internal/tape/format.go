@@ -366,7 +366,7 @@ func validateSHA256Digest(digest string) error {
 		return fmt.Errorf("must be sha256 followed by 64 lowercase hexadecimal characters")
 	}
 	for _, char := range digest[len(prefix):] {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return fmt.Errorf("must be sha256 followed by 64 lowercase hexadecimal characters")
 		}
 	}
@@ -416,7 +416,7 @@ func (e *ActionMissError) Error() string {
 	)
 }
 
-func (e *ActionMissError) Is(target error) bool { return target == ErrActionMiss }
+func (*ActionMissError) Is(target error) bool { return target == ErrActionMiss }
 
 // ActionDesyncError describes a replay whose next action differs from the
 // recorded action at the same position.
@@ -439,7 +439,7 @@ func (e *ActionDesyncError) Error() string {
 	)
 }
 
-func (e *ActionDesyncError) Is(target error) bool { return target == ErrActionDesync }
+func (*ActionDesyncError) Is(target error) bool { return target == ErrActionDesync }
 
 // UnconsumedError describes evidence the replayed classification did not ask
 // for or enter. ActionsKnown is false for legacy v1 tapes, whose absent
@@ -471,7 +471,7 @@ func (e *UnconsumedError) Error() string {
 	)
 }
 
-func (e *UnconsumedError) Is(target error) bool { return target == ErrUnconsumed }
+func (*UnconsumedError) Is(target error) bool { return target == ErrUnconsumed }
 
 // DesyncError describes a specific desync. It is the highest-signal failure the
 // replay produces: it says the port asked the wrong question, independently of
@@ -500,7 +500,7 @@ func (e *DesyncError) Error() string {
 	)
 }
 
-func (e *DesyncError) Is(target error) bool { return target == ErrDesync }
+func (*DesyncError) Is(target error) bool { return target == ErrDesync }
 
 // MissError describes a specific miss.
 type MissError struct {
@@ -517,7 +517,7 @@ func (e *MissError) Error() string {
 	)
 }
 
-func (e *MissError) Is(target error) bool { return target == ErrMiss }
+func (*MissError) Is(target error) bool { return target == ErrMiss }
 
 // Marshal encodes a value for the tape.
 //

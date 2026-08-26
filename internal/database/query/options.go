@@ -117,11 +117,11 @@ func OrderBy(columns ...OrderByColumn) Option {
 
 const QueryStringRankField = "query_string_rank"
 
-// QueryStringRankOrderByColumn is the descending full-text relevance ordering column.
+// StringRankOrderByColumn is the descending full-text relevance ordering column.
 // It's exposed separately from OrderByQueryStringRank so that callers can append
 // further columns after it, for example a deterministic tiebreak - relevance ranks
 // are frequently tied, and OrderBy replaces rather than extends the ordering.
-func QueryStringRankOrderByColumn() OrderByColumn {
+func StringRankOrderByColumn() OrderByColumn {
 	return OrderByColumn{
 		OrderByColumn: clause.OrderByColumn{
 			Column:  clause.Column{Name: QueryStringRankField},
@@ -131,9 +131,17 @@ func QueryStringRankOrderByColumn() OrderByColumn {
 	}
 }
 
+// QueryStringRankOrderByColumn preserves the pre-policy public API.
+// Deprecated: use [StringRankOrderByColumn].
+//
+//nolint:revive // Compatibility wrapper; removing it would break downstream callers.
+func QueryStringRankOrderByColumn() OrderByColumn {
+	return StringRankOrderByColumn()
+}
+
 func OrderByQueryStringRank() Option {
 	return func(ctx OptionBuilder) (OptionBuilder, error) {
-		return ctx.OrderBy(QueryStringRankOrderByColumn()), nil
+		return ctx.OrderBy(StringRankOrderByColumn()), nil
 	}
 }
 

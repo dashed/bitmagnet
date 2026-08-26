@@ -185,6 +185,9 @@ func replayContent(session *tape.Session, kind string, request any) (search.Cont
 	}
 
 	var response localContentResponse
+	// model.Content is generated and fully JSON-tagged, but musttag does not
+	// follow all of its nested custom scalar types through this tape wrapper.
+	//nolint:musttag
 	if err := json.Unmarshal(responseJSON, &response); err != nil {
 		return search.ContentResult{}, fmt.Errorf("decode taped %s response: %w", kind, err)
 	}

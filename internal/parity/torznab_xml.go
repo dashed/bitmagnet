@@ -3,6 +3,7 @@ package parity
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -132,7 +133,7 @@ func parseTorznabXML(raw []byte) (*torznabXMLElement, error) {
 	for {
 		token, err := decoder.RawToken()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 

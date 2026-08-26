@@ -147,7 +147,10 @@ func New(params Params) Result {
 				}
 			}
 
-			progressCtx, cancel := context.WithCancel(context.Background())
+			// The progress loop belongs to the Fx lifecycle, not the bounded
+			// OnStart hook. Preserve startup values while deliberately detaching
+			// its deadline; OnStop cancels this child and waits for completion.
+			progressCtx, cancel := context.WithCancel(context.WithoutCancel(startCtx))
 			progressCancel = cancel
 			progressDone = make(chan struct{})
 			logTapeProgress(params.Logger, params.Config.TapeDir, recorder)

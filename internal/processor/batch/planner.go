@@ -98,7 +98,9 @@ func (p *Planner) AddPage(infoHashes []protocol.ID) (*JobSpec, error) {
 	}
 	if len(infoHashes) == 0 {
 		p.done = true
-		return nil, nil
+		// A nil spec is the documented terminal-page signal: the empty page
+		// completed successfully and there is no child job to materialize.
+		return nil, nil //nolint:nilnil
 	}
 	if p.message.BatchSize > 0 && len(infoHashes) > int(p.message.BatchSize) {
 		return nil, errInvalidPlannerPage

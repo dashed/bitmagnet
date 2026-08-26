@@ -120,8 +120,17 @@ func (r *TapeReplayer) Run(ctx context.Context, record tape.Record) (TapeReplayR
 		if record.Outcome != nil {
 			want = record.Outcome.Kind
 		}
+		if runErr == nil {
+			return TapeReplayResult{}, fmt.Errorf(
+				"classifier tape record %s#%d outcome mismatch: Go replay got %q without an error, recorded %q",
+				record.Subject,
+				record.Attempt,
+				actualOutcome.Kind,
+				want,
+			)
+		}
 		return TapeReplayResult{}, fmt.Errorf(
-			"classifier tape record %s#%d outcome mismatch: Go replay got %q (error %v), recorded %q",
+			"classifier tape record %s#%d outcome mismatch: Go replay got %q (error %w), recorded %q",
 			record.Subject,
 			record.Attempt,
 			actualOutcome.Kind,
