@@ -105,10 +105,11 @@ pub(crate) struct QueueQuery;
 impl QueueQuery {
     async fn jobs(
         &self,
+        ctx: &Context<'_>,
         input: QueueJobsQueryInput,
     ) -> async_graphql::Result<QueueJobsQueryResult> {
-        let _ = &input;
-        unserved("queue.jobs")
+        let runtime = ctx.data::<super::queue_jobs::QueueJobsRuntimeData>()?;
+        super::queue_jobs::resolve(runtime, input).await
     }
 
     async fn metrics(

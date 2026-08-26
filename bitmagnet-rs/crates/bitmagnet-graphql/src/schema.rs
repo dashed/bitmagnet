@@ -4,6 +4,7 @@ mod inputs;
 pub mod lane_c;
 pub mod lane_s;
 pub(crate) mod objects;
+pub mod queue_jobs;
 mod roots;
 pub mod runtime;
 pub(crate) mod scalars;
@@ -17,6 +18,12 @@ use async_graphql::EmptySubscription;
 
 use crate::health::{HealthRuntime, RuntimeConfig};
 
+pub use queue_jobs::{
+    PgQueueJobsRuntime, QueueJobRecord, QueueJobsAggRecord, QueueJobsError, QueueJobsFacetRequest,
+    QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
+    QueueJobsRuntimeData, MAX_QUEUE_JOBS_FILTER_VALUES, MAX_QUEUE_JOBS_LIMIT,
+    MAX_QUEUE_JOBS_OFFSET, MAX_QUEUE_NAME_CHARS,
+};
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
 pub use torrent_files::{
@@ -43,6 +50,7 @@ pub type Schema = async_graphql::Schema<Query, Mutation, EmptySubscription>;
 pub fn schema() -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(SearchRuntimeData::disabled())
+        .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -55,6 +63,7 @@ pub fn build_schema(version: String) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::disabled())
+        .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -67,6 +76,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::new(search))
+        .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -85,6 +95,7 @@ pub fn build_runtime_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::disabled())
+        .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(TorrentTagsRuntimeData::pg(pool))
@@ -104,6 +115,7 @@ pub fn build_runtime_search_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::new(search))
+        .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(TorrentTagsRuntimeData::pg(pool))
