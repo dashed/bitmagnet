@@ -27,6 +27,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/queue/**"
+      - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
       - ".github/workflows/rust.yml"
@@ -46,6 +47,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/queue/**"
+      - "testdata/parity/torznab/**"
       - "testdata/parity/migrations.golden"
       - "Makefile"
       - ".github/workflows/rust.yml"
@@ -334,7 +336,7 @@ jobs:
       - run: cargo deny check licenses bans sources
 
   test-pg:
-    name: live-PG integration (db + queue + processor + DHT crawler)
+    name: live-PG integration (db + queue + processor + DHT crawler + Torznab)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -357,6 +359,7 @@ jobs:
       BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_TORZNAB_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
     steps:
       - uses: actions/checkout@v4
@@ -392,3 +395,14 @@ jobs:
           cargo test -p bitmagnet-dht-crawler --test pipeline_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test persist_pg -- --ignored --test-threads=1
+      # Run last: the Go oracle deliberately recreates and leaves the disposable
+      # schema for the Rust real-router process.
+      - name: Run Torznab real-router PostgreSQL parity
+        working-directory: ${{ github.workspace }}
+        run: |
+          go test -tags integration -count=1 ./internal/torznab \
+            -run '^TestGenerateTorznabParityPgFixtures$'
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-torznab --test parity_pg -- \
+            --ignored --exact real_pg_router_matches_go_goldens_without_mutation \
+            --test-threads=1
