@@ -18,7 +18,8 @@ use crate::health::{HealthRuntime, RuntimeConfig};
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
 pub use torrent_files::{
-    PgTorrentFilesRuntime, TorrentFilesLimits, TorrentFilesRuntime, TorrentFilesRuntimeData,
+    PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
+    TorrentFilesRuntime, TorrentFilesRuntimeData,
 };
 
 /// Runtime version data available to GraphQL resolvers.

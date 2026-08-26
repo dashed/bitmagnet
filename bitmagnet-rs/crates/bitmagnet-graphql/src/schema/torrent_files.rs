@@ -350,10 +350,10 @@ pub(super) async fn resolve(
     input: TorrentFilesQueryInput,
 ) -> Result<TorrentFilesQueryResult> {
     let info_hashes = parse_hashes(input.info_hashes, runtime.limits.max_info_hashes)?;
-    let limit = optional_nonnegative(&input.limit, "limit")?.unwrap_or(DEFAULT_LIMIT);
-    let page = optional_nonnegative(&input.page, "page")?;
-    let explicit_offset = optional_nonnegative(&input.offset, "offset")?.unwrap_or(0);
-    let mut offset = page
+    let limit = u64::from(optional_nonnegative(&input.limit, "limit")?.unwrap_or(DEFAULT_LIMIT));
+    let page = optional_nonnegative(&input.page, "page")?.map(u64::from);
+    let explicit_offset = u64::from(optional_nonnegative(&input.offset, "offset")?.unwrap_or(0));
+    let offset = page
         .filter(|value| *value > 0)
         .unwrap_or(1)
         .checked_sub(1)
@@ -443,9 +443,10 @@ pub(super) async fn resolve(
 
     sort_files(&mut files, input.order_by.as_deref());
     let total = files.len();
-    offset = offset.min(u32::try_from(total).unwrap_or(u32::MAX));
     let start = usize::try_from(offset).unwrap_or(total).min(total);
-    let end = start.saturating_add(limit as usize).min(total);
+    let end = start
+        .saturating_add(usize::try_from(limit).unwrap_or(usize::MAX))
+        .min(total);
     let items = files.drain(start..end).collect();
     let total_count = input.total_count.value().copied().unwrap_or(false);
     let has_next_page = input.has_next_page.value().copied().unwrap_or(false) && end < total;
