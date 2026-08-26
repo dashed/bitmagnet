@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+#
+# One-shot, migration-only Go binary. The repository root is the build context
+# because the Goose SQL history is embedded from migrations/*.sql.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.schema-migrator \
+#     --build-arg REVISION="$(git rev-parse HEAD)" \
+#     --build-arg SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+#     -t bitmagnet-schema-migrator .
+
+ARG REVISION
+ARG SOURCE_TREE
+
+FROM --platform=$BUILDPLATFORM golang:1.23.6-bookworm AS builder
+ARG REVISION
+ARG SOURCE_TREE
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+      go build -trimpath \
+        -ldflags "-s -w \
+          -X github.com/bitmagnet-io/bitmagnet/internal/version.GitTag=${REVISION} \
+          -X github.com/bitmagnet-io/bitmagnet/internal/version.SourceCommit=${REVISION} \
+          -X github.com/bitmagnet-io/bitmagnet/internal/version.SourceTree=${SOURCE_TREE}" \
+        -o /out/bitmagnet-schema-migrator \
+        ./cmd/bitmagnet-schema-migrator
+
+FROM debian:bookworm-slim AS runtime
+ARG REVISION
+ARG SOURCE_TREE
+
+RUN set -eu; \
+    test "${#REVISION}" -eq 40; \
+    case "${REVISION}" in *[!0-9a-f]*) echo "REVISION must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac; \
+    test "${#SOURCE_TREE}" -eq 40; \
+    case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${REVISION}" \
+      io.bitmagnet.source-tree="${SOURCE_TREE}" \
+      io.bitmagnet.schema-migrator-mode="migration-only" \
+      io.bitmagnet.schema-migrator-contract="goose-29-33/v1"
+
+ENV BITMAGNET_SOURCE_COMMIT="${REVISION}" \
+    BITMAGNET_SOURCE_TREE="${SOURCE_TREE}"
+
+# The statically linked binary needs only CA roots for PostgreSQL TLS. It does
+# not write to the image filesystem and has no shell/compiler tooling contract.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
+
+COPY --from=builder /out/bitmagnet-schema-migrator /usr/local/bin/bitmagnet-schema-migrator
+
+USER 65532:65532
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/bitmagnet-schema-migrator"]
+CMD []

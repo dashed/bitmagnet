@@ -2,10 +2,29 @@ TEST_POSTGRES_DSN ?= postgres://postgres:test@localhost:5433/bitmagnet_test?sslm
 PARITY_IMAGE ?=
 TAPE_DIR ?=
 OUTPUT_DIR ?=
+SCHEMA_MIGRATOR_IMAGE ?= bitmagnet-schema-migrator:local
 
 .PHONY: test
 test:
 	go test -count=1 ./...
+
+.PHONY: schema-migrator-check
+schema-migrator-check:
+	go test -count=1 ./internal/schemamigrator ./cmd/bitmagnet-schema-migrator ./internal/database/migrations
+
+.PHONY: schema-migrator-image-check
+schema-migrator-image-check: schema-migrator-check
+	@set -eu; \
+	revision="$$(git rev-parse HEAD)"; \
+	tree="$$(git rev-parse 'HEAD^{tree}')"; \
+	docker build \
+		--file bitmagnet-rs/docker/Dockerfile.schema-migrator \
+		--build-arg "REVISION=$$revision" \
+		--build-arg "SOURCE_TREE=$$tree" \
+		--tag "$(SCHEMA_MIGRATOR_IMAGE)" .; \
+	docker run --rm --network none --read-only --cap-drop ALL \
+		--security-opt no-new-privileges --user 65532:65532 \
+		"$(SCHEMA_MIGRATOR_IMAGE)" version
 
 .PHONY: test-e2e
 test-e2e:
