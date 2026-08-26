@@ -236,11 +236,13 @@ jobs:
 
   publish-graphql:
     name: publish immutable GraphQL read API image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/alberto/my-fork'
+    if: >-
+      github.repository == 'dashed/bitmagnet' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/alberto/my-fork'
     needs: docker-graphql
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       packages: write
     env:
       IMAGE_REPOSITORY: ghcr.io/dashed/bitmagnet-graphql
