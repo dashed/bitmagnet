@@ -505,8 +505,7 @@ func runPeerSampleClientScenario(
 		t, scenario.id, scenario.transactionID, captured, expectedArgs,
 	)
 
-	outcome, errorText, identityPreserved, errorIsTypedNil :=
-		peerSampleClientAssertOutcome(t, scenario, err, sentinel, resultWasZero)
+	outcome, errorText, identityPreserved, errorIsTypedNil := peerSampleClientAssertOutcome(t, scenario, err, sentinel, resultWasZero)
 	if scenario.operation == "get_peers_scrape" && err == nil {
 		peerSampleClientAssertBloomDirection(t, scenario, result)
 	}
@@ -697,6 +696,8 @@ func peerSampleClientProjectScrapeResult(
 	t *testing.T,
 	value GetPeersScrapeResult,
 ) peerSampleClientResult {
+	t.Helper()
+
 	result := peerSampleClientResult{
 		ID:             value.ID.String(),
 		NodesPresence:  peerSampleClientSlicePresence(value.Nodes),

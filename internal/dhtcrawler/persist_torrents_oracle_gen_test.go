@@ -1206,7 +1206,10 @@ func crawlerPersistTorrentsNormalizedASTDigests(t *testing.T) map[string]string 
 			}
 		}
 	} else if !*updateDHTCrawlerPersistTorrentsOracle {
-		encoded, _ := json.MarshalIndent(digests, "", "  ")
+		encoded, marshalErr := json.MarshalIndent(digests, "", "  ")
+		if marshalErr != nil {
+			t.Fatalf("marshal normalized AST digests: %v", marshalErr)
+		}
 		t.Fatalf("fill crawlerPersistTorrentsExpectedNormalizedASTSHA256 with:\n%s", encoded)
 	}
 	return digests

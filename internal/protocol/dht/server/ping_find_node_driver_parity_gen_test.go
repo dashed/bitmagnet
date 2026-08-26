@@ -117,6 +117,7 @@ func (s *pingFindNodeDriverSocket) Receive(buffer []byte) (int, netip.AddrPort, 
 	s.cancel()
 	return len(s.wire), s.source, nil
 }
+
 func (s *pingFindNodeDriverSocket) Send(destination netip.AddrPort, wire []byte) error {
 	s.mu.Lock()
 	s.events = append(s.events, "send")

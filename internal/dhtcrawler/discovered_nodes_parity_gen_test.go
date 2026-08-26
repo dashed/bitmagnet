@@ -950,8 +950,7 @@ func assertCrawlerDiscoveredNodesCloseSourceShape(t *testing.T) {
 						if receive, ok := expression.X.(*ast.UnaryExpr); ok && receive.Op == token.ARROW {
 							if selector, ok := receive.X.(*ast.SelectorExpr); ok && selector.Sel.Name == "C" {
 								tickerClauseFound = true
-								tickerGuardedFlushFound =
-									crawlerDiscoveredNodesHasNonemptyFlushGuard(clause.Body)
+								tickerGuardedFlushFound = crawlerDiscoveredNodesHasNonemptyFlushGuard(clause.Body)
 							}
 						}
 					}

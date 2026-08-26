@@ -94,6 +94,7 @@ func (s *pingFindNodeCaptureSocket) Send(destination netip.AddrPort, wire []byte
 	s.wire = append([]byte(nil), wire...)
 	return nil
 }
+
 func (*pingFindNodeCaptureSocket) Receive([]byte) (int, netip.AddrPort, error) {
 	return 0, netip.AddrPort{}, errors.New("receive is outside the dispatch oracle")
 }

@@ -736,6 +736,8 @@ func reconcileCrawlerOldNodePingProducerFixtures(
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerOldNodePingProducerLane)(nil)
-var _ ktable.Table = (*crawlerOldNodePingProducerTable)(nil)
-var _ ktable.Node = (*crawlerOldNodePingProducerProbeNode)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerOldNodePingProducerLane)(nil)
+	_ ktable.Table                                       = (*crawlerOldNodePingProducerTable)(nil)
+	_ ktable.Node                                        = (*crawlerOldNodePingProducerProbeNode)(nil)
+)

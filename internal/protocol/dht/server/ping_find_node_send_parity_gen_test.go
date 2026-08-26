@@ -64,6 +64,7 @@ func (s *pingFindNodeSendSocket) Send(destination netip.AddrPort, wire []byte) e
 	s.wires = append(s.wires, append([]byte(nil), wire...))
 	return s.err
 }
+
 func (*pingFindNodeSendSocket) Receive([]byte) (int, netip.AddrPort, error) {
 	return 0, netip.AddrPort{}, errors.New("receive is outside the send oracle")
 }

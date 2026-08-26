@@ -842,6 +842,8 @@ func reconcileCrawlerPingWorkerFixtures(t *testing.T, fixtures []crawlerPingWork
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerPingWorkerManualLane)(nil)
-var _ client.Client = (*crawlerPingWorkerClient)(nil)
-var _ ktable.Table = (*crawlerPingWorkerTracingTable)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerPingWorkerManualLane)(nil)
+	_ client.Client                                      = (*crawlerPingWorkerClient)(nil)
+	_ ktable.Table                                       = (*crawlerPingWorkerTracingTable)(nil)
+)

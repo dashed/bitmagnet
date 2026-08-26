@@ -1092,6 +1092,8 @@ func crawlerScrapeReconcileFixtures(t *testing.T, fixtures []crawlerScrapeFixtur
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerScrapeManualLane)(nil)
-var _ concurrency.BatchingChannel[ktable.Node] = (*crawlerScrapeDiscovery)(nil)
-var _ concurrency.BatchingChannel[infoHashWithScrape] = (*crawlerScrapeHandoffLane)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerScrapeManualLane)(nil)
+	_ concurrency.BatchingChannel[ktable.Node]                   = (*crawlerScrapeDiscovery)(nil)
+	_ concurrency.BatchingChannel[infoHashWithScrape]            = (*crawlerScrapeHandoffLane)(nil)
+)

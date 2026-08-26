@@ -724,6 +724,8 @@ func reconcileCrawlerSampleInfoHashesProducerFixtures(
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerSampleInfoHashesProducerLane)(nil)
-var _ ktable.Table = (*crawlerSampleInfoHashesProducerTable)(nil)
-var _ ktable.Node = (*crawlerSampleInfoHashesProducerProbeNode)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerSampleInfoHashesProducerLane)(nil)
+	_ ktable.Table                                       = (*crawlerSampleInfoHashesProducerTable)(nil)
+	_ ktable.Node                                        = (*crawlerSampleInfoHashesProducerProbeNode)(nil)
+)

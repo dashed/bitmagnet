@@ -272,6 +272,7 @@ func (*dhtDispatchSendCaptureSocket) Close() error              { return nil }
 func (*dhtDispatchSendCaptureSocket) Receive([]byte) (int, netip.AddrPort, error) {
 	return 0, netip.AddrPort{}, errors.New("receive is outside the dispatch/send oracle")
 }
+
 func (s *dhtDispatchSendCaptureSocket) Send(destination netip.AddrPort, wire []byte) error {
 	*s.events = append(*s.events, "send")
 	s.destinations = append(s.destinations, destination)

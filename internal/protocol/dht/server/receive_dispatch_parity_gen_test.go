@@ -77,6 +77,7 @@ func (*receiveDispatchSocket) Close() error              { return nil }
 func (*receiveDispatchSocket) Send(netip.AddrPort, []byte) error {
 	return nil
 }
+
 func (s *receiveDispatchSocket) Receive(buffer []byte) (int, netip.AddrPort, error) {
 	if s.served {
 		return 0, netip.AddrPort{}, context.Canceled
@@ -169,7 +170,7 @@ func runReceiveDispatchScenario(t *testing.T, scenario receiveDispatchScenario) 
 		PendingAfter:     scenario.pendingTID != "",
 		RustPendingAfter: len(scenario.pendingTID) == 2,
 	}
-	goOutcome := ""
+	var goOutcome string
 	switch {
 	case len(scenario.wire) == 0:
 		goOutcome = "zero"
@@ -259,6 +260,7 @@ func (*receiveReuseSocket) Close() error              { return nil }
 func (*receiveReuseSocket) Send(netip.AddrPort, []byte) error {
 	return nil
 }
+
 func (s *receiveReuseSocket) Receive(buffer []byte) (int, netip.AddrPort, error) {
 	if s.current == len(s.wires) {
 		return 0, netip.AddrPort{}, context.Canceled

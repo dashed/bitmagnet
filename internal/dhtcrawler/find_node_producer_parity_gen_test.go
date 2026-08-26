@@ -604,6 +604,8 @@ func reconcileCrawlerFindNodeProducerFixtures(
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerFindNodeProducerLane)(nil)
-var _ ktable.Table = (*crawlerFindNodeProducerTable)(nil)
-var _ ktable.Node = (*crawlerFindNodeProducerProbeNode)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[ktable.Node] = (*crawlerFindNodeProducerLane)(nil)
+	_ ktable.Table                                       = (*crawlerFindNodeProducerTable)(nil)
+	_ ktable.Node                                        = (*crawlerFindNodeProducerProbeNode)(nil)
+)

@@ -459,20 +459,32 @@ func TestGenerateDHTCrawlerRequestMetaInfoParity(t *testing.T) {
 	hybridV1, hybridV2 := crawlerRequestMetaInfoIdentities(hybridParsed)
 	hybridSuccess := crawlerRequestMetaInfoRequesterOutcome{Kind: "success", Name: hybridParsed.Info.Name, MetaVersion: hybridParsed.MetaVersion, InfoHashV1: hybridV1, InfoHashV2: hybridV2}
 	scenarios := []crawlerRequestMetaInfoScenario{
-		{id: crawlerRequestMetaInfoFixtureIDs[1], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
-			request: request(201, "198.51.100.201:7201"), handoffMode: "buffered_accept_one", handoffCapacity: 1},
-		{id: crawlerRequestMetaInfoFixtureIDs[2], classification: "RUNTIME_EXACT", kind: "run",
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[1], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
+			request: request(201, "198.51.100.201:7201"), handoffMode: "buffered_accept_one", handoffCapacity: 1,
+		},
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[2], classification: "RUNTIME_EXACT", kind: "run",
 			request:  requestWithHash(hybridHash, "198.51.100.202:7202", "203.0.113.1:7301", "203.0.113.1:7301", "[2001:db8::2%9]:7302", "203.0.113.3:7303"),
-			outcomes: []crawlerRequestMetaInfoRequesterOutcome{errorOutcome("peer one failed"), errorOutcome("duplicate peer failed"), hybridSuccess}, handoffMode: "buffered_accept_one", handoffCapacity: 1},
-		{id: crawlerRequestMetaInfoFixtureIDs[3], classification: "RUNTIME_EXACT", kind: "do",
+			outcomes: []crawlerRequestMetaInfoRequesterOutcome{errorOutcome("peer one failed"), errorOutcome("duplicate peer failed"), hybridSuccess}, handoffMode: "buffered_accept_one", handoffCapacity: 1,
+		},
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[3], classification: "RUNTIME_EXACT", kind: "do",
 			request:  request(203, "198.51.100.203:7203", "203.0.113.6:7306", "[2001:db8::7%11]:7307", "203.0.113.6:7306"),
-			outcomes: []crawlerRequestMetaInfoRequesterOutcome{errorOutcome("first failure"), errorOutcome("second failure"), errorOutcome("third failure")}, handoffMode: "not_executed"},
-		{id: crawlerRequestMetaInfoFixtureIDs[4], classification: "RUNTIME_EXACT", kind: "run",
-			request: request(204, "198.51.100.204:7204", "203.0.113.4:7304", "203.0.113.5:7305"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "success", InvalidInfo: true}}, actualDefaultBanning: true, blockError: "oracle ignored block failure", handoffMode: "buffered_accept_one", handoffCapacity: 1},
-		{id: crawlerRequestMetaInfoFixtureIDs[5], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
-			request: request(205, "198.51.100.205:7205", "203.0.113.8:7308", "203.0.113.9:7309"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "pending_until_cancel"}, errorOutcome("remaining peer sees cancelled context")}, cancelRequesterAtCall: 1, handoffMode: "unbuffered_no_receiver"},
-		{id: crawlerRequestMetaInfoFixtureIDs[6], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
-			request: request(206, "198.51.100.206:7206", "203.0.113.10:7310", "203.0.113.11:7311"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "pending_until_cancel"}, success("allowed.after.cancel", 1)}, cancelRequesterAtCall: 1, handoffMode: "unbuffered_no_receiver"},
+			outcomes: []crawlerRequestMetaInfoRequesterOutcome{errorOutcome("first failure"), errorOutcome("second failure"), errorOutcome("third failure")}, handoffMode: "not_executed",
+		},
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[4], classification: "RUNTIME_EXACT", kind: "run",
+			request: request(204, "198.51.100.204:7204", "203.0.113.4:7304", "203.0.113.5:7305"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "success", InvalidInfo: true}}, actualDefaultBanning: true, blockError: "oracle ignored block failure", handoffMode: "buffered_accept_one", handoffCapacity: 1,
+		},
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[5], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
+			request: request(205, "198.51.100.205:7205", "203.0.113.8:7308", "203.0.113.9:7309"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "pending_until_cancel"}, errorOutcome("remaining peer sees cancelled context")}, cancelRequesterAtCall: 1, handoffMode: "unbuffered_no_receiver",
+		},
+		{
+			id: crawlerRequestMetaInfoFixtureIDs[6], classification: "RUNTIME_WITH_OWNED_SHUTDOWN_DELTA", kind: "run",
+			request: request(206, "198.51.100.206:7206", "203.0.113.10:7310", "203.0.113.11:7311"), outcomes: []crawlerRequestMetaInfoRequesterOutcome{{Kind: "pending_until_cancel"}, success("allowed.after.cancel", 1)}, cancelRequesterAtCall: 1, handoffMode: "unbuffered_no_receiver",
+		},
 		{id: crawlerRequestMetaInfoFixtureIDs[7], classification: "GO_ONLY_LANE", kind: "run", handoffMode: "unbuffered_no_receiver", laneReturnError: true},
 	}
 	fixtures := []crawlerRequestMetaInfoFixture{crawlerRequestMetaInfoSourceFixture(t)}
@@ -497,6 +509,8 @@ func TestGenerateDHTCrawlerRequestMetaInfoParity(t *testing.T) {
 }
 
 func crawlerRequestMetaInfoSourceFixture(t *testing.T) crawlerRequestMetaInfoFixture {
+	t.Helper()
+
 	config := NewDefaultConfig()
 	return crawlerRequestMetaInfoFixture{
 		ID: crawlerRequestMetaInfoFixtureIDs[0], Subsystem: "dht_crawler_request_meta_info", Classification: "SOURCE_ONLY",
@@ -605,8 +619,10 @@ func crawlerRequestMetaInfoRunScenario(t *testing.T, s crawlerRequestMetaInfoSce
 		projected := crawlerRequestMetaInfoProjectRequest(*s.request)
 		input.Request = &projected
 	}
-	return crawlerRequestMetaInfoFixture{ID: s.id, Subsystem: "dht_crawler_request_meta_info", Classification: s.classification,
-		Oracle: crawlerRequestMetaInfoOracle{Composition: "actual_runRequestMetaInfo_or_doRequestMetaInfo_with_manual_lane_and_scripted_collaborators", Determinism: "synchronous_peer_attempts_and_explicit_pending_cancellation_gates", Lane: "manual_in_order_callback_interface", Requester: "scripted_metainforequester_Requester", Banning: "scripted_banning_Checker", Blocking: "scripted_blocking_Manager", Handoff: s.handoffMode}, Input: input, Expected: expected}
+	return crawlerRequestMetaInfoFixture{
+		ID: s.id, Subsystem: "dht_crawler_request_meta_info", Classification: s.classification,
+		Oracle: crawlerRequestMetaInfoOracle{Composition: "actual_runRequestMetaInfo_or_doRequestMetaInfo_with_manual_lane_and_scripted_collaborators", Determinism: "synchronous_peer_attempts_and_explicit_pending_cancellation_gates", Lane: "manual_in_order_callback_interface", Requester: "scripted_metainforequester_Requester", Banning: "scripted_banning_Checker", Blocking: "scripted_blocking_Manager", Handoff: s.handoffMode}, Input: input, Expected: expected,
+	}
 }
 
 func crawlerRequestMetaInfoProjectRequest(value infoHashWithPeers) crawlerRequestMetaInfoRequest {
@@ -675,7 +691,10 @@ func crawlerRequestMetaInfoNormalizedASTDigests(t *testing.T) map[string]string 
 		}
 	}
 	if missing {
-		encoded, _ := json.MarshalIndent(digests, "", "  ")
+		encoded, marshalErr := json.MarshalIndent(digests, "", "  ")
+		if marshalErr != nil {
+			t.Fatalf("marshal normalized AST digests: %v", marshalErr)
+		}
 		t.Fatalf("fill crawlerRequestMetaInfoExpectedNormalizedASTSHA256 with:\n%s", encoded)
 	}
 	return digests
@@ -710,6 +729,8 @@ func crawlerRequestMetaInfoFindASTNode(t *testing.T, spec crawlerRequestMetaInfo
 }
 
 func crawlerRequestMetaInfoPrerequisiteDigests(t *testing.T) map[string]string {
+	t.Helper()
+
 	want := map[string]string{
 		"internal/protocol/metainfo/testdata/bittorrent-v2-hybrid-test.torrent": "8ba7575e64e9046cac74ca6523bff6445ff5c3e369d5d132607a793a1834e93f",
 		"testdata/parity/dht/dht_crawler_get_peers.jsonl":                       "82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844",
@@ -721,6 +742,8 @@ func crawlerRequestMetaInfoPrerequisiteDigests(t *testing.T) map[string]string {
 }
 
 func crawlerRequestMetaInfoSourceDigests(t *testing.T) map[string]string {
+	t.Helper()
+
 	paths := []string{
 		"internal/blocking/manager.go", "internal/concurrency/batching_channel.go", "internal/concurrency/buffered_concurrent_channel.go",
 		"internal/dhtcrawler/config.go", "internal/dhtcrawler/crawler.go", "internal/dhtcrawler/factory.go", "internal/dhtcrawler/persist.go", "internal/dhtcrawler/request_meta_info.go",
@@ -738,6 +761,8 @@ func crawlerRequestMetaInfoSourceDigests(t *testing.T) map[string]string {
 }
 
 func crawlerRequestMetaInfoValidateDigests(t *testing.T, want map[string]string) {
+	t.Helper()
+
 	for path, expected := range want {
 		contents, err := os.ReadFile(filepath.Join(crawlerRequestMetaInfoRoot(t), path))
 		if err != nil {
@@ -750,6 +775,8 @@ func crawlerRequestMetaInfoValidateDigests(t *testing.T, want map[string]string)
 }
 
 func crawlerRequestMetaInfoRoot(t *testing.T) string {
+	t.Helper()
+
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve request-metainfo generator source")
@@ -758,6 +785,8 @@ func crawlerRequestMetaInfoRoot(t *testing.T) string {
 }
 
 func crawlerRequestMetaInfoReconcile(t *testing.T, fixtures []crawlerRequestMetaInfoFixture) {
+	t.Helper()
+
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
 	encoder.SetEscapeHTML(false)
@@ -787,8 +816,10 @@ func crawlerRequestMetaInfoReconcile(t *testing.T, fixtures []crawlerRequestMeta
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[infoHashWithPeers] = (*crawlerRequestMetaInfoManualLane)(nil)
-var _ metainforequester.Requester = (*crawlerRequestMetaInfoRequester)(nil)
-var _ banning.Checker = (*crawlerRequestMetaInfoChecker)(nil)
-var _ blocking.Manager = (*crawlerRequestMetaInfoBlocker)(nil)
-var _ concurrency.BatchingChannel[infoHashWithMetaInfo] = (*crawlerRequestMetaInfoHandoffLane)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[infoHashWithPeers] = (*crawlerRequestMetaInfoManualLane)(nil)
+	_ metainforequester.Requester                              = (*crawlerRequestMetaInfoRequester)(nil)
+	_ banning.Checker                                          = (*crawlerRequestMetaInfoChecker)(nil)
+	_ blocking.Manager                                         = (*crawlerRequestMetaInfoBlocker)(nil)
+	_ concurrency.BatchingChannel[infoHashWithMetaInfo]        = (*crawlerRequestMetaInfoHandoffLane)(nil)
+)

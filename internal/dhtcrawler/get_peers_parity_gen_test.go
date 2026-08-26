@@ -1056,8 +1056,10 @@ func reconcileCrawlerGetPeersFixtures(t *testing.T, fixtures []crawlerGetPeersFi
 	}
 }
 
-var _ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerGetPeersManualLane)(nil)
-var _ concurrency.BatchingChannel[ktable.Node] = (*crawlerGetPeersDiscovery)(nil)
-var _ concurrency.BufferedConcurrentChannel[infoHashWithPeers] = (*crawlerGetPeersMetadataLane)(nil)
-var _ client.Client = (*crawlerGetPeersClient)(nil)
-var _ ktable.Table = (*crawlerGetPeersTracingTable)(nil)
+var (
+	_ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerGetPeersManualLane)(nil)
+	_ concurrency.BatchingChannel[ktable.Node]                   = (*crawlerGetPeersDiscovery)(nil)
+	_ concurrency.BufferedConcurrentChannel[infoHashWithPeers]   = (*crawlerGetPeersMetadataLane)(nil)
+	_ client.Client                                              = (*crawlerGetPeersClient)(nil)
+	_ ktable.Table                                               = (*crawlerGetPeersTracingTable)(nil)
+)

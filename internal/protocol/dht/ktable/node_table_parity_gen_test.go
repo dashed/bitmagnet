@@ -152,8 +152,10 @@ func TestGenerateDHTNodeTableParity(t *testing.T) {
 		input nodeTableInput
 	}{
 		{"empty_origin_and_invalid_address", nodeTableInput{Origin: origin, Operations: []nodeTableOperation{
-			{Kind: "origin"}, closestNode(origin), closestNode(nodeID(99)),
-			{Kind: "putInvalid", ID: nodeID(1)}, putNode(origin, addr("127.0.0.1", 0, 0)),
+			{Kind: "origin"},
+			closestNode(origin), closestNode(nodeID(99)),
+			{Kind: "putInvalid", ID: nodeID(1)},
+			putNode(origin, addr("127.0.0.1", 0, 0)),
 			dropNode(origin),
 		}}},
 		{"address_representations_updates_and_shared_endpoint", nodeTableInput{Origin: zero, Operations: addressOps}},

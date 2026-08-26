@@ -532,12 +532,12 @@ func assertCrawlerIgnoreHashesModulePin(t *testing.T) string {
 	t.Helper()
 	root := crawlerPingWorkerRoot(t)
 	type moduleMetadata struct {
-		Path     string
-		Version  string
-		Sum      string
-		GoModSum string
-		Dir      string
-		Replace  *moduleMetadata
+		Path     string          `json:"Path"`
+		Version  string          `json:"Version"`
+		Sum      string          `json:"Sum"`
+		GoModSum string          `json:"GoModSum"`
+		Dir      string          `json:"Dir"`
+		Replace  *moduleMetadata `json:"Replace"`
 	}
 	command := exec.Command("go", "list", "-m", "-json", crawlerIgnoreHashesModulePath)
 	command.Dir = root

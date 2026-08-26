@@ -250,9 +250,12 @@ func generateKeyedLimiterFixtures(t *testing.T) []keyedLimiterFixture {
 	positiveTTL := 20 * time.Second
 	scenarios := []keyedLimiterFixture{
 		newKeyedFixture("initial_burst_is_independent_per_key", 0, 2, 4, 0, []keyedLimiterStep{
-			{Operation: "allow", Key: "alpha"}, {Operation: "allow", Key: "alpha"},
-			{Operation: "allow", Key: "alpha"}, {Operation: "allow", Key: "beta"},
-			{Operation: "allow", Key: "beta"}, {Operation: "allow", Key: "beta"},
+			{Operation: "allow", Key: "alpha"},
+			{Operation: "allow", Key: "alpha"},
+			{Operation: "allow", Key: "alpha"},
+			{Operation: "allow", Key: "beta"},
+			{Operation: "allow", Key: "beta"},
+			{Operation: "allow", Key: "beta"},
 		}),
 		newKeyedFixture("exact_string_keys_remain_distinct", 0, 1, 8, 0, []keyedLimiterStep{
 			{Operation: "allow", Key: "192.0.2.1"},
@@ -263,8 +266,10 @@ func generateKeyedLimiterFixtures(t *testing.T) []keyedLimiterFixture {
 			{Operation: "allow", Key: "::ffff:192.0.2.1"},
 		}),
 		newKeyedFixture("get_refreshes_lru_recency_and_capacity_evicts_oldest", 0, 1, 2, 0, []keyedLimiterStep{
-			{Operation: "get", Key: "alpha"}, {Operation: "get", Key: "beta"},
-			{Operation: "get", Key: "alpha"}, {Operation: "get", Key: "gamma"},
+			{Operation: "get", Key: "alpha"},
+			{Operation: "get", Key: "beta"},
+			{Operation: "get", Key: "alpha"},
+			{Operation: "get", Key: "gamma"},
 			{Operation: "get", Key: "beta"},
 		}),
 		newKeyedFixture("zero_ttl_disables_expiry", 0, 1, 2, 0, []keyedLimiterStep{

@@ -401,8 +401,12 @@ func assertDHTInfoHashBlockFilterSourceShapes(t *testing.T, root string) {
 func assertDHTInfoHashBlockFilterModulePin(t *testing.T, root string) string {
 	t.Helper()
 	type moduleMetadata struct {
-		Path, Version, Sum, GoModSum, Dir string
-		Replace                           *moduleMetadata
+		Path     string          `json:"Path"`
+		Version  string          `json:"Version"`
+		Sum      string          `json:"Sum"`
+		GoModSum string          `json:"GoModSum"`
+		Dir      string          `json:"Dir"`
+		Replace  *moduleMetadata `json:"Replace"`
 	}
 	command := exec.Command("go", "list", "-m", "-json", dhtInfoHashBlockFilterModulePath)
 	command.Dir = root

@@ -305,6 +305,8 @@ func TestGenerateDHTCrawlerPersistSourcesParity(t *testing.T) {
 }
 
 func crawlerPersistSourcesSourceFixture(t *testing.T) crawlerPersistSourcesFixture {
+	t.Helper()
+
 	return crawlerPersistSourcesFixture{
 		ID: crawlerPersistSourcesFixtureIDs[0], Subsystem: "dht_crawler_persist_sources", Classification: "SOURCE_ONLY",
 		Oracle: crawlerPersistSourcesOracle{
@@ -633,7 +635,10 @@ func crawlerPersistSourcesNormalizedASTDigests(t *testing.T) map[string]string {
 		}
 	}
 	if missing {
-		encoded, _ := json.MarshalIndent(digests, "", "  ")
+		encoded, marshalErr := json.MarshalIndent(digests, "", "  ")
+		if marshalErr != nil {
+			t.Fatalf("marshal normalized AST digests: %v", marshalErr)
+		}
 		t.Fatalf("fill crawlerPersistSourcesExpectedNormalizedASTSHA256 with:\n%s", encoded)
 	}
 	return digests

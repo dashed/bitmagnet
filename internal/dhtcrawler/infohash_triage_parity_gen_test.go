@@ -1154,6 +1154,8 @@ func reconcileCrawlerInfoHashTriageFixtures(t *testing.T, fixtures []crawlerInfo
 	}
 }
 
-var _ concurrency.BatchingChannel[nodeHasPeersForHash] = (*crawlerInfoHashTriageBatchLane)(nil)
-var _ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerInfoHashTriageDeliveryLane)(nil)
-var _ blocking.Manager = (*crawlerInfoHashTriageBlockingManager)(nil)
+var (
+	_ concurrency.BatchingChannel[nodeHasPeersForHash]           = (*crawlerInfoHashTriageBatchLane)(nil)
+	_ concurrency.BufferedConcurrentChannel[nodeHasPeersForHash] = (*crawlerInfoHashTriageDeliveryLane)(nil)
+	_ blocking.Manager                                           = (*crawlerInfoHashTriageBlockingManager)(nil)
+)
