@@ -21,6 +21,7 @@ mod dht_oldest_node_find_producer;
 mod dht_oldest_node_ping_producer;
 mod dht_responder;
 mod dht_runtime;
+mod dht_runtime_health;
 mod dht_sample_infohashes_producer;
 mod dht_sample_infohashes_worker;
 mod dht_send;
@@ -131,6 +132,10 @@ pub use dht_runtime::{
     DhtRuntime, DhtRuntimeClient, DhtRuntimeClientError, DhtRuntimeConfig, DhtRuntimeConfigError,
     DhtRuntimeControlledQueryError, DhtRuntimeDriverError, DhtRuntimeExit, DhtRuntimeStartError,
     DHT_DISCOVERY_QUEUE_CAPACITY,
+};
+pub use dht_runtime_health::{
+    DhtRuntimeHealthFailure, DhtRuntimeHealthHandle, DhtRuntimeHealthSnapshot,
+    DhtRuntimeHealthStatus, DHT_RUNTIME_HEALTH_INITIAL_GRACE, DHT_RUNTIME_HEALTH_SUCCESS_FRESHNESS,
 };
 pub use dht_sample_infohashes_producer::{
     DhtSampleInfoHashesProducer, DhtSampleInfoHashesProducerExit, DhtSampleInfoHashesProducerStats,

@@ -10,9 +10,10 @@ use crate::{
     assert_dht_channel_capacity, dht_discovery_channel, CryptoTransactionIdIssuer, DhtClient,
     DhtClientError, DhtConcurrentSupervisor, DhtConcurrentSupervisorExit, DhtDiscoveryReceiver,
     DhtDiscoveryStatsHandle, DhtDispatcher, DhtDriverError, DhtInboundRateLimiter, DhtInboundStats,
-    DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, FindNodeResult, GetPeersResult,
-    GetPeersScrapeResult, Id20, KTable, PingResult, SampleInfoHashesResult, TokioIpv4UdpError,
-    TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError, TokioIpv4UdpWeakSender, TransactionRegistry,
+    DhtOutboundRateLimiter, DhtRateLimitWaitError, DhtResponder, DhtRuntimeHealthHandle,
+    FindNodeResult, GetPeersResult, GetPeersScrapeResult, Id20, KTable, PingResult,
+    SampleInfoHashesResult, TokioIpv4UdpError, TokioIpv4UdpTransport, TokioIpv4UdpWeakSendError,
+    TokioIpv4UdpWeakSender, TransactionRegistry,
 };
 
 const CLIENT_SUFFIX: &[u8; 8] = b"-BM0001-";
@@ -138,6 +139,7 @@ pub struct DhtRuntimeClient {
     client: DhtClient<CryptoTransactionIdIssuer>,
     sender: TokioIpv4UdpWeakSender,
     outbound_rate_limiter: DhtOutboundRateLimiter,
+    health: DhtRuntimeHealthHandle,
 }
 
 impl DhtRuntimeClient {
@@ -151,6 +153,7 @@ impl DhtRuntimeClient {
             client: DhtClient::new(local_id, registry, query_timeout),
             sender,
             outbound_rate_limiter: DhtOutboundRateLimiter::new(),
+            health: DhtRuntimeHealthHandle::new(),
         }
     }
 
@@ -161,10 +164,19 @@ impl DhtRuntimeClient {
         self.sender.local_addr()
     }
 
+    /// Clone sender-free outbound query health observations.
+    #[must_use]
+    pub fn health(&self) -> DhtRuntimeHealthHandle {
+        self.health.clone()
+    }
+
     /// Admit, send, and await one typed `ping` query.
     pub async fn ping(&self, remote: SocketAddr) -> Result<PingResult, DhtRuntimeClientError> {
         self.outbound_rate_limiter.wait(remote).await;
-        self.client.ping(&mut self.sender.clone(), remote).await
+        let result = self.client.ping(&mut self.sender.clone(), remote).await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result
     }
 
     /// Admit with caller controls, then immediately send and await `ping`.
@@ -180,10 +192,10 @@ impl DhtRuntimeClient {
         let mut sender = self
             .admitted_sender(remote, admission_deadline, admission_cancellation)
             .await?;
-        self.client
-            .ping(&mut sender, remote)
-            .await
-            .map_err(DhtRuntimeControlledQueryError::Query)
+        let result = self.client.ping(&mut sender, remote).await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result.map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     /// Admit, send, and await one typed `find_node` query.
@@ -193,9 +205,13 @@ impl DhtRuntimeClient {
         target: Id20,
     ) -> Result<FindNodeResult, DhtRuntimeClientError> {
         self.outbound_rate_limiter.wait(remote).await;
-        self.client
+        let result = self
+            .client
             .find_node(&mut self.sender.clone(), remote, target)
-            .await
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result
     }
 
     /// Admit with caller controls, then immediately send and await `find_node`.
@@ -212,10 +228,10 @@ impl DhtRuntimeClient {
         let mut sender = self
             .admitted_sender(remote, admission_deadline, admission_cancellation)
             .await?;
-        self.client
-            .find_node(&mut sender, remote, target)
-            .await
-            .map_err(DhtRuntimeControlledQueryError::Query)
+        let result = self.client.find_node(&mut sender, remote, target).await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result.map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     /// Admit, send, and await one typed `get_peers` query.
@@ -225,9 +241,13 @@ impl DhtRuntimeClient {
         info_hash: Id20,
     ) -> Result<GetPeersResult, DhtRuntimeClientError> {
         self.outbound_rate_limiter.wait(remote).await;
-        self.client
+        let result = self
+            .client
             .get_peers(&mut self.sender.clone(), remote, info_hash)
-            .await
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result
     }
 
     /// Admit with caller controls, then immediately send and await `get_peers`.
@@ -244,10 +264,10 @@ impl DhtRuntimeClient {
         let mut sender = self
             .admitted_sender(remote, admission_deadline, admission_cancellation)
             .await?;
-        self.client
-            .get_peers(&mut sender, remote, info_hash)
-            .await
-            .map_err(DhtRuntimeControlledQueryError::Query)
+        let result = self.client.get_peers(&mut sender, remote, info_hash).await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result.map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     /// Admit, send, and await one typed BEP-33 scrape query.
@@ -257,9 +277,13 @@ impl DhtRuntimeClient {
         info_hash: Id20,
     ) -> Result<GetPeersScrapeResult, DhtRuntimeClientError> {
         self.outbound_rate_limiter.wait(remote).await;
-        self.client
+        let result = self
+            .client
             .get_peers_scrape(&mut self.sender.clone(), remote, info_hash)
-            .await
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result
     }
 
     /// Admit with caller controls, then immediately send and await BEP-33 scrape.
@@ -276,10 +300,13 @@ impl DhtRuntimeClient {
         let mut sender = self
             .admitted_sender(remote, admission_deadline, admission_cancellation)
             .await?;
-        self.client
+        let result = self
+            .client
             .get_peers_scrape(&mut sender, remote, info_hash)
-            .await
-            .map_err(DhtRuntimeControlledQueryError::Query)
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result.map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     /// Admit, send, and await one typed BEP-51 query.
@@ -289,9 +316,13 @@ impl DhtRuntimeClient {
         target: Id20,
     ) -> Result<SampleInfoHashesResult, DhtRuntimeClientError> {
         self.outbound_rate_limiter.wait(remote).await;
-        self.client
+        let result = self
+            .client
             .sample_infohashes(&mut self.sender.clone(), remote, target)
-            .await
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result
     }
 
     /// Admit with caller controls, then immediately send and await BEP-51.
@@ -308,10 +339,13 @@ impl DhtRuntimeClient {
         let mut sender = self
             .admitted_sender(remote, admission_deadline, admission_cancellation)
             .await?;
-        self.client
+        let result = self
+            .client
             .sample_infohashes(&mut sender, remote, target)
-            .await
-            .map_err(DhtRuntimeControlledQueryError::Query)
+            .await;
+        self.health
+            .record_query_completion(go_server_query_was_successful(&result));
+        result.map_err(DhtRuntimeControlledQueryError::Query)
     }
 
     async fn admitted_sender<F>(
@@ -329,6 +363,16 @@ impl DhtRuntimeClient {
             .map_err(DhtRuntimeControlledQueryError::Admission)?;
         Ok(self.sender.clone())
     }
+}
+
+// Go observes `server.Query` below its typed adapter. A structurally accepted
+// scrape response therefore counts as server success even when the adapter
+// later rejects its missing bloom filters.
+fn go_server_query_was_successful<T>(result: &Result<T, DhtRuntimeClientError>) -> bool {
+    matches!(
+        result,
+        Ok(_) | Err(DhtClientError::MissingScrapeBloomFilters { .. })
+    )
 }
 
 /// The initial owned production DHT composition over one shared IPv4 socket.
@@ -392,6 +436,7 @@ impl DhtRuntime {
         let (receiver, sender) = transport.into_parts();
         let weak_sender = sender.downgrade();
         let client = DhtRuntimeClient::new(local_id, &registry, config.query_timeout, weak_sender);
+        let health = client.health();
 
         let mut supervisor = DhtConcurrentSupervisor::with_inbound_policy(
             receiver,
@@ -405,8 +450,11 @@ impl DhtRuntime {
         let inbound_stats = supervisor.inbound_stats();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task_registry = registry.clone();
+        let task_health = health.clone();
+        health.mark_started();
         let task = tokio::spawn(async move {
             let _registry_guard = RegistryCloseGuard(task_registry);
+            let _health_guard = RuntimeHealthStopGuard(task_health);
             match supervisor.run(wait_for_shutdown(&mut shutdown_rx)).await {
                 DhtConcurrentSupervisorExit::Shutdown => DhtRuntimeExit::Shutdown,
                 DhtConcurrentSupervisorExit::Failed(error) => DhtRuntimeExit::Failed(error),
@@ -458,6 +506,12 @@ impl DhtRuntime {
     #[must_use]
     pub fn discovery_stats(&self) -> DhtDiscoveryStatsHandle {
         self.discovery_stats.clone()
+    }
+
+    /// Clone sender-free outbound query health observations.
+    #[must_use]
+    pub fn health(&self) -> DhtRuntimeHealthHandle {
+        self.client.health()
     }
 
     /// Take exclusive ownership of the production discovered-node stream.
@@ -546,11 +600,20 @@ impl DhtRuntime {
 
 impl Drop for DhtRuntime {
     fn drop(&mut self) {
+        self.client.health.mark_stopped();
         self.registry.close();
         let _ = self.shutdown_tx.send(true);
         if let Some(task) = self.task.take() {
             task.abort();
         }
+    }
+}
+
+struct RuntimeHealthStopGuard(DhtRuntimeHealthHandle);
+
+impl Drop for RuntimeHealthStopGuard {
+    fn drop(&mut self) {
+        self.0.mark_stopped();
     }
 }
 
@@ -595,9 +658,10 @@ mod tests {
     use tokio::sync::oneshot;
 
     use crate::{
-        ByteString, DhtDiscoveryOffer, DhtDiscoveryStats, DhtInboundStatsSnapshot, KrpcMessage,
-        MessageArgs, QuerySendError, RegisterError, RoutingNode, TokioIpv4UdpWeakSendError,
-        TransactionRegistry, MAX_INBOUND_DATAGRAM_BYTES,
+        ByteString, DhtDiscoveryOffer, DhtDiscoveryStats, DhtInboundStatsSnapshot,
+        DhtRuntimeHealthSnapshot, DhtRuntimeHealthStatus, KrpcMessage, MessageArgs, QuerySendError,
+        RegisterError, RoutingNode, TokioIpv4UdpWeakSendError, TransactionRegistry,
+        MAX_INBOUND_DATAGRAM_BYTES,
     };
 
     use super::*;
@@ -696,6 +760,8 @@ mod tests {
     async fn controlled_admission_precedes_closed_registry_and_query_errors_remain_nested() {
         let (closed_client, closed_registry, remote) = stopped_runtime_client().await;
         closed_registry.close();
+        closed_client.health.mark_started();
+        let health = closed_client.health();
 
         assert!(matches!(
             closed_client
@@ -706,6 +772,7 @@ mod tests {
             ))
         ));
         assert_eq!(closed_registry.pending_count(), 0);
+        assert_eq!(health.snapshot().last_response_ago, None);
 
         let expired = tokio::time::Instant::now()
             .checked_sub(Duration::from_nanos(1))
@@ -719,6 +786,7 @@ mod tests {
             ))
         ));
         assert_eq!(closed_registry.pending_count(), 0);
+        assert_eq!(health.snapshot().last_response_ago, None);
 
         assert!(matches!(
             closed_client
@@ -729,6 +797,8 @@ mod tests {
             ))
         ));
         assert_eq!(closed_registry.pending_count(), 0);
+        assert!(health.snapshot().last_response_ago.is_some());
+        assert_eq!(health.snapshot().last_success_ago, None);
 
         let (stopped_client, open_registry, remote) = stopped_runtime_client().await;
         assert!(matches!(
@@ -799,6 +869,8 @@ mod tests {
             Duration::from_secs(60),
             sender.downgrade(),
         );
+        client.health.mark_started();
+        let health = client.health();
         let blackhole = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let remote = blackhole.local_addr().unwrap();
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -809,10 +881,12 @@ mod tests {
         let first_poll = poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx))).await;
         assert!(first_poll.is_pending());
         assert_eq!(registry.pending_count(), 1);
+        assert_eq!(health.snapshot().last_response_ago, None);
         assert!(cancel_tx.send(()).is_err());
 
         drop(query);
         assert_eq!(registry.pending_count(), 0);
+        assert_eq!(health.snapshot().last_response_ago, None);
 
         // The successful admission remains committed even though the query was
         // later dropped: only the other three burst tokens are still ready.
@@ -842,6 +916,8 @@ mod tests {
             Duration::from_secs(1),
             client.sender.clone(),
         );
+        second_client.health.mark_started();
+        let second_health = second_client.health();
 
         assert_eq!(
             client
@@ -898,6 +974,8 @@ mod tests {
                 }
             )) if response_source == remote
         ));
+        assert!(second_health.snapshot().last_response_ago.is_some());
+        assert!(second_health.snapshot().last_success_ago.is_some());
 
         assert!(matches!(
             runtime.shutdown().await.unwrap(),
@@ -1038,18 +1116,25 @@ mod tests {
         let local_addr = runtime.local_addr();
         let local_id = runtime.local_id();
         let client = runtime.client();
+        let health = runtime.health();
 
         assert_eq!(runtime.table().origin(), local_id);
         assert_eq!(client.local_addr(), local_addr);
+        assert_eq!(health.snapshot().status(), DhtRuntimeHealthStatus::Up);
+        assert_eq!(health.snapshot().last_response_ago, None);
         assert_eq!(
             client.ping(SocketAddr::V4(local_addr)).await.unwrap(),
             PingResult { id: local_id }
         );
+        assert!(health.snapshot().last_response_ago.is_some());
+        assert!(health.snapshot().last_success_ago.is_some());
 
         assert!(matches!(
             runtime.shutdown().await.unwrap(),
             DhtRuntimeExit::Shutdown
         ));
+        assert_eq!(health.snapshot(), DhtRuntimeHealthSnapshot::default());
+        assert_eq!(health.snapshot().status(), DhtRuntimeHealthStatus::Inactive);
 
         let stopped = client.ping(SocketAddr::V4(local_addr)).await;
         assert!(matches!(
@@ -1058,6 +1143,7 @@ mod tests {
                 RegisterError::RegistryClosed
             )))
         ));
+        assert_eq!(health.snapshot(), DhtRuntimeHealthSnapshot::default());
 
         let rebound = TokioIpv4UdpTransport::bind(local_addr).await.unwrap();
         assert_eq!(rebound.local_addr(), local_addr);
