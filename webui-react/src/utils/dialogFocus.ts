@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 const DIALOG_FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -24,7 +24,7 @@ export function useDialogFocus(open: boolean, onClose: () => void) {
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
       return;
     }
