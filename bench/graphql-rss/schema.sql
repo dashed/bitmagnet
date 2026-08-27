@@ -9,7 +9,7 @@ CREATE TABLE goose_db_version (
   is_applied boolean NOT NULL,
   tstamp timestamptz NOT NULL DEFAULT now()
 );
-INSERT INTO goose_db_version (version_id, is_applied) VALUES (26, true);
+INSERT INTO goose_db_version (version_id, is_applied) VALUES (29, true);
 
 CREATE TABLE torrent_sources (
   key text PRIMARY KEY,

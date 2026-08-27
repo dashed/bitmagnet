@@ -5,7 +5,8 @@ not cover: the exact `Dockerfile.graphql` image, real sqlx/PostgreSQL hydration,
 the L3 gRPC client, async-graphql projection/serialization, four simultaneous
 clients, and the service container's cgroup-v2 memory accounting.
 
-It is local-only. It creates a private container network, a tmpfs PostgreSQL,
+It is local-only. It creates an internal-only container network with no external
+route, a tmpfs PostgreSQL,
 an L3 test double, and fresh GraphQL containers. It publishes no host ports and
 does not read a kubeconfig, contact k3s, or mutate production. Per-case kernel
 and mock evidence uses a Docker-managed named volume and `docker cp`, so the
@@ -22,8 +23,9 @@ Docker client and daemon do not need a shared host filesystem.
   mock, and response clients from the measured cgroup.
 - Network access for the Rust/Python/PostgreSQL base images and Cargo crates,
   plus enough disk for a release Rust build.
-- A checkout whose current files are the code to measure. Dirty and untracked
-  files are allowed and are included in the recorded workspace digest/status.
+- A checkout whose current files are the code to measure. Dirty or untracked
+  content under `bitmagnet-rs` is rejected. Harness-side dirt is recorded in the
+  workspace digest/status, though production admission may reject it.
 
 The runner exits before creating containers when any runtime prerequisite is
 missing:
@@ -40,22 +42,35 @@ From the repository root:
 python3 bench/graphql-rss/run.py \
   --profile gate \
   --repeat 3 \
+  --target-source-commit <reviewed-runtime-commit> \
+  --graphql-publication-receipt <publication-receipt.json> \
+  --expected-graphql-digest sha256:<reviewed-manifest-digest> \
   --output bench/graphql-rss/evidence/graphql-rss-gate.jsonl
 ```
 
-The default image builder is BuildKit. On a Kata workspace whose Docker data
-is backed by virtiofs, use the explicit legacy backend with the VFS storage
-driver when BuildKit cannot checksum a cross-stage copy:
+The admission-grade gate does not rebuild GraphQL. It derives the immutable
+GHCR reference from the typed publication receipt, requires that receipt to
+match the separately supplied manifest digest and reviewed target source, pulls
+only that digest, and validates its config ID, repository digest, linux/amd64
+platform, rootfs, non-root runtime, complete OCI labels/environment, ports,
+entrypoint, empty command, and stop signal. There is no tag or source-build
+fallback.
+
+The default helper-image builder is BuildKit. Source-built GraphQL images remain
+available only to the `smoke` profile for harness development. On a Kata
+workspace whose Docker data is backed by virtiofs, use the explicit legacy
+backend with the VFS storage driver when BuildKit cannot checksum a cross-stage
+copy:
 
 ```sh
 python3 bench/graphql-rss/run.py \
-  --profile gate \
-  --repeat 3 \
+  --profile smoke \
+  --repeat 1 \
   --graphql-docker-builder legacy \
-  --output bench/graphql-rss/evidence/graphql-rss-gate.jsonl
+  --output /tmp/bitmagnet-graphql-rss-smoke-legacy.jsonl
 ```
 
-This invokes the GraphQL `docker build` command and exact Dockerfile with
+In that smoke-only mode, this invokes the GraphQL `docker build` command and exact Dockerfile with
 `DOCKER_BUILDKIT=0`. The helper remains on BuildKit so Docker honors its
 Dockerfile-scoped ignore file instead of sending the full repository context.
 Both selected backends and environment values are recorded in the session
@@ -86,14 +101,20 @@ The runner builds the GraphQL image with the repository's exact command:
 
 ```sh
 docker build \
+  --build-arg REVISION=<reviewed-runtime-commit> \
+  --build-arg SOURCE_TREE=<reviewed-runtime-root-tree> \
   -f bitmagnet-rs/docker/Dockerfile.graphql \
   -t <session-tag> \
   bitmagnet-rs
 ```
 
-For admission-grade `gate` runs, the runner always builds GraphQL and helper
-images from the recorded checkout, requires at least three repeats, pins the
-PostgreSQL image, and verifies cleanup. It rejects `--graphql-image`,
+For admission-grade `gate` runs, the runner pulls the receipt-authorized GraphQL
+artifact and builds only the helper image from the recorded checkout, requires
+at least three repeats, pins the PostgreSQL image by digest, and verifies
+cleanup. `--target-source-commit` separates the reviewed runtime source from a
+later harness-only commit. The runner refuses the target unless its
+`bitmagnet-rs` subtree exactly matches the clean harness checkout and the
+published image's OCI source/runtime contract. It rejects `--graphql-image`,
 `--helper-image`, `--keep`, a different PostgreSQL image, or fewer repeats.
 Those overrides remain available to the `smoke` profile for debugging; their
 immutable Docker image IDs and layers are still recorded.
@@ -130,13 +151,16 @@ does not write multi-megabyte response bodies to disk.
 
 The JSONL contains:
 
-- commit, branch, dirty status, tracked-diff and full workspace hashes;
+- harness commit/tree, target runtime commit/tree, their shared `bitmagnet-rs`
+  tree, branch, dirty status, tracked-diff and full workspace hashes;
 - Dockerfile, Cargo lock/toolchain, migration-set, schema, runner, and helper
   hashes;
 - the explicit GraphQL and helper Docker builder backends and
   `DOCKER_BUILDKIT` values;
 - GraphQL/helper/PostgreSQL image IDs, repo digests, platforms, and layers;
-- every byte/count/timeout/concurrency configuration value and repeat number;
+- every byte/count/timeout/concurrency configuration value and repeat number,
+  including the production-aligned Goose 29 head and explicit false values for all three
+  mutation families;
 - seed blob raw/decoded-owned/composer-retained/GraphQL-derived/compressed sizes,
   retained-budget fill ratio, and SHA-256 hashes;
 - four response status/size/hash/latency/error summaries and handler duration;

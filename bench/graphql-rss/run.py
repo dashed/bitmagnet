@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,9 +23,25 @@ from typing import Any, Iterable
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 DEFAULT_GATE_PEAK_BYTES = 6 * GIB
-DEFAULT_POSTGRES_IMAGE = "postgres:17.5-bookworm"
+DEFAULT_POSTGRES_IMAGE = (
+    "postgres:17.5-bookworm@"
+    "sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
+)
+HARNESS_GOOSE_VERSION = 29
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
+
+GRAPHQL_IMAGE_LABEL_CONTRACT = {
+    "org.opencontainers.image.source": "https://github.com/dashed/bitmagnet",
+    "org.opencontainers.image.licenses": "MIT",
+    "io.bitmagnet.graphql-mode": "read-default",
+    "io.bitmagnet.graphql-read-contract": "read-only/v1",
+    "io.bitmagnet.graphql-mutation-contract": "torrent-tags/opt-in-writer/v1",
+    "io.bitmagnet.graphql-queue-mutation-contract": "queue-admin/opt-in-writer/v1",
+    "io.bitmagnet.graphql-torrent-delete-mutation-contract": (
+        "torrent-delete/opt-in-blocking-writer/v1"
+    ),
+}
 
 PROFILE_LIMITS = {
     "gate": {
@@ -162,6 +179,8 @@ def repository_provenance() -> dict[str, Any]:
         migration_digest.update(path.read_bytes())
     return {
         "commit": git_text("rev-parse", "HEAD"),
+        "tree": git_text("rev-parse", "HEAD^{tree}"),
+        "bitmagnet_rs_tree": git_text("rev-parse", "HEAD:bitmagnet-rs"),
         "branch": git_text("branch", "--show-current") or None,
         "describe": git_text("describe", "--always", "--dirty", "--tags"),
         "status_porcelain": status.splitlines(),
@@ -184,6 +203,8 @@ def repository_provenance() -> dict[str, Any]:
 
 PROVENANCE_STABILITY_KEYS = (
     "commit",
+    "tree",
+    "bitmagnet_rs_tree",
     "branch",
     "describe",
     "status_porcelain",
@@ -198,6 +219,90 @@ PROVENANCE_STABILITY_KEYS = (
     "harness_runner_sha256",
     "harness_helper_sha256",
 )
+
+
+def target_source_identity(commitish: str) -> dict[str, str]:
+    commit = git_text("rev-parse", "--verify", f"{commitish}^{{commit}}")
+    tree = git_text("rev-parse", "--verify", f"{commit}^{{tree}}")
+    bitmagnet_rs_tree = git_text(
+        "rev-parse", "--verify", f"{commit}:bitmagnet-rs"
+    )
+    harness_bitmagnet_rs_tree = git_text(
+        "rev-parse", "--verify", "HEAD:bitmagnet-rs"
+    )
+    dirty_bitmagnet_rs = git_text(
+        "status", "--porcelain=v1", "--untracked-files=all", "--", "bitmagnet-rs"
+    )
+    if dirty_bitmagnet_rs:
+        raise HarnessError(
+            "bitmagnet-rs has dirty or untracked content; refusing an uncommitted "
+            "runtime build context"
+        )
+    if bitmagnet_rs_tree != harness_bitmagnet_rs_tree:
+        raise HarnessError(
+            "target source bitmagnet-rs tree does not match the harness checkout: "
+            f"target={bitmagnet_rs_tree} harness={harness_bitmagnet_rs_tree}"
+        )
+    return {
+        "commit": commit,
+        "tree": tree,
+        "bitmagnet_rs_tree": bitmagnet_rs_tree,
+    }
+
+
+def publication_receipt(
+    path: Path,
+    target_source: dict[str, str],
+    expected_digest: str | None,
+) -> dict[str, Any]:
+    try:
+        receipt = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise HarnessError(
+            f"could not read GraphQL publication receipt: {error}"
+        ) from error
+    if not isinstance(receipt, dict):
+        raise HarnessError("GraphQL publication receipt must be a JSON object")
+    digest = receipt.get("digest")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest or "") is None:
+        raise HarnessError("expected GraphQL digest must be explicit sha256")
+    immutable_ref = f"ghcr.io/dashed/bitmagnet-graphql@{digest}"
+    expected = {
+        "schema": "bitmagnet.graphql-image-publication/v2",
+        "imageRepository": "ghcr.io/dashed/bitmagnet-graphql",
+        "tagPolicy": "mutable-convenience-only",
+        "deploymentAuthority": "digest",
+        "digest": expected_digest,
+        "immutableRef": immutable_ref,
+        "sourceCommit": target_source["commit"],
+        "sourceTree": target_source["tree"],
+        "tag": target_source["commit"],
+        "tagRef": (
+            "ghcr.io/dashed/bitmagnet-graphql:" + target_source["commit"]
+        ),
+    }
+    mismatches = {
+        key: {"expected": value, "actual": receipt.get(key)}
+        for key, value in expected.items()
+        if receipt.get(key) != value
+    }
+    if receipt.get("tagState") not in {"pushed", "reused"}:
+        mismatches["tagState"] = {
+            "expected": "pushed or reused",
+            "actual": receipt.get("tagState"),
+        }
+    for key in ("imageId", "archiveSha256"):
+        value = receipt.get(key)
+        pattern = r"^sha256:[0-9a-f]{64}$" if key == "imageId" else r"^[0-9a-f]{64}$"
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            mismatches[key] = {"expected": pattern, "actual": value}
+    for key in ("builderAttempt", "publisherAttempt"):
+        value = receipt.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            mismatches[key] = {"expected": "positive integer", "actual": value}
+    if mismatches:
+        raise HarnessError(f"GraphQL publication receipt mismatch: {mismatches}")
+    return {**receipt, "receiptSha256": sha256_file(path)}
 
 
 def provenance_stability(
@@ -503,6 +608,16 @@ class DockerHarness:
         runtime_architecture: str,
     ):
         self.args = args
+        self.target_source = target_source_identity(args.target_source_commit)
+        self.publication_receipt = (
+            publication_receipt(
+                args.graphql_publication_receipt,
+                self.target_source,
+                args.expected_graphql_digest,
+            )
+            if args.graphql_publication_receipt is not None
+            else None
+        )
         self.runtime = args.runtime
         self.session_id = session_id
         self.prefix = f"bm-rss-{session_id[:10]}"
@@ -513,7 +628,11 @@ class DockerHarness:
         self.volumes: set[str] = set()
         self.evidence_stores: dict[str, EvidenceStore] = {}
         self.network_created = False
-        self.graphql_image = args.graphql_image or f"{self.prefix}-graphql:local"
+        self.graphql_image = (
+            self.publication_receipt["immutableRef"]
+            if self.publication_receipt is not None
+            else args.graphql_image or f"{self.prefix}-graphql:local"
+        )
         self.helper_image = args.helper_image or f"{self.prefix}-helper:local"
         self.pg_password = uuid.uuid4().hex
         self.runtime_architecture = runtime_architecture
@@ -531,7 +650,7 @@ class DockerHarness:
         return run_command([self.runtime, *parts], **kwargs)
 
     def build_images(self) -> None:
-        if self.args.graphql_image is None:
+        if self.args.graphql_image is None and self.publication_receipt is None:
             print(
                 "building exact Dockerfile.graphql image "
                 f"({self.args.graphql_docker_builder})",
@@ -546,6 +665,10 @@ class DockerHarness:
             self.docker(
                 "build",
                 *legacy_cleanup,
+                "--build-arg",
+                f"REVISION={self.target_source['commit']}",
+                "--build-arg",
+                f"SOURCE_TREE={self.target_source['tree']}",
                 "--file",
                 "bitmagnet-rs/docker/Dockerfile.graphql",
                 "--tag",
@@ -577,6 +700,13 @@ class DockerHarness:
         if len(rows) != 1:
             raise HarnessError(f"expected one image inspection row for {image}")
         row = rows[0]
+        config = row.get("Config") or {}
+        labels = config.get("Labels") or {}
+        environment = {}
+        for entry in config.get("Env") or []:
+            key, separator, value = entry.partition("=")
+            if separator:
+                environment[key] = value
         return {
             "requested": image,
             "id": row.get("Id"),
@@ -585,9 +715,48 @@ class DockerHarness:
             "architecture": row.get("Architecture"),
             "os": row.get("Os"),
             "rootfs_layers": (row.get("RootFS") or {}).get("Layers") or [],
+            "runtime_contract": {
+                "user": config.get("User"),
+                "entrypoint": config.get("Entrypoint"),
+                "cmd": config.get("Cmd"),
+                "exposed_ports": sorted((config.get("ExposedPorts") or {}).keys()),
+                "stop_signal": config.get("StopSignal"),
+                "environment": environment,
+                "labels": labels,
+            },
         }
 
+    def validate_graphql_image_contract(self, info: dict[str, Any]) -> None:
+        contract = info.get("runtime_contract") or {}
+        expected_labels = {
+            **GRAPHQL_IMAGE_LABEL_CONTRACT,
+            "org.opencontainers.image.revision": self.target_source["commit"],
+            "io.bitmagnet.source-tree": self.target_source["tree"],
+        }
+        expected = {
+            "user": "65532:65532",
+            "entrypoint": ["/usr/local/bin/bitmagnet-graphql"],
+            "cmd": None,
+            "exposed_ports": ["3337/tcp", "9090/tcp"],
+            "stop_signal": "SIGTERM",
+            "environment": {
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "BITMAGNET_SOURCE_COMMIT": self.target_source["commit"],
+                "BITMAGNET_SOURCE_TREE": self.target_source["tree"],
+                "LISTEN_ADDR": "0.0.0.0:3337",
+            },
+            "labels": expected_labels,
+        }
+        if contract != expected:
+            raise HarnessError(
+                "GraphQL image runtime/source contract mismatch: "
+                f"expected={expected} actual={contract}"
+            )
+
     def resolve_images(self) -> dict[str, dict[str, Any]]:
+        graphql = self.docker("image", "inspect", self.graphql_image, check=False)
+        if graphql.returncode != 0:
+            self.docker("pull", self.graphql_image, timeout=600)
         postgres = self.docker("image", "inspect", self.args.postgres_image, check=False)
         if postgres.returncode != 0:
             self.docker("pull", self.args.postgres_image, timeout=600)
@@ -596,6 +765,30 @@ class DockerHarness:
             "helper": self.image_info(self.helper_image),
             "postgres": self.image_info(self.args.postgres_image),
         }
+        self.validate_graphql_image_contract(images["graphql"])
+        if self.publication_receipt is not None:
+            if images["graphql"]["id"] != self.publication_receipt["imageId"]:
+                raise HarnessError(
+                    "GraphQL image ID does not match the publication receipt: "
+                    f"expected={self.publication_receipt['imageId']} "
+                    f"actual={images['graphql']['id']}"
+                )
+            if (
+                self.publication_receipt["immutableRef"]
+                not in images["graphql"]["repo_digests"]
+            ):
+                raise HarnessError(
+                    "GraphQL image RepoDigests do not contain the immutable "
+                    f"publication ref: {images['graphql']['repo_digests']}"
+                )
+        if self.publication_receipt is not None and (
+            images["graphql"]["architecture"] != "amd64"
+            or images["graphql"]["os"] != "linux"
+        ):
+            raise HarnessError(
+                "GraphQL publication must be linux/amd64: "
+                f"os={images['graphql']['os']} arch={images['graphql']['architecture']}"
+            )
         self.graphql_image_id = images["graphql"]["id"]
         self.helper_image_id = images["helper"]["id"]
         self.postgres_image_id = images["postgres"]["id"]
@@ -816,8 +1009,11 @@ class DockerHarness:
     def start_dependencies(self) -> dict[str, Any]:
         if self.postgres_image_id is None:
             raise HarnessError("PostgreSQL image was not resolved")
-        self.docker("network", "create", self.network)
+        self.docker("network", "create", "--internal", self.network)
         self.network_created = True
+        network_rows = json.loads(self.docker("network", "inspect", self.network).stdout)
+        if len(network_rows) != 1 or network_rows[0].get("Internal") is not True:
+            raise HarnessError("Docker evidence network is not internal-only")
 
         self.containers.add(self.pg)
         self.docker(
@@ -901,7 +1097,10 @@ class DockerHarness:
         seed_lines = [line for line in seeded.stdout.decode().splitlines() if line.strip()]
         seed_summary = json.loads(seed_lines[-1])
 
-        return {"seed": seed_summary}
+        return {
+            "seed": seed_summary,
+            "network": {"name": self.network, "internal": True},
+        }
 
     def start_mock(self, case_id: str, evidence_volume: str) -> tuple[str, str]:
         if self.helper_image_id is None:
@@ -955,6 +1154,12 @@ class DockerHarness:
     def graphql_config(self) -> dict[str, str]:
         limits = PROFILE_LIMITS[self.args.profile]
         return {
+            "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION": str(
+                HARNESS_GOOSE_VERSION
+            ),
+            "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED": "false",
+            "BITMAGNET_GRAPHQL_QUEUE_MUTATIONS_ENABLED": "false",
+            "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATIONS_ENABLED": "false",
             "BITMAGNET_POSTGRES_MAX_CONNECTIONS": "16",
             "BITMAGNET_METRICS_ADDR": "0.0.0.0:9090",
             "BITMAGNET_VERSION": f"graphql-rss-{self.session_id}",
@@ -1320,6 +1525,16 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--max-peak-bytes", type=int, default=DEFAULT_GATE_PEAK_BYTES)
     parser.add_argument("--graphql-image")
+    parser.add_argument("--graphql-publication-receipt", type=Path)
+    parser.add_argument("--expected-graphql-digest")
+    parser.add_argument(
+        "--target-source-commit",
+        default="HEAD",
+        help=(
+            "reviewed runtime source commit; its bitmagnet-rs tree must exactly "
+            "match the harness checkout"
+        ),
+    )
     parser.add_argument("--helper-image")
     parser.add_argument("--postgres-image", default=DEFAULT_POSTGRES_IMAGE)
     parser.add_argument("--build-timeout", type=float, default=3600)
@@ -1350,8 +1565,21 @@ def validate_arguments(args: argparse.Namespace) -> None:
         failures.append("--repeat must be at least 3")
     if args.max_peak_bytes > DEFAULT_GATE_PEAK_BYTES:
         failures.append("--max-peak-bytes cannot exceed the selected 6 GiB ceiling")
-    if args.graphql_image is not None or args.helper_image is not None:
-        failures.append("prebuilt GraphQL/helper images are not source-linked")
+    if not args.preflight_only:
+        if re.fullmatch(r"[0-9a-f]{40}", args.target_source_commit) is None:
+            failures.append("--target-source-commit must be an explicit 40-hex commit")
+        if args.graphql_publication_receipt is None:
+            failures.append("--graphql-publication-receipt is required")
+        if re.fullmatch(
+            r"sha256:[0-9a-f]{64}", args.expected_graphql_digest or ""
+        ) is None:
+            failures.append("--expected-graphql-digest must be explicit sha256")
+        if args.graphql_image is not None:
+            failures.append(
+                "--graphql-image is forbidden; the publication receipt is authoritative"
+            )
+    if args.helper_image is not None:
+        failures.append("prebuilt helper images are not source-linked")
     if args.postgres_image != DEFAULT_POSTGRES_IMAGE:
         failures.append(f"--postgres-image must remain {DEFAULT_POSTGRES_IMAGE}")
     if args.keep:
@@ -1365,12 +1593,16 @@ def validate_arguments(args: argparse.Namespace) -> None:
 
 def docker_builders(args: argparse.Namespace) -> dict[str, dict[str, str]]:
     return {
-        "graphql": {
-            "backend": args.graphql_docker_builder,
-            "DOCKER_BUILDKIT": (
-                "0" if args.graphql_docker_builder == "legacy" else "1"
-            ),
-        },
+        "graphql": (
+            {"backend": "publication-receipt", "DOCKER_BUILDKIT": "not-used"}
+            if args.graphql_publication_receipt is not None
+            else {
+                "backend": args.graphql_docker_builder,
+                "DOCKER_BUILDKIT": (
+                    "0" if args.graphql_docker_builder == "legacy" else "1"
+                ),
+            }
+        ),
         "helper": {"backend": "buildkit", "DOCKER_BUILDKIT": "1"},
     }
 
@@ -1482,6 +1714,8 @@ def main() -> int:
                     "exclusive_output": True,
                 },
                 "repository": provenance,
+                "target_source": harness.target_source,
+                "graphql_publication_receipt": harness.publication_receipt,
             }
         )
 

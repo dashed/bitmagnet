@@ -261,7 +261,9 @@ class HarnessTests(unittest.TestCase):
             buildkit.helper_build_environment["DOCKER_BUILDKIT"], "1"
         )
 
-        legacy_args = parser.parse_args(["--graphql-docker-builder", "legacy"])
+        legacy_args = parser.parse_args(
+            ["--profile", "smoke", "--graphql-docker-builder", "legacy"]
+        )
         runner.validate_arguments(legacy_args)
         legacy = runner.DockerHarness(legacy_args, "session", HERE, "amd64")
         self.assertEqual(
@@ -297,6 +299,194 @@ class HarnessTests(unittest.TestCase):
             [kwargs["environment"]["DOCKER_BUILDKIT"] for _, kwargs in calls],
             ["0", "1"],
         )
+        graphql_build = calls[0][0]
+        revision_index = graphql_build.index(
+            "REVISION=" + harness.target_source["commit"]
+        )
+        tree_index = graphql_build.index(
+            "SOURCE_TREE=" + harness.target_source["tree"]
+        )
+        self.assertEqual(graphql_build[revision_index - 1], "--build-arg")
+        self.assertEqual(graphql_build[tree_index - 1], "--build-arg")
+
+    def test_graphql_runtime_contract_is_explicit_and_read_only(self):
+        args = runner.argument_parser().parse_args([])
+        harness = runner.DockerHarness(args, "session", HERE, "amd64")
+        config = harness.graphql_config()
+        self.assertEqual(
+            config["BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION"],
+            str(runner.HARNESS_GOOSE_VERSION),
+        )
+        self.assertEqual(config["BITMAGNET_GRAPHQL_MUTATIONS_ENABLED"], "false")
+        self.assertEqual(
+            config["BITMAGNET_GRAPHQL_QUEUE_MUTATIONS_ENABLED"], "false"
+        )
+        self.assertEqual(
+            config["BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATIONS_ENABLED"],
+            "false",
+        )
+        schema = (HERE / "schema.sql").read_text()
+        self.assertIn(
+            f"VALUES ({runner.HARNESS_GOOSE_VERSION}, true)", schema
+        )
+
+    def test_target_source_requires_identical_bitmagnet_rs_tree(self):
+        identity = runner.target_source_identity("HEAD")
+        self.assertEqual(
+            identity["bitmagnet_rs_tree"],
+            runner.git_text("rev-parse", "HEAD:bitmagnet-rs"),
+        )
+        with mock.patch.object(
+            runner,
+            "git_text",
+            side_effect=("a" * 40, "b" * 40, "c" * 40, "d" * 40, ""),
+        ):
+            with self.assertRaisesRegex(
+                runner.HarnessError, "bitmagnet-rs tree does not match"
+            ):
+                runner.target_source_identity("a" * 40)
+
+        with mock.patch.object(
+            runner,
+            "git_text",
+            side_effect=("a" * 40, "b" * 40, "c" * 40, "c" * 40, " M dirty"),
+        ):
+            with self.assertRaisesRegex(runner.HarnessError, "dirty or untracked"):
+                runner.target_source_identity("a" * 40)
+
+    def test_publication_receipt_is_digest_and_source_bound(self):
+        target = runner.target_source_identity("HEAD")
+        digest = "sha256:" + "b" * 64
+        receipt_data = {
+            "schema": "bitmagnet.graphql-image-publication/v2",
+            "imageRepository": "ghcr.io/dashed/bitmagnet-graphql",
+            "tag": target["commit"],
+            "tagRef": "ghcr.io/dashed/bitmagnet-graphql:" + target["commit"],
+            "tagPolicy": "mutable-convenience-only",
+            "deploymentAuthority": "digest",
+            "digest": digest,
+            "immutableRef": "ghcr.io/dashed/bitmagnet-graphql@" + digest,
+            "sourceCommit": target["commit"],
+            "sourceTree": target["tree"],
+            "imageId": "sha256:" + "c" * 64,
+            "archiveSha256": "d" * 64,
+            "tagState": "pushed",
+            "builderAttempt": 1,
+            "publisherAttempt": 1,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receipt.json"
+            path.write_text(runner.json.dumps(receipt_data))
+            admitted = runner.publication_receipt(path, target, digest)
+            self.assertEqual(admitted["immutableRef"], receipt_data["immutableRef"])
+            self.assertRegex(admitted["receiptSha256"], r"^[0-9a-f]{64}$")
+
+            for key, bad_value in (
+                ("digest", "sha256:" + "e" * 64),
+                ("sourceTree", "f" * 40),
+                ("tagRef", "ghcr.io/dashed/bitmagnet-graphql:wrong"),
+                ("tagState", "unknown"),
+                ("imageId", "not-a-digest"),
+            ):
+                with self.subTest(key=key):
+                    bad = dict(receipt_data)
+                    bad[key] = bad_value
+                    path.write_text(runner.json.dumps(bad))
+                    with self.assertRaisesRegex(
+                        runner.HarnessError, "publication receipt mismatch"
+                    ):
+                        runner.publication_receipt(path, target, digest)
+
+    def test_publication_receipt_skips_graphql_source_build(self):
+        target = runner.target_source_identity("HEAD")
+        digest = "sha256:" + "b" * 64
+        receipt_data = {
+            "schema": "bitmagnet.graphql-image-publication/v2",
+            "imageRepository": "ghcr.io/dashed/bitmagnet-graphql",
+            "tag": target["commit"],
+            "tagRef": "ghcr.io/dashed/bitmagnet-graphql:" + target["commit"],
+            "tagPolicy": "mutable-convenience-only",
+            "deploymentAuthority": "digest",
+            "digest": digest,
+            "immutableRef": "ghcr.io/dashed/bitmagnet-graphql@" + digest,
+            "sourceCommit": target["commit"],
+            "sourceTree": target["tree"],
+            "imageId": "sha256:" + "c" * 64,
+            "archiveSha256": "d" * 64,
+            "tagState": "reused",
+            "builderAttempt": 1,
+            "publisherAttempt": 2,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "receipt.json"
+            path.write_text(runner.json.dumps(receipt_data))
+            args = runner.argument_parser().parse_args(
+                [
+                    "--profile",
+                    "smoke",
+                    "--graphql-publication-receipt",
+                    str(path),
+                    "--expected-graphql-digest",
+                    digest,
+                ]
+            )
+            harness = runner.DockerHarness(args, "session", HERE, "amd64")
+            calls = []
+
+            def record(*parts, **kwargs):
+                calls.append((parts, kwargs))
+                return runner.subprocess.CompletedProcess(parts, 0, b"", b"")
+
+            harness.docker = record
+            harness.build_images()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], "build")
+        self.assertIn("bench/graphql-rss/Dockerfile.harness", calls[0][0])
+        self.assertEqual(
+            harness.graphql_image,
+            "ghcr.io/dashed/bitmagnet-graphql@" + digest,
+        )
+
+    def test_graphql_image_contract_is_source_bound(self):
+        args = runner.argument_parser().parse_args([])
+        harness = runner.DockerHarness(args, "session", HERE, "amd64")
+        info = {
+            "runtime_contract": {
+                "user": "65532:65532",
+                "entrypoint": ["/usr/local/bin/bitmagnet-graphql"],
+                "cmd": None,
+                "exposed_ports": ["3337/tcp", "9090/tcp"],
+                "stop_signal": "SIGTERM",
+                "environment": {
+                    "PATH": (
+                        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    ),
+                    "BITMAGNET_SOURCE_COMMIT": harness.target_source["commit"],
+                    "BITMAGNET_SOURCE_TREE": harness.target_source["tree"],
+                    "LISTEN_ADDR": "0.0.0.0:3337",
+                },
+                "labels": {
+                    **runner.GRAPHQL_IMAGE_LABEL_CONTRACT,
+                    "org.opencontainers.image.revision": harness.target_source[
+                        "commit"
+                    ],
+                    "io.bitmagnet.source-tree": harness.target_source["tree"],
+                },
+            }
+        }
+        harness.validate_graphql_image_contract(info)
+        info["runtime_contract"]["labels"]["io.bitmagnet.source-tree"] = "0" * 40
+        with self.assertRaisesRegex(runner.HarnessError, "contract mismatch"):
+            harness.validate_graphql_image_contract(info)
+
+    def test_dependency_network_is_created_internal_only(self):
+        source = (HERE / "run.py").read_text()
+        self.assertIn(
+            'self.docker("network", "create", "--internal", self.network)',
+            source,
+        )
+        self.assertIn('network_rows[0].get("Internal") is not True', source)
 
     def test_evidence_commands_use_docker_volume_not_host_bind(self):
         args = runner.argument_parser().parse_args(
@@ -444,7 +634,16 @@ class HarnessTests(unittest.TestCase):
 
     def test_gate_profile_rejects_admission_downgrades(self):
         parser = runner.argument_parser()
-        runner.validate_arguments(parser.parse_args([]))
+        valid = [
+            "--target-source-commit",
+            "a" * 40,
+            "--graphql-publication-receipt",
+            "receipt.json",
+            "--expected-graphql-digest",
+            "sha256:" + "b" * 64,
+        ]
+        runner.validate_arguments(parser.parse_args(valid))
+        runner.validate_arguments(parser.parse_args(["--preflight-only"]))
         rejected = (
             ["--repeat", "1"],
             ["--max-peak-bytes", str(runner.DEFAULT_GATE_PEAK_BYTES + 1)],
@@ -455,7 +654,20 @@ class HarnessTests(unittest.TestCase):
         )
         for options in rejected:
             with self.subTest(options=options), self.assertRaises(runner.HarnessError):
-                runner.validate_arguments(parser.parse_args(options))
+                runner.validate_arguments(parser.parse_args([*valid, *options]))
+
+        for incomplete in (
+            [],
+            ["--target-source-commit", "a" * 40],
+            [
+                "--target-source-commit",
+                "a" * 40,
+                "--graphql-publication-receipt",
+                "receipt.json",
+            ],
+        ):
+            with self.assertRaises(runner.HarnessError):
+                runner.validate_arguments(parser.parse_args(incomplete))
 
         smoke = parser.parse_args(
             [
