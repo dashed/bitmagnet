@@ -22,7 +22,7 @@ func TestNewReprocessTorrentsBatchJobPreservesGraphQLOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "process_torrent_batch", job.Queue)
 	require.Equal(t, uint(2), job.MaxRetries)
-	require.Equal(t,
+	require.JSONEq(t,
 		`{"InfoHashGreaterThan":"0000000000000000000000000000000000000000",`+
 			`"UpdatedBefore":"2026-08-27T20:15:16.123456789Z",`+
 			`"ClassifyMode":1,"ClassifierWorkflow":"custom",`+
