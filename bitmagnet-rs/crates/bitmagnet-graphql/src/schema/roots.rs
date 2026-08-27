@@ -21,7 +21,7 @@ use super::Version;
 
 fn unserved<T>(surface: &str) -> async_graphql::Result<T> {
     Err(async_graphql::Error::new(format!(
-        "{surface} is declared for SDL parity but is not served by the Phase-2 read API"
+        "{surface} is declared for SDL parity but is not served by this Rust GraphQL runtime"
     )))
 }
 
@@ -191,20 +191,24 @@ impl TorrentMutation {
 
     async fn delete_tags(
         &self,
+        ctx: &Context<'_>,
         info_hashes: Option<Vec<Hash20>>,
         tag_names: Option<Vec<String>>,
     ) -> async_graphql::Result<Option<Void>> {
-        let _ = (&info_hashes, &tag_names);
-        unserved("torrent mutation")
+        let runtime = ctx.data::<super::torrent_tag_mutations::TorrentTagMutationsRuntimeData>()?;
+        super::torrent_tag_mutations::resolve_delete(runtime, info_hashes, tag_names).await?;
+        Ok(None)
     }
 
     async fn put_tags(
         &self,
+        ctx: &Context<'_>,
         info_hashes: Vec<Hash20>,
         tag_names: Vec<String>,
     ) -> async_graphql::Result<Option<Void>> {
-        let _ = (&info_hashes, &tag_names);
-        unserved("torrent mutation")
+        let runtime = ctx.data::<super::torrent_tag_mutations::TorrentTagMutationsRuntimeData>()?;
+        super::torrent_tag_mutations::resolve_put(runtime, info_hashes, tag_names).await?;
+        Ok(None)
     }
 
     async fn reprocess(&self, input: TorrentReprocessInput) -> async_graphql::Result<Option<Void>> {
@@ -214,11 +218,13 @@ impl TorrentMutation {
 
     async fn set_tags(
         &self,
+        ctx: &Context<'_>,
         info_hashes: Vec<Hash20>,
         tag_names: Vec<String>,
     ) -> async_graphql::Result<Option<Void>> {
-        let _ = (&info_hashes, &tag_names);
-        unserved("torrent mutation")
+        let runtime = ctx.data::<super::torrent_tag_mutations::TorrentTagMutationsRuntimeData>()?;
+        super::torrent_tag_mutations::resolve_set(runtime, info_hashes, tag_names).await?;
+        Ok(None)
     }
 }
 

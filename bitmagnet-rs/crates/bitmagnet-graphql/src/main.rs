@@ -1,6 +1,8 @@
 //! Entry point for the PostgreSQL-backed GraphQL HTTP server.
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,6 +57,61 @@ struct Args {
 
     #[command(flatten)]
     search: SearchArgs,
+
+    #[command(flatten)]
+    mutations: MutationArgs,
+}
+
+/// Explicitly gated writer configuration for the torrent-tag mutation family.
+#[derive(Debug, ClapArgs)]
+struct MutationArgs {
+    /// Enable the served torrent-tag mutation runtime.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    mutations_enabled: bool,
+
+    /// Separate PostgreSQL writer DSN, required exactly when mutations are enabled.
+    #[arg(long, env = "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_DSN")]
+    mutation_postgres_dsn: Option<SecretDsn>,
+
+    /// Maximum connections in the separately authenticated writer pool.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        default_value_t = 4,
+        value_parser = parse_positive_u32
+    )]
+    mutation_postgres_max_connections: u32,
+}
+
+#[derive(Clone)]
+struct SecretDsn(String);
+
+impl SecretDsn {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretDsn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl FromStr for SecretDsn {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.is_empty() {
+            return Err("mutation PostgreSQL DSN must not be empty".to_owned());
+        }
+        Ok(Self(value.to_owned()))
+    }
 }
 
 /// Go-compatible search backend and feature configuration.
@@ -521,6 +578,8 @@ async fn main() -> anyhow::Result<()> {
         goose_version = goose_head.version,
         "goose schema version confirmed"
     );
+    let tag_mutations =
+        build_tag_mutations_runtime(&args.mutations, args.expected_goose_version, &pool).await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Register both C6 metric families exactly once, even while the serving
@@ -531,7 +590,7 @@ async fn main() -> anyhow::Result<()> {
     let search_runtime = build_search_runtime(pool.clone(), &args.search, pathsearch_metrics)?;
     let version =
         std::env::var("BITMAGNET_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
-    let schema = bitmagnet_graphql::build_runtime_search_schema(
+    let schema = bitmagnet_graphql::build_runtime_search_schema_with_tag_mutations(
         version.clone(),
         pool.clone(),
         bitmagnet_graphql::RuntimeConfig {
@@ -539,6 +598,7 @@ async fn main() -> anyhow::Result<()> {
             peer_timeout: args.health_peer_timeout,
         },
         Arc::clone(&search_runtime.runtime),
+        tag_mutations,
     );
     let state = AppState {
         schema,
@@ -556,6 +616,63 @@ async fn main() -> anyhow::Result<()> {
 
     info!("bitmagnet-graphql stopped");
     Ok(())
+}
+
+async fn build_tag_mutations_runtime(
+    args: &MutationArgs,
+    expected_goose_version: i64,
+    read_pool: &PgPool,
+) -> anyhow::Result<bitmagnet_graphql::TorrentTagMutationsRuntimeData> {
+    let Some(config) = mutation_db_config(args)? else {
+        return Ok(bitmagnet_graphql::TorrentTagMutationsRuntimeData::disabled());
+    };
+    let pool = bitmagnet_db::connect(&config)
+        .await
+        .context("connect the separately authenticated GraphQL mutation writer")?;
+    let goose_head = bitmagnet_graphql::admit_pg(&pool, expected_goose_version)
+        .await
+        .context("admit the GraphQL mutation writer against the expected Goose head")?;
+    let read_identity = postgres_identity(read_pool)
+        .await
+        .context("read the GraphQL reader PostgreSQL identity")?;
+    let writer_identity = postgres_identity(&pool)
+        .await
+        .context("read the GraphQL mutation writer PostgreSQL identity")?;
+    anyhow::ensure!(
+        writer_identity == read_identity,
+        "GraphQL reader and mutation writer must target the same PostgreSQL system and database"
+    );
+    info!(
+        goose_version = goose_head.version,
+        "torrent tag mutations enabled with a separate writer pool"
+    );
+    Ok(bitmagnet_graphql::TorrentTagMutationsRuntimeData::pg(pool))
+}
+
+async fn postgres_identity(pool: &PgPool) -> anyhow::Result<(String, String)> {
+    Ok(sqlx::query_as::<_, (String, String)>(
+        "SELECT current_database()::text, system_identifier::text \
+         FROM pg_control_system()",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+fn mutation_db_config(args: &MutationArgs) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
+    match (args.mutations_enabled, args.mutation_postgres_dsn.as_ref()) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_DSN is forbidden while mutations are disabled"
+        ),
+        (true, None) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_DSN is required while mutations are enabled"
+        ),
+        (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
+            dsn: dsn.expose().to_owned(),
+            max_connections: args.mutation_postgres_max_connections,
+            ..bitmagnet_db::DbConfig::default()
+        })),
+    }
 }
 
 fn app(state: AppState) -> Router {
@@ -629,6 +746,16 @@ fn parse_positive_i64(value: &str) -> Result<i64, String> {
         .map_err(|error| format!("invalid positive integer {value:?}: {error}"))?;
     if parsed <= 0 {
         return Err(format!("value must be positive, got {parsed}"));
+    }
+    Ok(parsed)
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid positive integer {value:?}: {error}"))?;
+    if parsed == 0 {
+        return Err("value must be greater than zero".to_owned());
     }
     Ok(parsed)
 }
@@ -728,15 +855,18 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        app, build_search_runtime, parse_go_duration, AppState, Args,
+        app, build_search_runtime, mutation_db_config, parse_go_duration, AppState, Args,
         GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 36] = [
+    const ARGS_ENV_KEYS: [&str; 39] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
+        "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
+        "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_DSN",
+        "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_MAX_CONNECTIONS",
         "HEALTH_PEER_GRAPHQL_URLS",
         "HEALTH_PEER_TIMEOUT",
         "SEARCH_FILE_SEARCH_ENABLED",
@@ -845,6 +975,9 @@ mod tests {
         let defaults = default_args();
         assert_eq!(defaults.listen_addr, "0.0.0.0:3337");
         assert_eq!(defaults.expected_goose_version, 33);
+        assert!(!defaults.mutations.mutations_enabled);
+        assert!(defaults.mutations.mutation_postgres_dsn.is_none());
+        assert_eq!(defaults.mutations.mutation_postgres_max_connections, 4);
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
             defaults.health_peer_timeout,
@@ -917,6 +1050,44 @@ mod tests {
             overridden.health_peer_timeout,
             std::time::Duration::from_millis(2_500)
         );
+    }
+
+    #[test]
+    fn mutation_writer_requires_the_explicit_double_gate() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            default_args()
+        };
+        assert!(mutation_db_config(&args.mutations)
+            .expect("disabled config")
+            .is_none());
+
+        args.mutations.mutations_enabled = true;
+        let missing =
+            mutation_db_config(&args.mutations).expect_err("enabled writer requires a DSN");
+        assert!(missing.to_string().contains("is required"));
+
+        args.mutations.mutations_enabled = false;
+        args.mutations.mutation_postgres_dsn = Some(
+            "postgres://writer:secret@localhost/bitmagnet"
+                .parse()
+                .expect("test DSN"),
+        );
+        let debug = format!("{:?}", args.mutations);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("writer:secret"));
+        let forbidden =
+            mutation_db_config(&args.mutations).expect_err("disabled writer forbids a DSN");
+        assert!(forbidden.to_string().contains("is forbidden"));
+
+        args.mutations.mutations_enabled = true;
+        args.mutations.mutation_postgres_max_connections = 3;
+        let config = mutation_db_config(&args.mutations)
+            .expect("enabled config")
+            .expect("writer config");
+        assert_eq!(config.max_connections, 3);
+        assert_eq!(config.dsn, "postgres://writer:secret@localhost/bitmagnet");
     }
 
     #[test]

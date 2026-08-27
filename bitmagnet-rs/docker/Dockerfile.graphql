@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# Multi-stage build for the Phase-2 PostgreSQL-backed GraphQL read service.
+# Multi-stage build for the PostgreSQL-backed GraphQL service. Reads are the
+# default; torrent-tag mutations require an explicit gate and separate writer.
 #
 #   docker build -f bitmagnet-rs/docker/Dockerfile.graphql \
 #     --build-arg REVISION="$(git rev-parse HEAD)" \
@@ -57,8 +58,9 @@ LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.revision="${REVISION}" \
       io.bitmagnet.source-tree="${SOURCE_TREE}" \
-      io.bitmagnet.graphql-mode="read-only" \
-      io.bitmagnet.graphql-read-contract="read-only/v1"
+      io.bitmagnet.graphql-mode="read-default" \
+      io.bitmagnet.graphql-read-contract="read-only/v1" \
+      io.bitmagnet.graphql-mutation-contract="torrent-tags/opt-in-writer/v1"
 
 # SQLx and the federated-health HTTP client use rustls; only CA roots are
 # needed. No compiler, shell tooling, or database migration binary is shipped.
