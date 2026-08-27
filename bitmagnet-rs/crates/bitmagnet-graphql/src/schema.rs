@@ -6,6 +6,7 @@ pub mod lane_s;
 pub mod metrics;
 pub(crate) mod objects;
 pub mod queue_jobs;
+pub mod queue_mutations;
 mod roots;
 pub mod runtime;
 pub(crate) mod scalars;
@@ -29,6 +30,10 @@ pub use queue_jobs::{
     QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
     QueueJobsRuntimeData, MAX_QUEUE_JOBS_FILTER_VALUES, MAX_QUEUE_JOBS_LIMIT,
     MAX_QUEUE_JOBS_OFFSET, MAX_QUEUE_NAME_CHARS,
+};
+pub use queue_mutations::{
+    EnqueueReprocessTorrentsBatchRequest, PgQueueMutationsRuntime, PurgeJobsRequest,
+    QueueMutationsError, QueueMutationsRuntime, QueueMutationsRuntimeData,
 };
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
@@ -63,6 +68,7 @@ pub fn schema() -> Schema {
         .data(SearchRuntimeData::disabled())
         .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
+        .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
@@ -78,6 +84,7 @@ pub fn build_schema(version: String) -> Schema {
         .data(SearchRuntimeData::disabled())
         .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
+        .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
@@ -93,6 +100,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
         .data(SearchRuntimeData::new(search))
         .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
+        .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
@@ -114,6 +122,7 @@ pub fn build_runtime_schema(
         .data(SearchRuntimeData::disabled())
         .data(MetricsRuntimeData::pg(pool.clone()))
         .data(QueueJobsRuntimeData::pg(pool.clone()))
+        .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(TorrentTagMutationsRuntimeData::disabled())
@@ -151,12 +160,36 @@ pub fn build_runtime_search_schema_with_tag_mutations(
     search: std::sync::Arc<dyn SearchRuntime>,
     tag_mutations: TorrentTagMutationsRuntimeData,
 ) -> Schema {
+    build_runtime_search_schema_with_mutations(
+        version,
+        pool,
+        config,
+        search,
+        tag_mutations,
+        QueueMutationsRuntimeData::disabled(),
+    )
+}
+
+/// Build the complete runtime schema with explicitly selected mutation runtimes.
+///
+/// Each enabled family must be constructed from its own separately authorized
+/// writer pool. All simpler builders attach fail-loud disabled implementations.
+#[must_use]
+pub fn build_runtime_search_schema_with_mutations(
+    version: String,
+    pool: bitmagnet_db::PgPool,
+    config: RuntimeConfig,
+    search: std::sync::Arc<dyn SearchRuntime>,
+    tag_mutations: TorrentTagMutationsRuntimeData,
+    queue_mutations: QueueMutationsRuntimeData,
+) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::new(search))
         .data(MetricsRuntimeData::pg(pool.clone()))
         .data(QueueJobsRuntimeData::pg(pool.clone()))
+        .data(queue_mutations)
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(tag_mutations)

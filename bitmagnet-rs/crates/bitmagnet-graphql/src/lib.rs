@@ -18,7 +18,7 @@ pub use schema::lane_c::LaneCSearchRuntime;
 pub use schema::lane_s::{LaneSSearchBackend, SqlxLaneSSearchBackend};
 pub use schema::runtime::{hydrate_l2_file_rows, PgL2SearchRuntime};
 pub use schema::{
-    build_runtime_schema, build_runtime_search_schema,
+    build_runtime_schema, build_runtime_search_schema, build_runtime_search_schema_with_mutations,
     build_runtime_search_schema_with_tag_mutations, build_schema, build_search_schema, schema,
     Mutation, Query, Schema,
 };
@@ -26,6 +26,10 @@ pub use schema::{
     DeleteTagsRequest, PgTorrentTagMutationsRuntime, PutTagsRequest, SetTagsRequest,
     TorrentTagMutationsError, TorrentTagMutationsRuntime, TorrentTagMutationsRuntimeData,
     MAX_TAG_MUTATION_INFO_HASHES, MAX_TAG_MUTATION_ROWS, MAX_TAG_MUTATION_TAG_NAMES,
+};
+pub use schema::{
+    EnqueueReprocessTorrentsBatchRequest, PgQueueMutationsRuntime, PurgeJobsRequest,
+    QueueMutationsError, QueueMutationsRuntime, QueueMutationsRuntimeData,
 };
 pub use schema::{
     MetricsBucket, MetricsError, MetricsRuntime, MetricsRuntimeData, PgMetricsRuntime,

@@ -201,6 +201,7 @@ jobs:
             .[0].Config.Labels["io.bitmagnet.graphql-mode"] == "read-default" and
             .[0].Config.Labels["io.bitmagnet.graphql-read-contract"] == "read-only/v1" and
             .[0].Config.Labels["io.bitmagnet.graphql-mutation-contract"] == "torrent-tags/opt-in-writer/v1" and
+            .[0].Config.Labels["io.bitmagnet.graphql-queue-mutation-contract"] == "queue-admin/opt-in-writer/v1" and
             (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
             (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
           ' "$inspect"
@@ -369,6 +370,7 @@ jobs:
               .[0].Config.Labels["io.bitmagnet.graphql-mode"] == "read-default" and
               .[0].Config.Labels["io.bitmagnet.graphql-read-contract"] == "read-only/v1" and
               .[0].Config.Labels["io.bitmagnet.graphql-mutation-contract"] == "torrent-tags/opt-in-writer/v1" and
+              .[0].Config.Labels["io.bitmagnet.graphql-queue-mutation-contract"] == "queue-admin/opt-in-writer/v1" and
               (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
               (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
             ' "$inspect"

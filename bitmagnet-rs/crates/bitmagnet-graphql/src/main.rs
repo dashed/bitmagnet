@@ -60,6 +60,9 @@ struct Args {
 
     #[command(flatten)]
     mutations: MutationArgs,
+
+    #[command(flatten)]
+    queue_mutations: QueueMutationArgs,
 }
 
 /// Explicitly gated writer configuration for the torrent-tag mutation family.
@@ -86,6 +89,32 @@ struct MutationArgs {
         value_parser = parse_positive_u32
     )]
     mutation_postgres_max_connections: u32,
+}
+
+/// Explicitly gated writer configuration for the queue mutation family.
+#[derive(Debug, ClapArgs)]
+struct QueueMutationArgs {
+    /// Enable the served queue mutation runtime.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_QUEUE_MUTATIONS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    queue_mutations_enabled: bool,
+
+    /// Separate PostgreSQL queue-writer DSN, required exactly when enabled.
+    #[arg(long, env = "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_DSN")]
+    queue_mutation_postgres_dsn: Option<SecretDsn>,
+
+    /// Maximum connections in the separately authenticated queue-writer pool.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        default_value_t = 2,
+        value_parser = parse_positive_u32
+    )]
+    queue_mutation_postgres_max_connections: u32,
 }
 
 #[derive(Clone)]
@@ -580,6 +609,9 @@ async fn main() -> anyhow::Result<()> {
     );
     let tag_mutations =
         build_tag_mutations_runtime(&args.mutations, args.expected_goose_version, &pool).await?;
+    let queue_mutations =
+        build_queue_mutations_runtime(&args.queue_mutations, args.expected_goose_version, &pool)
+            .await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Register both C6 metric families exactly once, even while the serving
@@ -590,7 +622,7 @@ async fn main() -> anyhow::Result<()> {
     let search_runtime = build_search_runtime(pool.clone(), &args.search, pathsearch_metrics)?;
     let version =
         std::env::var("BITMAGNET_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
-    let schema = bitmagnet_graphql::build_runtime_search_schema_with_tag_mutations(
+    let schema = bitmagnet_graphql::build_runtime_search_schema_with_mutations(
         version.clone(),
         pool.clone(),
         bitmagnet_graphql::RuntimeConfig {
@@ -599,6 +631,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Arc::clone(&search_runtime.runtime),
         tag_mutations,
+        queue_mutations,
     );
     let state = AppState {
         schema,
@@ -639,9 +672,14 @@ async fn build_tag_mutations_runtime(
         .await
         .context("read the GraphQL mutation writer PostgreSQL identity")?;
     anyhow::ensure!(
-        writer_identity == read_identity,
+        writer_identity.0 == read_identity.0 && writer_identity.1 == read_identity.1,
         "GraphQL reader and mutation writer must target the same PostgreSQL system and database"
     );
+    anyhow::ensure!(
+        writer_identity.2 != read_identity.2,
+        "GraphQL reader and mutation writer must use different PostgreSQL roles"
+    );
+    admit_mutation_writer_authority(&pool, MutationWriterFamily::TorrentTags).await?;
     info!(
         goose_version = goose_head.version,
         "torrent tag mutations enabled with a separate writer pool"
@@ -649,13 +687,163 @@ async fn build_tag_mutations_runtime(
     Ok(bitmagnet_graphql::TorrentTagMutationsRuntimeData::pg(pool))
 }
 
-async fn postgres_identity(pool: &PgPool) -> anyhow::Result<(String, String)> {
-    Ok(sqlx::query_as::<_, (String, String)>(
-        "SELECT current_database()::text, system_identifier::text \
+async fn build_queue_mutations_runtime(
+    args: &QueueMutationArgs,
+    expected_goose_version: i64,
+    read_pool: &PgPool,
+) -> anyhow::Result<bitmagnet_graphql::QueueMutationsRuntimeData> {
+    let Some(config) = queue_mutation_db_config(args)? else {
+        return Ok(bitmagnet_graphql::QueueMutationsRuntimeData::disabled());
+    };
+    let pool = bitmagnet_db::connect(&config)
+        .await
+        .context("connect the separately authenticated GraphQL queue mutation writer")?;
+    let goose_head = bitmagnet_graphql::admit_pg(&pool, expected_goose_version)
+        .await
+        .context("admit the GraphQL queue mutation writer against the expected Goose head")?;
+    let read_identity = postgres_identity(read_pool)
+        .await
+        .context("read the GraphQL reader PostgreSQL identity")?;
+    let writer_identity = postgres_identity(&pool)
+        .await
+        .context("read the GraphQL queue mutation writer PostgreSQL identity")?;
+    anyhow::ensure!(
+        writer_identity.0 == read_identity.0 && writer_identity.1 == read_identity.1,
+        "GraphQL reader and queue mutation writer must target the same PostgreSQL system and database"
+    );
+    anyhow::ensure!(
+        writer_identity.2 != read_identity.2,
+        "GraphQL reader and queue mutation writer must use different PostgreSQL roles"
+    );
+    admit_mutation_writer_authority(&pool, MutationWriterFamily::Queue).await?;
+    info!(
+        goose_version = goose_head.version,
+        "queue mutations enabled with a separate writer pool"
+    );
+    Ok(bitmagnet_graphql::QueueMutationsRuntimeData::pg(pool))
+}
+
+async fn postgres_identity(pool: &PgPool) -> anyhow::Result<(String, String, String)> {
+    Ok(sqlx::query_as::<_, (String, String, String)>(
+        "SELECT current_database()::text, system_identifier::text, current_user::text \
          FROM pg_control_system()",
     )
     .fetch_one(pool)
     .await?)
+}
+
+#[derive(Clone, Copy)]
+enum MutationWriterFamily {
+    TorrentTags,
+    Queue,
+}
+
+async fn admit_mutation_writer_authority(
+    pool: &PgPool,
+    family: MutationWriterFamily,
+) -> anyhow::Result<()> {
+    let attributes = sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool, bool)>(
+        "SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole, \
+         rolreplication, rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(pool)
+    .await
+    .context("read GraphQL mutation writer role attributes")?;
+    anyhow::ensure!(
+        attributes == (true, false, false, false, false, false, false),
+        "GraphQL mutation writer must be LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS"
+    );
+
+    let creation = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT has_database_privilege(current_user, current_database(), 'CREATE'), \
+                has_schema_privilege(current_user, 'public', 'CREATE')",
+    )
+    .fetch_one(pool)
+    .await
+    .context("read GraphQL mutation writer creation authority")?;
+    anyhow::ensure!(
+        creation == (false, false),
+        "GraphQL mutation writer must not hold database or public-schema CREATE"
+    );
+
+    let grants = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT table_schema, table_name, privilege_type \
+         FROM information_schema.role_table_grants \
+         WHERE grantee = current_user \
+           AND table_schema NOT IN ('pg_catalog', 'information_schema') \
+         ORDER BY table_schema, table_name, privilege_type",
+    )
+    .fetch_all(pool)
+    .await
+    .context("read GraphQL mutation writer table grants")?;
+    let expected = match family {
+        MutationWriterFamily::TorrentTags => vec![
+            (
+                "public".to_owned(),
+                "goose_db_version".to_owned(),
+                "SELECT".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "torrent_tags".to_owned(),
+                "DELETE".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "torrent_tags".to_owned(),
+                "INSERT".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "torrent_tags".to_owned(),
+                "SELECT".to_owned(),
+            ),
+        ],
+        MutationWriterFamily::Queue => vec![
+            (
+                "public".to_owned(),
+                "goose_db_version".to_owned(),
+                "SELECT".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "queue_jobs".to_owned(),
+                "DELETE".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "queue_jobs".to_owned(),
+                "INSERT".to_owned(),
+            ),
+            (
+                "public".to_owned(),
+                "queue_jobs".to_owned(),
+                "TRUNCATE".to_owned(),
+            ),
+        ],
+    };
+    anyhow::ensure!(
+        grants == expected,
+        "GraphQL mutation writer does not have the exact family-specific table grants"
+    );
+
+    if matches!(family, MutationWriterFamily::Queue) {
+        let selected_columns = sqlx::query_scalar::<_, String>(
+            "SELECT column_name FROM information_schema.column_privileges \
+             WHERE grantee = current_user AND table_schema = 'public' \
+               AND table_name = 'queue_jobs' AND privilege_type = 'SELECT' \
+             ORDER BY column_name",
+        )
+        .fetch_all(pool)
+        .await
+        .context("read GraphQL queue mutation writer column grants")?;
+        anyhow::ensure!(
+            selected_columns == ["queue".to_owned(), "status".to_owned()],
+            "GraphQL queue mutation writer must SELECT only queue_jobs.queue and queue_jobs.status"
+        );
+    }
+
+    Ok(())
 }
 
 fn mutation_db_config(args: &MutationArgs) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
@@ -670,6 +858,28 @@ fn mutation_db_config(args: &MutationArgs) -> anyhow::Result<Option<bitmagnet_db
         (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
             dsn: dsn.expose().to_owned(),
             max_connections: args.mutation_postgres_max_connections,
+            ..bitmagnet_db::DbConfig::default()
+        })),
+    }
+}
+
+fn queue_mutation_db_config(
+    args: &QueueMutationArgs,
+) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
+    match (
+        args.queue_mutations_enabled,
+        args.queue_mutation_postgres_dsn.as_ref(),
+    ) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_DSN is forbidden while queue mutations are disabled"
+        ),
+        (true, None) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_DSN is required while queue mutations are enabled"
+        ),
+        (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
+            dsn: dsn.expose().to_owned(),
+            max_connections: args.queue_mutation_postgres_max_connections,
             ..bitmagnet_db::DbConfig::default()
         })),
     }
@@ -855,18 +1065,21 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        app, build_search_runtime, mutation_db_config, parse_go_duration, AppState, Args,
-        GRAPHQL_HANDLER_DURATION_HEADER,
+        app, build_search_runtime, mutation_db_config, parse_go_duration, queue_mutation_db_config,
+        AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 39] = [
+    const ARGS_ENV_KEYS: [&str; 42] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
         "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
         "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_DSN",
         "BITMAGNET_GRAPHQL_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        "BITMAGNET_GRAPHQL_QUEUE_MUTATIONS_ENABLED",
+        "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_DSN",
+        "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_MAX_CONNECTIONS",
         "HEALTH_PEER_GRAPHQL_URLS",
         "HEALTH_PEER_TIMEOUT",
         "SEARCH_FILE_SEARCH_ENABLED",
@@ -978,6 +1191,17 @@ mod tests {
         assert!(!defaults.mutations.mutations_enabled);
         assert!(defaults.mutations.mutation_postgres_dsn.is_none());
         assert_eq!(defaults.mutations.mutation_postgres_max_connections, 4);
+        assert!(!defaults.queue_mutations.queue_mutations_enabled);
+        assert!(defaults
+            .queue_mutations
+            .queue_mutation_postgres_dsn
+            .is_none());
+        assert_eq!(
+            defaults
+                .queue_mutations
+                .queue_mutation_postgres_max_connections,
+            2
+        );
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
             defaults.health_peer_timeout,
@@ -1088,6 +1312,47 @@ mod tests {
             .expect("writer config");
         assert_eq!(config.max_connections, 3);
         assert_eq!(config.dsn, "postgres://writer:secret@localhost/bitmagnet");
+    }
+
+    #[test]
+    fn queue_mutation_writer_requires_a_separate_explicit_double_gate() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            default_args()
+        };
+        assert!(queue_mutation_db_config(&args.queue_mutations)
+            .expect("disabled config")
+            .is_none());
+
+        args.queue_mutations.queue_mutations_enabled = true;
+        let missing = queue_mutation_db_config(&args.queue_mutations)
+            .expect_err("enabled queue writer requires a DSN");
+        assert!(missing.to_string().contains("is required"));
+
+        args.queue_mutations.queue_mutations_enabled = false;
+        args.queue_mutations.queue_mutation_postgres_dsn = Some(
+            "postgres://queue-writer:secret@localhost/bitmagnet"
+                .parse()
+                .expect("test DSN"),
+        );
+        let debug = format!("{:?}", args.queue_mutations);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("queue-writer:secret"));
+        let forbidden = queue_mutation_db_config(&args.queue_mutations)
+            .expect_err("disabled queue writer forbids a DSN");
+        assert!(forbidden.to_string().contains("is forbidden"));
+
+        args.queue_mutations.queue_mutations_enabled = true;
+        args.queue_mutations.queue_mutation_postgres_max_connections = 1;
+        let config = queue_mutation_db_config(&args.queue_mutations)
+            .expect("enabled config")
+            .expect("queue writer config");
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(
+            config.dsn,
+            "postgres://queue-writer:secret@localhost/bitmagnet"
+        );
     }
 
     #[test]

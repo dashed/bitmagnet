@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Timelike, Utc};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -34,6 +34,35 @@ impl GoTime {
     #[must_use]
     pub fn zero() -> Self {
         Self("0001-01-01T00:00:00Z".to_string())
+    }
+
+    /// Converts a UTC instant to Go's RFC3339Nano JSON representation.
+    ///
+    /// Go trims every trailing fractional zero, whereas Chrono's `AutoSi`
+    /// formatter selects only 0/3/6/9 digits. Formatting the fraction
+    /// explicitly preserves exact fingerprints for values such as `.1234Z`.
+    #[must_use]
+    pub fn from_utc(value: DateTime<Utc>) -> Self {
+        let base = value.format("%Y-%m-%dT%H:%M:%S");
+        let nanos = value.nanosecond();
+        if nanos == 0 {
+            return Self(format!("{base}Z"));
+        }
+
+        let fraction = format!("{nanos:09}").trim_end_matches('0').to_owned();
+        Self(format!("{base}.{fraction}Z"))
+    }
+
+    /// Captures the current UTC instant in Go's RFC3339Nano representation.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::from_utc(Utc::now())
+    }
+
+    /// Returns the exact serialized representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn parsed(&self) -> Result<DateTime<FixedOffset>, chrono::ParseError> {
@@ -303,7 +332,34 @@ pub fn blob_migration_job(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessTorrentBatchParams, ProcessTorrentParams, CLASSIFY_MODE_DEFAULT};
+    use chrono::{TimeZone, Timelike, Utc};
+
+    use super::{GoTime, ProcessTorrentBatchParams, ProcessTorrentParams, CLASSIFY_MODE_DEFAULT};
+
+    #[test]
+    fn go_time_formats_rfc3339_nano_with_arbitrary_zero_trimming() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 8, 27, 20, 15, 16)
+            .single()
+            .expect("valid timestamp");
+        assert_eq!(GoTime::from_utc(base).as_str(), "2026-08-27T20:15:16Z");
+        assert_eq!(
+            GoTime::from_utc(
+                base.with_nanosecond(123_400_000)
+                    .expect("valid nanoseconds")
+            )
+            .as_str(),
+            "2026-08-27T20:15:16.1234Z"
+        );
+        assert_eq!(
+            GoTime::from_utc(
+                base.with_nanosecond(123_456_789)
+                    .expect("valid nanoseconds")
+            )
+            .as_str(),
+            "2026-08-27T20:15:16.123456789Z"
+        );
+    }
 
     #[test]
     fn process_torrent_decode_applies_go_zero_values_for_omitted_fields() {

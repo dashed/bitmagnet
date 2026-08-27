@@ -13,6 +13,7 @@ bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-proto = { path = "../bitmagnet-proto" }
+bitmagnet-queue = { path = "../bitmagnet-queue" }
 bitmagnet-search-query = { path = "../bitmagnet-search-query" }
 bitmagnet-search-serve = { path = "../bitmagnet-search-serve" }
 anyhow = { workspace = true }

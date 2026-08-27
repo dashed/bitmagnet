@@ -128,15 +128,22 @@ pub(crate) struct QueueMutation;
 impl QueueMutation {
     async fn enqueue_reprocess_torrents_batch(
         &self,
+        ctx: &Context<'_>,
         input: Option<QueueEnqueueReprocessTorrentsBatchInput>,
     ) -> async_graphql::Result<Option<Void>> {
-        let _ = &input;
-        unserved("queue mutation")
+        let runtime = ctx.data::<super::queue_mutations::QueueMutationsRuntimeData>()?;
+        super::queue_mutations::resolve_enqueue(runtime, input).await?;
+        Ok(None)
     }
 
-    async fn purge_jobs(&self, input: QueuePurgeJobsInput) -> async_graphql::Result<Option<Void>> {
-        let _ = &input;
-        unserved("queue mutation")
+    async fn purge_jobs(
+        &self,
+        ctx: &Context<'_>,
+        input: QueuePurgeJobsInput,
+    ) -> async_graphql::Result<Option<Void>> {
+        let runtime = ctx.data::<super::queue_mutations::QueueMutationsRuntimeData>()?;
+        super::queue_mutations::resolve_purge(runtime, input).await?;
+        Ok(None)
     }
 }
 

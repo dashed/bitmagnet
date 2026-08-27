@@ -1046,6 +1046,7 @@ dependencies = [
  "bitmagnet-db",
  "bitmagnet-model",
  "bitmagnet-proto",
+ "bitmagnet-queue",
  "bitmagnet-search-query",
  "bitmagnet-search-serve",
  "chrono",

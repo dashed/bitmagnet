@@ -276,39 +276,55 @@ impl QueueStore {
     /// Active-fingerprint conflicts are returned unchanged (normally SQLSTATE
     /// `23505`), so any conflict rolls back the complete statement.
     pub async fn insert_jobs_strict(&self, jobs: &[PreparedQueueJob]) -> Result<(), QueuePgError> {
-        if jobs.is_empty() {
-            return Ok(());
-        }
-
-        // Validate every application value before PostgreSQL sees any row.
-        let prepared = prepare_materialized_jobs(jobs)?;
-
-        let created_at = Utc::now();
-        let mut query = QueryBuilder::<Postgres>::new(
-            "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, \
-             max_retries, run_after, ran_at, error, deadline, archival_duration, \
-             created_at, priority) ",
-        );
-        query.push_values(&prepared, |mut row, prepared| {
-            row.push_bind(&prepared.job.job.fingerprint)
-                .push_bind(&prepared.job.job.queue)
-                .push("'pending'::queue_job_status")
-                .push_bind(&prepared.job.job.payload)
-                .push_unseparated("::jsonb")
-                .push("0")
-                .push_bind(prepared.max_retries)
-                .push_bind(prepared.job.run_after)
-                .push("NULL")
-                .push("NULL")
-                .push("NULL")
-                .push_bind(prepared.archival_duration)
-                .push_bind(created_at)
-                .push_bind(prepared.job.job.priority);
-        });
-
-        query.build().execute(self.pool()).await?;
-        Ok(())
+        insert_jobs_strict_with_executor(self.pool(), jobs).await
     }
+}
+
+/// Insert constructed jobs through a caller-owned transaction or pool without
+/// conflict suppression.
+///
+/// This is the transaction-aware form of [`QueueStore::insert_jobs_strict`].
+/// It lets higher-level operations compose a purge and enqueue atomically
+/// without duplicating the queue validation or insert projection.
+pub async fn insert_jobs_strict_with_executor<'e, E>(
+    executor: E,
+    jobs: &[PreparedQueueJob],
+) -> Result<(), QueuePgError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    // Validate every application value before PostgreSQL sees any row.
+    let prepared = prepare_materialized_jobs(jobs)?;
+
+    let created_at = Utc::now();
+    let mut query = QueryBuilder::<Postgres>::new(
+        "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, \
+         max_retries, run_after, ran_at, error, deadline, archival_duration, \
+         created_at, priority) ",
+    );
+    query.push_values(&prepared, |mut row, prepared| {
+        row.push_bind(&prepared.job.job.fingerprint)
+            .push_bind(&prepared.job.job.queue)
+            .push("'pending'::queue_job_status")
+            .push_bind(&prepared.job.job.payload)
+            .push_unseparated("::jsonb")
+            .push("0")
+            .push_bind(prepared.max_retries)
+            .push_bind(prepared.job.run_after)
+            .push("NULL")
+            .push("NULL")
+            .push("NULL")
+            .push_bind(prepared.archival_duration)
+            .push_bind(created_at)
+            .push_bind(prepared.job.job.priority);
+    });
+
+    query.build().execute(executor).await?;
+    Ok(())
 }
 
 fn validate_common_job(job: &QueueJob) -> Result<serde_json::Value, QueuePgError> {

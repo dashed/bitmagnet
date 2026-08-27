@@ -49,7 +49,8 @@ pub use pg::{
     ShadowJobEnvelopeV1, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 pub use producer_pg::{
-    prepare_pg_queue_job_values, ActiveJobInsertReceipt, PgQueueJobValues, PreparedQueueJob,
+    insert_jobs_strict_with_executor, prepare_pg_queue_job_values, ActiveJobInsertReceipt,
+    PgQueueJobValues, PreparedQueueJob,
 };
 pub use status_pg::{
     ProcessTorrentBatchStatusCount, QUEUE_JOBS_METRIC_HELP, QUEUE_JOBS_METRIC_NAME,
