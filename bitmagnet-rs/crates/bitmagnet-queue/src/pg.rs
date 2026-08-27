@@ -659,8 +659,8 @@ impl QueueStore {
         // conjuncts rather than one `shadow_eligible` boolean, so a refused
         // candidate can be attributed to a reason. The logic is unchanged:
         // eligible is still the conjunction of the same terms, and
-        // `NOT EXISTS(rows WHERE a OR b OR c OR d)` is exactly
-        // `NOT a AND NOT b AND NOT c AND NOT d` where each term is
+        // `NOT EXISTS(rows WHERE a OR b OR c OR d OR e)` is exactly
+        // `NOT a AND NOT b AND NOT c AND NOT d AND NOT e` where each term is
         // `EXISTS(rows WHERE …)`, computed here in one lateral pass as
         // `coalesce(bool_or(…), false)` (a `WHERE` only passes TRUE, and
         // `bool_or` over no TRUE row yields NULL or no rows).
@@ -694,7 +694,7 @@ impl QueueStore {
                         AS torrent_updated_after_ran_at, \
                       bool_or(EXISTS (\
                         SELECT 1 FROM torrent_hints AS source_hint \
-                        WHERE source_hint.info_hash = source_torrent.info_hash\
+                        WHERE source_hint.info_hash = source_torrent.info_hash \
                           AND (source_hint.content_source IS NOT NULL \
                             OR source_hint.content_id IS NOT NULL \
                             OR source_hint.title IS NOT NULL \
