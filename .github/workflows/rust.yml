@@ -433,6 +433,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -440,6 +446,9 @@ jobs:
           file: bitmagnet-rs/docker/Dockerfile.ingest-shadow
           push: false
           tags: bitmagnet-ingest-shadow:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

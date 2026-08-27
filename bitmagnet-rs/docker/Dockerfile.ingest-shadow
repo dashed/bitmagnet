@@ -2,6 +2,14 @@
 #
 # One fail-closed executable, run as separate `mirror` and `consume`
 # Deployments. Neither mode persists processor writes to live tables.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.ingest-shadow \
+#     --build-arg REVISION="$(git rev-parse HEAD)" \
+#     --build-arg SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+#     -t bitmagnet-ingest-shadow .
+
+ARG REVISION
+ARG SOURCE_TREE
 
 FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 ENV RUSTUP_TOOLCHAIN=1.97.1
@@ -18,6 +26,25 @@ RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release \
     && rm -rf bitmagnet-rs/target
 
 FROM debian:bookworm-slim AS runtime
+ARG REVISION
+ARG SOURCE_TREE
+
+# Reject unbound or ambiguous source identity at image-build time.
+RUN set -eu; \
+    test "${#REVISION}" -eq 40; \
+    case "${REVISION}" in *[!0-9a-f]*) echo "REVISION must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac; \
+    test "${#SOURCE_TREE}" -eq 40; \
+    case "${SOURCE_TREE}" in *[!0-9a-f]*) echo "SOURCE_TREE must be 40 lowercase hexadecimal characters" >&2; exit 1 ;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${REVISION}" \
+      io.bitmagnet.source-tree="${SOURCE_TREE}" \
+      io.bitmagnet.ingest-shadow-contract="live-tables-read-only/v1"
+
+ENV BITMAGNET_SOURCE_COMMIT="${REVISION}" \
+    BITMAGNET_SOURCE_TREE="${SOURCE_TREE}"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
