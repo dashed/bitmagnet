@@ -661,8 +661,9 @@ jobs:
       # sslmode=disable: the alpine PG service speaks plaintext on localhost, and
       # goose (lib/pq) otherwise defaults to sslmode=require.
       BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
-      BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
-      BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_processor_writer_load_test?sslmode=disable
+      BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_processor_writer_load_test?sslmode=disable
+      BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_processor_writer_load_test?sslmode=disable
       BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_writer_gate?sslmode=disable
       BITMAGNET_GRAPHQL_TEST_DATABASE_URL: postgres://bitmagnet_graphql_reader_ci:graphql-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_METRICS_TEST_DATABASE_URL: postgres://bitmagnet_graphql_metrics_reader_ci:graphql-metrics-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
@@ -681,9 +682,12 @@ jobs:
           "$(go env GOPATH)/bin/goose" -dir migrations postgres "$BITMAGNET_POSTGRES_DSN" up
           psql -X 'postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' \
             -v ON_ERROR_STOP=1 \
-            -c 'CREATE DATABASE bitmagnet_writer_gate'
+            -c 'CREATE DATABASE bitmagnet_writer_gate' \
+            -c 'CREATE DATABASE bitmagnet_processor_writer_load_test'
           "$(go env GOPATH)/bin/goose" -dir migrations postgres \
             "$BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL" up
+          "$(go env GOPATH)/bin/goose" -dir migrations postgres \
+            "$BITMAGNET_PROCESSOR_TEST_DATABASE_URL" up
       - uses: dtolnay/rust-toolchain@stable
       - uses: arduino/setup-protoc@v3
         with:
@@ -700,14 +704,15 @@ jobs:
             -p bitmagnet-queue --test batch_selection_pg -- \
             --ignored --exact batch_selection_matches_go_postgres_oracle \
             --test-threads=1
-      # These #[ignore]d tests connect to the migrated schema. The queue gate
-      # truncates queue_jobs, so the CI service must remain disposable.
+      # These #[ignore]d tests connect to migrated, sentinel-named writer
+      # databases. They truncate and seed tables, so both remain disposable.
       - name: Run live-PG (ignored) tests
         run: |
           cargo test -p bitmagnet-db -- --ignored
           cargo test -p bitmagnet-dht-crawler --test pipeline_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test persist_pg -- --ignored --test-threads=1
+          cargo test -p bitmagnet-processor --test writer_load_pg -- --ignored --test-threads=1
       - name: Run GraphQL PostgreSQL read parity
         working-directory: ${{ github.workspace }}
         run: |
