@@ -485,14 +485,12 @@ fn format_duration(nanos: i64) -> String {
         encoded.push_str(&format!("{minutes}M"));
     }
     if remaining != 0 {
-        let seconds = remaining / NANOS_PER_SECOND;
-        let fractional = remaining % NANOS_PER_SECOND;
-        if fractional == 0 {
-            encoded.push_str(&format!("{seconds}S"));
-        } else {
-            let fraction = format!("{fractional:09}");
-            encoded.push_str(&format!("{seconds}.{}S", fraction.trim_end_matches('0')));
-        }
+        // Match time.Duration.Seconds plus sosodev/duration's FormatFloat
+        // path exactly. The split and floating-point addition are observable
+        // for some nanosecond values (for example, 11.499733 seconds).
+        let seconds = (remaining / NANOS_PER_SECOND) as f64
+            + (remaining % NANOS_PER_SECOND) as f64 / NANOS_PER_SECOND as f64;
+        encoded.push_str(&format!("{seconds}S"));
     }
     if encoded == "P" {
         encoded.push_str("T0S");
@@ -586,7 +584,7 @@ mod tests {
                     "createdAtBucket": "2024-06-01T00:00:00Z",
                     "ranAtBucket": "2024-06-01T01:00:00.12Z",
                     "count": 2,
-                    "latency": "PT1H1M1.23456789S",
+                    "latency": "PT1H1M1.2345678900000001S",
                 },
                 {
                     "queue": "process_torrent",
@@ -669,8 +667,12 @@ mod tests {
     #[test]
     fn duration_format_matches_gqlgen_sosodev_decomposition() {
         assert_eq!(format_duration(0), "PT0S");
-        assert_eq!(format_duration(1_234_567_890), "PT1.23456789S");
-        assert_eq!(format_duration(3_661_234_567_890), "PT1H1M1.23456789S");
+        assert_eq!(format_duration(1_234_567_890), "PT1.2345678900000001S");
+        assert_eq!(format_duration(11_499_733_000), "PT11.499732999999999S");
+        assert_eq!(
+            format_duration(3_661_234_567_890),
+            "PT1H1M1.2345678900000001S"
+        );
         assert_eq!(format_duration(34_858_800_000_000_000), "P1Y1M1W1DT1H");
     }
 }
