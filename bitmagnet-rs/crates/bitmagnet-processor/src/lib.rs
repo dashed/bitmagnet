@@ -58,7 +58,8 @@ pub use writer_compare::{
 pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
 pub use writer_plan::{
     compose_writer_plan, load_writer_plan, persist_writer_plan, PersistWriterPlanError,
-    PersistWriterPlanReceipt, RetryPublishReceipt, RetryPublisher, WriterPlan, WriterPlanError,
+    PersistWriterPlanReceipt, RetryPublishReceipt, RetryPublisher, WriterFailureCause,
+    WriterFailures, WriterPlan, WriterPlanError,
 };
 pub use writer_projection::{
     project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
@@ -170,6 +171,18 @@ pub struct Materializer {
     classifier: Classifier,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClassifierFailure {
+    pub info_hash: String,
+    pub rendered_error: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MaterializedWriterOutput {
+    pub write_set: WriteSet,
+    pub classifier_failures: Vec<ClassifierFailure>,
+}
+
 impl Materializer {
     /// Compile the embedded core classifier used by the frozen parity corpus.
     pub fn from_core() -> Result<Self, MaterializeError> {
@@ -204,6 +217,16 @@ impl Materializer {
         params: &ProcessTorrentParams,
         torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
     ) -> Result<WriteSet, MaterializeError> {
+        Ok(self
+            .materialize_borrowed_with_failures(params, torrents)?
+            .write_set)
+    }
+
+    fn materialize_borrowed_with_failures<'a>(
+        &self,
+        params: &ProcessTorrentParams,
+        torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
+    ) -> Result<MaterializedWriterOutput, MaterializeError> {
         let workflow = if params.classifier_workflow.is_empty() {
             "default"
         } else {
@@ -220,6 +243,7 @@ impl Materializer {
         }
 
         let mut write_set = WriteSet::default();
+        let mut classifier_failures = Vec::new();
         let mut seen = BTreeSet::new();
         for requested in &params.info_hashes {
             let info_hash = protocol_id_hex(requested)?;
@@ -247,11 +271,21 @@ impl Materializer {
                 &flags,
                 &torrent.classifier_input,
             ));
-            append_classification_write(&mut write_set, torrent, result, outcome, false)?;
+            if let Some(rendered_error) =
+                append_classification_write(&mut write_set, torrent, result, outcome, false)?
+            {
+                classifier_failures.push(ClassifierFailure {
+                    info_hash,
+                    rendered_error,
+                });
+            }
         }
 
         write_set.canonicalize();
-        Ok(write_set)
+        Ok(MaterializedWriterOutput {
+            write_set,
+            classifier_failures,
+        })
     }
 
     /// Materialize one classifier result that was produced by replaying an
@@ -271,7 +305,7 @@ impl Materializer {
         validate_info_hash(&torrent.info_hash)?;
 
         let mut write_set = WriteSet::default();
-        append_classification_write(&mut write_set, &torrent, result, outcome, true)?;
+        let _ = append_classification_write(&mut write_set, &torrent, result, outcome, true)?;
         write_set.canonicalize();
         Ok(write_set)
     }
@@ -283,8 +317,12 @@ fn append_classification_write(
     result: Classification,
     outcome: Outcome,
     include_identifiers: bool,
-) -> Result<(), MaterializeError> {
+) -> Result<Option<String>, MaterializeError> {
     let info_hash = torrent.info_hash.clone();
+    let rendered_error = match &outcome {
+        Outcome::Unmatched(error) | Outcome::Error(error) => Some(error.clone()),
+        Outcome::Classified | Outcome::Deleted(_) => None,
+    };
     match outcome.tag() {
         "deleted" => write_set.delete_info_hashes.push(info_hash),
         "classified" => {
@@ -321,7 +359,7 @@ fn append_classification_write(
         other => return Err(MaterializeError::UnknownOutcome(other.to_string())),
     }
 
-    Ok(())
+    Ok(rendered_error)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -475,7 +513,31 @@ fn validate_info_hash(value: &str) -> Result<(), MaterializeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_id, validate_info_hash, WriteSet};
+    use bitmagnet_classifier::{Classification, ClassifierInput, Outcome};
+
+    use super::{
+        append_classification_write, infer_id, validate_info_hash, LoadedTorrent, WriteSet,
+    };
+
+    fn loaded_torrent() -> LoadedTorrent {
+        let info_hash = "0123456789abcdef0123456789abcdef01234567".to_owned();
+        LoadedTorrent {
+            info_hash: info_hash.clone(),
+            classifier_input: ClassifierInput {
+                id: info_hash,
+                name: "failure-ledger fixture".to_owned(),
+                size: 0,
+                files_status: "unknown".to_owned(),
+                extension: None,
+                files_count: None,
+                files: Vec::new(),
+                hint: None,
+                contents: Vec::new(),
+            },
+            existing_content_ids: Vec::new(),
+            attach_hint_unsupported: false,
+        }
+    }
 
     #[test]
     fn infer_id_matches_go_invalid_content_markers() {
@@ -504,5 +566,32 @@ mod tests {
         assert!(validate_info_hash("0123456789abcdef0123456789abcdef01234567").is_ok());
         assert!(validate_info_hash("0123456789ABCDEF0123456789ABCDEF01234567").is_err());
         assert!(validate_info_hash("short").is_err());
+    }
+
+    #[test]
+    fn classifier_failures_preserve_exact_unmatched_and_error_strings() {
+        let torrent = loaded_torrent();
+
+        for outcome in [
+            Outcome::Unmatched("unmatched: exact fixture".to_owned()),
+            Outcome::Error("classify: exact fixture".to_owned()),
+        ] {
+            let expected = outcome.error_string().expect("failure outcome");
+            let mut write_set = WriteSet::default();
+            let rendered = append_classification_write(
+                &mut write_set,
+                &torrent,
+                Classification::default(),
+                outcome,
+                false,
+            )
+            .expect("append failure write");
+
+            assert_eq!(rendered.as_deref(), Some(expected.as_str()));
+            assert_eq!(
+                write_set.failed_info_hashes.as_slice(),
+                std::slice::from_ref(&torrent.info_hash)
+            );
+        }
     }
 }

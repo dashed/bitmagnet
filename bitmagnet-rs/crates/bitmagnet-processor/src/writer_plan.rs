@@ -8,7 +8,8 @@
 //! delegating to that transaction kernel. No queue consumer or application
 //! runtime calls it yet; the ingest-shadow runtime remains comparison-only.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::fmt;
 
 use bitmagnet_queue::{
     process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions, QueueStore,
@@ -25,6 +26,77 @@ use crate::{
 };
 
 pub use bitmagnet_queue::ActiveJobInsertReceipt as RetryPublishReceipt;
+
+/// One structured member of Go's ordered processor `errors.Join` ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WriterFailureCause {
+    /// One aggregate error for every requested torrent absent from the load,
+    /// preserving request order and duplicate missing hashes for inspection.
+    MissingHashes { info_hashes: Vec<String> },
+    /// One raw classifier error for a loaded torrent.
+    Classifier {
+        info_hash: String,
+        rendered_error: String,
+    },
+}
+
+impl fmt::Display for WriterFailureCause {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingHashes { info_hashes } => {
+                write!(formatter, "missing {} info hashes", info_hashes.len())
+            }
+            Self::Classifier { rendered_error, .. } => formatter.write_str(rendered_error),
+        }
+    }
+}
+
+/// Ordered failure image used by all-failed and retry-publication errors.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriterFailures {
+    causes: Vec<WriterFailureCause>,
+}
+
+impl WriterFailures {
+    #[must_use]
+    pub fn causes(&self) -> &[WriterFailureCause] {
+        &self.causes
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.causes.is_empty()
+    }
+
+    fn retry_info_hashes(&self) -> Vec<&str> {
+        let mut info_hashes = Vec::new();
+        for cause in &self.causes {
+            match cause {
+                WriterFailureCause::MissingHashes {
+                    info_hashes: missing,
+                } => info_hashes.extend(missing.iter().map(String::as_str)),
+                WriterFailureCause::Classifier { info_hash, .. } => {
+                    info_hashes.push(info_hash.as_str());
+                }
+            }
+        }
+        info_hashes
+    }
+}
+
+impl fmt::Display for WriterFailures {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, cause) in self.causes.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("\n")?;
+            }
+            write!(formatter, "{cause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for WriterFailures {}
 
 /// A fully materialized supported-subset writer intent.
 ///
@@ -44,6 +116,7 @@ pub struct WriterPlan {
     persistence: BTreeMap<String, TorrentContentPersistence>,
     retry_info_hashes: Vec<String>,
     retry_job: Option<QueueJob>,
+    failures: WriterFailures,
 }
 
 impl WriterPlan {
@@ -77,6 +150,12 @@ impl WriterPlan {
     #[must_use]
     pub fn retry_job(&self) -> Option<&QueueJob> {
         self.retry_job.as_ref()
+    }
+
+    /// Borrow Go's ordered missing/classifier failure ledger.
+    #[must_use]
+    pub fn failures(&self) -> &WriterFailures {
+        &self.failures
     }
 
     /// Consume the validated plan into the transaction kernel's two inputs.
@@ -203,20 +282,25 @@ where
             })
         } else {
             Err(PersistWriterPlanError::AllFailed {
-                failed: plan.retry_info_hashes().len(),
+                failures: plan.failures.clone(),
             })
         };
     }
 
     let retry = if !plan.retry_info_hashes().is_empty() {
-        let retry_job = plan
-            .retry_job()
-            .ok_or(PersistWriterPlanError::RetryJobMissing)?;
+        let retry_job =
+            plan.retry_job()
+                .ok_or_else(|| PersistWriterPlanError::RetryJobMissing {
+                    failures: plan.failures.clone(),
+                })?;
         Some(
             retry_publisher
                 .publish_retry(retry_job)
                 .await
-                .map_err(PersistWriterPlanError::RetryPublish)?,
+                .map_err(|source| PersistWriterPlanError::RetryPublish {
+                    failures: plan.failures.clone(),
+                    source,
+                })?,
         )
     } else {
         None
@@ -234,12 +318,16 @@ where
 /// Fail-closed errors from retry-before-persist coordination.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistWriterPlanError {
-    #[error("all {failed} classifications failed; the source job must own retry handling")]
-    AllFailed { failed: usize },
-    #[error("partial-failure writer plan is missing its canonical retry job")]
-    RetryJobMissing,
-    #[error("publishing the partial-failure retry job failed")]
-    RetryPublish(#[source] BoxError),
+    #[error("{failures}")]
+    AllFailed { failures: WriterFailures },
+    #[error("{failures}\npartial-failure writer plan is missing its canonical retry job")]
+    RetryJobMissing { failures: WriterFailures },
+    #[error("{failures}\n{source}")]
+    RetryPublish {
+        failures: WriterFailures,
+        #[source]
+        source: BoxError,
+    },
     #[error("{source}")]
     Persist {
         /// Durable retry side effect that preceded the failed persistence.
@@ -279,11 +367,29 @@ pub fn compose_writer_plan(
     validate_supported_params(params)?;
     let indexed = index_loaded_torrents(loaded)?;
     reject_unrequested_loaded_torrents(params, &indexed)?;
-    let write_set =
-        materializer.materialize_borrowed(params, loaded.iter().map(|torrent| &torrent.loaded))?;
+    let materialized = materializer
+        .materialize_borrowed_with_failures(params, loaded.iter().map(|torrent| &torrent.loaded))?;
+    let write_set = materialized.write_set;
     let persistence = project_persistence(&write_set, &indexed)?;
     validate_persistence_input(&write_set, &persistence)?;
-    let retry_info_hashes = compose_retry_info_hashes(params, &indexed, &write_set);
+    let failures = compose_writer_failures(params, &indexed, materialized.classifier_failures);
+    let retry_info_hashes = failures
+        .retry_info_hashes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let retry_set = retry_info_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let canonical_failed_set = write_set
+        .failed_info_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if retry_set != canonical_failed_set {
+        return Err(WriterPlanError::FailureLedgerMismatch);
+    }
     let retry_job = compose_retry_job(
         params,
         &retry_info_hashes,
@@ -294,46 +400,37 @@ pub fn compose_writer_plan(
         persistence,
         retry_info_hashes,
         retry_job,
+        failures,
     })
 }
 
-fn compose_retry_info_hashes(
+fn compose_writer_failures(
     params: &ProcessTorrentParams,
     indexed: &BTreeMap<&str, &WriterLoadedTorrent>,
-    write_set: &WriteSet,
-) -> Vec<String> {
-    let failed = write_set
-        .failed_info_hashes
+    classifier_failures: Vec<crate::ClassifierFailure>,
+) -> WriterFailures {
+    let missing = params
+        .info_hashes
         .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    let mut retry_info_hashes = Vec::new();
-
-    // Go seeds failedHashes from the search layer's missing result before any
-    // classifiers finish. Preserve original request order and multiplicity for
-    // that prefix even though WriteSet keeps a canonical comparison set.
-    for requested in &params.info_hashes {
-        let info_hash = requested.to_hex();
-        if !indexed.contains_key(info_hash.as_str()) {
-            retry_info_hashes.push(info_hash);
-        }
+        .map(|info_hash| (*info_hash).to_hex())
+        .filter(|info_hash| !indexed.contains_key(info_hash.as_str()))
+        .collect::<Vec<_>>();
+    let mut causes =
+        Vec::with_capacity(classifier_failures.len() + usize::from(!missing.is_empty()));
+    if !missing.is_empty() {
+        causes.push(WriterFailureCause::MissingHashes {
+            info_hashes: missing,
+        });
     }
-
-    // Rust classifies loaded torrents in first-request order. Go appends these
-    // from concurrent goroutines, so its concrete completion order is not
-    // deterministic; this deterministic suffix preserves Rust processing order.
-    let mut processed = BTreeSet::new();
-    for requested in &params.info_hashes {
-        let info_hash = requested.to_hex();
-        if processed.insert(info_hash.clone())
-            && indexed.contains_key(info_hash.as_str())
-            && failed.contains(info_hash.as_str())
-        {
-            retry_info_hashes.push(info_hash);
-        }
-    }
-
-    retry_info_hashes
+    causes.extend(
+        classifier_failures
+            .into_iter()
+            .map(|failure| WriterFailureCause::Classifier {
+                info_hash: failure.info_hash,
+                rendered_error: failure.rendered_error,
+            }),
+    );
+    WriterFailures { causes }
 }
 
 fn compose_retry_job(
@@ -498,6 +595,8 @@ pub enum WriterPlanError {
     },
     #[error("writer plan produced duplicate persistence metadata ID {id}")]
     DuplicatePersistenceId { id: String },
+    #[error("writer plan failure ledger does not match its ordered retry hashes")]
+    FailureLedgerMismatch,
 }
 
 #[cfg(test)]
@@ -513,14 +612,15 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        compose_retry_info_hashes, compose_retry_job, compose_writer_plan, index_loaded_torrents,
+        compose_retry_job, compose_writer_failures, compose_writer_plan, index_loaded_torrents,
         persist_writer_plan, persist_writer_plan_with, project_persistence,
         validate_supported_params, PersistWriterPlanError, RetryPublishReceipt, RetryPublisher,
-        WriterPlan, WriterPlanError, WriterPlanPersister,
+        WriterFailureCause, WriterFailures, WriterPlan, WriterPlanError, WriterPlanPersister,
     };
     use crate::{
-        BlockingManager, BoxError, LoadedTorrent, PersistError, TorrentContentPersistence,
-        TorrentContentWrite, TorrentSnapshot, WriteSet, WriterLoadedTorrent, WriterProjectionError,
+        BlockingManager, BoxError, ClassifierFailure, LoadedTorrent, PersistError,
+        TorrentContentPersistence, TorrentContentWrite, TorrentSnapshot, WriteSet,
+        WriterLoadedTorrent, WriterProjectionError,
     };
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -607,11 +707,21 @@ mod tests {
             !write_set.torrent_contents.is_empty(),
         )
         .expect("compose retry fixture");
+        let failures = if retry_info_hashes.is_empty() {
+            WriterFailures::default()
+        } else {
+            WriterFailures {
+                causes: vec![WriterFailureCause::MissingHashes {
+                    info_hashes: retry_info_hashes.clone(),
+                }],
+            }
+        };
         WriterPlan {
             write_set,
             persistence,
             retry_info_hashes,
             retry_job,
+            failures,
         }
     }
 
@@ -811,6 +921,13 @@ mod tests {
 
         assert_eq!(plan.write_set.failed_info_hashes, [HASH_B, HASH_C]);
         assert_eq!(plan.retry_info_hashes(), [HASH_C, HASH_B, HASH_C]);
+        assert_eq!(
+            plan.failures().causes(),
+            [WriterFailureCause::MissingHashes {
+                info_hashes: vec![HASH_C.to_owned(), HASH_B.to_owned(), HASH_C.to_owned()]
+            }]
+        );
+        assert_eq!(plan.failures().to_string(), "missing 3 info hashes");
         assert_eq!(plan.write_set.torrent_contents.len(), 1);
         let retry_job = plan.retry_job().expect("partial failure retry job");
         assert_eq!(
@@ -839,13 +956,42 @@ mod tests {
             .into_iter()
             .map(|hash| ProtocolId::from_hex(hash).expect("fixture hash"))
             .collect();
-        let write_set = WriteSet {
-            failed_info_hashes: vec![HASH_A.to_owned(), HASH_B.to_owned(), HASH_C.to_owned()],
-            ..WriteSet::default()
-        };
-
+        let failures = compose_writer_failures(
+            &params,
+            &indexed,
+            vec![
+                ClassifierFailure {
+                    info_hash: HASH_B.to_owned(),
+                    rendered_error: "classifier B failed".to_owned(),
+                },
+                ClassifierFailure {
+                    info_hash: HASH_A.to_owned(),
+                    rendered_error: "classifier A failed".to_owned(),
+                },
+            ],
+        );
         assert_eq!(
-            compose_retry_info_hashes(&params, &indexed, &write_set),
+            failures.causes(),
+            [
+                WriterFailureCause::MissingHashes {
+                    info_hashes: vec![HASH_C.to_owned(), HASH_C.to_owned()]
+                },
+                WriterFailureCause::Classifier {
+                    info_hash: HASH_B.to_owned(),
+                    rendered_error: "classifier B failed".to_owned()
+                },
+                WriterFailureCause::Classifier {
+                    info_hash: HASH_A.to_owned(),
+                    rendered_error: "classifier A failed".to_owned()
+                }
+            ]
+        );
+        assert_eq!(
+            failures.to_string(),
+            "missing 2 info hashes\nclassifier B failed\nclassifier A failed"
+        );
+        assert_eq!(
+            failures.retry_info_hashes(),
             [HASH_C, HASH_C, HASH_B, HASH_A]
         );
     }
@@ -864,7 +1010,14 @@ mod tests {
             .await
             .expect_err("retry publication failure aborts before persistence");
 
-        assert!(matches!(error, PersistWriterPlanError::RetryPublish(_)));
+        assert!(matches!(
+            &error,
+            PersistWriterPlanError::RetryPublish { .. }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "missing 2 info hashes\nretry fixture failure"
+        );
         assert_eq!(events.lock().expect("events mutex").as_slice(), ["publish"]);
     }
 
@@ -882,6 +1035,7 @@ mod tests {
             .await
             .expect_err("late persistence failure is returned");
 
+        assert_eq!(error.to_string(), sqlx::Error::PoolClosed.to_string());
         assert!(matches!(
             error,
             PersistWriterPlanError::Persist {
@@ -974,10 +1128,16 @@ mod tests {
             .await
             .expect_err("all-failed source job must own retry handling");
 
-        assert!(matches!(
-            error,
-            PersistWriterPlanError::AllFailed { failed: 2 }
-        ));
+        assert_eq!(error.to_string(), "missing 2 info hashes");
+        let PersistWriterPlanError::AllFailed { failures } = error else {
+            panic!("expected structured all-failed error")
+        };
+        assert_eq!(
+            failures.causes(),
+            [WriterFailureCause::MissingHashes {
+                info_hashes: vec![HASH_A.to_owned(), HASH_B.to_owned()]
+            }]
+        );
         assert!(events.lock().expect("events mutex").is_empty());
         assert!(publisher.jobs.lock().expect("jobs mutex").is_empty());
     }
@@ -1033,7 +1193,7 @@ mod tests {
             .await
             .expect_err("publish failure must precede blocker and closed pool access");
 
-        assert!(matches!(error, PersistWriterPlanError::RetryPublish(_)));
+        assert!(matches!(error, PersistWriterPlanError::RetryPublish { .. }));
         assert_eq!(events.lock().expect("events mutex").as_slice(), ["publish"]);
     }
 

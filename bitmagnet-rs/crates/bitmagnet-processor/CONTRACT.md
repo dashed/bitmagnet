@@ -111,14 +111,27 @@ also freezes Go's second early return: a plan with no classified
 kernel, even if it contains delete signals. The kernel's independently callable
 deletion-only correctness improvement described above remains unchanged.
 
-One fidelity gap remains explicit. `AllFailed` retains only the failed-hash count,
-not Go's joined missing/classifier error sources, so a production handler cannot
-yet reproduce Go's exact returned error chain.
+The plan also retains a structured ordered failure ledger separate from its
+canonical comparison set. One aggregate missing-hash cause preserves the original
+request order and duplicates and renders exactly `missing N info hashes`; loaded
+classifier errors follow in Rust's first-request processing order with their raw
+messages. `AllFailed` renders those causes newline-separated like Go's
+`errors.Join`. Retry-publication failure appends the publisher error to the same
+image, while a persistence failure after successful publication carries only the
+persistence error plus the durable retry receipt. The classifier suffix remains
+one valid Go goroutine-completion order, not a claim that mixed owners choose the
+same concrete order.
+This preserves Go's visible joined text and exposes every structured cause, but
+Rust's single-source `Error` trait does not reproduce Go's multi-error
+`Unwrap() []error` / `errors.Is` traversal. Retry-job construction is infallible
+for the currently admitted bool-only payload; if that payload grows, a build
+failure must join this ledger before mutation activation.
 
 Focused fake-based tests freeze exact retry JSON/fingerprint bytes, missing-hash
 order and multiplicity independent of the canonical comparison set, publish-
-before-persist ordering, publish-failure short-circuiting, retry survival after a
-late persistence error, all-failed handling, the deletion-only early return, and
+before-persist ordering, exact joined failure rendering, publish-failure
+short-circuiting, retry survival and receipt retention after a late persistence
+error, all-failed handling, the deletion-only early return, and
 the public seam's publish-failure short circuit before both the blocker and a
 closed database pool. No consumer, application wiring, migration, Tantivy
 dual-write, or live PostgreSQL mutation was added by this checkpoint. Direct
