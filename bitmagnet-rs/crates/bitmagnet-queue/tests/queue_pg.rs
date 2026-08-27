@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use bitmagnet_queue::pg::MirrorBootstrap;
 use bitmagnet_queue::{
-    fingerprint, new_queue_job, ConsumeOutcome, Consumer, ConsumerConfig, MirrorConfig,
-    MirrorIneligibleReason, PreparedQueueJob, ProtocolId, QueueJobOptions, QueueJobStatus,
-    QueuePgError, QueueStore, ShadowJobEnvelopeV1, PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
-    PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
+    fingerprint, new_queue_job, ActiveJobInsertReceipt, ConsumeOutcome, Consumer, ConsumerConfig,
+    MirrorConfig, MirrorIneligibleReason, PreparedQueueJob, ProtocolId, QueueJobOptions,
+    QueueJobStatus, QueuePgError, QueueStore, ShadowJobEnvelopeV1, PROCESS_TORRENT,
+    PROCESS_TORRENT_BATCH, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
 use chrono::Utc;
 use prometheus::Encoder as _;
@@ -505,6 +505,168 @@ async fn queue_runtime_matches_go_contract() {
         .await
         .unwrap(),
         3
+    );
+
+    // The processor retry producer accepts the production schema's active-
+    // fingerprint collision and otherwise exposes a durable one-row insertion.
+    // The typed receipt distinguishes those two successful outcomes without a
+    // racy follow-up SELECT.
+    reset(&pool).await;
+    let idempotent = new_queue_job(
+        PROCESS_TORRENT,
+        &serde_json::json!({"InfoHashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}),
+        QueueJobOptions::default().with_max_retries(2),
+    )
+    .expect("construct idempotent producer job");
+    let inserted_id = match store
+        .insert_job_idempotent(&idempotent)
+        .await
+        .expect("insert first idempotent job")
+    {
+        ActiveJobInsertReceipt::Inserted { id } => id,
+        ActiveJobInsertReceipt::ExistingActiveFingerprint => {
+            panic!("first idempotent insert unexpectedly conflicted")
+        }
+    };
+    assert!(!inserted_id.is_empty());
+    let idempotent_row = sqlx::query(
+        "SELECT id, fingerprint, queue, payload::text AS payload, \
+                status::text AS status, retries, max_retries, priority, \
+                run_after <= created_at AS ready_immediately, \
+                archival_duration = make_interval(secs => 604800) AS archive_exact \
+         FROM queue_jobs WHERE fingerprint = $1",
+    )
+    .bind(&idempotent.fingerprint)
+    .fetch_one(&pool)
+    .await
+    .expect("read idempotent producer row");
+    assert_eq!(
+        idempotent_row.try_get::<String, _>("id").unwrap(),
+        inserted_id
+    );
+    assert_eq!(
+        idempotent_row.try_get::<String, _>("fingerprint").unwrap(),
+        idempotent.fingerprint
+    );
+    assert_eq!(
+        idempotent_row.try_get::<String, _>("queue").unwrap(),
+        PROCESS_TORRENT
+    );
+    assert_eq!(
+        idempotent_row.try_get::<String, _>("status").unwrap(),
+        "pending"
+    );
+    assert_eq!(idempotent_row.try_get::<i32, _>("retries").unwrap(), 0);
+    assert_eq!(idempotent_row.try_get::<i32, _>("max_retries").unwrap(), 2);
+    assert_eq!(idempotent_row.try_get::<i32, _>("priority").unwrap(), 0);
+    assert!(idempotent_row
+        .try_get::<bool, _>("ready_immediately")
+        .unwrap());
+    assert!(idempotent_row.try_get::<bool, _>("archive_exact").unwrap());
+    let normalized_idempotent_payload = idempotent_row
+        .try_get::<String, _>("payload")
+        .expect("normalized idempotent payload");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&normalized_idempotent_payload).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&idempotent.payload).unwrap()
+    );
+    assert_ne!(
+        fingerprint(PROCESS_TORRENT, &normalized_idempotent_payload),
+        idempotent.fingerprint,
+        "the stored fingerprint must retain the raw constructor bytes"
+    );
+    assert_eq!(
+        store.insert_job_idempotent(&idempotent).await.unwrap(),
+        ActiveJobInsertReceipt::ExistingActiveFingerprint
+    );
+    sqlx::query("UPDATE queue_jobs SET status = 'retry' WHERE id = $1")
+        .bind(&inserted_id)
+        .execute(&pool)
+        .await
+        .expect("make idempotent row retry");
+    assert_eq!(
+        store.insert_job_idempotent(&idempotent).await.unwrap(),
+        ActiveJobInsertReceipt::ExistingActiveFingerprint
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&idempotent.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE queue_jobs SET status = 'processed' WHERE id = $1")
+        .bind(&inserted_id)
+        .execute(&pool)
+        .await
+        .expect("settle idempotent row");
+    assert!(matches!(
+        store.insert_job_idempotent(&idempotent).await.unwrap(),
+        ActiveJobInsertReceipt::Inserted { .. }
+    ));
+    sqlx::query(
+        "UPDATE queue_jobs SET status = 'failed' \
+         WHERE fingerprint = $1 AND status = 'pending'",
+    )
+    .bind(&idempotent.fingerprint)
+    .execute(&pool)
+    .await
+    .expect("fail second idempotent row");
+    assert!(matches!(
+        store.insert_job_idempotent(&idempotent).await.unwrap(),
+        ActiveJobInsertReceipt::Inserted { .. }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&idempotent.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+
+    reset(&pool).await;
+    let concurrent = new_queue_job(
+        PROCESS_TORRENT,
+        &serde_json::json!({"InfoHashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}),
+        QueueJobOptions::default().with_max_retries(2),
+    )
+    .expect("construct concurrent idempotent job");
+    let (left, right) = tokio::join!(
+        store.insert_job_idempotent(&concurrent),
+        store.insert_job_idempotent(&concurrent),
+    );
+    let receipts = [left.unwrap(), right.unwrap()];
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| matches!(receipt, ActiveJobInsertReceipt::Inserted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(receipt, ActiveJobInsertReceipt::ExistingActiveFingerprint)
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM queue_jobs WHERE fingerprint = $1",
+        )
+        .bind(&concurrent.fingerprint)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
     );
 
     // Go's batch handler inserts children through its base DAO while the queue

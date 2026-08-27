@@ -9,6 +9,19 @@ use crate::{
     PROCESS_TORRENT, PROCESS_TORRENT_BATCH,
 };
 
+/// Result of inserting one job through the active-fingerprint deduplication
+/// contract used by Go's `ON CONFLICT DO NOTHING` producer path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveJobInsertReceipt {
+    /// PostgreSQL inserted a new pending row and assigned this ID.
+    Inserted { id: String },
+    /// The partial unique index observed the fingerprint in pending or retry.
+    ///
+    /// This records the statement's conflict outcome, not a durable assertion
+    /// that the competing row is still active after the statement returns.
+    ExistingActiveFingerprint,
+}
+
 /// A logical queue job whose application-clock eligibility timestamp has been
 /// materialized. Batch callers prepare each child when its source page is
 /// planned, preserving Go's page-by-page `RunAfter` ordering.
@@ -138,6 +151,47 @@ fn prepare_materialized_jobs(
 }
 
 impl QueueStore {
+    /// Insert one constructed job, accepting only an active-fingerprint conflict.
+    ///
+    /// The one-statement auto-commit boundary matches Go's retry publication:
+    /// the job becomes durable before the processor opens its persistence
+    /// transaction. The explicit partial-index arbiter ensures unrelated unique
+    /// constraints and trigger failures remain errors instead of being mistaken
+    /// for successful deduplication.
+    pub async fn insert_job_idempotent(
+        &self,
+        job: &QueueJob,
+    ) -> Result<ActiveJobInsertReceipt, QueuePgError> {
+        let prepared = PreparedQueueJob::materialize_at(job.clone(), Utc::now())?;
+        let values = prepare_pg_queue_job_values(&prepared.job)?;
+        let created_at = Utc::now();
+        let inserted_id = sqlx::query_scalar::<_, String>(
+            "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, \
+             max_retries, run_after, ran_at, error, deadline, archival_duration, \
+             created_at, priority) \
+             VALUES ($1, $2, 'pending'::queue_job_status, $3::jsonb, 0, $4, $5, \
+                     NULL, NULL, NULL, $6, $7, $8) \
+             ON CONFLICT (fingerprint) WHERE status IN ('pending', 'retry') \
+             DO NOTHING \
+             RETURNING id",
+        )
+        .bind(&values.job.fingerprint)
+        .bind(&values.job.queue)
+        .bind(&values.job.payload)
+        .bind(values.max_retries)
+        .bind(prepared.run_after)
+        .bind(values.archival_duration)
+        .bind(created_at)
+        .bind(values.job.priority)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(match inserted_id {
+            Some(id) => ActiveJobInsertReceipt::Inserted { id },
+            None => ActiveJobInsertReceipt::ExistingActiveFingerprint,
+        })
+    }
+
     /// Insert the closed output shape of one `process_torrent_batch` plan
     /// through migration 32's fixed-queue capability.
     pub(crate) async fn insert_process_torrent_batch_plan_strict(
