@@ -1133,10 +1133,16 @@ fn map_content(content: &bitmagnet_model::Content, item: &SearchResultItem) -> R
             name: content.source.clone(),
         },
         external_links: Vec::<ExternalLink>::new(),
-        // The frozen Lane-S item does not yet carry content-table timestamps;
-        // use the enclosing association timestamps until the adapter expands.
-        created_at: timestamp(item.torrent_content_created_at)?,
-        updated_at: timestamp(item.torrent_content_updated_at)?,
+        created_at: timestamp(
+            content
+                .created_at
+                .unwrap_or(item.torrent_content_created_at),
+        )?,
+        updated_at: timestamp(
+            content
+                .updated_at
+                .unwrap_or(item.torrent_content_updated_at),
+        )?,
     })
 }
 
@@ -2048,12 +2054,10 @@ mod tests {
                 popularity: Some(10.0),
                 vote_average: Some(8.0),
                 vote_count: Some(100),
-                // Not projected by the search query, so not exercised by the
-                // GraphQL mapper (see `bitmagnet-search-query`'s row decoder).
                 release_date: None,
                 adult: None,
-                created_at: None,
-                updated_at: None,
+                created_at: Some(1_500_000_000),
+                updated_at: Some(1_500_000_001),
                 tsv: Default::default(),
                 collections: Vec::new(),
                 attributes: Vec::new(),
@@ -2064,6 +2068,16 @@ mod tests {
             dht_last_seen_at: Some(1_700_000_001),
             query_string_rank: 0.75,
         }
+    }
+
+    #[test]
+    fn content_timestamps_come_from_the_content_row() {
+        let item = sample_item();
+        let mapped = map_search_item(item, false).unwrap();
+        let content = mapped.content.expect("sample content is present");
+
+        assert_eq!(content.created_at.0, timestamp(1_500_000_000).unwrap().0);
+        assert_eq!(content.updated_at.0, timestamp(1_500_000_001).unwrap().0);
     }
 
     fn aggregation_group(values: &[(&str, &str)]) -> AggregationGroup {

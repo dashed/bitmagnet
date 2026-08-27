@@ -516,8 +516,8 @@ fn decode_hydration_row(row: &PgRow, options: HydrateOptions) -> Result<(String,
                 // SearchResultItem, matching the existing hydration path.
                 release_date: None,
                 adult: None,
-                created_at: None,
-                updated_at: None,
+                created_at: row.try_get("content_created_at")?,
+                updated_at: row.try_get("content_updated_at")?,
                 tsv: Default::default(),
                 collections: Vec::new(),
                 attributes: Vec::new(),
@@ -812,6 +812,8 @@ const HYDRATION_SELECT: &str = r#"SELECT torrent_contents.id AS id,
        content.popularity::real AS content_popularity,
        content.vote_average::real AS content_vote_average,
        content.vote_count::bigint AS content_vote_count,
+       floor(EXTRACT(EPOCH FROM content.created_at))::bigint AS content_created_at,
+       floor(EXTRACT(EPOCH FROM content.updated_at))::bigint AS content_updated_at,
        NULLIF(content.release_year, 0) AS release_year,
        CASE WHEN content.source = 'imdb' THEN content.id ELSE ca_imdb.value END AS imdb_id,
        CASE WHEN content.source = 'tmdb' THEN content.id ELSE ca_tmdb.value END AS tmdb_id,
@@ -2083,7 +2085,8 @@ mod tests {
         assert!(sql.contains("content.original_language"));
         assert!(sql.contains("content.popularity::real"));
         assert!(sql.contains("content.vote_average::real"));
-        assert!(sql.contains("content.vote_average"));
+        assert!(sql.contains("content.created_at"));
+        assert!(sql.contains("content.updated_at"));
         assert!(!sql.contains("torrent_files_data"));
         assert!(!sql.contains("ORDER BY"));
         assert!(!sql.contains("LIMIT"));
