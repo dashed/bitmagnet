@@ -29,6 +29,12 @@ use crate::refine::{
     BoundedRefineFiles, RefinePredicate,
 };
 
+// Tiny candidate chunks are cheaper as one bounded SQL statement. Splitting a
+// two-ID chunk into concurrent singletons doubles statement/pool overhead while
+// providing little blob-transfer overlap. Larger chunks retain the two-half
+// overlap that benefits real multi-blob hydration.
+const MIN_PARALLEL_HYDRATE_IDS: usize = 4;
+
 /// L3 path candidate composer backed by Lane-S PostgreSQL hydration.
 ///
 /// [`PgSearchBackend`] is the real Lane-S adapter seam. Candidate shaping
@@ -515,19 +521,21 @@ impl Composer {
         }
     }
 
-    /// Hydrate one already-bounded logical chunk through two contiguous reads.
+    /// Hydrate one already-bounded logical chunk through one or two reads.
     ///
-    /// Both halves together contain exactly the IDs and compressed blobs held by
-    /// the former single read, so the file-count and compressed-byte envelope is
-    /// unchanged. The reads overlap PostgreSQL/blob transfer, while concatenating
-    /// left then right preserves the L3 relevance order before exact refinement.
+    /// Chunks below [`MIN_PARALLEL_HYDRATE_IDS`] stay in one statement so a
+    /// common two-ID file-budget chunk does not become two singleton queries.
+    /// Larger chunks split into contiguous halves whose union contains exactly
+    /// the original IDs and compressed blobs, so the file-count and byte envelope
+    /// is unchanged. The reads overlap PostgreSQL/blob transfer, while
+    /// concatenating left then right preserves L3 relevance order.
     async fn hydrate_bounded_chunk(
         &self,
         request: &SearchRequest,
         ids: &[InfoHash],
         deadline: Instant,
     ) -> Result<Vec<SearchResultItem>, RefineCap> {
-        if ids.len() < 2 {
+        if ids.len() < MIN_PARALLEL_HYDRATE_IDS {
             return self.hydrate_chunk(request, ids, deadline).await;
         }
 
@@ -1834,8 +1842,8 @@ mod tests {
         let calls = pg.calls();
         assert_eq!(
             calls.len(),
-            2,
-            "one bounded logical chunk hydrates through two concurrent halves"
+            1,
+            "a three-ID logical chunk stays in one bounded statement"
         );
         assert!(calls.iter().all(|call| call.hydrate.files_data));
         assert!(calls.iter().all(|call| {
@@ -1942,6 +1950,7 @@ mod tests {
         let composer = budget_composer(config());
 
         // Shallow: unchanged (need <= max_decode keeps the ~200 fast-path floor).
+        assert_eq!(composer.candidate_budget(20, 0), 80);
         assert_eq!(composer.candidate_budget(50, 0), 200);
         assert_eq!(composer.candidate_budget(100, 0), 200);
         assert_eq!(composer.candidate_budget(20, 40), 200);
@@ -2081,18 +2090,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_chunk_hydrates_two_halves_concurrently_in_l3_order() {
-        let candidate_source = Arc::new(FakeCandidates::returning(&[id(1), id(1), id(2)], 3));
+    async fn tiny_bounded_chunk_stays_in_one_statement_in_l3_order() {
+        let candidate_source =
+            Arc::new(FakeCandidates::returning(&[id(1), id(1), id(2), id(3)], 4));
         let mut fake_pg = FakePg::new(
-            vec![item(1, 1, true), item(2, 1, true)],
-            HashMap::from([(id(1), 1), (id(2), 1)]),
+            vec![item(1, 1, true), item(2, 1, true), item(3, 1, true)],
+            HashMap::from([(id(1), 1), (id(2), 1), (id(3), 1)]),
         );
-        fake_pg.delayed_ids.extend([id(1), id(2)]);
+        fake_pg.delayed_ids.extend([id(1), id(2), id(3)]);
         fake_pg.delay = Duration::from_millis(25);
         let pg = Arc::new(fake_pg);
         let mut cfg = config();
-        cfg.max_chunk_torrents = 2;
-        cfg.refine_file_budget = 2;
+        cfg.max_chunk_torrents = 3;
+        cfg.refine_file_budget = 3;
         let metrics = Arc::new(PathsearchMetrics::new());
         let composer = Composer::new(candidate_source, pg.clone(), cfg, None)
             .with_metrics(Arc::clone(&metrics));
@@ -2106,8 +2116,58 @@ mod tests {
                 .iter()
                 .map(|item| item.info_hash)
                 .collect::<Vec<_>>(),
-            vec![id(1), id(2)],
-            "duplicate candidates collapse and concurrent halves rejoin in L3 order"
+            vec![id(1), id(2), id(3)],
+            "duplicate candidates collapse without changing L3 order"
+        );
+        assert_eq!(pg.max_active_hydrations(), 1);
+        let hydrate_calls = pg
+            .calls()
+            .into_iter()
+            .filter(|call| call.hydrate.files_data)
+            .collect::<Vec<_>>();
+        assert_eq!(hydrate_calls.len(), 1);
+        assert_eq!(candidate_ids(&hydrate_calls[0].options.filter).len(), 3);
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::HydrateChunk),
+            1,
+            "one statement remains one bounded logical-chunk observation"
+        );
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RefineChunk), 1);
+    }
+
+    #[tokio::test]
+    async fn four_id_bounded_chunk_hydrates_two_halves_concurrently_in_l3_order() {
+        let candidate_source =
+            Arc::new(FakeCandidates::returning(&[id(1), id(2), id(3), id(4)], 4));
+        let mut fake_pg = FakePg::new(
+            vec![
+                item(1, 1, true),
+                item(2, 1, true),
+                item(3, 1, true),
+                item(4, 1, true),
+            ],
+            (1..=4).map(|value| (id(value), 1)).collect(),
+        );
+        fake_pg.delayed_ids.extend((1..=4).map(id));
+        fake_pg.delay = Duration::from_millis(25);
+        let pg = Arc::new(fake_pg);
+        let mut cfg = config();
+        cfg.max_chunk_torrents = 4;
+        cfg.refine_file_budget = 4;
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidate_source, pg.clone(), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.info_hash)
+                .collect::<Vec<_>>(),
+            vec![id(1), id(2), id(3), id(4)]
         );
         assert_eq!(pg.max_active_hydrations(), 2);
         let hydrate_calls = pg
@@ -2118,13 +2178,50 @@ mod tests {
         assert_eq!(hydrate_calls.len(), 2);
         assert!(hydrate_calls
             .iter()
-            .all(|call| candidate_ids(&call.options.filter).len() == 1));
+            .all(|call| candidate_ids(&call.options.filter).len() == 2));
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::HydrateChunk), 1);
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RefineChunk), 1);
+    }
+
+    #[tokio::test]
+    async fn production_ranked_window_keeps_two_id_chunks_batched() {
+        let ids: Vec<InfoHash> = (1..=80).map(id).collect();
+        let candidate_source = Arc::new(FakeCandidates::returning(&ids, 80));
+        let pg = Arc::new(FakePg::new(
+            (1..=80).map(|value| item(value, 1, true)).collect(),
+            (1..=80).map(|value| (id(value), 150_000)).collect(),
+        ));
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidate_source.clone(), pg.clone(), config(), None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 20, 0).await;
+
+        assert!(served);
+        assert_eq!(result.items.len(), 20);
+        assert_eq!(candidate_source.requested_limit.load(Ordering::Relaxed), 80);
+        let hydrate_calls = pg
+            .calls()
+            .into_iter()
+            .filter(|call| call.hydrate.files_data)
+            .collect::<Vec<_>>();
+        assert_eq!(hydrate_calls.len(), 40);
+        assert!(hydrate_calls
+            .iter()
+            .all(|call| candidate_ids(&call.options.filter).len() == 2));
+        assert_eq!(
+            hydrate_calls
+                .iter()
+                .flat_map(|call| candidate_ids(&call.options.filter))
+                .collect::<Vec<_>>(),
+            ids,
+            "all 80 candidates hydrate once in exact L3 order"
+        );
         assert_eq!(
             metrics.phase_sample_count(PathsearchPhase::HydrateChunk),
-            1,
-            "two overlapping reads remain one bounded logical-chunk observation"
+            40,
+            "40 two-ID logical chunks remain 40 timing observations"
         );
-        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RefineChunk), 1);
     }
 
     #[tokio::test]
