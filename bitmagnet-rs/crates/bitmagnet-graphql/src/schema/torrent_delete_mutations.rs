@@ -413,17 +413,12 @@ pub async fn admit_torrent_delete_writer_authority(
     anyhow::ensure!(
         routines
             == [
-                (
-                    "lo_get".to_owned(),
-                    "loid oid, offset bigint, len integer".to_owned(),
-                ),
-                (
-                    "lo_put".to_owned(),
-                    "loid oid, offset bigint, data bytea".to_owned(),
-                ),
+                ("lo_get".to_owned(), "oid, bigint, integer".to_owned(),),
+                ("lo_put".to_owned(), "oid, bigint, bytea".to_owned(),),
             ],
         "GraphQL torrent-delete writer must execute exactly lo_get(oid,bigint,integer) \
-         and lo_put(oid,bigint,bytea) among PostgreSQL large-object routines"
+         and lo_put(oid,bigint,bytea) among PostgreSQL large-object routines; \
+         observed {routines:?}"
     );
 
     let writer_owned_large_objects = sqlx::query_scalar::<_, i64>(
