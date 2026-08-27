@@ -77,7 +77,7 @@ pub use order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
 pub use params::TorznabSearchParams;
 pub use query::{build_query, Bind, HydrateOptions, Result, SearchQuery, SearchQueryError};
 pub use result::{SearchResult, SearchResultItem, TorrentSourceInfo};
-pub use search::{build_search_query, search};
+pub use search::{build_search_query, search, search_candidates};
 
 // Re-exported so Lane T and tests can name these without a direct
 // `bitmagnet-model` dependency.

@@ -425,6 +425,10 @@ impl Composer {
     ) -> Vec<Vec<InfoHash>> {
         let mut chunks = Vec::new();
         let mut current = Vec::new();
+        // SQL IN semantics collapse duplicate candidate hashes. Preserve the
+        // first L3 occurrence here so a duplicate can never straddle the two
+        // concurrent halves and be hydrated/refined twice.
+        let mut seen = HashSet::with_capacity(ids.len());
         let mut current_files = 0_u64;
         let mut current_compressed_bytes = 0_u64;
         let max_torrents = usize::try_from(self.config.max_chunk_torrents)
@@ -434,6 +438,9 @@ impl Composer {
         let compressed_budget = self.config.refine_decoded_byte_budget;
 
         for id in ids {
+            if !seen.insert(id) {
+                continue;
+            }
             let files = self.file_count_of(&id, metadata);
             let compressed_bytes = metadata
                 .get(&id)
@@ -498,7 +505,7 @@ impl Composer {
                 max_files_data_bytes: Some(self.compressed_blob_cap()),
             },
         );
-        match timeout_at(deadline, self.pg.torrent_content(request)).await {
+        match timeout_at(deadline, self.pg.candidate_torrent_content(request)).await {
             Ok(Ok(result)) => Ok(self.ordered_chunk_items(result, ids)),
             Ok(Err(error)) => {
                 tracing::warn!(%error, "pathsearch candidate hydration failed; falling back to PostgreSQL");
@@ -506,6 +513,32 @@ impl Composer {
             }
             Err(_) => Err(RefineCap::Deadline),
         }
+    }
+
+    /// Hydrate one already-bounded logical chunk through two contiguous reads.
+    ///
+    /// Both halves together contain exactly the IDs and compressed blobs held by
+    /// the former single read, so the file-count and compressed-byte envelope is
+    /// unchanged. The reads overlap PostgreSQL/blob transfer, while concatenating
+    /// left then right preserves the L3 relevance order before exact refinement.
+    async fn hydrate_bounded_chunk(
+        &self,
+        request: &SearchRequest,
+        ids: &[InfoHash],
+        deadline: Instant,
+    ) -> Result<Vec<SearchResultItem>, RefineCap> {
+        if ids.len() < 2 {
+            return self.hydrate_chunk(request, ids, deadline).await;
+        }
+
+        let midpoint = ids.len().div_ceil(2);
+        let (left_ids, right_ids) = ids.split_at(midpoint);
+        let (mut left, right) = tokio::try_join!(
+            self.hydrate_chunk(request, left_ids, deadline),
+            self.hydrate_chunk(request, right_ids, deadline),
+        )?;
+        left.extend(right);
+        Ok(left)
     }
 
     /// Runs the bounded candidate + chunked hydrate pipeline and retains every
@@ -939,7 +972,7 @@ impl Composer {
             // only after that chunk hydrates successfully.
             let hydrate_result = {
                 let _hydrate_chunk = self.phase_timer(PathsearchPhase::HydrateChunk);
-                self.hydrate_chunk(options.refine_request(), &chunk, deadline)
+                self.hydrate_bounded_chunk(options.refine_request(), &chunk, deadline)
                     .await
             };
             let items = match hydrate_result {
@@ -1442,6 +1475,8 @@ mod tests {
         counts: HashMap<InfoHash, i64>,
         calls: Mutex<Vec<SearchRequest>>,
         agg_calls: Mutex<Vec<SearchRequest>>,
+        active_hydrations: AtomicU32,
+        max_active_hydrations: AtomicU32,
         delayed_ids: HashSet<InfoHash>,
         delay: Duration,
         fail_counts: bool,
@@ -1457,6 +1492,8 @@ mod tests {
                 counts,
                 calls: Mutex::new(Vec::new()),
                 agg_calls: Mutex::new(Vec::new()),
+                active_hydrations: AtomicU32::new(0),
+                max_active_hydrations: AtomicU32::new(0),
                 delayed_ids: HashSet::new(),
                 delay: Duration::ZERO,
                 fail_counts: false,
@@ -1476,6 +1513,18 @@ mod tests {
                 .expect("agg_calls mutex poisoned")
                 .clone()
         }
+
+        fn max_active_hydrations(&self) -> u32 {
+            self.max_active_hydrations.load(Ordering::Relaxed)
+        }
+    }
+
+    struct ActiveHydration<'a>(&'a AtomicU32);
+
+    impl Drop for ActiveHydration<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     #[async_trait::async_trait]
@@ -1490,6 +1539,12 @@ mod tests {
                 return Err(crate::Error::Pg("search failure".into()));
             }
             let candidate_ids = candidate_ids(&request.options.filter);
+            let _active_hydration = request.hydrate.files_data.then(|| {
+                let active = self.active_hydrations.fetch_add(1, Ordering::Relaxed) + 1;
+                self.max_active_hydrations
+                    .fetch_max(active, Ordering::Relaxed);
+                ActiveHydration(&self.active_hydrations)
+            });
             if request.hydrate.files_data
                 && candidate_ids.iter().any(|id| self.delayed_ids.contains(id))
             {
@@ -1779,16 +1834,15 @@ mod tests {
         let calls = pg.calls();
         assert_eq!(
             calls.len(),
-            1,
-            "torrent_content runs only the hydrate chunk"
+            2,
+            "one bounded logical chunk hydrates through two concurrent halves"
         );
-        assert!(calls[0].hydrate.files_data);
-        assert_eq!(
-            calls[0].hydrate.max_files_data_bytes,
-            Some(composer.config.max_refine_decompressed_bytes)
-        );
+        assert!(calls.iter().all(|call| call.hydrate.files_data));
+        assert!(calls.iter().all(|call| {
+            call.hydrate.max_files_data_bytes == Some(composer.config.max_refine_decompressed_bytes)
+        }));
         assert!(
-            calls[0].options.facets.is_empty(),
+            calls.iter().all(|call| call.options.facets.is_empty()),
             "even a one-chunk route must use refine, not candidate-set combined facets"
         );
         // Aggregation now routes through the dedicated grouped entry point over
@@ -2024,6 +2078,53 @@ mod tests {
         );
         assert_eq!(metrics.phase_sample_count(PathsearchPhase::Aggregations), 1);
         assert_eq!(metrics.phase_sample_count(PathsearchPhase::RouteTotal), 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_chunk_hydrates_two_halves_concurrently_in_l3_order() {
+        let candidate_source = Arc::new(FakeCandidates::returning(&[id(1), id(1), id(2)], 3));
+        let mut fake_pg = FakePg::new(
+            vec![item(1, 1, true), item(2, 1, true)],
+            HashMap::from([(id(1), 1), (id(2), 1)]),
+        );
+        fake_pg.delayed_ids.extend([id(1), id(2)]);
+        fake_pg.delay = Duration::from_millis(25);
+        let pg = Arc::new(fake_pg);
+        let mut cfg = config();
+        cfg.max_chunk_torrents = 2;
+        cfg.refine_file_budget = 2;
+        let metrics = Arc::new(PathsearchMetrics::new());
+        let composer = Composer::new(candidate_source, pg.clone(), cfg, None)
+            .with_metrics(Arc::clone(&metrics));
+
+        let (result, served) = search(&composer, 10, 0).await;
+
+        assert!(served);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.info_hash)
+                .collect::<Vec<_>>(),
+            vec![id(1), id(2)],
+            "duplicate candidates collapse and concurrent halves rejoin in L3 order"
+        );
+        assert_eq!(pg.max_active_hydrations(), 2);
+        let hydrate_calls = pg
+            .calls()
+            .into_iter()
+            .filter(|call| call.hydrate.files_data)
+            .collect::<Vec<_>>();
+        assert_eq!(hydrate_calls.len(), 2);
+        assert!(hydrate_calls
+            .iter()
+            .all(|call| candidate_ids(&call.options.filter).len() == 1));
+        assert_eq!(
+            metrics.phase_sample_count(PathsearchPhase::HydrateChunk),
+            1,
+            "two overlapping reads remain one bounded logical-chunk observation"
+        );
+        assert_eq!(metrics.phase_sample_count(PathsearchPhase::RefineChunk), 1);
     }
 
     #[tokio::test]
@@ -2400,8 +2501,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             hydrate_calls.len(),
-            5,
-            "four chunks fill the retained cap and only one bounded lookahead chunk may decode"
+            10,
+            "five bounded logical chunks each hydrate through two concurrent halves"
         );
         for call in &hydrate_calls {
             let ids = candidate_ids(&call.options.filter);
@@ -2410,7 +2511,7 @@ mod tests {
                 files <= i64::from(CHUNK_FILE_BUDGET),
                 "one hydration decoded {files} files above the chunk budget"
             );
-            assert!(ids.len() <= 5);
+            assert!(ids.len() <= 3);
         }
         assert_eq!(
             hydrate_calls

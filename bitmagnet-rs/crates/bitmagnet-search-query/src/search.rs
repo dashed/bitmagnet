@@ -7,7 +7,9 @@
 
 use crate::facets::{build_base_query, fetch_aggregations, fetch_total_count, BASE_SELECT};
 use crate::order::{OrderDirection, TorrentContentOrder, TorrentContentOrderField};
-use crate::query::{Bind, BuildState, CriteriaCtx, HydrateOptions, Result, SearchQuery};
+use crate::query::{
+    Bind, BuildState, CriteriaCtx, HydrateOptions, Result, SearchQuery, SearchQueryError,
+};
 use crate::result::SearchResult;
 use crate::{SearchBuildConfig, SearchOptions};
 use chrono::{DateTime, Utc};
@@ -90,6 +92,50 @@ pub async fn search(
         items,
         aggregations,
     })
+}
+
+/// Execute the L3 composer's bounded candidate hydration as one SQL statement.
+///
+/// This deliberately rejects ordinary search controls. Candidate text has
+/// already been evaluated by L3, pagination happens after exact refine, and
+/// refined-set aggregation has its own executor. Keeping those preconditions
+/// fail-closed prevents this optimized path from silently skipping requested
+/// count, page, or facet work.
+pub async fn search_candidates(
+    pool: &PgPool,
+    options: &SearchOptions,
+    config: &SearchBuildConfig,
+    hydrate: HydrateOptions,
+) -> Result<SearchResult> {
+    validate_candidate_options(options)?;
+    let membership = build_search_query_at(options, config, Utc::now())?;
+    let items = membership.fetch_candidates_with(pool, hydrate).await?;
+    Ok(SearchResult {
+        total_count: 0,
+        total_count_is_estimate: false,
+        has_next_page: false,
+        items,
+        aggregations: Default::default(),
+    })
+}
+
+fn validate_candidate_options(options: &SearchOptions) -> Result<()> {
+    let has_query = options
+        .query
+        .as_ref()
+        .is_some_and(|query| !query.is_empty());
+    if has_query
+        || options.limit.is_some()
+        || options.offset != 0
+        || options.total_count
+        || options.has_next_page
+        || options.facets.iter().any(|facet| facet.aggregate)
+    {
+        return Err(SearchQueryError::InvalidParams(
+            "candidate hydration requires no text, page, count, or aggregate facets".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn build_search_query_at(
@@ -254,6 +300,7 @@ const fn direction_sql(direction: OrderDirection) -> &'static str {
 mod tests {
     use super::*;
     use crate::criteria::Criteria;
+    use crate::FacetRequest;
 
     fn order(field: TorrentContentOrderField, direction: OrderDirection) -> TorrentContentOrder {
         TorrentContentOrder { field, direction }
@@ -383,5 +430,43 @@ mod tests {
         assert!(!query.sql().contains("files_data"));
         assert!(!query.sql().contains("LEFT JOIN content"));
         assert!(query.sql().contains("\nLIMIT 10"));
+    }
+
+    #[test]
+    fn candidate_executor_rejects_ordinary_search_controls() {
+        let valid = SearchOptions {
+            limit: None,
+            ..SearchOptions::new()
+        };
+        assert!(validate_candidate_options(&valid).is_ok());
+
+        let mut invalid = valid.clone();
+        invalid.query = Some("matrix".to_owned());
+        assert!(validate_candidate_options(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.limit = Some(10);
+        assert!(validate_candidate_options(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.offset = 1;
+        assert!(validate_candidate_options(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.total_count = true;
+        assert!(validate_candidate_options(&invalid).is_err());
+
+        let mut invalid = valid.clone();
+        invalid.has_next_page = true;
+        assert!(validate_candidate_options(&invalid).is_err());
+
+        let mut invalid = valid;
+        invalid.facets.push(FacetRequest {
+            facet: crate::TorrentContentFacet::ContentType,
+            aggregate: true,
+            logic: None,
+            filter: Default::default(),
+        });
+        assert!(validate_candidate_options(&invalid).is_err());
     }
 }

@@ -26,7 +26,7 @@ use bitmagnet_model::{
 use chrono::{DateTime, Datelike, Duration, Months, NaiveDate, NaiveDateTime, SecondsFormat};
 use chrono::{Timelike, Utc};
 use serde::Deserialize;
-use sqlx::{types::Json, PgPool, Row};
+use sqlx::{postgres::PgRow, types::Json, PgPool, Row};
 use std::collections::BTreeMap;
 
 /// Controls optional, heavyweight result hydration.
@@ -125,6 +125,19 @@ struct Hydration {
     content: Option<Content>,
 }
 
+#[derive(Deserialize)]
+struct DbTorrentSourceInfo {
+    key: String,
+    name: String,
+    import_id: Option<String>,
+    seeders: Option<i64>,
+    leechers: Option<i64>,
+    published_at: Option<i64>,
+    seen_count: i64,
+    first_seen_at: i64,
+    last_seen_at: i64,
+}
+
 impl SearchQuery {
     /// Construct from raw parts (used by [`build_query`] and by shape tests).
     pub fn new(sql: impl Into<String>, binds: Vec<Bind>) -> Self {
@@ -199,32 +212,7 @@ impl SearchQuery {
 
         let mut ordered: Vec<OrderedRow> = Vec::with_capacity(ordered_rows.len());
         for row in ordered_rows {
-            let raw_info_hash: Vec<u8> = row.try_get("info_hash")?;
-            let content_type: Option<String> = row.try_get("content_type")?;
-            let video_resolution: Option<String> = row.try_get("video_resolution")?;
-            let video_3d: Option<String> = row.try_get("video_3d")?;
-            let Json(db_episodes): Json<DbEpisodes> = row.try_get("episodes")?;
-
-            ordered.push(OrderedRow {
-                id: row.try_get("id")?,
-                info_hash: decode_info_hash(&raw_info_hash)?,
-                size: decode_u64("size", row.try_get("size")?)?,
-                content_type: decode_content_type(content_type)?,
-                published_at: row.try_get("published_at")?,
-                // DEVIATION: `files` attr derives from denormalized files_count; live Go
-                // omits it under the D1 torrent_files read-disable. See CONTRACT.md.
-                files_count: decode_optional_u32("files_count", row.try_get("files_count")?)?,
-                video_resolution: decode_video_resolution(video_resolution)?,
-                video_3d: decode_video_3d(video_3d)?,
-                video_codec: row.try_get("video_codec")?,
-                release_group: row.try_get("release_group")?,
-                episodes: db_episodes.into(),
-                query_string_rank: if has_query_string_rank {
-                    f64::from(row.try_get::<f32, _>("query_string_rank")?)
-                } else {
-                    0.0
-                },
-            });
+            ordered.push(decode_ordered_row(&row, has_query_string_rank)?);
         }
         if ordered.is_empty() {
             return Ok(Vec::new());
@@ -241,145 +229,8 @@ impl SearchQuery {
         let mut hydration: std::collections::HashMap<String, Hydration> =
             std::collections::HashMap::with_capacity(hydration_rows.len());
         for row in hydration_rows {
-            let id: String = row.try_get("id")?;
-            let info_hash_v1: Option<Vec<u8>> = row.try_get("info_hash_v1")?;
-            let info_hash_v2: Option<Vec<u8>> = row.try_get("info_hash_v2")?;
-            let release_year: Option<i32> = row.try_get("release_year")?;
-            let raw_tc_info_hash: Vec<u8> = row.try_get("tc_info_hash")?;
-            let tc_info_hash = decode_info_hash(&raw_tc_info_hash)?;
-            let tc_content_type = decode_content_type(row.try_get("tc_content_type")?)?;
-            let tc_size = decode_u64("tc_size", row.try_get("tc_size")?)?;
-            let tc_seeders = decode_optional_u32("tc_seeders", row.try_get("tc_seeders")?)?;
-            let tc_leechers = decode_optional_u32("tc_leechers", row.try_get("tc_leechers")?)?;
-            let tc_files_count =
-                decode_optional_u32("tc_files_count", row.try_get("tc_files_count")?)?;
-            let Json(tc_languages): Json<Vec<String>> = row.try_get("tc_languages")?;
-            let torrent_content = TorrentContent {
-                id: id.clone(),
-                info_hash: tc_info_hash,
-                content_type: tc_content_type,
-                content_source: row.try_get("tc_content_source")?,
-                content_id: row.try_get("tc_content_id")?,
-                languages: tc_languages,
-                video_resolution: row.try_get("tc_video_resolution")?,
-                video_source: row.try_get("tc_video_source")?,
-                video_codec: row.try_get("tc_video_codec")?,
-                release_group: row.try_get("tc_release_group")?,
-                seeders: tc_seeders,
-                leechers: tc_leechers,
-                published_at: row.try_get("tc_published_at")?,
-                size: tc_size,
-                files_count: tc_files_count,
-            };
-
-            let torrent_name: Option<String> = row.try_get("name")?;
-            let torrent = if let Some(name) = torrent_name.clone() {
-                let raw_files_status: String = row.try_get("torrent_files_status")?;
-                let files_status = raw_files_status
-                    .parse::<FilesStatus>()
-                    .map_err(|error| decode_error(format!("torrent_files_status: {error}")))?;
-                let Json(file_extensions): Json<Vec<String>> =
-                    row.try_get("torrent_file_extensions")?;
-                Some(Torrent {
-                    info_hash: tc_info_hash,
-                    name,
-                    size: decode_u64("torrent_size", row.try_get("torrent_size")?)?,
-                    private: row.try_get("torrent_private")?,
-                    files_status,
-                    extension: row.try_get("torrent_extension")?,
-                    files_count: decode_optional_u32(
-                        "torrent_files_count",
-                        row.try_get("torrent_files_count")?,
-                    )?,
-                    files_data: if options.files_data {
-                        row.try_get("torrent_files_data")?
-                    } else {
-                        None
-                    },
-                    file_extensions,
-                })
-            } else {
-                None
-            };
-
-            let content_type = decode_content_type(row.try_get("content_type_value")?)?;
-            let content_source: Option<String> = row.try_get("content_source_value")?;
-            let content_id: Option<String> = row.try_get("content_id_value")?;
-            let content_title: Option<String> = row.try_get("content_title")?;
-            let content = match (content_type, content_source, content_id, content_title) {
-                (Some(content_type), Some(source), Some(id), Some(title)) if !id.is_empty() => {
-                    Some(Content {
-                        content_type,
-                        source,
-                        id,
-                        title,
-                        release_year: decode_optional_u32(
-                            "content_release_year",
-                            row.try_get("content_release_year")?,
-                        )?,
-                        original_language: row.try_get("content_original_language")?,
-                        original_title: row.try_get("content_original_title")?,
-                        overview: row.try_get("content_overview")?,
-                        runtime: decode_optional_u32(
-                            "content_runtime",
-                            row.try_get("content_runtime")?,
-                        )?,
-                        popularity: row.try_get("content_popularity")?,
-                        vote_average: row.try_get("content_vote_average")?,
-                        vote_count: decode_optional_u32(
-                            "content_vote_count",
-                            row.try_get("content_vote_count")?,
-                        )?,
-                        // The search projection selects only the columns the
-                        // result mapper reads; the remaining `model.Content`
-                        // columns (release_date, adult, timestamps, tsv) and the
-                        // collection/attribute associations are deliberately not
-                        // hydrated here, exactly as before the B′-0 seam widened
-                        // the struct.
-                        release_date: None,
-                        adult: None,
-                        created_at: None,
-                        updated_at: None,
-                        tsv: Default::default(),
-                        collections: Vec::new(),
-                        attributes: Vec::new(),
-                    })
-                }
-                _ => None,
-            };
-            hydration.insert(
-                id,
-                Hydration {
-                    name: torrent_name,
-                    info_hash_v1: decode_fixed_hash::<20>("info_hash_v1", info_hash_v1)?,
-                    info_hash_v2: decode_fixed_hash::<32>("info_hash_v2", info_hash_v2)?,
-                    release_year: release_year.filter(|year| *year != 0),
-                    imdb_id: row.try_get("imdb_id")?,
-                    tmdb_id: row.try_get("tmdb_id")?,
-                    seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
-                    leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
-                    files_attr_count: decode_optional_u32(
-                        "files_attr_count",
-                        row.try_get("files_attr_count")?,
-                    )?,
-                    torrent_content: Some(torrent_content),
-                    torrent_content_video_modifier: row.try_get("tc_video_modifier")?,
-                    torrent_content_created_at: row.try_get("tc_created_at")?,
-                    torrent_content_updated_at: row.try_get("tc_updated_at")?,
-                    torrent,
-                    torrent_created_at: row
-                        .try_get::<Option<i64>, _>("torrent_created_at")?
-                        .unwrap_or(0),
-                    torrent_updated_at: row
-                        .try_get::<Option<i64>, _>("torrent_updated_at")?
-                        .unwrap_or(0),
-                    torrent_meta_version: decode_optional_u16(
-                        "torrent_meta_version",
-                        row.try_get("torrent_meta_version")?,
-                    )?,
-                    content,
-                },
-            );
+            let (id, item) = decode_hydration_row(&row, options)?;
+            hydration.insert(id, item);
         }
 
         let info_hashes: Vec<Vec<u8>> = ordered
@@ -439,93 +290,70 @@ impl SearchQuery {
             tags.sort_by(|left, right| natural_cmp(left, right));
         }
 
-        // Merge preserving query-1 order.
-        let mut items = Vec::with_capacity(ordered.len());
-        for row in ordered {
-            let h = hydration.remove(&row.id).unwrap_or_default();
-            let name = h.name.clone().unwrap_or_default();
-            // A torrent can have multiple torrent_content rows, so every row
-            // sharing an info hash gets the same keyed association preload.
-            let torrent_sources = sources_by_hash
-                .get(&row.info_hash)
-                .cloned()
-                .unwrap_or_default();
-            let torrent_tags = tags_by_hash
-                .get(&row.info_hash)
-                .cloned()
-                .unwrap_or_default();
-            let (dht_seen_count, dht_first_seen_at, dht_last_seen_at) =
-                dht_seen_stats(&torrent_sources);
-            let content = h.content;
-            let title = derive_title(&name, content.as_ref(), &row.episodes);
-            let torrent_content = h.torrent_content.unwrap_or_else(|| TorrentContent {
-                id: row.id.clone(),
-                info_hash: row.info_hash,
-                content_type: row.content_type,
-                content_source: None,
-                content_id: None,
-                languages: Vec::new(),
-                video_resolution: row.video_resolution.map(|value| value.as_str().to_owned()),
-                video_source: None,
-                video_codec: row.video_codec.clone(),
-                release_group: row.release_group.clone(),
-                seeders: None,
-                leechers: None,
-                published_at: row.published_at,
-                size: row.size,
-                files_count: row.files_count,
-            });
-            let torrent = h.torrent.unwrap_or_else(|| Torrent {
-                info_hash: row.info_hash,
-                name: name.clone(),
-                size: row.size,
-                private: false,
-                files_status: FilesStatus::NoInfo,
-                extension: None,
-                files_count: row.files_count,
-                files_data: None,
-                file_extensions: Vec::new(),
-            });
-            items.push(SearchResultItem {
-                info_hash: row.info_hash,
-                name,
-                size: row.size,
-                content_type: row.content_type,
-                published_at: row.published_at,
-                seeders: h.seeders,
-                leechers: h.leechers,
-                files_count: row.files_count,
-                files_attr_count: h.files_attr_count,
-                video_resolution: row.video_resolution,
-                video_3d: row.video_3d,
-                video_codec: row.video_codec,
-                release_group: row.release_group,
-                episodes: row.episodes,
-                release_year: h.release_year,
-                imdb_id: h.imdb_id,
-                tmdb_id: h.tmdb_id,
-                info_hash_v1: h.info_hash_v1,
-                info_hash_v2: h.info_hash_v2,
-                torrent_content,
-                torrent_content_video_modifier: h.torrent_content_video_modifier,
-                torrent_content_created_at: h.torrent_content_created_at,
-                torrent_content_updated_at: h.torrent_content_updated_at,
-                torrent,
-                refine_files: Vec::new(),
-                torrent_created_at: h.torrent_created_at,
-                torrent_updated_at: h.torrent_updated_at,
-                torrent_meta_version: h.torrent_meta_version,
-                torrent_sources,
-                torrent_tags,
-                content,
-                title,
-                dht_seen_count,
-                dht_first_seen_at,
-                dht_last_seen_at,
-                query_string_rank: row.query_string_rank,
-            });
+        Ok(assemble_items(
+            ordered,
+            hydration,
+            &sources_by_hash,
+            &tags_by_hash,
+        ))
+    }
+
+    /// Execute the composer-only, unpaginated candidate path in one statement.
+    ///
+    /// The caller must already have removed free text, pagination, count, and
+    /// aggregate facets. The lean membership query remains the authoritative
+    /// filter intersection inside a materialized CTE; hydration and keyed
+    /// associations are projected around those exact row identities. Composer
+    /// restores L3 candidate order after this call, so the outer statement does
+    /// not rely on PostgreSQL preserving CTE order.
+    pub(crate) async fn fetch_candidates_with(
+        &self,
+        pool: &PgPool,
+        options: HydrateOptions,
+    ) -> Result<Vec<SearchResultItem>> {
+        let has_query_string_rank = self.query_string_rank_placeholder().is_some();
+        let sql = candidate_hydration_sql(&self.ordering_sql()?, options, has_query_string_rank)?;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in self.binds() {
+            query = match bind {
+                Bind::Bytea(value) => query.bind(value),
+                Bind::Text(value) | Bind::Tsquery(value) | Bind::Timestamp(value) => {
+                    query.bind(value)
+                }
+                Bind::TextArray(value) => query.bind(value),
+            };
         }
-        Ok(items)
+
+        let rows = query.fetch_all(pool).await?;
+        let mut ordered = Vec::with_capacity(rows.len());
+        let mut hydration = std::collections::HashMap::with_capacity(rows.len());
+        let mut sources_by_hash = std::collections::HashMap::new();
+        let mut tags_by_hash = std::collections::HashMap::new();
+        for row in rows {
+            let ordered_row = decode_ordered_row(&row, has_query_string_rank)?;
+            let info_hash = ordered_row.info_hash;
+            let (id, hydrated) = decode_hydration_row(&row, options)?;
+            let Json(db_sources): Json<Vec<DbTorrentSourceInfo>> =
+                row.try_get("torrent_sources_json")?;
+            let mut sources = Vec::with_capacity(db_sources.len());
+            for source in db_sources {
+                sources.push(decode_db_torrent_source(source)?);
+            }
+            let Json(mut tags): Json<Vec<String>> = row.try_get("torrent_tags_json")?;
+            tags.sort_by(|left, right| natural_cmp(left, right));
+
+            ordered.push(ordered_row);
+            hydration.insert(id, hydrated);
+            sources_by_hash.entry(info_hash).or_insert(sources);
+            tags_by_hash.entry(info_hash).or_insert(tags);
+        }
+
+        Ok(assemble_items(
+            ordered,
+            hydration,
+            &sources_by_hash,
+            &tags_by_hash,
+        ))
     }
 
     fn ordering_sql(&self) -> Result<String> {
@@ -567,6 +395,278 @@ impl SearchQuery {
             .position(|bind| matches!(bind, Bind::Tsquery(_)))
             .map(|index| index + 1)
     }
+}
+
+fn decode_ordered_row(row: &PgRow, has_query_string_rank: bool) -> Result<OrderedRow> {
+    let raw_info_hash: Vec<u8> = row.try_get("info_hash")?;
+    let content_type: Option<String> = row.try_get("content_type")?;
+    let video_resolution: Option<String> = row.try_get("video_resolution")?;
+    let video_3d: Option<String> = row.try_get("video_3d")?;
+    let Json(db_episodes): Json<DbEpisodes> = row.try_get("episodes")?;
+
+    Ok(OrderedRow {
+        id: row.try_get("id")?,
+        info_hash: decode_info_hash(&raw_info_hash)?,
+        size: decode_u64("size", row.try_get("size")?)?,
+        content_type: decode_content_type(content_type)?,
+        published_at: row.try_get("published_at")?,
+        // DEVIATION: `files` attr derives from denormalized files_count; live Go
+        // omits it under the D1 torrent_files read-disable. See CONTRACT.md.
+        files_count: decode_optional_u32("files_count", row.try_get("files_count")?)?,
+        video_resolution: decode_video_resolution(video_resolution)?,
+        video_3d: decode_video_3d(video_3d)?,
+        video_codec: row.try_get("video_codec")?,
+        release_group: row.try_get("release_group")?,
+        episodes: db_episodes.into(),
+        query_string_rank: if has_query_string_rank {
+            f64::from(row.try_get::<f32, _>("query_string_rank")?)
+        } else {
+            0.0
+        },
+    })
+}
+
+fn decode_hydration_row(row: &PgRow, options: HydrateOptions) -> Result<(String, Hydration)> {
+    let id: String = row.try_get("id")?;
+    let info_hash_v1: Option<Vec<u8>> = row.try_get("info_hash_v1")?;
+    let info_hash_v2: Option<Vec<u8>> = row.try_get("info_hash_v2")?;
+    let release_year: Option<i32> = row.try_get("release_year")?;
+    let raw_tc_info_hash: Vec<u8> = row.try_get("tc_info_hash")?;
+    let tc_info_hash = decode_info_hash(&raw_tc_info_hash)?;
+    let tc_content_type = decode_content_type(row.try_get("tc_content_type")?)?;
+    let tc_size = decode_u64("tc_size", row.try_get("tc_size")?)?;
+    let tc_seeders = decode_optional_u32("tc_seeders", row.try_get("tc_seeders")?)?;
+    let tc_leechers = decode_optional_u32("tc_leechers", row.try_get("tc_leechers")?)?;
+    let tc_files_count = decode_optional_u32("tc_files_count", row.try_get("tc_files_count")?)?;
+    let Json(tc_languages): Json<Vec<String>> = row.try_get("tc_languages")?;
+    let torrent_content = TorrentContent {
+        id: id.clone(),
+        info_hash: tc_info_hash,
+        content_type: tc_content_type,
+        content_source: row.try_get("tc_content_source")?,
+        content_id: row.try_get("tc_content_id")?,
+        languages: tc_languages,
+        video_resolution: row.try_get("tc_video_resolution")?,
+        video_source: row.try_get("tc_video_source")?,
+        video_codec: row.try_get("tc_video_codec")?,
+        release_group: row.try_get("tc_release_group")?,
+        seeders: tc_seeders,
+        leechers: tc_leechers,
+        published_at: row.try_get("tc_published_at")?,
+        size: tc_size,
+        files_count: tc_files_count,
+    };
+
+    let torrent_name: Option<String> = row.try_get("name")?;
+    let torrent = if let Some(name) = torrent_name.clone() {
+        let raw_files_status: String = row.try_get("torrent_files_status")?;
+        let files_status = raw_files_status
+            .parse::<FilesStatus>()
+            .map_err(|error| decode_error(format!("torrent_files_status: {error}")))?;
+        let Json(file_extensions): Json<Vec<String>> = row.try_get("torrent_file_extensions")?;
+        Some(Torrent {
+            info_hash: tc_info_hash,
+            name,
+            size: decode_u64("torrent_size", row.try_get("torrent_size")?)?,
+            private: row.try_get("torrent_private")?,
+            files_status,
+            extension: row.try_get("torrent_extension")?,
+            files_count: decode_optional_u32(
+                "torrent_files_count",
+                row.try_get("torrent_files_count")?,
+            )?,
+            files_data: if options.files_data {
+                row.try_get("torrent_files_data")?
+            } else {
+                None
+            },
+            file_extensions,
+        })
+    } else {
+        None
+    };
+
+    let content_type = decode_content_type(row.try_get("content_type_value")?)?;
+    let content_source: Option<String> = row.try_get("content_source_value")?;
+    let content_id: Option<String> = row.try_get("content_id_value")?;
+    let content_title: Option<String> = row.try_get("content_title")?;
+    let content = match (content_type, content_source, content_id, content_title) {
+        (Some(content_type), Some(source), Some(id), Some(title)) if !id.is_empty() => {
+            Some(Content {
+                content_type,
+                source,
+                id,
+                title,
+                release_year: decode_optional_u32(
+                    "content_release_year",
+                    row.try_get("content_release_year")?,
+                )?,
+                original_language: row.try_get("content_original_language")?,
+                original_title: row.try_get("content_original_title")?,
+                overview: row.try_get("content_overview")?,
+                runtime: decode_optional_u32("content_runtime", row.try_get("content_runtime")?)?,
+                popularity: row.try_get("content_popularity")?,
+                vote_average: row.try_get("content_vote_average")?,
+                vote_count: decode_optional_u32(
+                    "content_vote_count",
+                    row.try_get("content_vote_count")?,
+                )?,
+                // The search projection selects only the columns the result
+                // mapper reads. Associations remain represented explicitly on
+                // SearchResultItem, matching the existing hydration path.
+                release_date: None,
+                adult: None,
+                created_at: None,
+                updated_at: None,
+                tsv: Default::default(),
+                collections: Vec::new(),
+                attributes: Vec::new(),
+            })
+        }
+        _ => None,
+    };
+
+    Ok((
+        id,
+        Hydration {
+            name: torrent_name,
+            info_hash_v1: decode_fixed_hash::<20>("info_hash_v1", info_hash_v1)?,
+            info_hash_v2: decode_fixed_hash::<32>("info_hash_v2", info_hash_v2)?,
+            release_year: release_year.filter(|year| *year != 0),
+            imdb_id: row.try_get("imdb_id")?,
+            tmdb_id: row.try_get("tmdb_id")?,
+            seeders: decode_optional_u32("seeders", row.try_get("seeders")?)?,
+            leechers: decode_optional_u32("leechers", row.try_get("leechers")?)?,
+            files_attr_count: decode_optional_u32(
+                "files_attr_count",
+                row.try_get("files_attr_count")?,
+            )?,
+            torrent_content: Some(torrent_content),
+            torrent_content_video_modifier: row.try_get("tc_video_modifier")?,
+            torrent_content_created_at: row.try_get("tc_created_at")?,
+            torrent_content_updated_at: row.try_get("tc_updated_at")?,
+            torrent,
+            torrent_created_at: row
+                .try_get::<Option<i64>, _>("torrent_created_at")?
+                .unwrap_or(0),
+            torrent_updated_at: row
+                .try_get::<Option<i64>, _>("torrent_updated_at")?
+                .unwrap_or(0),
+            torrent_meta_version: decode_optional_u16(
+                "torrent_meta_version",
+                row.try_get("torrent_meta_version")?,
+            )?,
+            content,
+        },
+    ))
+}
+
+fn decode_db_torrent_source(source: DbTorrentSourceInfo) -> Result<TorrentSourceInfo> {
+    Ok(TorrentSourceInfo {
+        key: source.key,
+        name: source.name,
+        import_id: source.import_id,
+        seeders: decode_optional_u32("source_seeders", source.seeders)?,
+        leechers: decode_optional_u32("source_leechers", source.leechers)?,
+        published_at: source.published_at,
+        seen_count: decode_u32("source_seen_count", source.seen_count)?,
+        first_seen_at: source.first_seen_at,
+        last_seen_at: source.last_seen_at,
+    })
+}
+
+fn assemble_items(
+    ordered: Vec<OrderedRow>,
+    mut hydration: std::collections::HashMap<String, Hydration>,
+    sources_by_hash: &std::collections::HashMap<InfoHash, Vec<TorrentSourceInfo>>,
+    tags_by_hash: &std::collections::HashMap<InfoHash, Vec<String>>,
+) -> Vec<SearchResultItem> {
+    let mut items = Vec::with_capacity(ordered.len());
+    for row in ordered {
+        let h = hydration.remove(&row.id).unwrap_or_default();
+        let name = h.name.clone().unwrap_or_default();
+        // A torrent can have multiple torrent_content rows, so every row
+        // sharing an info hash gets the same keyed association preload.
+        let torrent_sources = sources_by_hash
+            .get(&row.info_hash)
+            .cloned()
+            .unwrap_or_default();
+        let torrent_tags = tags_by_hash
+            .get(&row.info_hash)
+            .cloned()
+            .unwrap_or_default();
+        let (dht_seen_count, dht_first_seen_at, dht_last_seen_at) =
+            dht_seen_stats(&torrent_sources);
+        let content = h.content;
+        let title = derive_title(&name, content.as_ref(), &row.episodes);
+        let torrent_content = h.torrent_content.unwrap_or_else(|| TorrentContent {
+            id: row.id.clone(),
+            info_hash: row.info_hash,
+            content_type: row.content_type,
+            content_source: None,
+            content_id: None,
+            languages: Vec::new(),
+            video_resolution: row.video_resolution.map(|value| value.as_str().to_owned()),
+            video_source: None,
+            video_codec: row.video_codec.clone(),
+            release_group: row.release_group.clone(),
+            seeders: None,
+            leechers: None,
+            published_at: row.published_at,
+            size: row.size,
+            files_count: row.files_count,
+        });
+        let torrent = h.torrent.unwrap_or_else(|| Torrent {
+            info_hash: row.info_hash,
+            name: name.clone(),
+            size: row.size,
+            private: false,
+            files_status: FilesStatus::NoInfo,
+            extension: None,
+            files_count: row.files_count,
+            files_data: None,
+            file_extensions: Vec::new(),
+        });
+        items.push(SearchResultItem {
+            info_hash: row.info_hash,
+            name,
+            size: row.size,
+            content_type: row.content_type,
+            published_at: row.published_at,
+            seeders: h.seeders,
+            leechers: h.leechers,
+            files_count: row.files_count,
+            files_attr_count: h.files_attr_count,
+            video_resolution: row.video_resolution,
+            video_3d: row.video_3d,
+            video_codec: row.video_codec,
+            release_group: row.release_group,
+            episodes: row.episodes,
+            release_year: h.release_year,
+            imdb_id: h.imdb_id,
+            tmdb_id: h.tmdb_id,
+            info_hash_v1: h.info_hash_v1,
+            info_hash_v2: h.info_hash_v2,
+            torrent_content,
+            torrent_content_video_modifier: h.torrent_content_video_modifier,
+            torrent_content_created_at: h.torrent_content_created_at,
+            torrent_content_updated_at: h.torrent_content_updated_at,
+            torrent,
+            refine_files: Vec::new(),
+            torrent_created_at: h.torrent_created_at,
+            torrent_updated_at: h.torrent_updated_at,
+            torrent_meta_version: h.torrent_meta_version,
+            torrent_sources,
+            torrent_tags,
+            content,
+            title,
+            dht_seen_count,
+            dht_first_seen_at,
+            dht_last_seen_at,
+            query_string_rank: row.query_string_rank,
+        });
+    }
+    items
 }
 
 /// Lower a [`TorznabSearchParams`] to a [`SearchQuery`].
@@ -745,8 +845,40 @@ FROM torrent_tags
 WHERE info_hash = ANY($1::bytea[])
 ORDER BY info_hash, name"#;
 
-fn hydration_by_id_sql(options: HydrateOptions) -> String {
-    let files_column = if options.files_data {
+const CANDIDATE_HYDRATION_FROM: &str = r#"
+FROM membership
+INNER JOIN torrent_contents ON torrent_contents.id = membership.id
+LEFT JOIN torrents ON torrent_contents.info_hash = torrents.info_hash
+LEFT JOIN torrent_file_summary ON torrent_file_summary.info_hash = torrents.info_hash
+LEFT JOIN content ON torrent_contents.content_type = content.type AND torrent_contents.content_source = content.source AND torrent_contents.content_id = content.id
+LEFT JOIN content_attributes ca_imdb ON ca_imdb.content_type = content.type AND ca_imdb.content_source = content.source AND ca_imdb.content_id = content.id AND ca_imdb.source = 'imdb' AND ca_imdb.key = 'id'
+LEFT JOIN content_attributes ca_tmdb ON ca_tmdb.content_type = content.type AND ca_tmdb.content_source = content.source AND ca_tmdb.content_id = content.id AND ca_tmdb.source = 'tmdb' AND ca_tmdb.key = 'id'"#;
+
+const CANDIDATE_ASSOCIATION_PROJECTIONS: &str = r#",
+       COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+               'key', s.source,
+               'name', COALESCE(torrent_sources.name, ''),
+               'import_id', s.import_id,
+               'seeders', s.seeders::bigint,
+               'leechers', s.leechers::bigint,
+               'published_at', floor(EXTRACT(EPOCH FROM s.published_at))::bigint,
+               'seen_count', s.seen_count::bigint,
+               'first_seen_at', floor(EXTRACT(EPOCH FROM s.created_at))::bigint,
+               'last_seen_at', floor(EXTRACT(EPOCH FROM s.updated_at))::bigint
+           ) ORDER BY s.source)
+           FROM torrents_torrent_sources s
+           LEFT JOIN torrent_sources ON torrent_sources.key = s.source
+           WHERE s.info_hash = membership.info_hash
+       ), '[]'::jsonb) AS torrent_sources_json,
+       COALESCE((
+           SELECT jsonb_agg(torrent_tags.name ORDER BY torrent_tags.name)
+           FROM torrent_tags
+           WHERE torrent_tags.info_hash = membership.info_hash
+       ), '[]'::jsonb) AS torrent_tags_json"#;
+
+fn files_data_projection(options: HydrateOptions) -> String {
+    if options.files_data {
         match options.max_files_data_bytes {
             Some(limit) => {
                 format!(
@@ -758,8 +890,36 @@ fn hydration_by_id_sql(options: HydrateOptions) -> String {
         }
     } else {
         String::new()
-    };
+    }
+}
+
+fn hydration_by_id_sql(options: HydrateOptions) -> String {
+    let files_column = files_data_projection(options);
     format!("{HYDRATION_SELECT}{files_column}{HYDRATION_FROM}")
+}
+
+fn candidate_hydration_sql(
+    membership_sql: &str,
+    options: HydrateOptions,
+    has_query_string_rank: bool,
+) -> Result<String> {
+    let hydration_tail = HYDRATION_SELECT
+        .strip_prefix("SELECT torrent_contents.id AS id")
+        .ok_or_else(|| {
+            SearchQueryError::InvalidParams(
+                "candidate hydration projection is missing its id prefix".to_owned(),
+            )
+        })?;
+    let rank_projection = if has_query_string_rank {
+        ",\n       membership.query_string_rank AS query_string_rank"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "WITH membership AS MATERIALIZED (\n{membership_sql}\n)\n\
+SELECT membership.id AS id,\n       membership.info_hash AS info_hash,\n       membership.size AS size,\n       membership.content_type AS content_type,\n       membership.published_at AS published_at,\n       membership.files_count AS files_count,\n       membership.video_resolution AS video_resolution,\n       membership.video_3d AS video_3d,\n       membership.video_codec AS video_codec,\n       membership.release_group AS release_group,\n       membership.episodes AS episodes{rank_projection}{hydration_tail}{}{CANDIDATE_ASSOCIATION_PROJECTIONS}{CANDIDATE_HYDRATION_FROM}",
+        files_data_projection(options),
+    ))
 }
 
 #[derive(Default)]
@@ -1921,6 +2081,30 @@ mod tests {
         assert!(!sql.contains("torrent_files_data"));
         assert!(!sql.contains("ORDER BY"));
         assert!(!sql.contains("LIMIT"));
+    }
+
+    #[test]
+    fn candidate_hydration_is_one_bounded_statement() {
+        let membership = "SELECT torrent_contents.id AS id,\n       torrent_contents.info_hash AS info_hash,\n       torrent_contents.size AS size,\n       torrent_contents.content_type AS content_type,\n       floor(EXTRACT(EPOCH FROM torrent_contents.published_at))::bigint AS published_at,\n       torrent_contents.files_count::bigint AS files_count,\n       torrent_contents.video_resolution AS video_resolution,\n       torrent_contents.video_3d AS video_3d,\n       torrent_contents.video_codec AS video_codec,\n       torrent_contents.release_group AS release_group,\n       COALESCE(torrent_contents.episodes, '{}'::jsonb) AS episodes\nFROM torrent_contents\nWHERE torrent_contents.info_hash = $1\nORDER BY torrent_contents.published_at DESC";
+        let sql = candidate_hydration_sql(
+            membership,
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: Some(67_108_864),
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(sql.starts_with("WITH membership AS MATERIALIZED (\nSELECT"));
+        assert!(sql.contains("WHERE torrent_contents.info_hash = $1"));
+        assert!(sql.contains("INNER JOIN torrent_contents ON torrent_contents.id = membership.id"));
+        assert!(sql.contains("octet_length(torrents.files_data) <= 67108864"));
+        assert!(sql.contains("AS torrent_sources_json"));
+        assert!(sql.contains("jsonb_agg(torrent_tags.name ORDER BY torrent_tags.name)"));
+        assert!(sql.contains("AS torrent_tags_json"));
+        assert!(!sql.contains("torrent_contents.id = ANY($1::text[])"));
+        assert!(!sql.contains(';'));
     }
 
     #[test]

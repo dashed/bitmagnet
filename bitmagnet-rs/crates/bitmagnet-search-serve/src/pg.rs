@@ -136,6 +136,18 @@ pub trait PgSearchBackend: Send + Sync {
     /// Execute one fully shaped Lane-S PostgreSQL request.
     async fn torrent_content(&self, request: SearchRequest) -> crate::Result<SearchResult>;
 
+    /// Execute one bounded L3 candidate chunk.
+    ///
+    /// The default preserves existing fake and alternate backend behavior. The
+    /// concrete PostgreSQL adapter overrides it with the one-statement candidate
+    /// executor; composer is responsible for supplying candidate-only controls.
+    async fn candidate_torrent_content(
+        &self,
+        request: SearchRequest,
+    ) -> crate::Result<SearchResult> {
+        self.torrent_content(request).await
+    }
+
     /// Read authoritative counts and compressed sizes without selecting blobs.
     async fn refine_metadata(
         &self,
@@ -243,6 +255,20 @@ impl PgSearch {
 impl PgSearchBackend for PgSearch {
     async fn torrent_content(&self, request: SearchRequest) -> crate::Result<SearchResult> {
         self.search(&request.options, request.hydrate).await
+    }
+
+    async fn candidate_torrent_content(
+        &self,
+        request: SearchRequest,
+    ) -> crate::Result<SearchResult> {
+        bitmagnet_search_query::search_candidates(
+            &self.pool,
+            &request.options,
+            &self.build_config,
+            request.hydrate,
+        )
+        .await
+        .map_err(|error| crate::Error::Pg(error.to_string()))
     }
 
     async fn refine_metadata(
