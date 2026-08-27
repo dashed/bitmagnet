@@ -480,8 +480,11 @@ pub enum MirrorIneligibleReason {
     /// A requested torrent was updated after the source job settled, so the
     /// live image is no longer the image the source job wrote.
     TorrentUpdatedAfterRanAt,
-    /// A requested torrent carries a hint the shadow cannot reproduce.
-    HasHint,
+    /// A requested torrent carries a sourced or enriched hint the shadow
+    /// cannot reproduce.
+    UnsupportedHint,
+    /// A supported type-only hint changed after the source job settled.
+    HintUpdatedAfterRanAt,
     /// A requested torrent has content with a non-null `content_source`.
     HasContentSource,
 }
@@ -489,12 +492,13 @@ pub enum MirrorIneligibleReason {
 impl MirrorIneligibleReason {
     /// Every reason, so the metric children can be materialized at startup
     /// instead of only appearing once a reason is first observed.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::PayloadShape,
         Self::NoInfoHashes,
         Self::TorrentMissing,
         Self::TorrentUpdatedAfterRanAt,
-        Self::HasHint,
+        Self::UnsupportedHint,
+        Self::HintUpdatedAfterRanAt,
         Self::HasContentSource,
     ];
 
@@ -505,7 +509,8 @@ impl MirrorIneligibleReason {
             Self::NoInfoHashes => "no_infohashes",
             Self::TorrentMissing => "torrent_missing",
             Self::TorrentUpdatedAfterRanAt => "torrent_updated_after_ran_at",
-            Self::HasHint => "has_hint",
+            Self::UnsupportedHint => "unsupported_hint",
+            Self::HintUpdatedAfterRanAt => "hint_updated_after_ran_at",
             Self::HasContentSource => "has_content_source",
         }
     }
@@ -523,7 +528,8 @@ struct MirrorEligibility {
     has_infohashes: bool,
     torrent_missing: bool,
     torrent_updated_after_ran_at: bool,
-    has_hint: bool,
+    has_unsupported_hint: bool,
+    hint_updated_after_ran_at: bool,
     has_content_source: bool,
 }
 
@@ -541,8 +547,11 @@ impl MirrorEligibility {
         if self.torrent_updated_after_ran_at {
             return Some(MirrorIneligibleReason::TorrentUpdatedAfterRanAt);
         }
-        if self.has_hint {
-            return Some(MirrorIneligibleReason::HasHint);
+        if self.has_unsupported_hint {
+            return Some(MirrorIneligibleReason::UnsupportedHint);
+        }
+        if self.hint_updated_after_ran_at {
+            return Some(MirrorIneligibleReason::HintUpdatedAfterRanAt);
         }
         if self.has_content_source {
             return Some(MirrorIneligibleReason::HasContentSource);
@@ -672,7 +681,10 @@ impl QueueStore {
                       AS shadow_torrent_missing, \
                     coalesce(requested_torrent.torrent_updated_after_ran_at, false) \
                       AS shadow_torrent_updated_after_ran_at, \
-                    coalesce(requested_torrent.has_hint, false) AS shadow_has_hint, \
+                    coalesce(requested_torrent.has_unsupported_hint, false) \
+                      AS shadow_has_unsupported_hint, \
+                    coalesce(requested_torrent.hint_updated_after_ran_at, false) \
+                      AS shadow_hint_updated_after_ran_at, \
                     coalesce(requested_torrent.has_content_source, false) \
                       AS shadow_has_content_source \
              FROM queue_jobs AS source_job \
@@ -683,7 +695,26 @@ impl QueueStore {
                       bool_or(EXISTS (\
                         SELECT 1 FROM torrent_hints AS source_hint \
                         WHERE source_hint.info_hash = source_torrent.info_hash\
-                      )) AS has_hint, \
+                          AND (source_hint.content_source IS NOT NULL \
+                            OR source_hint.content_id IS NOT NULL \
+                            OR source_hint.title IS NOT NULL \
+                            OR source_hint.release_year IS NOT NULL \
+                            OR coalesce(source_hint.languages, '[]'::jsonb) \
+                              <> '[]'::jsonb \
+                            OR coalesce(source_hint.episodes, '{}'::jsonb) \
+                              <> '{}'::jsonb \
+                            OR source_hint.video_resolution IS NOT NULL \
+                            OR source_hint.video_source IS NOT NULL \
+                            OR source_hint.video_codec IS NOT NULL \
+                            OR source_hint.video_3d IS NOT NULL \
+                            OR source_hint.video_modifier IS NOT NULL \
+                            OR source_hint.release_group IS NOT NULL)\
+                      )) AS has_unsupported_hint, \
+                      bool_or(EXISTS (\
+                        SELECT 1 FROM torrent_hints AS source_hint \
+                        WHERE source_hint.info_hash = source_torrent.info_hash \
+                          AND source_hint.updated_at > source_job.ran_at\
+                      )) AS hint_updated_after_ran_at, \
                       bool_or(EXISTS (\
                         SELECT 1 FROM torrent_contents AS source_content \
                         WHERE source_content.info_hash = source_torrent.info_hash \
@@ -730,7 +761,9 @@ impl QueueStore {
                         torrent_missing: row.try_get("shadow_torrent_missing")?,
                         torrent_updated_after_ran_at: row
                             .try_get("shadow_torrent_updated_after_ran_at")?,
-                        has_hint: row.try_get("shadow_has_hint")?,
+                        has_unsupported_hint: row.try_get("shadow_has_unsupported_hint")?,
+                        hint_updated_after_ran_at: row
+                            .try_get("shadow_hint_updated_after_ran_at")?,
                         has_content_source: row.try_get("shadow_has_content_source")?,
                     },
                 })
@@ -844,7 +877,8 @@ mod tests {
         has_infohashes: true,
         torrent_missing: false,
         torrent_updated_after_ran_at: false,
-        has_hint: false,
+        has_unsupported_hint: false,
+        hint_updated_after_ran_at: false,
         has_content_source: false,
     };
 
@@ -886,23 +920,26 @@ mod tests {
     #[test]
     fn decomposed_predicate_matches_the_original_conjunction() {
         // The original single `shadow_eligible` boolean was
-        // `shape AND infohashes AND NOT (missing OR updated OR hint OR source)`.
+        // `shape AND infohashes AND NOT (missing OR updated OR unsupported hint
+        // OR updated hint OR source)`.
         // Attributing a reason must not change which candidates are admitted,
-        // so assert the equivalence over the whole 64-value truth table.
-        for bits in 0_u8..64 {
+        // so assert the equivalence over the whole 128-value truth table.
+        for bits in 0_u8..128 {
             let eligibility = MirrorEligibility {
                 payload_shape_ok: bits & 1 != 0,
                 has_infohashes: bits & 2 != 0,
                 torrent_missing: bits & 4 != 0,
                 torrent_updated_after_ran_at: bits & 8 != 0,
-                has_hint: bits & 16 != 0,
-                has_content_source: bits & 32 != 0,
+                has_unsupported_hint: bits & 16 != 0,
+                hint_updated_after_ran_at: bits & 32 != 0,
+                has_content_source: bits & 64 != 0,
             };
             let original = eligibility.payload_shape_ok
                 && eligibility.has_infohashes
                 && !(eligibility.torrent_missing
                     || eligibility.torrent_updated_after_ran_at
-                    || eligibility.has_hint
+                    || eligibility.has_unsupported_hint
+                    || eligibility.hint_updated_after_ran_at
                     || eligibility.has_content_source);
             assert_eq!(
                 eligibility.ineligible_reason().is_none(),
@@ -947,10 +984,17 @@ mod tests {
             ),
             (
                 MirrorEligibility {
-                    has_hint: true,
+                    has_unsupported_hint: true,
                     ..ELIGIBLE
                 },
-                MirrorIneligibleReason::HasHint,
+                MirrorIneligibleReason::UnsupportedHint,
+            ),
+            (
+                MirrorEligibility {
+                    hint_updated_after_ran_at: true,
+                    ..ELIGIBLE
+                },
+                MirrorIneligibleReason::HintUpdatedAfterRanAt,
             ),
             (
                 MirrorEligibility {
@@ -971,7 +1015,8 @@ mod tests {
             has_infohashes: false,
             torrent_missing: true,
             torrent_updated_after_ran_at: true,
-            has_hint: true,
+            has_unsupported_hint: true,
+            hint_updated_after_ran_at: true,
             has_content_source: true,
         };
         assert_eq!(

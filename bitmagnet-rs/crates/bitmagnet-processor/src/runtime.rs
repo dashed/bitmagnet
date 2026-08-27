@@ -187,7 +187,24 @@ async fn validate_causal_source_in(
            coalesce(bool_or(EXISTS ( \
              SELECT 1 FROM torrent_hints AS source_hint \
              WHERE source_hint.info_hash = source_torrent.info_hash \
-           )), false) AS has_hint, \
+               AND (source_hint.content_source IS NOT NULL \
+                 OR source_hint.content_id IS NOT NULL \
+                 OR source_hint.title IS NOT NULL \
+                 OR source_hint.release_year IS NOT NULL \
+                 OR coalesce(source_hint.languages, '[]'::jsonb) <> '[]'::jsonb \
+                 OR coalesce(source_hint.episodes, '{}'::jsonb) <> '{}'::jsonb \
+                 OR source_hint.video_resolution IS NOT NULL \
+                 OR source_hint.video_source IS NOT NULL \
+                 OR source_hint.video_codec IS NOT NULL \
+                 OR source_hint.video_3d IS NOT NULL \
+                 OR source_hint.video_modifier IS NOT NULL \
+                 OR source_hint.release_group IS NOT NULL) \
+           )), false) AS has_unsupported_hint, \
+           coalesce(bool_or(EXISTS ( \
+             SELECT 1 FROM torrent_hints AS source_hint \
+             WHERE source_hint.info_hash = source_torrent.info_hash \
+               AND source_hint.updated_at > $2::timestamptz \
+           )), false) AS hint_updated_after_ran_at, \
            coalesce(bool_or(EXISTS ( \
              SELECT 1 FROM torrent_contents AS source_content \
              WHERE source_content.info_hash = source_torrent.info_hash \
@@ -222,8 +239,11 @@ async fn validate_causal_source_in(
     if admission.try_get("torrent_updated_after_ran_at")? {
         return Err(ShadowRuntimeError::SourceTorrentUpdatedAfterRun);
     }
-    if admission.try_get("has_hint")? {
-        return Err(ShadowRuntimeError::SourceHintPresent);
+    if admission.try_get("has_unsupported_hint")? {
+        return Err(ShadowRuntimeError::SourceHintUnsupported);
+    }
+    if admission.try_get("hint_updated_after_ran_at")? {
+        return Err(ShadowRuntimeError::SourceHintUpdatedAfterRun);
     }
     if admission.try_get("has_content_source")? {
         return Err(ShadowRuntimeError::SourceBackedContentPresent);
@@ -280,8 +300,10 @@ pub enum ShadowRuntimeError {
     SourceTorrentMissing,
     #[error("a captured source torrent changed after the source job settled")]
     SourceTorrentUpdatedAfterRun,
-    #[error("a captured source torrent now has an explicit hint")]
-    SourceHintPresent,
+    #[error("a captured source torrent has a sourced or enriched explicit hint")]
+    SourceHintUnsupported,
+    #[error("a captured torrent hint changed after the source job settled")]
+    SourceHintUpdatedAfterRun,
     #[error("a captured source torrent now has a source-backed content association")]
     SourceBackedContentPresent,
     #[error("a captured torrent source row changed after the source job settled")]
@@ -335,7 +357,8 @@ impl ShadowRuntimeError {
             Self::LaterOverlappingSourceAttempt => Some("later_overlapping_attempt"),
             Self::SourceTorrentMissing => Some("torrent_missing"),
             Self::SourceTorrentUpdatedAfterRun => Some("torrent_updated_after_ran_at"),
-            Self::SourceHintPresent => Some("has_hint"),
+            Self::SourceHintUnsupported => Some("unsupported_hint"),
+            Self::SourceHintUpdatedAfterRun => Some("hint_updated_after_ran_at"),
             Self::SourceBackedContentPresent => Some("has_content_source"),
             Self::SourceRowsUpdatedAfterRun => Some("source_updated_after_ran_at"),
             Self::TorrentContentUpdatedAfterRun => Some("content_updated_after_ran_at"),
@@ -696,6 +719,14 @@ mod tests {
             (
                 ShadowRuntimeError::LaterOverlappingSourceAttempt,
                 "later_overlapping_attempt",
+            ),
+            (
+                ShadowRuntimeError::SourceHintUnsupported,
+                "unsupported_hint",
+            ),
+            (
+                ShadowRuntimeError::SourceHintUpdatedAfterRun,
+                "hint_updated_after_ran_at",
             ),
             (
                 ShadowRuntimeError::SourceRowsUpdatedAfterRun,

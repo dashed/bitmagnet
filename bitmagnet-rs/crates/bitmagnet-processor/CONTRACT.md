@@ -236,12 +236,14 @@ transferring their blob.
 Admission and runtime checks deliberately support only payloads whose workflow
 is explicitly `default`, whose three attach flags are explicitly false, whose
 source torrents still exist and have not changed since the source job settled,
-which have no explicit `torrent_hints` row, and which have no reusable
-source-backed `torrent_contents` association. Unsupported inputs settle only
-their scratch job and are counted by a closed reason vocabulary; transient
+which have either no explicit `torrent_hints` row or one bare type-only hint,
+and which have no reusable source-backed `torrent_contents` association. A bare
+hint has no source, ID, title/date, episode/language/video, or release-group
+fields; sourced or enriched hints remain excluded. Unsupported inputs settle
+only their scratch job and are counted by a closed reason vocabulary; transient
 database/runtime errors retain queue retry behavior. Rematch preserves explicit
-Go hint semantics internally while disabling only content-association reuse,
-although all explicit hints remain excluded from this milestone. The consumer
+Go hint semantics internally while disabling only content-association reuse.
+The consumer
 revalidates the envelope against the exact retained `process_torrent` row and
 rejects a missing/changed source, any other overlapping attempted run at or
 after the captured timestamp, any overlapping nonterminal `pending`/`retry` job
@@ -249,8 +251,9 @@ regardless of its `run_after`, or a newly ineligible live input. The nonterminal
 guard closes the interval where Go is executing a handler but its row has not
 yet committed a terminal status or `ran_at`. The runtime also rejects post-source
 `updated_at` values in `torrents`, `torrents_torrent_sources`,
-`torrent_contents`, and `torrent_tags`; hint presence is already a categorical
-rejection. Source validation, bounded writer loading, `WriterPlan` composition
+`torrent_contents`, `torrent_tags`, and an admitted bare hint; sourced/enriched
+hint presence is a categorical rejection. Source validation, bounded writer
+loading, `WriterPlan` composition
 inputs, stable live comparison, and volatile writer comparison share one
 read-only repeatable-read snapshot, preventing a concurrent Go transaction from
 creating a torn or cross-run image. The returned causal result binds both

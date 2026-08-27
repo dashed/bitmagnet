@@ -25,11 +25,12 @@ active-depth cap. Admission is fail-closed: only payloads with
 `attach_*` actions remain unsupported. An omitted workflow is rejected because
 Go resolves it through mutable deployment configuration. Every requested
 info-hash must also still exist, must not have changed since the source job
-settled, none may have any `torrent_hints` row, and none may have a
-source-backed `torrent_contents` association. Omitted/default-true, deleted,
-explicit-hint, and source-backed rows are scanned and checkpointed but never
-inserted. Rust does not yet model all fields of an explicit hint, so even a
-type-only hint is excluded. This
+settled, may have at most a physically bare type-only `torrent_hints` row that
+also predates settlement, and may not have a source-backed `torrent_contents`
+association. Sourced or enriched hints remain excluded because this lane does
+not yet model every explicit-hint field or attachment action. Omitted/default-
+true, deleted, post-settlement-hint, sourced/enriched-hint, and source-backed
+rows are scanned and checkpointed but never inserted. This
 admission query requires read access to `torrents`, `torrent_hints`, and
 `torrent_contents`; it takes no live-row locks. Migration 28 adds a durable cursor keyed by the
 `(source_queue,shadow_queue)` mirror identity. Each page locks and reads that

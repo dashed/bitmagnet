@@ -80,7 +80,15 @@ pub(crate) async fn load_torrents_in(
 
     let hint_rows = sqlx::query(
         "SELECT encode(info_hash, 'hex') AS info_hash, content_type, \
-                content_source, content_id \
+                content_source, content_id, \
+                content_source IS NULL AND content_id IS NULL \
+                  AND title IS NULL AND release_year IS NULL \
+                  AND coalesce(languages, '[]'::jsonb) = '[]'::jsonb \
+                  AND coalesce(episodes, '{}'::jsonb) = '{}'::jsonb \
+                  AND video_resolution IS NULL AND video_source IS NULL \
+                  AND video_codec IS NULL AND video_3d IS NULL \
+                  AND video_modifier IS NULL AND release_group IS NULL \
+                  AS bare_type_only \
          FROM torrent_hints \
          WHERE info_hash = ANY($1::bytea[]) \
          ORDER BY info_hash",
@@ -96,6 +104,7 @@ pub(crate) async fn load_torrents_in(
                 content_type: row.try_get("content_type")?,
                 content_source: row.try_get("content_source")?,
                 content_id: row.try_get("content_id")?,
+                bare_type_only: row.try_get("bare_type_only")?,
             },
         );
     }
@@ -184,7 +193,9 @@ pub(crate) async fn load_torrents_in(
         let existing = current.remove(&info_hash).unwrap_or_default();
         let explicit = explicit_hints.remove(&info_hash);
         let allow_content_reuse = params.classify_mode != CLASSIFY_MODE_REMATCH;
-        let attach_hint_unsupported = explicit.is_some()
+        let attach_hint_unsupported = explicit
+            .as_ref()
+            .is_some_and(|hint| !hint.is_supported_type_only())
             || (allow_content_reuse && existing.iter().any(CurrentContent::is_source_backed));
         let files_status: String = row.try_get("files_status")?;
         let hint = effective_hint(
@@ -297,6 +308,16 @@ pub struct CurrentHint {
     pub content_type: String,
     pub content_source: Option<String>,
     pub content_id: Option<String>,
+    /// True only when every Go classification-attribute column is empty.
+    /// This is the explicit-hint shape the read-only writer lane can consume
+    /// without silently dropping episode/language/video fields.
+    pub bare_type_only: bool,
+}
+
+impl CurrentHint {
+    fn is_supported_type_only(&self) -> bool {
+        self.bare_type_only && self.content_source.is_none() && self.content_id.is_none()
+    }
 }
 
 /// A `torrent_contents` association, as much of it as the hint synthesis reads.
@@ -589,6 +610,7 @@ mod tests {
             content_type: "movie".into(),
             content_source: Some("imdb".into()),
             content_id: Some("tt0133093".into()),
+            bare_type_only: false,
         };
         let hint = effective_hint(Some(explicit_source), &existing, true, true).unwrap();
         assert_eq!(hint.content_source, "imdb");
@@ -597,6 +619,7 @@ mod tests {
             content_type: "movie".into(),
             content_source: None,
             content_id: None,
+            bare_type_only: true,
         };
         let hint = effective_hint(Some(type_only), &existing, true, true).unwrap();
         assert_eq!(hint.content_source, "tmdb");
@@ -606,10 +629,38 @@ mod tests {
             content_type: "tv_show".into(),
             content_source: None,
             content_id: None,
+            bare_type_only: true,
         };
         let hint = effective_hint(Some(mismatched_type), &existing, true, true).unwrap();
         assert_eq!(hint.content_type, "tv_show");
         assert!(hint.content_source.is_empty());
+    }
+
+    #[test]
+    fn only_bare_source_less_explicit_hints_are_supported() {
+        let bare = CurrentHint {
+            content_type: "xxx".into(),
+            content_source: None,
+            content_id: None,
+            bare_type_only: true,
+        };
+        assert!(bare.is_supported_type_only());
+
+        let enriched = CurrentHint {
+            bare_type_only: false,
+            ..bare.clone()
+        };
+        assert!(!enriched.is_supported_type_only());
+
+        let sourced = CurrentHint {
+            content_source: Some("tmdb".into()),
+            content_id: Some("42".into()),
+            // A defensive check: even an inconsistent SQL projection cannot
+            // mark a sourced hint as supported.
+            bare_type_only: true,
+            ..bare
+        };
+        assert!(!sourced.is_supported_type_only());
     }
 
     #[test]
@@ -624,6 +675,7 @@ mod tests {
             content_type: "tv_show".into(),
             content_source: None,
             content_id: None,
+            bare_type_only: true,
         };
 
         let hint = effective_hint(Some(explicit), &existing, false, true).expect("explicit hint");

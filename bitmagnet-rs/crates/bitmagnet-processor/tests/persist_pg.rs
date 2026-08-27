@@ -659,6 +659,95 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     .await
     .expect("restore the captured source boundary");
 
+    let hinted_content_type = "xxx";
+    sqlx::query(
+        "INSERT INTO torrent_hints \
+           (info_hash, content_type, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), $2, \
+                 $3::timestamptz - interval '1 microsecond', \
+                 $3::timestamptz - interval '1 microsecond')",
+    )
+    .bind(HASH_A)
+    .bind(hinted_content_type)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("seed unchanged bare type-only hint");
+    let hinted_comparison = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect("an unchanged bare type-only hint is comparable end to end");
+    assert_eq!(
+        hinted_comparison.writer.rows[0].id,
+        format!("{HASH_A}:xxx:?:?"),
+        "the explicit bare hint must override the fixture's inferred movie type"
+    );
+    assert_eq!(
+        hinted_comparison.writer.rows[0].drift_fields,
+        vec![WriterDriftField::RowPresence],
+        "the hint-derived writer ID is intentionally absent from the live fixture"
+    );
+    sqlx::query(
+        "UPDATE torrent_hints \
+         SET updated_at=$2::timestamptz + interval '1 microsecond' \
+         WHERE info_hash=decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("move the bare hint past source settlement");
+    let changed_hint_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("a post-source bare hint is non-comparable");
+    assert!(matches!(
+        changed_hint_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceHintUpdatedAfterRun
+    ));
+    sqlx::query(
+        "UPDATE torrent_hints \
+         SET release_group='ENRICHED', updated_at=$2::timestamptz \
+         WHERE info_hash=decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("enrich the explicit hint within the causal timestamp");
+    let enriched_hint_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("an enriched hint remains outside the supported subset");
+    assert!(matches!(
+        enriched_hint_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceHintUnsupported
+    ));
+    sqlx::query(
+        "UPDATE torrent_hints \
+         SET release_group=NULL, content_source='tmdb', content_id='603', \
+             updated_at=$2::timestamptz \
+         WHERE info_hash=decode($1, 'hex')",
+    )
+    .bind(HASH_A)
+    .bind(&source_ran_at)
+    .execute(&pool)
+    .await
+    .expect("source the explicit hint within the causal timestamp");
+    let sourced_hint_error = runtime
+        .process_job(&shadow_job)
+        .await
+        .expect_err("a sourced hint remains outside the supported subset");
+    assert!(matches!(
+        sourced_hint_error,
+        bitmagnet_processor::ShadowRuntimeError::SourceHintUnsupported
+    ));
+    sqlx::query("DELETE FROM torrent_hints WHERE info_hash=decode($1, 'hex')")
+        .bind(HASH_A)
+        .execute(&pool)
+        .await
+        .expect("remove explicit-hint causal fixtures");
+
     sqlx::query(
         "INSERT INTO torrents_torrent_sources \
            (source, info_hash, seeders, leechers, created_at, updated_at) \

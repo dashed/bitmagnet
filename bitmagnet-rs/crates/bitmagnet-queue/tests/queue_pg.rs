@@ -2198,8 +2198,8 @@ async fn queue_runtime_matches_go_contract() {
     seed_torrent(&pool, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").await;
     sqlx::query(
         "INSERT INTO torrent_hints \
-         (info_hash, content_type, created_at, updated_at) \
-         VALUES (decode($1, 'hex'), 'movie', \
+         (info_hash, content_type, release_group, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'ENRICHED', \
                  clock_timestamp(), clock_timestamp())",
     )
     .bind("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
@@ -2322,7 +2322,7 @@ async fn queue_runtime_matches_go_contract() {
         BTreeMap::from([
             (MirrorIneligibleReason::PayloadShape, 1),
             (MirrorIneligibleReason::TorrentMissing, 1),
-            (MirrorIneligibleReason::HasHint, 1),
+            (MirrorIneligibleReason::UnsupportedHint, 1),
             (MirrorIneligibleReason::HasContentSource, 1),
         ]),
         "each refusal is attributed to its first failing conjunct"
@@ -2447,6 +2447,98 @@ async fn queue_runtime_matches_go_contract() {
         "unsupported default, explicit-hint, source-backed, and deleted inputs must fail closed"
     );
 
+    // A physically bare type-only hint is reproducible and may enter the
+    // scratch queue, but its exact row must predate source settlement. This
+    // keeps mirror admission and the processor's repeatable-read causal fence
+    // on the same supported subset.
+    reset(&pool).await;
+    let payload_bare_hint = r#"{"ClassifierWorkflow":"default","ClassifierFlags":{"local_search_enabled":false,"apis_enabled":false,"tmdb_enabled":false},"InfoHashes":["1111111111111111111111111111111111111111"]}"#;
+    let payload_changed_hint = r#"{"ClassifierWorkflow":"default","ClassifierFlags":{"local_search_enabled":false,"apis_enabled":false,"tmdb_enabled":false},"InfoHashes":["2222222222222222222222222222222222222222"]}"#;
+    for (id, payload, hash) in [
+        (
+            "source-bare-hint",
+            payload_bare_hint,
+            "1111111111111111111111111111111111111111",
+        ),
+        (
+            "source-changed-hint",
+            payload_changed_hint,
+            "2222222222222222222222222222222222222222",
+        ),
+    ] {
+        seed(
+            &pool,
+            id,
+            PROCESS_TORRENT,
+            "processed",
+            0,
+            -1,
+            0,
+            2,
+            payload,
+        )
+        .await;
+        seed_torrent(&pool, hash).await;
+        sqlx::query(
+            "INSERT INTO torrent_hints \
+             (info_hash, content_type, created_at, updated_at) \
+             VALUES (decode($1, 'hex'), 'movie', \
+                     '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')",
+        )
+        .bind(hash)
+        .execute(&pool)
+        .await
+        .expect("seed bare type-only mirror hint");
+    }
+    sqlx::query(
+        "UPDATE queue_jobs SET ran_at = CASE id \
+           WHEN 'source-bare-hint' THEN '2026-01-01T00:00:00Z'::timestamptz \
+           ELSE '2026-01-01T00:00:01Z'::timestamptz END \
+         WHERE id IN ('source-bare-hint','source-changed-hint')",
+    )
+    .execute(&pool)
+    .await
+    .expect("settle bare-hint mirror sources");
+    sqlx::query(
+        "UPDATE torrents SET updated_at='2025-01-01T00:00:00Z'::timestamptz \
+         WHERE info_hash IN (decode('1111111111111111111111111111111111111111','hex'), \
+                             decode('2222222222222222222222222222222222222222','hex'))",
+    )
+    .execute(&pool)
+    .await
+    .expect("make bare-hint torrent images older than source settlement");
+    sqlx::query(
+        "UPDATE torrent_hints SET updated_at='2026-01-01T00:00:02Z'::timestamptz \
+         WHERE info_hash=decode('2222222222222222222222222222222222222222','hex')",
+    )
+    .execute(&pool)
+    .await
+    .expect("make one bare hint newer than source settlement");
+    let bare_hint_report = store
+        .mirror_processed_page(&MirrorConfig {
+            bootstrap: MirrorBootstrap::ArchiveStart,
+            sample_basis_points: 10_000,
+            ..MirrorConfig::default()
+        })
+        .await
+        .expect("mirror the unchanged bare type-only hint");
+    assert_eq!(bare_hint_report.scanned, 2);
+    assert_eq!(bare_hint_report.sampled, 1);
+    assert_eq!(bare_hint_report.inserted, 1);
+    assert_eq!(
+        bare_hint_report.ineligible,
+        BTreeMap::from([(MirrorIneligibleReason::HintUpdatedAfterRanAt, 1)])
+    );
+    let bare_source_id: String = sqlx::query_scalar(
+        "SELECT payload->>'sourceJobId' FROM queue_jobs \
+         WHERE queue=$1 AND payload->>'sourceJobId'='source-bare-hint'",
+    )
+    .bind(PROCESS_TORRENT_SHADOW)
+    .fetch_one(&pool)
+    .await
+    .expect("read admitted bare-hint envelope");
+    assert_eq!(bare_source_id, "source-bare-hint");
+
     // Admission is all-or-nothing across a multi-hash payload, malformed wire
     // shapes fail closed without aborting the page, and an explicit cursor is
     // used only when the durable mirror identity is first created.
@@ -2481,8 +2573,9 @@ async fn queue_runtime_matches_go_contract() {
     seed_torrent(&pool, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").await;
     sqlx::query(
         "INSERT INTO torrent_hints \
-         (info_hash, content_type, created_at, updated_at) \
-         VALUES (decode($1, 'hex'), 'movie', clock_timestamp(), clock_timestamp())",
+         (info_hash, content_type, release_group, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'ENRICHED', \
+                 clock_timestamp(), clock_timestamp())",
     )
     .bind("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
     .execute(&pool)

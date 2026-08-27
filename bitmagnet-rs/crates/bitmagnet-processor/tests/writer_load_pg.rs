@@ -174,6 +174,53 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
         "one microsecond after the cutoff remains exact"
     );
 
+    sqlx::query(
+        "INSERT INTO torrent_hints \
+         (info_hash, content_type, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'xxx', NOW(), NOW())",
+    )
+    .bind(HASH_B)
+    .execute(&pool)
+    .await
+    .expect("seed bare type-only hint");
+    let bare_hint = load_writer_torrents(&pool, &supported_params(vec![id_b]))
+        .await
+        .expect("load bare type-only hint");
+    assert_eq!(bare_hint.len(), 1);
+    assert_eq!(
+        bare_hint[0]
+            .loaded
+            .classifier_input
+            .hint
+            .as_ref()
+            .map(|hint| hint.content_type.as_str()),
+        Some("xxx")
+    );
+    assert!(
+        !bare_hint[0].loaded.attach_hint_unsupported,
+        "a bare source-less type hint is an exact supported classifier input"
+    );
+    sqlx::query(
+        "UPDATE torrent_hints SET release_group='ENRICHED', updated_at=NOW() \
+         WHERE info_hash=decode($1, 'hex')",
+    )
+    .bind(HASH_B)
+    .execute(&pool)
+    .await
+    .expect("enrich the explicit hint");
+    let enriched_hint = load_writer_torrents(&pool, &supported_params(vec![id_b]))
+        .await
+        .expect("load enriched hint");
+    assert!(
+        enriched_hint[0].loaded.attach_hint_unsupported,
+        "an ignored Go hint attribute must remain outside the supported subset"
+    );
+    sqlx::query("DELETE FROM torrent_hints WHERE info_hash=decode($1, 'hex')")
+        .bind(HASH_B)
+        .execute(&pool)
+        .await
+        .expect("remove explicit-hint fixture before the remaining gates");
+
     let counts = project_unattached_persistence(
         &content_row(&loaded[0]),
         &loaded[0].loaded.classifier_input,

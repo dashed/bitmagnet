@@ -76,8 +76,8 @@ pub struct LoadedTorrent {
     pub info_hash: String,
     pub classifier_input: ClassifierInput,
     pub existing_content_ids: Vec<String>,
-    /// Whether Go would apply an explicit hint or reuse a source-backed
-    /// association before classification.
+    /// Whether Go would apply a sourced/enriched explicit hint or reuse a
+    /// source-backed association before classification.
     ///
     /// The shadow runtime REFUSES such a job outright rather than comparing it.
     ///
@@ -87,10 +87,10 @@ pub struct LoadedTorrent {
     /// clause could in principle now be compared. The flag is deliberately NOT
     /// narrowed yet — admitting those torrents changes which rows the write-set
     /// gate compares, which re-baselines it, so it needs a gate re-run as
-    /// evidence rather than an assumption. The explicit-hint clause is still
-    /// genuinely unsupported: a hinted content ID reaches
-    /// `attach_local_content_by_id`, which needs a live resolver the shadow does
-    /// not have.
+    /// evidence rather than an assumption. Bare type-only explicit hints are
+    /// supported; sourced or enriched hints remain excluded. A hinted content
+    /// ID reaches `attach_local_content_by_id`, which needs a live resolver the
+    /// shadow does not have.
     pub attach_hint_unsupported: bool,
 }
 
