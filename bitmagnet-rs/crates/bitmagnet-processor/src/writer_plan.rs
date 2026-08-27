@@ -3,21 +3,25 @@
 //! The loader, classifier materializer, volatile-field projection, and
 //! transaction kernel deliberately landed as separate parity gates. This
 //! module joins the first three into the exact input image expected by
-//! [`crate::persist_write_set`] without calling that function. The
-//! ingest-shadow runtime consumes the plan for stable comparison only; it does
-//! not wire a live database writer or blocking-manager lifecycle.
+//! [`crate::persist_write_set`]. [`persist_writer_plan`] is the deliberately
+//! dormant mutation seam: it publishes partial-failure retry intent before
+//! delegating to that transaction kernel. No queue consumer or application
+//! runtime calls it yet; the ingest-shadow runtime remains comparison-only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use bitmagnet_queue::ProcessTorrentParams;
+use bitmagnet_queue::{
+    process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions,
+};
+use futures::future::BoxFuture;
 use sqlx::PgPool;
 
-use crate::persist::validate_persistence_input;
+use crate::persist::{persist_write_set, validate_persistence_input};
 use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
 use crate::{
-    load_writer_torrents, project_unattached_persistence, MaterializeError, Materializer,
-    PersistError, TorrentContentPersistence, WriteSet, WriterLoadError, WriterLoadedTorrent,
-    WriterProjectionError,
+    load_writer_torrents, project_unattached_persistence, BlockingManager, BoxError,
+    MaterializeError, Materializer, PersistError, TorrentContentPersistence, WriteSet,
+    WriterLoadError, WriterLoadedTorrent, WriterProjectionError,
 };
 
 /// A fully materialized supported-subset writer intent.
@@ -27,13 +31,17 @@ use crate::{
 /// private so callers cannot break that keyset after validation. Holding this
 /// value performs no database mutation.
 ///
-/// Failed hashes remain in the write-set as retry intent. Matching Go requires
-/// any persisting runtime to enqueue that retry successfully before persisting
-/// the successful portion of the same plan.
+/// Failed hashes remain canonical in the write-set for comparison. The plan also
+/// carries separate ordered retry intent, because queue payload order and missing-
+/// hash multiplicity are fingerprint-significant. Matching Go's mutation boundary
+/// requires any persisting runtime to enqueue that retry successfully before
+/// persisting the successful portion of the same plan.
 #[derive(Debug, PartialEq, Eq)]
 pub struct WriterPlan {
     write_set: WriteSet,
     persistence: BTreeMap<String, TorrentContentPersistence>,
+    retry_info_hashes: Vec<String>,
+    retry_job: Option<QueueJob>,
 }
 
 impl WriterPlan {
@@ -50,16 +58,153 @@ impl WriterPlan {
     }
 
     /// Hashes that a persisting writer must republish before persisting successes.
+    ///
+    /// Missing requested hashes form an order- and duplicate-preserving prefix;
+    /// loaded classifier failures follow in Rust's first-request processing order.
+    /// The canonical comparison set remains available through [`Self::write_set`].
     #[must_use]
     pub fn retry_info_hashes(&self) -> &[String] {
-        &self.write_set.failed_info_hashes
+        &self.retry_info_hashes
+    }
+
+    /// Borrow the canonical partial-failure retry job, when this plan has both
+    /// successful rows and failed hashes.
+    ///
+    /// An all-failed plan deliberately has no retry job: Go returns the source
+    /// job's error instead of publishing a replacement in that case.
+    #[must_use]
+    pub fn retry_job(&self) -> Option<&QueueJob> {
+        self.retry_job.as_ref()
     }
 
     /// Consume the validated plan into the transaction kernel's two inputs.
+    ///
+    /// This is a low-level escape hatch that discards retry publication intent.
+    /// Persisting callers should use [`persist_writer_plan`] instead.
     #[must_use]
     pub fn into_parts(self) -> (WriteSet, BTreeMap<String, TorrentContentPersistence>) {
         (self.write_set, self.persistence)
     }
+}
+
+/// Durable publication boundary for a partial-failure `process_torrent` retry.
+///
+/// The coordinator supplies a Go-compatible [`QueueJob`]: its missing-hash prefix
+/// is exact, while its loaded-failure suffix is one valid Go completion order.
+/// Its fingerprint and max-retry value are derived by the shared queue contract.
+/// An implementation must return only after the job has either been inserted
+/// durably or an active-fingerprint conflict has been accepted as
+/// `ON CONFLICT DO NOTHING` success.
+pub trait RetryPublisher: Send + Sync {
+    fn publish_retry<'a>(&'a self, job: &'a QueueJob) -> BoxFuture<'a, Result<(), BoxError>>;
+}
+
+/// Persist one validated writer plan with Go's retry-before-persist ordering.
+///
+/// Partial failures publish their canonical replacement job before the blocking
+/// manager or PostgreSQL writer is invoked. Publication failure therefore leaves
+/// the live write-set untouched. Publication is intentionally outside the writer
+/// transaction, so a later persistence failure leaves the retry durable, exactly
+/// as Go does. An all-failed plan returns [`PersistWriterPlanError::AllFailed`]
+/// without publishing or persisting; the source queue job remains responsible for
+/// its ordinary retry lifecycle. A deletion-only plan also returns without calling
+/// the kernel, preserving Go's second pre-persist early return.
+pub async fn persist_writer_plan<B, R>(
+    pool: &PgPool,
+    plan: &WriterPlan,
+    retry_publisher: &R,
+    blocking_manager: &B,
+) -> Result<(), PersistWriterPlanError>
+where
+    B: BlockingManager + ?Sized,
+    R: RetryPublisher + ?Sized,
+{
+    let persister = PgWriterPlanPersister {
+        pool,
+        blocking_manager,
+    };
+    persist_writer_plan_with(plan, retry_publisher, &persister).await
+}
+
+trait WriterPlanPersister: Send + Sync {
+    fn persist<'a>(
+        &'a self,
+        write_set: &'a WriteSet,
+        persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+    ) -> BoxFuture<'a, Result<(), PersistError>>;
+}
+
+struct PgWriterPlanPersister<'a, B: ?Sized> {
+    pool: &'a PgPool,
+    blocking_manager: &'a B,
+}
+
+impl<B> WriterPlanPersister for PgWriterPlanPersister<'_, B>
+where
+    B: BlockingManager + ?Sized,
+{
+    fn persist<'a>(
+        &'a self,
+        write_set: &'a WriteSet,
+        persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+    ) -> BoxFuture<'a, Result<(), PersistError>> {
+        Box::pin(persist_write_set(
+            self.pool,
+            write_set,
+            persistence,
+            self.blocking_manager,
+        ))
+    }
+}
+
+async fn persist_writer_plan_with<R, P>(
+    plan: &WriterPlan,
+    retry_publisher: &R,
+    persister: &P,
+) -> Result<(), PersistWriterPlanError>
+where
+    R: RetryPublisher + ?Sized,
+    P: WriterPlanPersister + ?Sized,
+{
+    if plan.write_set.torrent_contents.is_empty() {
+        return if plan.retry_info_hashes().is_empty() {
+            // Go's processor has a second early return before `persist`: a
+            // deletion-only batch is acknowledged without blocking or deleting.
+            Ok(())
+        } else {
+            Err(PersistWriterPlanError::AllFailed {
+                failed: plan.retry_info_hashes().len(),
+            })
+        };
+    }
+
+    if !plan.retry_info_hashes().is_empty() {
+        let retry_job = plan
+            .retry_job()
+            .ok_or(PersistWriterPlanError::RetryJobMissing)?;
+        retry_publisher
+            .publish_retry(retry_job)
+            .await
+            .map_err(PersistWriterPlanError::RetryPublish)?;
+    }
+
+    persister
+        .persist(&plan.write_set, &plan.persistence)
+        .await?;
+    Ok(())
+}
+
+/// Fail-closed errors from retry-before-persist coordination.
+#[derive(Debug, thiserror::Error)]
+pub enum PersistWriterPlanError {
+    #[error("all {failed} classifications failed; the source job must own retry handling")]
+    AllFailed { failed: usize },
+    #[error("partial-failure writer plan is missing its canonical retry job")]
+    RetryJobMissing,
+    #[error("publishing the partial-failure retry job failed")]
+    RetryPublish(#[source] BoxError),
+    #[error(transparent)]
+    Persist(#[from] PersistError),
 }
 
 /// Read one stable source image and compose its non-persisting writer intent.
@@ -96,10 +241,85 @@ pub fn compose_writer_plan(
         materializer.materialize_borrowed(params, loaded.iter().map(|torrent| &torrent.loaded))?;
     let persistence = project_persistence(&write_set, &indexed)?;
     validate_persistence_input(&write_set, &persistence)?;
+    let retry_info_hashes = compose_retry_info_hashes(params, &indexed, &write_set);
+    let retry_job = compose_retry_job(
+        params,
+        &retry_info_hashes,
+        !write_set.torrent_contents.is_empty(),
+    )?;
     Ok(WriterPlan {
         write_set,
         persistence,
+        retry_info_hashes,
+        retry_job,
     })
+}
+
+fn compose_retry_info_hashes(
+    params: &ProcessTorrentParams,
+    indexed: &BTreeMap<&str, &WriterLoadedTorrent>,
+    write_set: &WriteSet,
+) -> Vec<String> {
+    let failed = write_set
+        .failed_info_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut retry_info_hashes = Vec::new();
+
+    // Go seeds failedHashes from the search layer's missing result before any
+    // classifiers finish. Preserve original request order and multiplicity for
+    // that prefix even though WriteSet keeps a canonical comparison set.
+    for requested in &params.info_hashes {
+        let info_hash = requested.to_hex();
+        if !indexed.contains_key(info_hash.as_str()) {
+            retry_info_hashes.push(info_hash);
+        }
+    }
+
+    // Rust classifies loaded torrents in first-request order. Go appends these
+    // from concurrent goroutines, so its concrete completion order is not
+    // deterministic; this deterministic suffix preserves Rust processing order.
+    let mut processed = BTreeSet::new();
+    for requested in &params.info_hashes {
+        let info_hash = requested.to_hex();
+        if processed.insert(info_hash.clone())
+            && indexed.contains_key(info_hash.as_str())
+            && failed.contains(info_hash.as_str())
+        {
+            retry_info_hashes.push(info_hash);
+        }
+    }
+
+    retry_info_hashes
+}
+
+fn compose_retry_job(
+    params: &ProcessTorrentParams,
+    retry_info_hashes: &[String],
+    has_successful_rows: bool,
+) -> Result<Option<QueueJob>, WriterPlanError> {
+    if retry_info_hashes.is_empty() || !has_successful_rows {
+        return Ok(None);
+    }
+
+    let info_hashes = retry_info_hashes
+        .iter()
+        .map(|info_hash| {
+            ProtocolId::from_hex(info_hash).map_err(|source| {
+                WriterPlanError::InvalidRetryInfoHash {
+                    info_hash: info_hash.clone(),
+                    source,
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut retry_params = params.clone();
+    retry_params.info_hashes = info_hashes;
+    Ok(Some(process_torrent_job(
+        &retry_params,
+        QueueJobOptions::default(),
+    )?))
 }
 
 fn reject_unrequested_loaded_torrents(
@@ -199,6 +419,14 @@ pub enum WriterPlanError {
     Materialize(#[from] MaterializeError),
     #[error(transparent)]
     Persistence(#[from] PersistError),
+    #[error("invalid retry info hash '{info_hash}' in a validated writer plan")]
+    InvalidRetryInfoHash {
+        info_hash: String,
+        #[source]
+        source: hex::FromHexError,
+    },
+    #[error(transparent)]
+    RetryJob(#[from] bitmagnet_queue::JobError),
     #[error("writer plan requires ClassifierWorkflow to be explicitly 'default'")]
     ClassifierWorkflowUnsupported,
     #[error(
@@ -233,22 +461,29 @@ pub enum WriterPlanError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
 
     use bitmagnet_classifier::ClassifierInput;
-    use bitmagnet_queue::ProcessTorrentParams;
+    use bitmagnet_queue::{ProcessTorrentParams, ProtocolId, QueueJob, QueueJobStatus};
+    use futures::future::BoxFuture;
     use serde_json::Value;
+    use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        compose_writer_plan, index_loaded_torrents, project_persistence, validate_supported_params,
-        WriterPlanError,
+        compose_retry_info_hashes, compose_retry_job, compose_writer_plan, index_loaded_torrents,
+        persist_writer_plan, persist_writer_plan_with, project_persistence,
+        validate_supported_params, PersistWriterPlanError, RetryPublisher, WriterPlan,
+        WriterPlanError, WriterPlanPersister,
     };
     use crate::{
-        LoadedTorrent, TorrentContentWrite, TorrentSnapshot, WriteSet, WriterLoadedTorrent,
-        WriterProjectionError,
+        BlockingManager, BoxError, LoadedTorrent, PersistError, TorrentContentPersistence,
+        TorrentContentWrite, TorrentSnapshot, WriteSet, WriterLoadedTorrent, WriterProjectionError,
     };
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
     fn loaded(info_hash: &str) -> WriterLoadedTorrent {
         WriterLoadedTorrent {
@@ -305,6 +540,343 @@ mod tests {
             ])),
             ..ProcessTorrentParams::default()
         }
+    }
+
+    fn plan(params: &ProcessTorrentParams, write_set: WriteSet) -> WriterPlan {
+        let persistence = write_set
+            .torrent_contents
+            .iter()
+            .map(|row| {
+                (
+                    row.id.clone(),
+                    TorrentContentPersistence {
+                        seeders: None,
+                        leechers: None,
+                        published_at_micros: 1,
+                        tsv: String::new(),
+                    },
+                )
+            })
+            .collect();
+        let retry_info_hashes = write_set.failed_info_hashes.clone();
+        let retry_job = compose_retry_job(
+            params,
+            &retry_info_hashes,
+            !write_set.torrent_contents.is_empty(),
+        )
+        .expect("compose retry fixture");
+        WriterPlan {
+            write_set,
+            persistence,
+            retry_info_hashes,
+            retry_job,
+        }
+    }
+
+    fn partial_failure_plan() -> WriterPlan {
+        let mut params = supported_params();
+        params.classify_mode = 1;
+        params.info_hashes = [HASH_A, HASH_B, HASH_C]
+            .into_iter()
+            .map(|hash| ProtocolId::from_hex(hash).expect("fixture hash"))
+            .collect();
+        plan(
+            &params,
+            WriteSet {
+                torrent_contents: vec![row(HASH_A)],
+                failed_info_hashes: vec![HASH_B.to_owned(), HASH_C.to_owned()],
+                ..WriteSet::default()
+            },
+        )
+    }
+
+    #[derive(Debug)]
+    struct RetryFixtureError;
+
+    impl fmt::Display for RetryFixtureError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("retry fixture failure")
+        }
+    }
+
+    impl std::error::Error for RetryFixtureError {}
+
+    struct FakeRetryPublisher {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        jobs: Mutex<Vec<QueueJob>>,
+        fail: bool,
+    }
+
+    impl FakeRetryPublisher {
+        fn new(events: Arc<Mutex<Vec<&'static str>>>, fail: bool) -> Self {
+            Self {
+                events,
+                jobs: Mutex::new(Vec::new()),
+                fail,
+            }
+        }
+    }
+
+    impl RetryPublisher for FakeRetryPublisher {
+        fn publish_retry<'a>(&'a self, job: &'a QueueJob) -> BoxFuture<'a, Result<(), BoxError>> {
+            Box::pin(async move {
+                self.events.lock().expect("events mutex").push("publish");
+                self.jobs.lock().expect("jobs mutex").push(job.clone());
+                if self.fail {
+                    Err(Box::new(RetryFixtureError) as BoxError)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct FakePersister {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail: bool,
+    }
+
+    impl WriterPlanPersister for FakePersister {
+        fn persist<'a>(
+            &'a self,
+            _write_set: &'a WriteSet,
+            _persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+        ) -> BoxFuture<'a, Result<(), PersistError>> {
+            Box::pin(async move {
+                self.events.lock().expect("events mutex").push("persist");
+                if self.fail {
+                    Err(PersistError::Database(sqlx::Error::PoolClosed))
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct PanicBlocker;
+
+    impl BlockingManager for PanicBlocker {
+        fn block<'a>(&'a self, _info_hashes: &'a [String]) -> BoxFuture<'a, Result<(), BoxError>> {
+            panic!("empty public coordinator fixture must not call the blocker")
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_failure_publishes_canonical_retry_before_persistence() {
+        let plan = partial_failure_plan();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), false);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect("partial failure publishes then persists");
+
+        assert_eq!(
+            events.lock().expect("events mutex").as_slice(),
+            ["publish", "persist"]
+        );
+        let jobs = publisher.jobs.lock().expect("jobs mutex");
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.queue, bitmagnet_queue::PROCESS_TORRENT);
+        assert_eq!(job.status, QueueJobStatus::Pending);
+        assert_eq!(job.max_retries, 2);
+        assert_eq!(job.priority, 0);
+        let retry: ProcessTorrentParams =
+            serde_json::from_str(&job.payload).expect("decode retry payload");
+        assert_eq!(retry.classify_mode, 1);
+        assert_eq!(retry.classifier_workflow, "default");
+        assert_eq!(retry.classifier_flags, supported_params().classifier_flags);
+        assert_eq!(
+            retry
+                .info_hashes
+                .iter()
+                .map(|info_hash| info_hash.to_hex())
+                .collect::<Vec<_>>(),
+            [HASH_B, HASH_C]
+        );
+    }
+
+    #[test]
+    fn retry_job_preserves_distinct_missing_order_duplicates_and_exact_fingerprint() {
+        let materializer = crate::Materializer::from_core().expect("compile core classifier");
+        let mut params = supported_params();
+        params.info_hashes = [HASH_C, HASH_B, HASH_A, HASH_C]
+            .into_iter()
+            .map(|hash| ProtocolId::from_hex(hash).expect("fixture hash"))
+            .collect();
+
+        let plan = compose_writer_plan(&materializer, &params, &[loaded(HASH_A)])
+            .expect("one classified row plus ordered distinct and duplicate missing hashes");
+
+        assert_eq!(plan.write_set.failed_info_hashes, [HASH_B, HASH_C]);
+        assert_eq!(plan.retry_info_hashes(), [HASH_C, HASH_B, HASH_C]);
+        assert_eq!(plan.write_set.torrent_contents.len(), 1);
+        let retry_job = plan.retry_job().expect("partial failure retry job");
+        assert_eq!(
+            retry_job.payload,
+            concat!(
+                "{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{",
+                "\"apis_enabled\":false,\"local_search_enabled\":false,",
+                "\"tmdb_enabled\":false},\"InfoHashes\":[",
+                "\"cccccccccccccccccccccccccccccccccccccccc\",",
+                "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",",
+                "\"cccccccccccccccccccccccccccccccccccccccc\"]}"
+            )
+        );
+        assert_eq!(
+            retry_job.fingerprint,
+            "b9d935513d1349daf6bcddff79e3c79184ff818e2a564cdb1fb4956aca28dd31"
+        );
+    }
+
+    #[test]
+    fn retry_order_prefixes_duplicate_missing_then_loaded_failures_in_processing_order() {
+        let loaded = [loaded(HASH_A), loaded(HASH_B)];
+        let indexed = index_loaded_torrents(&loaded).expect("index loaded retry fixtures");
+        let mut params = supported_params();
+        params.info_hashes = [HASH_C, HASH_B, HASH_A, HASH_C, HASH_B]
+            .into_iter()
+            .map(|hash| ProtocolId::from_hex(hash).expect("fixture hash"))
+            .collect();
+        let write_set = WriteSet {
+            failed_info_hashes: vec![HASH_A.to_owned(), HASH_B.to_owned(), HASH_C.to_owned()],
+            ..WriteSet::default()
+        };
+
+        assert_eq!(
+            compose_retry_info_hashes(&params, &indexed, &write_set),
+            [HASH_C, HASH_C, HASH_B, HASH_A]
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_publish_failure_prevents_persistence() {
+        let plan = partial_failure_plan();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), true);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        let error = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect_err("retry publication failure aborts before persistence");
+
+        assert!(matches!(error, PersistWriterPlanError::RetryPublish(_)));
+        assert_eq!(events.lock().expect("events mutex").as_slice(), ["publish"]);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_does_not_retract_published_retry() {
+        let plan = partial_failure_plan();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), false);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: true,
+        };
+
+        let error = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect_err("late persistence failure is returned");
+
+        assert!(matches!(
+            error,
+            PersistWriterPlanError::Persist(PersistError::Database(sqlx::Error::PoolClosed))
+        ));
+        assert_eq!(
+            events.lock().expect("events mutex").as_slice(),
+            ["publish", "persist"]
+        );
+        assert_eq!(publisher.jobs.lock().expect("jobs mutex").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn all_failed_returns_source_job_error_without_publish_or_persist() {
+        let params = supported_params();
+        let plan = plan(
+            &params,
+            WriteSet {
+                failed_info_hashes: vec![HASH_A.to_owned(), HASH_B.to_owned()],
+                ..WriteSet::default()
+            },
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), false);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        let error = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect_err("all-failed source job must own retry handling");
+
+        assert!(matches!(
+            error,
+            PersistWriterPlanError::AllFailed { failed: 2 }
+        ));
+        assert!(events.lock().expect("events mutex").is_empty());
+        assert!(publisher.jobs.lock().expect("jobs mutex").is_empty());
+    }
+
+    #[tokio::test]
+    async fn deletion_only_matches_go_second_early_return() {
+        let params = supported_params();
+        let plan = plan(
+            &params,
+            WriteSet {
+                delete_info_hashes: vec![HASH_A.to_owned()],
+                delete_ids: vec![format!("{HASH_A}:movie:?:?")],
+                ..WriteSet::default()
+            },
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), false);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect("Go acknowledges deletion-only batches before persist");
+
+        assert!(events.lock().expect("events mutex").is_empty());
+        assert!(publisher.jobs.lock().expect("jobs mutex").is_empty());
+    }
+
+    #[tokio::test]
+    async fn public_publish_failure_does_not_touch_blocker_or_database() {
+        let params = supported_params();
+        let plan = plan(
+            &params,
+            WriteSet {
+                torrent_contents: vec![row(HASH_A)],
+                failed_info_hashes: vec![HASH_B.to_owned()],
+                delete_info_hashes: vec![HASH_C.to_owned()],
+                ..WriteSet::default()
+            },
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), true);
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/bitmagnet_writer_plan_closed")
+            .expect("parse lazy test pool URL");
+        pool.close().await;
+
+        let error = persist_writer_plan(&pool, &plan, &publisher, &PanicBlocker)
+            .await
+            .expect_err("publish failure must precede blocker and closed pool access");
+
+        assert!(matches!(error, PersistWriterPlanError::RetryPublish(_)));
+        assert_eq!(events.lock().expect("events mutex").as_slice(), ["publish"]);
     }
 
     #[test]

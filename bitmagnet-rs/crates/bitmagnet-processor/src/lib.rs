@@ -56,7 +56,10 @@ pub use writer_compare::{
     WriterCompareError, WriterComparison, WriterDriftField, WriterRowComparison,
 };
 pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
-pub use writer_plan::{compose_writer_plan, load_writer_plan, WriterPlan, WriterPlanError};
+pub use writer_plan::{
+    compose_writer_plan, load_writer_plan, persist_writer_plan, PersistWriterPlanError,
+    RetryPublisher, WriterPlan, WriterPlanError,
+};
 pub use writer_projection::{
     project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
 };
