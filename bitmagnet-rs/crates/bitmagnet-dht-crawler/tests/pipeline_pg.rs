@@ -3,7 +3,7 @@
 //!
 //! The graph-admission gates deliberately stop before any worker is polled. The
 //! writer gates exercise the concrete six-stage transaction and delete their
-//! keyed fixtures on success. Point this suite only at a disposable Goose-33
+//! keyed fixtures on success. Point this suite only at a disposable Goose-34
 //! database and invoke it explicitly with `--ignored --test-threads=1`.
 
 use std::future::ready;
@@ -50,7 +50,7 @@ async fn connect_disposable_database() -> PgPool {
         .unwrap_or_else(|_| panic!("{TEST_DATABASE_URL} must be set for ignored gate"));
     let pool = PgPool::connect(&database_url)
         .await
-        .expect("connect disposable Goose-33 PostgreSQL");
+        .expect("connect disposable Goose-34 PostgreSQL");
     let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
         .fetch_one(&pool)
         .await
@@ -221,14 +221,14 @@ async fn keyed_count(pool: &PgPool, table: &str, info_hash: Id20) -> i64 {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-33 PostgreSQL"]
-async fn writer_graph_admits_goose_33_and_drains_without_writes() {
+#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
+async fn writer_graph_admits_goose_34_and_drains_without_writes() {
     let pool = connect_disposable_database().await;
     let before = writer_table_counts(&pool).await;
 
-    let (supervisor, handles) = DhtCrawlerPipelineSupervisor::start(writer_projection(33), &pool)
+    let (supervisor, handles) = DhtCrawlerPipelineSupervisor::start(writer_projection(34), &pool)
         .await
-        .expect("Goose-33 admits the complete taskless writer graph");
+        .expect("Goose-34 admits the complete taskless writer graph");
     let local_addr = supervisor.local_addr();
     drop(handles);
 
@@ -254,23 +254,23 @@ async fn writer_graph_admits_goose_33_and_drains_without_writes() {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-33 PostgreSQL"]
-async fn writer_graph_rejects_goose_32_without_writes_or_a_bound_runtime() {
+#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
+async fn writer_graph_rejects_goose_33_without_writes_or_a_bound_runtime() {
     let pool = connect_disposable_database().await;
     let before = writer_table_counts(&pool).await;
 
-    let error = match DhtCrawlerPipelineSupervisor::start(writer_projection(32), &pool).await {
+    let error = match DhtCrawlerPipelineSupervisor::start(writer_projection(33), &pool).await {
         Ok((supervisor, handles)) => {
             drop((supervisor, handles));
-            panic!("Goose-32 requirement must not admit a Goose-33 database");
+            panic!("Goose-33 requirement must not admit a Goose-34 database");
         }
         Err(error) => error,
     };
     assert!(matches!(
         &error,
         DhtCrawlerPipelineStartError::GooseHead(GooseHeadMismatch::Unexpected {
-            required: 32,
-            actual: 33,
+            required: 33,
+            actual: 34,
         })
     ));
     assert_eq!(error.bound_addr(), None);
@@ -280,7 +280,7 @@ async fn writer_graph_rejects_goose_32_without_writes_or_a_bound_runtime() {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-33 PostgreSQL"]
+#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
 async fn torrent_writer_commits_all_six_stages_with_shadow_queue_identity() {
     let pool = connect_disposable_database().await;
     let info_hash = unique_fixture_id();
@@ -331,7 +331,7 @@ async fn torrent_writer_commits_all_six_stages_with_shadow_queue_identity() {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-33 PostgreSQL"]
+#[ignore = "requires BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
 async fn shadow_fingerprint_collision_rolls_back_every_preceding_stage() {
     let pool = connect_disposable_database().await;
     let info_hash = unique_fixture_id();

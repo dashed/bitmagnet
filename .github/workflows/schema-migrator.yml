@@ -99,7 +99,7 @@ jobs:
             .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
             .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
             .[0].Config.Labels["io.bitmagnet.schema-migrator-mode"] == "migration-only" and
-            .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-33/v1" and
+            .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-34/v1" and
             (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
             (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
           ' "$inspect"
@@ -117,11 +117,11 @@ jobs:
             "$image" --help | grep -F "bitmagnet-schema-migrator"
           if docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user 65532:65532 \
-            "$image" migrate up --version 34 2>"$rejected"; then
+            "$image" migrate up --version 35 2>"$rejected"; then
             echo "wrong up target unexpectedly succeeded" >&2
             exit 1
           fi
-          grep -Fx 'migrate up requires --version 33; got "34"' "$rejected"
+          grep -Fx 'migrate up requires --version 34; got "35"' "$rejected"
           if docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --user 65532:65532 \
             "$image" migrate down --version 29 2>"$rejected"; then
@@ -276,7 +276,7 @@ jobs:
               .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
               .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
               .[0].Config.Labels["io.bitmagnet.schema-migrator-mode"] == "migration-only" and
-              .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-33/v1"
+              .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-34/v1"
             ' "$inspect"
 
           final_tag_inspect="$(docker buildx imagetools inspect "$image_ref")"

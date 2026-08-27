@@ -487,7 +487,7 @@ and deliberate nonvalidation boundaries, error context, type traits, and
 closed-pool `BEGIN` behavior for both empty and nonempty valid plans.
 
 The ignored migration-backed `pipeline_pg` gate additionally executes one
-successful six-stage plan against a disposable Goose-33 PostgreSQL database. It
+successful six-stage plan against a disposable Goose-34 PostgreSQL database. It
 asserts one keyed row for the torrent, file, summary, source, and pieces stages,
 plus the Shadow queue row's queue, pending status, payload, retry policy,
 priority, and transaction-stable 60-second delay. A second gate seeds the same
@@ -1886,7 +1886,7 @@ above. No gate alone establishes production composition or readiness.
 The following remain deliberately outside this checkpoint:
 
 - broader disposable-Goose-schema integration for the complete graph. Exact
-  Goose-33 admission, one wrong requested head, one six-stage commit, and the
+  Goose-34 admission, one wrong requested head, one six-stage commit, and the
   active-Shadow-fingerprint rollback path are covered. Missing and reapplied
   head admission; every remaining adapter; further constraints and triggers;
   query plans, statement auditing, ambiguous acknowledgement, and durability

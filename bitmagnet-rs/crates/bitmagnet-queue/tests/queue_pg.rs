@@ -1,7 +1,7 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables. It requires the exact
-//! disposable Goose-33 database name `bitmagnet_processor_writer_load_test`
+//! disposable Goose-34 database name `bitmagnet_processor_writer_load_test`
 //! and explicit invocation with `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -56,7 +56,8 @@ async fn seed(
          (id, fingerprint, queue, status, payload, retries, max_retries, run_after, \
           archival_duration, created_at, priority) \
          VALUES ($1, $2, $3, $4::queue_job_status, $5::jsonb, $6, $7, \
-                 clock_timestamp() + make_interval(secs => $8), interval '7 days', \
+                 clock_timestamp() + make_interval(secs => $8), \
+                 make_interval(secs => 604800), \
                  clock_timestamp(), $9)",
     )
     .bind(id)
@@ -116,7 +117,7 @@ fn assert_queue_database_code(error: QueuePgError, expected: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-33 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-34 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -1245,7 +1246,7 @@ async fn queue_runtime_matches_go_contract() {
         "INSERT INTO queue_jobs \
          (fingerprint, queue, payload, run_after, archival_duration, created_at) \
          VALUES ('forbidden-batch-insert', 'process_torrent', '{}'::jsonb, \
-                 clock_timestamp(), interval '7 days', clock_timestamp())",
+                 clock_timestamp(), make_interval(secs => 604800), clock_timestamp())",
     )
     .execute(&batch_pool)
     .await
@@ -1328,7 +1329,9 @@ async fn queue_runtime_matches_go_contract() {
                 status::text AS status, retries, max_retries, priority, \
                 run_after, created_at, ran_at IS NULL AS ran_at_null, \
                 error IS NULL AS error_null, deadline IS NULL AS deadline_null, \
-                archival_duration = interval '7 days' AS archive_seven_days \
+                archival_duration = interval '7 days' AS archive_seven_days, \
+                EXTRACT(day FROM archival_duration)::bigint AS archive_days, \
+                EXTRACT(epoch FROM archival_duration)::bigint AS archive_seconds \
          FROM queue_jobs ORDER BY run_after",
     )
     .fetch_all(&pool)
@@ -1382,6 +1385,11 @@ async fn queue_runtime_matches_go_contract() {
         ] {
             assert!(row.try_get::<bool, _>(field).unwrap(), "{field}");
         }
+        assert_eq!(row.try_get::<i64, _>("archive_days").unwrap(), 0);
+        assert_eq!(
+            row.try_get::<i64, _>("archive_seconds").unwrap(),
+            7 * 24 * 60 * 60
+        );
     }
 
     // Empty plan is an explicit successful no-op. Malformed arrays, payloads,

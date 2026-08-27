@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	UpVersion   int64 = 33
+	UpVersion   int64 = 34
 	DownVersion int64 = 29
 
 	versionSchema = "bitmagnet.schema-migrator-version/v1"

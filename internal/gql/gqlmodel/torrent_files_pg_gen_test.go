@@ -29,7 +29,7 @@ const (
 )
 
 // TestGenerateTorrentFilesParityPgFixtures recreates and seeds only the
-// disposable POSTGRES_DSN database. It intentionally leaves the Goose-33
+// disposable POSTGRES_DSN database. It intentionally leaves the Goose-34
 // schema in place for the Rust SELECT-only parity process that follows in CI.
 func TestGenerateTorrentFilesParityPgFixtures(t *testing.T) {
 	dsn := os.Getenv("POSTGRES_DSN")

@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 
-const EXPECTED_GOOSE_VERSION: i64 = 33;
+const EXPECTED_GOOSE_VERSION: i64 = 34;
 const READER_ROLE: &str = "bitmagnet_graphql_reader_ci";
 
 #[derive(Debug, Deserialize)]
@@ -48,13 +48,13 @@ async fn real_pg_queue_jobs_matches_go_without_mutation() {
 
     let head = admit_pg(&pool, EXPECTED_GOOSE_VERSION)
         .await
-        .expect("Goose 33 database is admitted");
+        .expect("Goose 34 database is admitted");
     assert_eq!(head.version, EXPECTED_GOOSE_VERSION);
     assert!(matches!(
         admit_pg(&pool, EXPECTED_GOOSE_VERSION - 1).await,
         Err(PgAdmissionError::Head(GooseHeadMismatch::Unexpected {
-            required: 32,
-            actual: 33,
+            required: 33,
+            actual: 34,
         }))
     ));
     assert_goose_mismatch_precedes_listener_bind(&reader_dsn).await;
@@ -254,11 +254,11 @@ async fn assert_goose_mismatch_precedes_listener_bind(dsn: &str) {
     let occupied = TcpListener::bind("127.0.0.1:0").expect("reserve a loopback listener");
     let listen_addr = occupied.local_addr().expect("reserved listener address");
     let output = mismatch_process(dsn, &listen_addr.to_string()).await;
-    assert!(!output.status.success(), "Goose-32 process must fail");
+    assert!(!output.status.success(), "Goose-33 process must fail");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Goose migration head is 33; required version 32"),
+        stderr.contains("Goose migration head is 34; required version 33"),
         "typed Goose mismatch must be the process failure: {stderr}"
     );
     assert!(
@@ -279,7 +279,7 @@ async fn mismatch_process(dsn: &str, listen_addr: &str) -> Output {
         .arg((EXPECTED_GOOSE_VERSION - 1).to_string())
         .output()
         .await
-        .expect("run GraphQL binary against Goose 33")
+        .expect("run GraphQL binary against Goose 34")
 }
 
 fn load_cases(path: &Path) -> Vec<OracleCase> {

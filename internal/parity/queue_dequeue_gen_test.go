@@ -139,7 +139,7 @@ func TestGenerateQueueDequeueOrderingFixture(t *testing.T) {
 		if err := db.WithContext(ctx).Exec(
 			`INSERT INTO queue_jobs
 			 (id, fingerprint, queue, status, payload, run_after, archival_duration, created_at, priority)
-			 VALUES (?, ?, ?, ?::queue_job_status, '{}'::jsonb, now() + make_interval(secs => ?), interval '7 days', now(), ?)`,
+			 VALUES (?, ?, ?, ?::queue_job_status, '{}'::jsonb, now() + make_interval(secs => ?), make_interval(secs => 604800), now(), ?)`,
 			seed.ID, seed.ID, seed.Queue, seed.Status, seed.RunAfterOffsetSeconds, seed.Priority,
 		).Error; err != nil {
 			t.Fatalf("seed job %q: %v", seed.ID, err)
