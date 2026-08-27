@@ -22,10 +22,12 @@ func run() int {
 
 	logger, err := zap.NewProduction()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "initialize logger: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "initialize logger: %v\n", err)
 		return 1
 	}
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	app := schemamigrator.NewApp(schemamigrator.Params{
 		BuildInfo: schemamigrator.BuildInfo{
@@ -39,7 +41,7 @@ func run() int {
 		ErrWriter: os.Stderr,
 	})
 	if err := app.RunContext(ctx, os.Args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0

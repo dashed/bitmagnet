@@ -93,6 +93,8 @@ func TestWriterProjectionOracle(t *testing.T) {
 
 		if os.Getenv(writerProjectionPrintEnv) == "" {
 			t.Run(fixture.ID, func(t *testing.T) {
+				t.Parallel()
+
 				require.Equal(t, fixture.Expected, actual)
 			})
 		}

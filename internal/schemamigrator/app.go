@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/migrations"
+	// Register the pgx database/sql driver used by OpenPostgresSession.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
@@ -174,7 +175,7 @@ func OpenPostgresSession(logger *zap.SugaredLogger) OpenSession {
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 		if err := db.PingContext(ctx); err != nil {
-			db.Close()
+			_ = db.Close()
 			return Session{}, err
 		}
 		return Session{
