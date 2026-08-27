@@ -5,7 +5,7 @@
 //! text already evaluated by L3, and removes the caller's page window so exact
 //! refine remains the only pagination boundary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub use bitmagnet_search_query::{
@@ -15,7 +15,7 @@ pub use bitmagnet_search_query::{
 use chrono::Utc;
 use sqlx::{PgPool, Row};
 
-use crate::metrics::{PathsearchMetrics, PathsearchPhase};
+use crate::metrics::{PathsearchMetrics, PathsearchPhase, RefineMetadataCandidateState};
 
 const SUMMARY_COUNTS_SQL: &str = "SELECT info_hash, file_count::bigint AS file_count,\
 \n       compressed_bytes::bigint AS compressed_bytes\
@@ -320,11 +320,14 @@ impl PgSearchBackend for PgSearch {
                 .map_err(|error| crate::Error::Pg(error.to_string()))?
         };
 
+        let summary_row_count = summary_rows.len();
         let mut metadata = HashMap::with_capacity(ids.len());
+        let mut summary_ids = HashSet::with_capacity(summary_row_count);
         // A candidate is "covered" iff its summary row supplies a non-NULL
         // compressed_bytes; only the rest fall back to the torrents probe. When
         // the column is absent no candidate is covered, so all fall through.
-        let mut covered = std::collections::HashSet::with_capacity(summary_rows.len());
+        let mut covered = HashSet::with_capacity(summary_row_count);
+        let mut null_bytes_count = 0_usize;
         for row in summary_rows {
             let raw: Vec<u8> = row
                 .try_get("info_hash")
@@ -339,8 +342,11 @@ impl PgSearchBackend for PgSearch {
             } else {
                 None
             };
+            summary_ids.insert(info_hash);
             if compressed_bytes.is_some() {
                 covered.insert(info_hash);
+            } else if has_compressed_bytes {
+                null_bytes_count = null_bytes_count.saturating_add(1);
             }
             metadata.insert(
                 info_hash,
@@ -355,11 +361,27 @@ impl PgSearchBackend for PgSearch {
         // (the backfill window / blob-less torrents). Empty => skip the torrents
         // probe entirely, so RefineMetadataTorrents records zero observations on
         // a fully covered route (documented in CONTRACT.md — no count==1 assert).
+        let missing_summary_count = ids.iter().filter(|id| !summary_ids.contains(id)).count();
         let misses: Vec<bitmagnet_model::InfoHash> = ids
             .iter()
             .copied()
             .filter(|id| !covered.contains(id))
             .collect();
+        if let Some(metrics) = &self.metrics {
+            for (state, count) in [
+                (RefineMetadataCandidateState::Requested, ids.len()),
+                (RefineMetadataCandidateState::SummaryRow, summary_row_count),
+                (RefineMetadataCandidateState::Covered, covered.len()),
+                (
+                    RefineMetadataCandidateState::MissingSummary,
+                    missing_summary_count,
+                ),
+                (RefineMetadataCandidateState::NullBytes, null_bytes_count),
+                (RefineMetadataCandidateState::FallbackMiss, misses.len()),
+            ] {
+                metrics.add_refine_metadata_candidates(state, count);
+            }
+        }
         if misses.is_empty() {
             return Ok(metadata);
         }

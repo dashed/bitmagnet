@@ -67,6 +67,43 @@ impl PathsearchPhase {
     }
 }
 
+/// Fixed candidate-cardinality labels for the pre-hydration metadata probe.
+///
+/// These are aggregate counters, never request or torrent identifiers. Their
+/// deltas expose whether a slow fallback was caused by absent summary rows or
+/// NULL denormalized byte counts without adding high-cardinality labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefineMetadataCandidateState {
+    Requested,
+    SummaryRow,
+    Covered,
+    MissingSummary,
+    NullBytes,
+    FallbackMiss,
+}
+
+impl RefineMetadataCandidateState {
+    const ALL: [Self; 6] = [
+        Self::Requested,
+        Self::SummaryRow,
+        Self::Covered,
+        Self::MissingSummary,
+        Self::NullBytes,
+        Self::FallbackMiss,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::SummaryRow => "summary_row",
+            Self::Covered => "covered",
+            Self::MissingSummary => "missing_summary",
+            Self::NullBytes => "null_bytes",
+            Self::FallbackMiss => "fallback_miss",
+        }
+    }
+}
+
 /// Stable labels for `bitmagnet_search_pathsearch_route_total`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteResult {
@@ -129,6 +166,7 @@ pub struct PathsearchMetrics {
     deadline_capped: prometheus::IntCounter,
     refine_shed: prometheus::IntCounter,
     refine_agg_error: prometheus::IntCounter,
+    refine_metadata_candidates: prometheus::IntCounterVec,
     phase_duration: prometheus::HistogramVec,
 }
 
@@ -186,6 +224,11 @@ impl PathsearchMetrics {
                 &format!("{PATH_PREFIX}_refine_agg_error_total"),
                 "Requests served without facets after refined-set aggregation failed.",
             ),
+            refine_metadata_candidates: int_counter_vec(
+                &format!("{PATH_PREFIX}_refine_metadata_candidates_total"),
+                "Candidate cardinality observed by each bounded refine-metadata state.",
+                &["state"],
+            ),
             phase_duration: histogram_vec(
                 &format!("{PATH_PREFIX}_phase_duration_seconds"),
                 "Duration of ranked torrent-content composition phases. Hydrate is observed per attempted chunk; refine only after successful hydrate.",
@@ -215,6 +258,11 @@ impl PathsearchMetrics {
         }
         for phase in PathsearchPhase::ALL {
             metrics.phase_duration.with_label_values(&[phase.label()]);
+        }
+        for state in RefineMetadataCandidateState::ALL {
+            metrics
+                .refine_metadata_candidates
+                .with_label_values(&[state.label()]);
         }
 
         metrics
@@ -288,6 +336,17 @@ impl PathsearchMetrics {
         self.refine_agg_error.inc();
     }
 
+    /// Adds candidate cardinality for one fixed refine-metadata state.
+    pub(crate) fn add_refine_metadata_candidates(
+        &self,
+        state: RefineMetadataCandidateState,
+        count: usize,
+    ) {
+        self.refine_metadata_candidates
+            .with_label_values(&[state.label()])
+            .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
     /// Starts an RAII timer for one fixed ranked-search composition phase.
     ///
     /// Dropping the returned timer records exactly one observation. The phase
@@ -312,6 +371,7 @@ impl PathsearchMetrics {
             Box::new(self.deadline_capped.clone()),
             Box::new(self.refine_shed.clone()),
             Box::new(self.refine_agg_error.clone()),
+            Box::new(self.refine_metadata_candidates.clone()),
             Box::new(self.phase_duration.clone()),
         ]
     }
@@ -361,6 +421,13 @@ impl PathsearchMetrics {
     #[cfg(test)]
     pub(crate) fn agg_error_count(&self) -> u64 {
         self.refine_agg_error.get()
+    }
+
+    #[cfg(test)]
+    fn refine_metadata_candidate_count(&self, state: RefineMetadataCandidateState) -> u64 {
+        self.refine_metadata_candidates
+            .with_label_values(&[state.label()])
+            .get()
     }
 
     #[cfg(test)]
@@ -498,6 +565,8 @@ mod tests {
     ));
     const RUST_ONLY_PHASE_DURATION_CONTRACT: &str =
         "bitmagnet_search_pathsearch_phase_duration_seconds{phase}";
+    const RUST_ONLY_REFINE_METADATA_CONTRACT: &str =
+        "bitmagnet_search_pathsearch_refine_metadata_candidates_total{state}";
 
     fn contract_lines(collectors: Vec<Box<dyn prometheus::core::Collector>>) -> Vec<String> {
         let mut lines = collectors
@@ -525,6 +594,7 @@ mod tests {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         expected.push(RUST_ONLY_PHASE_DURATION_CONTRACT.to_owned());
+        expected.push(RUST_ONLY_REFINE_METADATA_CONTRACT.to_owned());
         expected.sort();
 
         assert!(!expected.is_empty(), "Phase-0 metric golden lost Lane C");
@@ -546,6 +616,9 @@ mod tests {
         metrics.inc_refine_deadline_capped();
         metrics.inc_refine_shed();
         metrics.inc_refine_agg_error();
+        for (index, state) in RefineMetadataCandidateState::ALL.into_iter().enumerate() {
+            metrics.add_refine_metadata_candidates(state, index + 1);
+        }
         for phase in PathsearchPhase::ALL {
             drop(metrics.start_phase_timer(phase));
         }
@@ -569,6 +642,12 @@ mod tests {
         assert_eq!(metrics.deadline_capped_count(), 1);
         assert_eq!(metrics.shed_count(), 1);
         assert_eq!(metrics.agg_error_count(), 1);
+        for (index, state) in RefineMetadataCandidateState::ALL.into_iter().enumerate() {
+            assert_eq!(
+                metrics.refine_metadata_candidate_count(state),
+                u64::try_from(index + 1).unwrap()
+            );
+        }
         for phase in PathsearchPhase::ALL {
             assert_eq!(metrics.phase_sample_count(phase), 1);
         }
@@ -625,6 +704,7 @@ mod tests {
         let pathsearch = PathsearchMetrics::register();
         let serve = ServeMetrics::register();
         pathsearch.inc_route(RouteResult::Served);
+        pathsearch.add_refine_metadata_candidates(RefineMetadataCandidateState::MissingSummary, 3);
         drop(pathsearch.start_phase_timer(PathsearchPhase::RouteTotal));
         serve.inc_serve(ServeOutcome::FallbackEmpty);
 
@@ -640,6 +720,9 @@ mod tests {
             .any(|line| line == "bitmagnet_search_pathsearch_healthy 0"));
         assert!(text.lines().any(|line| {
             line == "bitmagnet_search_pathsearch_phase_duration_seconds_count{phase=\"route_total\"} 1"
+        }));
+        assert!(text.lines().any(|line| {
+            line == "bitmagnet_search_pathsearch_refine_metadata_candidates_total{state=\"missing_summary\"} 3"
         }));
     }
 }
