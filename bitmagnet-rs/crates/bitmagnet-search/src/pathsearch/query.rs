@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use anyhow::Context;
-use tantivy::collector::{Count, TopDocs};
+use tantivy::collector::{Count, MultiCollector, TopDocs};
 use tantivy::query::{BooleanQuery, BoostQuery, EmptyQuery, Occur, Query, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::TokenStream;
@@ -61,12 +61,11 @@ pub fn run_path_candidates(
 ) -> anyhow::Result<PathCandidatesResponse> {
     let query = build_path_query(index, fields, &request.query);
     let searcher = reader.searcher();
-    let candidate_total = searcher.search(&*query, &Count)? as u64;
     let limit = candidate_limit(request.limit, request.oversample);
-    let candidates = if limit == 0 {
-        Vec::new()
+    let (candidates, candidate_total) = if limit == 0 {
+        (Vec::new(), searcher.search(&*query, &Count)? as u64)
     } else {
-        collect_candidates(&searcher, fields, &*query, limit, &request.sort)?
+        collect_candidates_and_count(&searcher, fields, &*query, limit, &request.sort)?
     };
     Ok(PathCandidatesResponse {
         candidates,
@@ -235,42 +234,66 @@ fn sort_key(sort: &[SortBy]) -> Option<(&'static str, FastType, Order)> {
     }
 }
 
-fn collect_candidates(
+/// Collect the ranked page and its matching-document total in one Tantivy
+/// traversal. Running `Count` and `TopDocs` through separate `search` calls
+/// evaluates the same ngram query twice; `MultiCollector` preserves both fruits
+/// while sharing the segment walk and scoring work.
+fn collect_candidates_and_count(
     searcher: &Searcher,
     fields: &Fields,
     query: &dyn Query,
     limit: usize,
     sort: &[SortBy],
-) -> anyhow::Result<Vec<PathCandidate>> {
+) -> anyhow::Result<(Vec<PathCandidate>, u64)> {
     match sort_key(sort) {
-        None => searcher
-            .search(query, &TopDocs::with_limit(limit).order_by_score())?
-            .into_iter()
-            .map(|(score, addr)| candidate(searcher, fields, addr, score, 0))
-            .collect(),
-        Some((name, FastType::U64, order)) => searcher
-            .search(
-                query,
-                &TopDocs::with_limit(limit).order_by_fast_field::<u64>(name, order),
-            )?
-            .into_iter()
-            .map(|(sort_value, addr)| {
-                candidate(searcher, fields, addr, 0.0, sort_value.unwrap_or_default())
-            })
-            .collect(),
-        Some((name, FastType::I64, order)) => searcher
-            .search(
-                query,
-                &TopDocs::with_limit(limit).order_by_fast_field::<i64>(name, order),
-            )?
-            .into_iter()
-            .map(|(sort_value, addr)| {
-                let value = sort_value
-                    .and_then(|v| u64::try_from(v).ok())
-                    .unwrap_or_default();
-                candidate(searcher, fields, addr, 0.0, value)
-            })
-            .collect(),
+        None => {
+            let mut collectors = MultiCollector::new();
+            let top_docs = collectors.add_collector(TopDocs::with_limit(limit).order_by_score());
+            let count = collectors.add_collector(Count);
+            let mut fruits = searcher.search(query, &collectors)?;
+            let candidate_total = count.extract(&mut fruits) as u64;
+            let candidates = top_docs
+                .extract(&mut fruits)
+                .into_iter()
+                .map(|(score, addr)| candidate(searcher, fields, addr, score, 0))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((candidates, candidate_total))
+        }
+        Some((name, FastType::U64, order)) => {
+            let mut collectors = MultiCollector::new();
+            let top_docs = collectors
+                .add_collector(TopDocs::with_limit(limit).order_by_fast_field::<u64>(name, order));
+            let count = collectors.add_collector(Count);
+            let mut fruits = searcher.search(query, &collectors)?;
+            let candidate_total = count.extract(&mut fruits) as u64;
+            let candidates = top_docs
+                .extract(&mut fruits)
+                .into_iter()
+                .map(|(sort_value, addr)| {
+                    candidate(searcher, fields, addr, 0.0, sort_value.unwrap_or_default())
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((candidates, candidate_total))
+        }
+        Some((name, FastType::I64, order)) => {
+            let mut collectors = MultiCollector::new();
+            let top_docs = collectors
+                .add_collector(TopDocs::with_limit(limit).order_by_fast_field::<i64>(name, order));
+            let count = collectors.add_collector(Count);
+            let mut fruits = searcher.search(query, &collectors)?;
+            let candidate_total = count.extract(&mut fruits) as u64;
+            let candidates = top_docs
+                .extract(&mut fruits)
+                .into_iter()
+                .map(|(sort_value, addr)| {
+                    let value = sort_value
+                        .and_then(|v| u64::try_from(v).ok())
+                        .unwrap_or_default();
+                    candidate(searcher, fields, addr, 0.0, value)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok((candidates, candidate_total))
+        }
     }
 }
 
@@ -301,7 +324,7 @@ mod tests {
     use crate::pathsearch::index::{reader, writer};
     use crate::pathsearch::indexer::upsert;
     use crate::pathsearch::schema::{build_schema, register_tokenizer, Fields};
-    use crate::proto::PathCandidatesRequest;
+    use crate::proto::{PathCandidatesRequest, SortBy};
     use tantivy::Index;
 
     fn doc(byte: u8, paths: &[&str], seeders: u64) -> PathDocument {
@@ -429,6 +452,48 @@ mod tests {
             vec![2; 20],
             "name match must outrank the path-only match"
         );
+    }
+
+    #[test]
+    fn combined_collectors_preserve_total_and_fast_field_order() {
+        let mut oldest = doc(1, &["films/aurora-one.mkv"], 30);
+        oldest.published_at = 1_600_000_001;
+        let mut middle = doc(2, &["films/aurora-two.mkv"], 20);
+        middle.published_at = 1_600_000_002;
+        let mut newest = doc(3, &["films/aurora-three.mkv"], 10);
+        newest.published_at = 1_600_000_003;
+        let (index, reader, fields) = index_docs(&[oldest, middle, newest]);
+
+        for (field, descending, expected) in [
+            ("seeders", true, [1_u8, 2_u8]),
+            ("published_at", false, [1_u8, 2_u8]),
+        ] {
+            let out = run_path_candidates(
+                &index,
+                &reader,
+                &fields,
+                PathCandidatesRequest {
+                    query: "aurora".to_owned(),
+                    limit: 1,
+                    oversample: 1,
+                    sort: vec![SortBy {
+                        field: field.to_owned(),
+                        descending,
+                    }],
+                },
+            )
+            .unwrap();
+
+            assert_eq!(out.candidate_total, 3);
+            assert_eq!(out.candidates.len(), 2);
+            assert_eq!(
+                out.candidates
+                    .iter()
+                    .map(|candidate| candidate.info_hash[0])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]
