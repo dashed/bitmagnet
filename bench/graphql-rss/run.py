@@ -28,6 +28,7 @@ DEFAULT_POSTGRES_IMAGE = (
     "sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
 )
 HARNESS_GOOSE_VERSION = 29
+REFINE_BARRIER_TARGETS = {"accepted": 8, "adversarial": 4}
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 
@@ -1207,7 +1208,8 @@ class DockerHarness:
             environment.extend(["--env", f"{key}={value}"])
         return environment
 
-    def reset_refine_barrier(self) -> int:
+    def reset_refine_barrier(self, scenario: str) -> tuple[int, int]:
+        target_arrivals = REFINE_BARRIER_TARGETS[scenario]
         result = self.docker(
             "exec",
             self.pg,
@@ -1218,15 +1220,18 @@ class DockerHarness:
             "-d",
             "bitmagnet",
             "-c",
-            "SELECT nextval('rss_refine_barrier_generation'); "
-            "SELECT setval('rss_refine_barrier_arrivals', 1, false);",
+            f"SELECT setval('rss_refine_barrier_target', {target_arrivals}, true); "
+            "SELECT setval('rss_refine_barrier_arrivals', 1, false); "
+            "SELECT nextval('rss_refine_barrier_generation');",
         )
         values = [line.strip() for line in result.stdout.decode().splitlines() if line.strip()]
-        if len(values) != 2:
+        if len(values) != 3 or values[:2] != [str(target_arrivals), "1"]:
             raise HarnessError(f"unexpected refine-barrier reset output: {values!r}")
-        return int(values[0])
+        return int(values[2]), target_arrivals
 
-    def refine_barrier_evidence(self, expected_generation: int) -> dict[str, Any]:
+    def refine_barrier_evidence(
+        self, expected_generation: int, expected_target_arrivals: int
+    ) -> dict[str, Any]:
         result = self.docker(
             "exec",
             self.pg,
@@ -1238,18 +1243,29 @@ class DockerHarness:
             "-d",
             "bitmagnet",
             "-c",
-            "SELECT generation.last_value, arrivals.last_value, arrivals.is_called "
+            "SELECT generation.last_value, target.last_value, "
+            "arrivals.last_value, arrivals.is_called "
             "FROM rss_refine_barrier_generation AS generation "
+            "CROSS JOIN rss_refine_barrier_target AS target "
             "CROSS JOIN rss_refine_barrier_arrivals AS arrivals;",
         )
         fields = result.stdout.decode().strip().split(",")
-        if len(fields) != 3:
+        if len(fields) != 4:
             return {"ok": False, "parse_error": fields}
-        generation, arrivals, is_called = int(fields[0]), int(fields[1]), fields[2] == "t"
+        generation = int(fields[0])
+        target_arrivals = int(fields[1])
+        arrivals = int(fields[2])
+        is_called = fields[3] == "t"
         return {
-            "ok": generation == expected_generation and is_called and arrivals == 4,
+            "ok": (
+                generation == expected_generation
+                and target_arrivals == expected_target_arrivals
+                and is_called
+                and arrivals == expected_target_arrivals
+            ),
             "expected_generation": expected_generation,
             "generation": generation,
+            "target_arrivals": target_arrivals,
             "arrivals": arrivals if is_called else 0,
             "is_called": is_called,
         }
@@ -1269,7 +1285,7 @@ class DockerHarness:
         run_dir.mkdir(parents=True, exist_ok=False)
         evidence_store = self.create_evidence_store(case_id, run_dir)
         mock_name, events_name = self.start_mock(case_id, evidence_store.volume)
-        refine_generation = self.reset_refine_barrier()
+        refine_generation, refine_target_arrivals = self.reset_refine_barrier(scenario)
 
         watcher = r"""
 snapshot() {
@@ -1378,7 +1394,9 @@ exit "$app_status"
         events_path = run_dir / events_name
         events = new_mock_events(events_path, 0)
         barrier = barrier_evidence(events, scenario)
-        refine_barrier = self.refine_barrier_evidence(refine_generation)
+        refine_barrier = self.refine_barrier_evidence(
+            refine_generation, refine_target_arrivals
+        )
 
         self.remove_container(name)
         self.remove_container(mock_name)

@@ -145,9 +145,11 @@ The HTTP driver and each case's fresh gRPC test double have four-party barriers.
 A harness-only forced-RLS policy adds a second barrier on the first
 `torrent_contents` read after each request acquires a composer refine permit. A
 run is invalid unless the mock records exactly four arrivals, releases, and
-responses in one generation and four distinct sqlx backends reach the refine
-barrier. The driver retains only response summaries and hashes in the JSONL; it
-does not write multi-megabyte response bodies to disk.
+responses in one generation. The refine barrier requires all four accepted
+requests to reach both concurrent hydration reads (eight sqlx backends), or all
+four adversarial requests to reach their summary read (four sqlx backends).
+The driver retains only response summaries and hashes in the JSONL; it does not
+write multi-megabyte response bodies to disk.
 
 The JSONL contains:
 
