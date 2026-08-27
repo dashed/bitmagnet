@@ -350,6 +350,8 @@ async fn upsert_torrent_contents(
             .push_bind(tc.size)
             .push_bind(tc.files_count);
     });
+    // Go/GORM's UpdateAll omits PublishedAt because the generated model field
+    // carries a database-default tag. Keep the projected value insert-only.
     query.push(
         " ON CONFLICT (id) DO UPDATE SET \
          content_type = EXCLUDED.content_type, \
@@ -367,7 +369,6 @@ async fn upsert_torrent_contents(
          tsv = EXCLUDED.tsv, \
          seeders = EXCLUDED.seeders, \
          leechers = EXCLUDED.leechers, \
-         published_at = EXCLUDED.published_at, \
          size = EXCLUDED.size, \
          files_count = EXCLUDED.files_count",
     );

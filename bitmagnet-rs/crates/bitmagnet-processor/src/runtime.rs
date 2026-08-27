@@ -644,6 +644,8 @@ mod tests {
                 field.as_str()
             )));
         }
+        assert!(!gathered
+            .contains("bitmagnet_ingest_shadow_writer_field_drift_total{field=\"published_at\"}"));
     }
 
     #[test]

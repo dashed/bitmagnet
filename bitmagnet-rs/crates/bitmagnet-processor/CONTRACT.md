@@ -135,14 +135,24 @@ enter that API.
 
 A separate bounded writer comparator keys the plan's persistence image by exact
 `torrent_contents.id` and compares expected-row presence, seeders, leechers,
-published-at microseconds, and generated `tsv`. PostgreSQL evaluates the text
-projection using `tc.tsv = expected.tsv::tsvector`, matching the transaction
-kernel's `::tsvector` persistence cast; it does not run `to_tsvector` over
+and generated `tsv`. PostgreSQL evaluates the text projection using
+`tc.tsv = expected.tsv::tsvector`, matching the transaction kernel's
+`::tsvector` persistence cast; it does not run `to_tsvector` over
 already-serialized tsvector text. The writer reader selects only expected IDs.
 Missing expected rows are writer `row_presence` drift, while unexpected or stale
 rows remain solely in the stable comparator's ownership. Writer verdict and
-drift metrics add only closed labels and do not alter the existing stable metric
-names.
+drift metrics add only the closed `row_presence`, `seeders`, `leechers`, and
+`tsv` labels and do not alter the existing stable metric names.
+
+The persistence projection still computes `published_at` for every insert.
+On conflict, however, the Go writer's GORM `UpdateAll` excludes this generated
+model field because it carries a database-default tag, preserving the existing
+row's value. The Rust transaction kernel deliberately mirrors that behavior by
+omitting `published_at` from its conflict-update list. A post-only reader cannot
+distinguish an inserted row from a conflict without prior state, so the writer
+comparator neither selects `published_at` nor emits a drift label for it. The
+bounded campaign controller's before/after row evidence owns proof that an
+existing `published_at` value was preserved.
 
 Expected tags use additive semantics: every tag Rust would add must exist in
 the live set, while unrelated pre-existing tags remain valid because Go never

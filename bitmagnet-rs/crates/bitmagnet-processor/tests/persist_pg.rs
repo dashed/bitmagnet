@@ -1,7 +1,7 @@
 //! Live-PostgreSQL gate for the Lane P transaction kernel.
 //!
 //! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to the exact disposable
-//! Goose-33 database named `bitmagnet_processor_writer_load_test`. The test
+//! Goose-34 database named `bitmagnet_processor_writer_load_test`. The test
 //! truncates processor-owned rows and refuses every other database name.
 
 use std::collections::BTreeMap;
@@ -112,7 +112,7 @@ fn assert_insufficient_privilege(error: sqlx::Error) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-33 database"]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-34 database"]
 async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
@@ -401,6 +401,16 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         calls: Arc::clone(&runtime_calls),
         observed_before_delete: Arc::clone(&runtime_observed),
     };
+    let writer_row_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT FROM torrent_contents WHERE id = $1)")
+            .bind(&writer_id)
+            .fetch_one(&pool)
+            .await
+            .expect("check the missing-row insert precondition");
+    assert!(
+        !writer_row_exists,
+        "writer projection starts as a missing row"
+    );
     persist_write_set(
         &pool,
         runtime_plan.write_set(),
@@ -409,6 +419,51 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     )
     .await
     .expect("seed the exact live writer projection");
+    let inserted_published_at_micros: i64 = sqlx::query_scalar(
+        "SELECT (EXTRACT(EPOCH FROM published_at) * 1000000)::bigint \
+         FROM torrent_contents WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the missing-row insert projection");
+    assert_eq!(
+        inserted_published_at_micros, writer_metadata.published_at_micros,
+        "a missing row receives the projected published_at"
+    );
+
+    let preserved_published_at_micros = writer_metadata.published_at_micros + 31_536_000_000_000;
+    sqlx::query(
+        "UPDATE torrent_contents \
+         SET published_at = $2 * interval '1 microsecond' + timestamptz 'epoch' \
+         WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .bind(preserved_published_at_micros)
+    .execute(&pool)
+    .await
+    .expect("seed a pre-existing published_at sentinel");
+    persist_write_set(
+        &pool,
+        runtime_plan.write_set(),
+        runtime_plan.persistence(),
+        &runtime_blocker,
+    )
+    .await
+    .expect("exercise the conflict-update path over the sentinel");
+    let conflicted_published_at_micros: i64 = sqlx::query_scalar(
+        "SELECT (EXTRACT(EPOCH FROM published_at) * 1000000)::bigint \
+         FROM torrent_contents WHERE id = $1",
+    )
+    .bind(&writer_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read the conflict-preserved published_at sentinel");
+    assert_eq!(
+        conflicted_published_at_micros, preserved_published_at_micros,
+        "conflicts preserve the existing published_at like Go/GORM UpdateAll"
+    );
+
     let stale_write_set = WriteSet {
         torrent_contents: vec![rows[0].clone()],
         ..WriteSet::default()
@@ -493,7 +548,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         exact_writer_row
             .try_get::<i64, _>("published_at_micros")
             .unwrap(),
-        writer_metadata.published_at_micros
+        preserved_published_at_micros
     );
     assert_eq!(
         exact_writer_row.try_get::<String, _>("tsv_text").unwrap(),
@@ -515,7 +570,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     .bind(&source_ran_at)
     .execute(&pool)
     .await
-    .expect("drift every live writer field without crossing the causal timestamp");
+    .expect("drift comparable writer fields and published_at within the causal timestamp");
     let writer_drift = runtime
         .process_job(&shadow_job)
         .await
@@ -525,15 +580,13 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         vec![
             WriterDriftField::Seeders,
             WriterDriftField::Leechers,
-            WriterDriftField::PublishedAt,
             WriterDriftField::Tsv,
         ]
     );
     sqlx::query(
         "UPDATE torrent_contents \
          SET seeders = $2, leechers = $3, \
-             published_at = $4 * interval '1 microsecond' + timestamptz 'epoch', \
-             tsv = $5::tsvector, updated_at = $6::timestamptz \
+             tsv = $4::tsvector, updated_at = $5::timestamptz \
          WHERE id = $1",
     )
     .bind(&writer_id)
@@ -547,7 +600,6 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
             .leechers
             .map(|value| i32::try_from(value).expect("validated leechers fit i32")),
     )
-    .bind(writer_metadata.published_at_micros)
     .bind(&writer_metadata.tsv)
     .bind(&source_ran_at)
     .execute(&pool)

@@ -3,7 +3,10 @@
 //! The stable comparator owns classification rows, deletes, tags, and stale or
 //! unexpected live rows. This comparator considers only the exact
 //! `torrent_contents.id` keys in [`crate::WriterPlan::persistence`] and compares
-//! the volatile fields that [`crate::persist_write_set`] would upsert.
+//! the volatile fields that [`crate::persist_write_set`] would update on
+//! conflict. `published_at` remains an insert projection, but the Go/GORM
+//! conflict path preserves its existing value; a post-only reader therefore
+//! cannot compare it without knowing whether the row existed before the write.
 
 use std::collections::BTreeMap;
 
@@ -21,8 +24,6 @@ WITH expected(id, tsv) AS ( \
 SELECT expected.id, \
        tc.id IS NOT NULL AS present, \
        tc.seeders, tc.leechers, \
-       (EXTRACT(EPOCH FROM tc.published_at) * 1000000)::bigint \
-         AS published_at_micros, \
        CASE WHEN tc.id IS NULL THEN NULL \
             ELSE tc.tsv = expected.tsv::tsvector END AS tsv_matches \
 FROM expected \
@@ -72,19 +73,12 @@ pub enum WriterDriftField {
     RowPresence,
     Seeders,
     Leechers,
-    PublishedAt,
     Tsv,
 }
 
 impl WriterDriftField {
     /// Complete bounded label vocabulary.
-    pub const ALL: [Self; 5] = [
-        Self::RowPresence,
-        Self::Seeders,
-        Self::Leechers,
-        Self::PublishedAt,
-        Self::Tsv,
-    ];
+    pub const ALL: [Self; 4] = [Self::RowPresence, Self::Seeders, Self::Leechers, Self::Tsv];
 
     /// Low-cardinality label for writer drift metrics.
     pub const fn as_str(self) -> &'static str {
@@ -92,7 +86,6 @@ impl WriterDriftField {
             Self::RowPresence => "row_presence",
             Self::Seeders => "seeders",
             Self::Leechers => "leechers",
-            Self::PublishedAt => "published_at",
             Self::Tsv => "tsv",
         }
     }
@@ -104,7 +97,6 @@ struct LiveWriterRow {
     present: bool,
     seeders: Option<i32>,
     leechers: Option<i32>,
-    published_at_micros: Option<i64>,
     tsv_matches: Option<bool>,
 }
 
@@ -141,7 +133,6 @@ pub(crate) async fn compare_writer_persistence_in(
                 present: row.try_get("present")?,
                 seeders: row.try_get("seeders")?,
                 leechers: row.try_get("leechers")?,
-                published_at_micros: row.try_get("published_at_micros")?,
                 tsv_matches: row.try_get("tsv_matches")?,
             })
         })
@@ -183,9 +174,6 @@ fn compare_writer_rows(
                     })
                 {
                     drift_fields.push(WriterDriftField::Leechers);
-                }
-                if actual.published_at_micros != Some(expected.published_at_micros) {
-                    drift_fields.push(WriterDriftField::PublishedAt);
                 }
                 if actual.tsv_matches != Some(true) {
                     drift_fields.push(WriterDriftField::Tsv);
@@ -243,7 +231,6 @@ mod tests {
             present: true,
             seeders: Some(5),
             leechers: Some(7),
-            published_at_micros: Some(1_700_000_000_123_456),
             tsv_matches: Some(true),
         }];
         let comparison = compare_writer_rows(&expected, &live);
@@ -256,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_row_and_each_volatile_field_have_closed_drift_labels() {
+    fn missing_row_and_each_comparable_field_have_closed_drift_labels() {
         let expected = BTreeMap::from([
             ("changed".to_owned(), persistence(5)),
             ("missing".to_owned(), persistence(6)),
@@ -267,7 +254,6 @@ mod tests {
                 present: true,
                 seeders: Some(4),
                 leechers: Some(8),
-                published_at_micros: Some(1_700_000_000_123_455),
                 tsv_matches: Some(false),
             },
             LiveWriterRow {
@@ -275,7 +261,6 @@ mod tests {
                 present: false,
                 seeders: None,
                 leechers: None,
-                published_at_micros: None,
                 tsv_matches: None,
             },
         ];
@@ -286,7 +271,6 @@ mod tests {
             vec![
                 WriterDriftField::Seeders,
                 WriterDriftField::Leechers,
-                WriterDriftField::PublishedAt,
                 WriterDriftField::Tsv,
             ]
         );
@@ -295,10 +279,10 @@ mod tests {
             vec![WriterDriftField::RowPresence]
         );
         assert_eq!(WriterDriftField::RowPresence.as_str(), "row_presence");
-        assert_eq!(WriterDriftField::PublishedAt.as_str(), "published_at");
         assert_eq!(
             WriterDriftField::ALL.map(WriterDriftField::as_str),
-            ["row_presence", "seeders", "leechers", "published_at", "tsv"]
+            ["row_presence", "seeders", "leechers", "tsv"]
         );
+        assert!(!WRITER_LIVE_SQL.contains("published_at"));
     }
 }

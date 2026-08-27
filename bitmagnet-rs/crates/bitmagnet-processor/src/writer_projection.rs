@@ -452,6 +452,25 @@ mod tests {
     }
 
     #[test]
+    fn older_valid_source_publication_is_the_projected_insert_value() {
+        let torrent_created_at = 1_738_368_000_000_000;
+        let older_source_published_at = 1_609_459_200_000_000;
+        let projected = project(
+            &row(),
+            &input("Campaign-shaped fixture", &[]),
+            torrent_created_at,
+            &[TorrentSourceSnapshot {
+                seeders: None,
+                leechers: None,
+                published_at_micros: Some(older_source_published_at),
+                created_at_micros: 1_740_960_000_000_000,
+            }],
+        );
+
+        assert_eq!(projected.published_at_micros, older_source_published_at);
+    }
+
+    #[test]
     fn high_priority_tsv_fields_follow_go_order_and_labels() {
         let mut row = row();
         row.video_resolution = Some("V1080p".to_owned());
