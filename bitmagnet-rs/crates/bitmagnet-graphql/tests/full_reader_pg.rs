@@ -418,6 +418,9 @@ async fn assert_direct_and_queue_reads(schema: &bitmagnet_graphql::Schema) {
               torrent {{
                 listSources {{ sources {{ key name }} }}
                 suggestTags(input: {{ prefix: "parity" }}) {{ suggestions {{ name count }} }}
+                metrics(input: {{ bucketDuration: hour }}) {{
+                  buckets {{ source bucket updated count }}
+                }}
                 files(input: {{
                   infoHashes: ["{ABSENT_HASH}"]
                   limit: 1
@@ -430,6 +433,9 @@ async fn assert_direct_and_queue_reads(schema: &bitmagnet_graphql::Schema) {
                 }}
               }}
               queue {{
+                metrics(input: {{ bucketDuration: minute }}) {{
+                  buckets {{ queue status createdAtBucket ranAtBucket count latency }}
+                }}
                 jobs(input: {{
                   limit: 1
                   totalCount: true
@@ -463,10 +469,18 @@ async fn assert_direct_and_queue_reads(schema: &bitmagnet_graphql::Schema) {
     assert!(data["torrent"]["suggestTags"]["suggestions"]
         .as_array()
         .is_some_and(|suggestions| !suggestions.is_empty()));
+    assert!(data["torrent"]["metrics"]["buckets"]
+        .as_array()
+        .is_some_and(|buckets| !buckets.is_empty()));
     assert_eq!(data["torrent"]["files"]["totalCount"], 0);
     assert_eq!(data["torrent"]["files"]["hasNextPage"], false);
-    assert_eq!(data["queue"]["jobs"]["totalCount"], 0);
-    assert_eq!(data["queue"]["jobs"]["hasNextPage"], false);
+    assert!(data["queue"]["jobs"]["totalCount"]
+        .as_i64()
+        .is_some_and(|count| count > 0));
+    assert_eq!(data["queue"]["jobs"]["hasNextPage"], true);
+    assert!(data["queue"]["metrics"]["buckets"]
+        .as_array()
+        .is_some_and(|buckets| !buckets.is_empty()));
 }
 
 async fn table_fingerprints(pool: &PgPool) -> BTreeMap<String, (i64, String)> {
