@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bitmagnet_queue::{
-    process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions,
+    process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions, QueueStore,
 };
 use futures::future::BoxFuture;
 use sqlx::PgPool;
@@ -23,6 +23,8 @@ use crate::{
     MaterializeError, Materializer, PersistError, TorrentContentPersistence, WriteSet,
     WriterLoadError, WriterLoadedTorrent, WriterProjectionError,
 };
+
+pub use bitmagnet_queue::ActiveJobInsertReceipt as RetryPublishReceipt;
 
 /// A fully materialized supported-subset writer intent.
 ///
@@ -96,7 +98,32 @@ impl WriterPlan {
 /// durably or an active-fingerprint conflict has been accepted as
 /// `ON CONFLICT DO NOTHING` success.
 pub trait RetryPublisher: Send + Sync {
-    fn publish_retry<'a>(&'a self, job: &'a QueueJob) -> BoxFuture<'a, Result<(), BoxError>>;
+    fn publish_retry<'a>(
+        &'a self,
+        job: &'a QueueJob,
+    ) -> BoxFuture<'a, Result<RetryPublishReceipt, BoxError>>;
+}
+
+impl RetryPublisher for QueueStore {
+    fn publish_retry<'a>(
+        &'a self,
+        job: &'a QueueJob,
+    ) -> BoxFuture<'a, Result<RetryPublishReceipt, BoxError>> {
+        Box::pin(async move {
+            self.insert_job_idempotent(job)
+                .await
+                .map_err(|error| Box::new(error) as BoxError)
+        })
+    }
+}
+
+/// Durable side-effect receipt from successful writer-plan coordination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistWriterPlanReceipt {
+    /// Present only for a partial-success plan that published retry intent.
+    pub retry: Option<RetryPublishReceipt>,
+    /// False only for Go's deletion-only pre-persist acknowledgement path.
+    pub persisted: bool,
 }
 
 /// Persist one validated writer plan with Go's retry-before-persist ordering.
@@ -114,7 +141,7 @@ pub async fn persist_writer_plan<B, R>(
     plan: &WriterPlan,
     retry_publisher: &R,
     blocking_manager: &B,
-) -> Result<(), PersistWriterPlanError>
+) -> Result<PersistWriterPlanReceipt, PersistWriterPlanError>
 where
     B: BlockingManager + ?Sized,
     R: RetryPublisher + ?Sized,
@@ -161,7 +188,7 @@ async fn persist_writer_plan_with<R, P>(
     plan: &WriterPlan,
     retry_publisher: &R,
     persister: &P,
-) -> Result<(), PersistWriterPlanError>
+) -> Result<PersistWriterPlanReceipt, PersistWriterPlanError>
 where
     R: RetryPublisher + ?Sized,
     P: WriterPlanPersister + ?Sized,
@@ -170,7 +197,10 @@ where
         return if plan.retry_info_hashes().is_empty() {
             // Go's processor has a second early return before `persist`: a
             // deletion-only batch is acknowledged without blocking or deleting.
-            Ok(())
+            Ok(PersistWriterPlanReceipt {
+                retry: None,
+                persisted: false,
+            })
         } else {
             Err(PersistWriterPlanError::AllFailed {
                 failed: plan.retry_info_hashes().len(),
@@ -178,20 +208,27 @@ where
         };
     }
 
-    if !plan.retry_info_hashes().is_empty() {
+    let retry = if !plan.retry_info_hashes().is_empty() {
         let retry_job = plan
             .retry_job()
             .ok_or(PersistWriterPlanError::RetryJobMissing)?;
-        retry_publisher
-            .publish_retry(retry_job)
-            .await
-            .map_err(PersistWriterPlanError::RetryPublish)?;
-    }
+        Some(
+            retry_publisher
+                .publish_retry(retry_job)
+                .await
+                .map_err(PersistWriterPlanError::RetryPublish)?,
+        )
+    } else {
+        None
+    };
 
-    persister
-        .persist(&plan.write_set, &plan.persistence)
-        .await?;
-    Ok(())
+    if let Err(source) = persister.persist(&plan.write_set, &plan.persistence).await {
+        return Err(PersistWriterPlanError::Persist { retry, source });
+    }
+    Ok(PersistWriterPlanReceipt {
+        retry,
+        persisted: true,
+    })
 }
 
 /// Fail-closed errors from retry-before-persist coordination.
@@ -203,8 +240,13 @@ pub enum PersistWriterPlanError {
     RetryJobMissing,
     #[error("publishing the partial-failure retry job failed")]
     RetryPublish(#[source] BoxError),
-    #[error(transparent)]
-    Persist(#[from] PersistError),
+    #[error("{source}")]
+    Persist {
+        /// Durable retry side effect that preceded the failed persistence.
+        retry: Option<RetryPublishReceipt>,
+        #[source]
+        source: PersistError,
+    },
 }
 
 /// Read one stable source image and compose its non-persisting writer intent.
@@ -473,8 +515,8 @@ mod tests {
     use super::{
         compose_retry_info_hashes, compose_retry_job, compose_writer_plan, index_loaded_torrents,
         persist_writer_plan, persist_writer_plan_with, project_persistence,
-        validate_supported_params, PersistWriterPlanError, RetryPublisher, WriterPlan,
-        WriterPlanError, WriterPlanPersister,
+        validate_supported_params, PersistWriterPlanError, RetryPublishReceipt, RetryPublisher,
+        WriterPlan, WriterPlanError, WriterPlanPersister,
     };
     use crate::{
         BlockingManager, BoxError, LoadedTorrent, PersistError, TorrentContentPersistence,
@@ -605,6 +647,7 @@ mod tests {
         events: Arc<Mutex<Vec<&'static str>>>,
         jobs: Mutex<Vec<QueueJob>>,
         fail: bool,
+        receipt: RetryPublishReceipt,
     }
 
     impl FakeRetryPublisher {
@@ -613,19 +656,37 @@ mod tests {
                 events,
                 jobs: Mutex::new(Vec::new()),
                 fail,
+                receipt: RetryPublishReceipt::Inserted {
+                    id: "fake-retry-id".to_owned(),
+                },
+            }
+        }
+
+        fn with_receipt(
+            events: Arc<Mutex<Vec<&'static str>>>,
+            receipt: RetryPublishReceipt,
+        ) -> Self {
+            Self {
+                events,
+                jobs: Mutex::new(Vec::new()),
+                fail: false,
+                receipt,
             }
         }
     }
 
     impl RetryPublisher for FakeRetryPublisher {
-        fn publish_retry<'a>(&'a self, job: &'a QueueJob) -> BoxFuture<'a, Result<(), BoxError>> {
+        fn publish_retry<'a>(
+            &'a self,
+            job: &'a QueueJob,
+        ) -> BoxFuture<'a, Result<RetryPublishReceipt, BoxError>> {
             Box::pin(async move {
                 self.events.lock().expect("events mutex").push("publish");
                 self.jobs.lock().expect("jobs mutex").push(job.clone());
                 if self.fail {
                     Err(Box::new(RetryFixtureError) as BoxError)
                 } else {
-                    Ok(())
+                    Ok(self.receipt.clone())
                 }
             })
         }
@@ -671,7 +732,7 @@ mod tests {
             fail: false,
         };
 
-        persist_writer_plan_with(&plan, &publisher, &persister)
+        let receipt = persist_writer_plan_with(&plan, &publisher, &persister)
             .await
             .expect("partial failure publishes then persists");
 
@@ -679,6 +740,13 @@ mod tests {
             events.lock().expect("events mutex").as_slice(),
             ["publish", "persist"]
         );
+        assert_eq!(
+            receipt.retry,
+            Some(RetryPublishReceipt::Inserted {
+                id: "fake-retry-id".to_owned()
+            })
+        );
+        assert!(receipt.persisted);
         let jobs = publisher.jobs.lock().expect("jobs mutex");
         assert_eq!(jobs.len(), 1);
         let job = &jobs[0];
@@ -699,6 +767,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             [HASH_B, HASH_C]
         );
+    }
+
+    #[tokio::test]
+    async fn active_fingerprint_receipt_proceeds_to_persistence_and_is_exposed() {
+        let plan = partial_failure_plan();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::with_receipt(
+            Arc::clone(&events),
+            RetryPublishReceipt::ExistingActiveFingerprint,
+        );
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        let receipt = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect("active retry fingerprint is Go-compatible success");
+
+        assert_eq!(
+            events.lock().expect("events mutex").as_slice(),
+            ["publish", "persist"]
+        );
+        assert_eq!(
+            receipt.retry,
+            Some(RetryPublishReceipt::ExistingActiveFingerprint)
+        );
+        assert!(receipt.persisted);
     }
 
     #[test]
@@ -788,13 +884,73 @@ mod tests {
 
         assert!(matches!(
             error,
-            PersistWriterPlanError::Persist(PersistError::Database(sqlx::Error::PoolClosed))
+            PersistWriterPlanError::Persist {
+                retry: Some(RetryPublishReceipt::Inserted { ref id }),
+                source: PersistError::Database(sqlx::Error::PoolClosed),
+            } if id == "fake-retry-id"
         ));
         assert_eq!(
             events.lock().expect("events mutex").as_slice(),
             ["publish", "persist"]
         );
         assert_eq!(publisher.jobs.lock().expect("jobs mutex").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_retains_active_fingerprint_receipt() {
+        let plan = partial_failure_plan();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::with_receipt(
+            Arc::clone(&events),
+            RetryPublishReceipt::ExistingActiveFingerprint,
+        );
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: true,
+        };
+
+        let error = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect_err("late persistence failure retains conflict receipt");
+
+        assert!(matches!(
+            error,
+            PersistWriterPlanError::Persist {
+                retry: Some(RetryPublishReceipt::ExistingActiveFingerprint),
+                source: PersistError::Database(sqlx::Error::PoolClosed),
+            }
+        ));
+        assert_eq!(
+            events.lock().expect("events mutex").as_slice(),
+            ["publish", "persist"]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_success_persists_without_publishing_retry() {
+        let params = supported_params();
+        let plan = plan(
+            &params,
+            WriteSet {
+                torrent_contents: vec![row(HASH_A)],
+                ..WriteSet::default()
+            },
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeRetryPublisher::new(Arc::clone(&events), false);
+        let persister = FakePersister {
+            events: Arc::clone(&events),
+            fail: false,
+        };
+
+        let receipt = persist_writer_plan_with(&plan, &publisher, &persister)
+            .await
+            .expect("all-success plan persists without retry");
+
+        assert_eq!(receipt.retry, None);
+        assert!(receipt.persisted);
+        assert_eq!(events.lock().expect("events mutex").as_slice(), ["persist"]);
+        assert!(publisher.jobs.lock().expect("jobs mutex").is_empty());
     }
 
     #[tokio::test]
@@ -844,10 +1000,12 @@ mod tests {
             fail: false,
         };
 
-        persist_writer_plan_with(&plan, &publisher, &persister)
+        let receipt = persist_writer_plan_with(&plan, &publisher, &persister)
             .await
             .expect("Go acknowledges deletion-only batches before persist");
 
+        assert_eq!(receipt.retry, None);
+        assert!(!receipt.persisted);
         assert!(events.lock().expect("events mutex").is_empty());
         assert!(publisher.jobs.lock().expect("jobs mutex").is_empty());
     }

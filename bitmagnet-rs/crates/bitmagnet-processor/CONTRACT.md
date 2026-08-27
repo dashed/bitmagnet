@@ -98,7 +98,11 @@ constructing the same fingerprint for a batch with loaded classifier failures.
 
 The coordinator requires a `RetryPublisher` to durably insert that job, accepting
 an active-fingerprint conflict as Go's `ON CONFLICT DO NOTHING`, before it invokes
-the existing blocker/transaction kernel. Publish failure prevents any blocker or
+the existing blocker/transaction kernel. `QueueStore` now implements that boundary
+with a one-statement auto-commit insert and returns a typed receipt distinguishing
+the new row ID from an active-fingerprint conflict. The coordinator exposes that
+receipt on success and carries it on any later persistence error instead of
+discarding evidence of the durable side effect. Publish failure prevents any blocker or
 live-table mutation; a later persistence failure deliberately does not retract the
 already-durable retry. When every classification failed it returns an error without
 publishing or persisting so the source queue job owns ordinary retry handling. It
@@ -107,21 +111,20 @@ also freezes Go's second early return: a plan with no classified
 kernel, even if it contains delete signals. The kernel's independently callable
 deletion-only correctness improvement described above remains unchanged.
 
-Two fidelity gaps remain explicit. `AllFailed` retains only the failed-hash count,
+One fidelity gap remains explicit. `AllFailed` retains only the failed-hash count,
 not Go's joined missing/classifier error sources, so a production handler cannot
-yet reproduce Go's exact returned error chain. `RetryPublisher` returns only
-success or failure and therefore provides no inserted-versus-active-conflict
-receipt; both successful outcomes intentionally proceed to persistence, but a
-future concrete publisher must add a receipt before claiming that observability.
+yet reproduce Go's exact returned error chain.
 
 Focused fake-based tests freeze exact retry JSON/fingerprint bytes, missing-hash
 order and multiplicity independent of the canonical comparison set, publish-
 before-persist ordering, publish-failure short-circuiting, retry survival after a
 late persistence error, all-failed handling, the deletion-only early return, and
 the public seam's publish-failure short circuit before both the blocker and a
-closed database pool. No queue-store publisher, consumer, application wiring,
-migration, Tantivy dual-write, or new PostgreSQL mutation was added by this
-checkpoint.
+closed database pool. No consumer, application wiring, migration, Tantivy
+dual-write, or live PostgreSQL mutation was added by this checkpoint. Direct
+`QueueStore` publication still requires table `INSERT` and therefore remains a
+source/test seam; production activation requires a fixed least-privilege enqueue
+capability.
 
 This is not yet the complete runtime persistence milestone:
 
