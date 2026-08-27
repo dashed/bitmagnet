@@ -29,6 +29,7 @@ on:
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
       - "testdata/parity/graphql-torrent-tags/**"
+      - "testdata/parity/graphql-metrics/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
@@ -53,6 +54,7 @@ on:
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
       - "testdata/parity/graphql-torrent-tags/**"
+      - "testdata/parity/graphql-metrics/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
@@ -661,7 +663,7 @@ jobs:
       BITMAGNET_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_QUEUE_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_PROCESSOR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
-      BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet?sslmode=disable
+      BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_writer_gate?sslmode=disable
       BITMAGNET_GRAPHQL_TEST_DATABASE_URL: postgres://bitmagnet_graphql_reader_ci:graphql-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_METRICS_TEST_DATABASE_URL: postgres://bitmagnet_graphql_metrics_reader_ci:graphql-metrics-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_FULL_READER_TEST_DATABASE_URL: postgres://bitmagnet_graphql_full_reader_ci:graphql-full-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
@@ -677,6 +679,10 @@ jobs:
         run: |
           go install github.com/pressly/goose/v3/cmd/goose@v3.24.1
           "$(go env GOPATH)/bin/goose" -dir migrations postgres "$BITMAGNET_POSTGRES_DSN" up
+          psql -X "$POSTGRES_DSN" -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE bitmagnet_writer_gate'
+          "$(go env GOPATH)/bin/goose" -dir migrations postgres \
+            "$BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL" up
       - uses: dtolnay/rust-toolchain@stable
       - uses: arduino/setup-protoc@v3
         with:
