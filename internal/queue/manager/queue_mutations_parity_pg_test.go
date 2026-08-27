@@ -245,14 +245,16 @@ func readQueueMutationRows(t *testing.T, db interface {
 	result := make([]queueMutationRow, 0)
 	for rows.Next() {
 		var row queueMutationRow
+		var payload string
 		require.NoError(t, rows.Scan(
 			&row.Fingerprint,
 			&row.Queue,
 			&row.Status,
-			&row.Payload,
+			&payload,
 			&row.MaxRetries,
 			&row.Priority,
 		))
+		row.Payload = json.RawMessage(payload)
 		result = append(result, row)
 	}
 	require.NoError(t, rows.Err())
