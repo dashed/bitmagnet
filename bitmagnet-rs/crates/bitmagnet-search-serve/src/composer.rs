@@ -498,7 +498,7 @@ impl Composer {
         ids: &[InfoHash],
         deadline: Instant,
     ) -> Result<Vec<SearchResultItem>, RefineCap> {
-        let request = request.for_candidates(
+        let request = request.for_hydration_candidates(
             ids,
             HydrateOptions {
                 files_data: true,

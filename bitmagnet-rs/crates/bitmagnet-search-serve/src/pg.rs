@@ -100,6 +100,23 @@ impl SearchRequest {
         request.hydrate = hydrate;
         request
     }
+
+    /// Shape one hydration-only L3 candidate chunk.
+    ///
+    /// Facet filters still constrain membership, but their aggregate work is
+    /// disabled because the composer re-aggregates only the exact refined IDs.
+    #[must_use]
+    pub fn for_hydration_candidates(
+        &self,
+        ids: &[bitmagnet_model::InfoHash],
+        hydrate: HydrateOptions,
+    ) -> Self {
+        let mut request = self.for_candidates(ids, hydrate);
+        for facet in &mut request.options.facets {
+            facet.aggregate = false;
+        }
+        request
+    }
 }
 
 /// PostgreSQL option sets built by the GraphQL layer for composer refine paths.
@@ -491,7 +508,7 @@ mod tests {
         );
         assert_eq!(shaped.options.query, None);
         assert_eq!(shaped.options.order, vec![order]);
-        assert_eq!(shaped.options.facets, vec![facet]);
+        assert_eq!(shaped.options.facets, vec![facet.clone()]);
         assert_eq!(shaped.options.limit, None);
         assert_eq!(shaped.options.offset, 0);
         assert!(!shaped.options.total_count);
@@ -501,6 +518,21 @@ mod tests {
 
         assert_eq!(original.options.query.as_deref(), Some("inception"));
         assert_eq!(original.options.limit, Some(25));
+
+        let hydration = original.for_hydration_candidates(
+            &[info_hash(1)],
+            HydrateOptions {
+                files_data: true,
+                max_files_data_bytes: None,
+            },
+        );
+        assert_eq!(
+            hydration.options.facets,
+            vec![bitmagnet_search_query::FacetRequest {
+                aggregate: false,
+                ..facet
+            }]
+        );
     }
 
     #[test]

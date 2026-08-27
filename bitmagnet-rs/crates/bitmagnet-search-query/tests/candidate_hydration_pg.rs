@@ -29,25 +29,42 @@ fn candidate_hydration_matches_established_path() {
         let pool = PgPool::connect(&dsn)
             .await
             .expect("connect to disposable Bitmagnet PostgreSQL");
-        let raw_hashes = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT info_hash FROM torrent_contents ORDER BY id LIMIT 20",
+        const ORDER_PROBE: &str = "__candidate_hydration_order_probe__";
+        sqlx::query("DELETE FROM torrent_contents WHERE release_group = $1")
+            .bind(ORDER_PROBE)
+            .execute(&pool)
+            .await
+            .expect("remove a stale candidate-order probe");
+        let raw_hash = sqlx::query_scalar::<_, Vec<u8>>(
+            "INSERT INTO torrent_contents (\
+                 info_hash, content_type, content_source, content_id, languages, episodes, \
+                 video_resolution, video_source, video_codec, video_3d, video_modifier, \
+                 release_group, created_at, updated_at, tsv, seeders, leechers, published_at, \
+                 size, files_count) \
+             SELECT info_hash, 'audiobook', NULL, NULL, languages, '{}'::jsonb, \
+                    NULL, NULL, NULL, NULL, NULL, $1, created_at, updated_at, tsv, seeders, \
+                    leechers, published_at, size, files_count \
+             FROM torrent_contents original \
+             WHERE NOT EXISTS (\
+                 SELECT 1 FROM torrent_contents sibling \
+                 WHERE sibling.info_hash = original.info_hash \
+                   AND sibling.content_type = 'audiobook'\
+             ) \
+             ORDER BY original.id \
+             LIMIT 1 \
+             RETURNING info_hash",
         )
-        .fetch_all(&pool)
+        .bind(ORDER_PROBE)
+        .fetch_one(&pool)
         .await
-        .expect("load candidate hashes");
-        assert!(
-            !raw_hashes.is_empty(),
-            "candidate fixture database is empty"
-        );
-        let hashes = raw_hashes
-            .iter()
-            .map(|raw| InfoHash::from_slice(raw).expect("valid candidate info hash"))
-            .collect::<Vec<_>>();
+        .expect("insert same-info-hash candidate-order probe");
+        let hash = InfoHash::from_slice(&raw_hash).expect("valid candidate info hash");
         let options = SearchOptions::new()
             .with_limit(None)
-            .with_filter(Criteria::torrent_content_info_hash_in(hashes));
+            .with_filter(Criteria::torrent_content_info_hash_in([hash]));
         let config = SearchBuildConfig::default();
 
+        let mut results = Vec::new();
         for hydrate in [
             HydrateOptions {
                 files_data: true,
@@ -58,19 +75,26 @@ fn candidate_hydration_matches_established_path() {
                 max_files_data_bytes: Some(0),
             },
         ] {
-            let mut established = search(&pool, &options, &config, hydrate)
+            let established = search(&pool, &options, &config, hydrate)
                 .await
                 .expect("execute established hydration path");
-            let mut candidate = search_candidates(&pool, &options, &config, hydrate)
+            let candidate = search_candidates(&pool, &options, &config, hydrate)
                 .await
                 .expect("execute optimized candidate hydration path");
+            results.push((established, candidate));
+        }
 
-            established
-                .items
-                .sort_by(|left, right| left.torrent_content.id.cmp(&right.torrent_content.id));
-            candidate
-                .items
-                .sort_by(|left, right| left.torrent_content.id.cmp(&right.torrent_content.id));
+        sqlx::query("DELETE FROM torrent_contents WHERE release_group = $1")
+            .bind(ORDER_PROBE)
+            .execute(&pool)
+            .await
+            .expect("remove candidate-order probe");
+
+        for (established, candidate) in results {
+            assert!(
+                established.items.len() >= 2,
+                "order fixture must include two content rows for one info hash"
+            );
             assert_eq!(candidate.items, established.items);
             assert_eq!(candidate.total_count, 0);
             assert!(!candidate.total_count_is_estimate);

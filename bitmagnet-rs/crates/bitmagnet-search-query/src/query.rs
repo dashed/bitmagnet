@@ -916,8 +916,14 @@ fn candidate_hydration_sql(
         ""
     };
     Ok(format!(
-        "WITH membership AS MATERIALIZED (\n{membership_sql}\n)\n\
-SELECT membership.id AS id,\n       membership.info_hash AS info_hash,\n       membership.size AS size,\n       membership.content_type AS content_type,\n       membership.published_at AS published_at,\n       membership.files_count AS files_count,\n       membership.video_resolution AS video_resolution,\n       membership.video_3d AS video_3d,\n       membership.video_codec AS video_codec,\n       membership.release_group AS release_group,\n       membership.episodes AS episodes{rank_projection}{hydration_tail}{}{CANDIDATE_ASSOCIATION_PROJECTIONS}{CANDIDATE_HYDRATION_FROM}",
+        "WITH ordered_membership AS MATERIALIZED (\n{membership_sql}\n),\n\
+membership AS MATERIALIZED (\n\
+    SELECT ordered_membership.*,\n\
+           row_number() OVER () AS _membership_ordinal\n\
+    FROM ordered_membership\n\
+)\n\
+SELECT membership.id AS id,\n       membership.info_hash AS info_hash,\n       membership.size AS size,\n       membership.content_type AS content_type,\n       membership.published_at AS published_at,\n       membership.files_count AS files_count,\n       membership.video_resolution AS video_resolution,\n       membership.video_3d AS video_3d,\n       membership.video_codec AS video_codec,\n       membership.release_group AS release_group,\n       membership.episodes AS episodes{rank_projection}{hydration_tail}{}{CANDIDATE_ASSOCIATION_PROJECTIONS}{CANDIDATE_HYDRATION_FROM}\n\
+ORDER BY membership._membership_ordinal",
         files_data_projection(options),
     ))
 }
@@ -2096,7 +2102,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(sql.starts_with("WITH membership AS MATERIALIZED (\nSELECT"));
+        assert!(sql.starts_with("WITH ordered_membership AS MATERIALIZED (\nSELECT"));
+        assert!(sql.contains("row_number() OVER () AS _membership_ordinal"));
+        assert!(sql.ends_with("ORDER BY membership._membership_ordinal"));
         assert!(sql.contains("WHERE torrent_contents.info_hash = $1"));
         assert!(sql.contains("INNER JOIN torrent_contents ON torrent_contents.id = membership.id"));
         assert!(sql.contains("octet_length(torrents.files_data) <= 67108864"));
