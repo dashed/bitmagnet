@@ -114,10 +114,11 @@ impl QueueQuery {
 
     async fn metrics(
         &self,
+        ctx: &Context<'_>,
         input: QueueMetricsQueryInput,
     ) -> async_graphql::Result<QueueMetricsQueryResult> {
-        let _ = &input;
-        unserved("queue.metrics")
+        let runtime = ctx.data::<super::metrics::MetricsRuntimeData>()?;
+        super::metrics::resolve_queue(runtime, input).await
     }
 }
 
@@ -162,10 +163,11 @@ impl TorrentQuery {
 
     async fn metrics(
         &self,
+        ctx: &Context<'_>,
         input: TorrentMetricsQueryInput,
     ) -> async_graphql::Result<TorrentMetricsQueryResult> {
-        let _ = &input;
-        unserved("torrent.metrics")
+        let runtime = ctx.data::<super::metrics::MetricsRuntimeData>()?;
+        super::metrics::resolve_torrent(runtime, input).await
     }
 
     async fn suggest_tags(

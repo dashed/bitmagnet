@@ -22,6 +22,10 @@ pub use schema::{
     Schema,
 };
 pub use schema::{
+    MetricsBucket, MetricsError, MetricsRuntime, MetricsRuntimeData, PgMetricsRuntime,
+    QueueMetricsRecord, QueueMetricsRequest, TorrentMetricsRecord, TorrentMetricsRequest,
+};
+pub use schema::{
     PgQueueJobsRuntime, QueueJobRecord, QueueJobsAggRecord, QueueJobsError, QueueJobsFacetRequest,
     QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
     QueueJobsRuntimeData, MAX_QUEUE_JOBS_FILTER_VALUES, MAX_QUEUE_JOBS_LIMIT,

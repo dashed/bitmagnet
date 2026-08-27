@@ -3,6 +3,7 @@ pub mod file_search_client;
 mod inputs;
 pub mod lane_c;
 pub mod lane_s;
+pub mod metrics;
 pub(crate) mod objects;
 pub mod queue_jobs;
 mod roots;
@@ -18,6 +19,10 @@ use async_graphql::EmptySubscription;
 
 use crate::health::{HealthRuntime, RuntimeConfig};
 
+pub use metrics::{
+    MetricsBucket, MetricsError, MetricsRuntime, MetricsRuntimeData, PgMetricsRuntime,
+    QueueMetricsRecord, QueueMetricsRequest, TorrentMetricsRecord, TorrentMetricsRequest,
+};
 pub use queue_jobs::{
     PgQueueJobsRuntime, QueueJobRecord, QueueJobsAggRecord, QueueJobsError, QueueJobsFacetRequest,
     QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
@@ -50,6 +55,7 @@ pub type Schema = async_graphql::Schema<Query, Mutation, EmptySubscription>;
 pub fn schema() -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(SearchRuntimeData::disabled())
+        .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
@@ -63,6 +69,7 @@ pub fn build_schema(version: String) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::disabled())
+        .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
@@ -76,6 +83,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
         .data(SearchRuntimeData::new(search))
+        .data(MetricsRuntimeData::disabled())
         .data(QueueJobsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
@@ -95,6 +103,7 @@ pub fn build_runtime_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::disabled())
+        .data(MetricsRuntimeData::pg(pool.clone()))
         .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
@@ -115,6 +124,7 @@ pub fn build_runtime_search_schema(
         .data(Version(version))
         .data(HealthRuntime::new(pool.clone(), config))
         .data(SearchRuntimeData::new(search))
+        .data(MetricsRuntimeData::pg(pool.clone()))
         .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
