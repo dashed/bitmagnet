@@ -62,6 +62,15 @@
       "runAfter": "2099-06-01T00:39:00Z",
       "ranAt": "2099-06-01T00:40:00Z",
       "createdAt": "2099-06-01T00:40:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-other-go-float",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-other-go-float",
+      "queue": "graphql_metrics_other",
+      "status": "processed",
+      "runAfter": "2099-06-01T00:41:48.500267Z",
+      "ranAt": "2099-06-01T00:42:00Z",
+      "createdAt": "2099-06-01T00:42:00Z"
     }
   ],
   "sources": [

@@ -191,6 +191,11 @@ func graphqlMetricsOracleCases() []graphqlMetricsOracleCase {
 			Input:   json.RawMessage(`{"bucketDuration":"day","queues":["graphql_metrics_oracle"],"statuses":["processed"]}`),
 		},
 		{
+			ID:      "queue-go-duration-rounding-minute",
+			Surface: "queue",
+			Input:   json.RawMessage(`{"bucketDuration":"minute","queues":["graphql_metrics_other"],"statuses":["processed"]}`),
+		},
+		{
 			ID:      "queue-start-only-legacy-precedence",
 			Surface: "queue",
 			Input:   json.RawMessage(`{"bucketDuration":"hour","queues":["graphql_metrics_oracle"],"startTime":"2099-06-01T01:00:00Z"}`),
