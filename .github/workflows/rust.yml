@@ -28,6 +28,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
+      - "testdata/parity/graphql-queue-mutations/**"
       - "testdata/parity/graphql-torrent-tag-mutations/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/graphql-metrics/**"
@@ -54,6 +55,7 @@ on:
       - "testdata/parity/classifier-attach/**"
       - "testdata/parity/classifier-tape-rerun/**"
       - "testdata/parity/graphql-torrent-files/**"
+      - "testdata/parity/graphql-queue-mutations/**"
       - "testdata/parity/graphql-torrent-tag-mutations/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/graphql-metrics/**"
@@ -674,6 +676,8 @@ jobs:
       BITMAGNET_GRAPHQL_TEST_DATABASE_URL: postgres://bitmagnet_graphql_reader_ci:graphql-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_MUTATION_TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_graphql_mutation_test?sslmode=disable
       BITMAGNET_GRAPHQL_MUTATION_TEST_DATABASE_URL: postgres://bitmagnet_graphql_tag_writer_ci:graphql-tag-writer-ci-only@localhost:5432/bitmagnet_graphql_mutation_test?sslmode=disable
+      BITMAGNET_GRAPHQL_QUEUE_MUTATION_TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_graphql_queue_mutation_test?sslmode=disable
+      BITMAGNET_GRAPHQL_QUEUE_MUTATION_TEST_DATABASE_URL: postgres://bitmagnet_graphql_queue_writer_ci:graphql-queue-writer-ci-only@localhost:5432/bitmagnet_graphql_queue_mutation_test?sslmode=disable
       BITMAGNET_GRAPHQL_METRICS_TEST_DATABASE_URL: postgres://bitmagnet_graphql_metrics_reader_ci:graphql-metrics-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_FULL_READER_TEST_DATABASE_URL: postgres://bitmagnet_graphql_full_reader_ci:graphql-full-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_TORZNAB_TEST_DATABASE_URL: postgres://bitmagnet_torznab_reader_ci:torznab-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
@@ -692,7 +696,8 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -c 'CREATE DATABASE bitmagnet_writer_gate' \
             -c 'CREATE DATABASE bitmagnet_processor_writer_load_test' \
-            -c 'CREATE DATABASE bitmagnet_graphql_mutation_test'
+            -c 'CREATE DATABASE bitmagnet_graphql_mutation_test' \
+            -c 'CREATE DATABASE bitmagnet_graphql_queue_mutation_test'
           "$(go env GOPATH)/bin/goose" -dir migrations postgres \
             "$BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL" up
           "$(go env GOPATH)/bin/goose" -dir migrations postgres \
@@ -770,6 +775,31 @@ jobs:
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \
             -p bitmagnet-graphql --test torrent_tag_mutations_pg -- \
             --ignored --exact real_pg_torrent_tag_mutations_match_go_with_isolated_writer \
+            --test-threads=1
+      - name: Run GraphQL queue mutation differential
+        working-directory: ${{ github.workspace }}
+        run: |
+          go test -tags integration -count=1 ./internal/queue/manager \
+            -run '^TestQueueMutationParityCorpus$'
+          psql -X "$BITMAGNET_GRAPHQL_QUEUE_MUTATION_TEST_ADMIN_DATABASE_URL" \
+            -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          CREATE ROLE bitmagnet_graphql_queue_writer_ci
+            LOGIN PASSWORD 'graphql-queue-writer-ci-only'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
+            CONNECTION LIMIT 2;
+          GRANT CONNECT ON DATABASE bitmagnet_graphql_queue_mutation_test
+            TO bitmagnet_graphql_queue_writer_ci;
+          GRANT USAGE ON SCHEMA public TO bitmagnet_graphql_queue_writer_ci;
+          GRANT SELECT ON goose_db_version TO bitmagnet_graphql_queue_writer_ci;
+          GRANT INSERT, DELETE, TRUNCATE ON queue_jobs
+            TO bitmagnet_graphql_queue_writer_ci;
+          GRANT SELECT (queue, status) ON queue_jobs
+            TO bitmagnet_graphql_queue_writer_ci;
+          SQL
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-graphql --test queue_mutations_pg -- \
+            --ignored --exact real_pg_queue_mutations_match_go_with_isolated_writer \
             --test-threads=1
       - name: Run full GraphQL reader authority gate
         working-directory: ${{ github.workspace }}

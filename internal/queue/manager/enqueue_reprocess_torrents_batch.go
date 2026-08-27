@@ -12,7 +12,7 @@ import (
 )
 
 func (m manager) EnqueueReprocessTorrentsBatch(ctx context.Context, req EnqueueReprocessTorrentsBatchRequest) error {
-	job, err := newReprocessTorrentsBatchJob(req, time.Now())
+	job, err := newReprocessTorrentsBatchJob(req, m.currentTime())
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,8 @@
 package manager
 
 import (
+	"time"
+
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"go.uber.org/fx"
@@ -32,6 +34,7 @@ func New(params Params) Result {
 			return manager{
 				dao: d,
 				db:  db,
+				now: time.Now,
 			}, nil
 		}),
 	}
