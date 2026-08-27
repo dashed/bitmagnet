@@ -404,7 +404,7 @@ pub async fn admit_torrent_delete_writer_authority(
          FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
          WHERE n.nspname = 'pg_catalog' AND p.prokind = 'f' \
-           AND (p.proname LIKE 'lo\\_%' ESCAPE '\\' OR p.proname IN ('loread', 'lowrite')) \
+           AND (p.proname LIKE 'lo!_%' ESCAPE '!' OR p.proname IN ('loread', 'lowrite')) \
            AND has_function_privilege(current_user, p.oid, 'EXECUTE') \
          ORDER BY p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)",
     )

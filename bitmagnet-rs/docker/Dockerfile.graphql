@@ -61,7 +61,8 @@ LABEL org.opencontainers.image.source="https://github.com/dashed/bitmagnet" \
       io.bitmagnet.graphql-mode="read-default" \
       io.bitmagnet.graphql-read-contract="read-only/v1" \
       io.bitmagnet.graphql-mutation-contract="torrent-tags/opt-in-writer/v1" \
-      io.bitmagnet.graphql-queue-mutation-contract="queue-admin/opt-in-writer/v1"
+      io.bitmagnet.graphql-queue-mutation-contract="queue-admin/opt-in-writer/v1" \
+      io.bitmagnet.graphql-torrent-delete-mutation-contract="torrent-delete/opt-in-blocking-writer/v1"
 
 # SQLx and the federated-health HTTP client use rustls; only CA roots are
 # needed. No compiler, shell tooling, or database migration binary is shipped.
