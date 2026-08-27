@@ -8,12 +8,187 @@ use bitmagnet_search_query::{
     fetch_aggregations, fetch_aggregations_grouped_for_candidates, Criteria, FacetRequest,
     SearchOptions, TorrentContentFacet,
 };
-use bitmagnet_search_serve::{PgSearch, PgSearchBackend, SearchBuildConfig};
+use bitmagnet_search_serve::{PathsearchMetrics, PgSearch, PgSearchBackend, SearchBuildConfig};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 fn info_hash(byte: u8) -> InfoHash {
     InfoHash::new([byte; bitmagnet_model::INFO_HASH_LEN])
+}
+
+fn refine_candidate_count(state: &str) -> u64 {
+    let prefix = format!(
+        "bitmagnet_search_pathsearch_refine_metadata_candidates_total{{state=\"{state}\"}} "
+    );
+    bitmagnet_common::metrics::gather_text()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(&prefix)
+                .map(|value| value.parse::<u64>().expect("integer counter sample"))
+        })
+        .unwrap_or_else(|| panic!("missing refine candidate state {state:?}"))
+}
+
+fn assert_refine_candidate_counts(expected: [u64; 7]) {
+    for (state, count) in [
+        "requested",
+        "summary_row",
+        "covered",
+        "missing_summary",
+        "null_bytes",
+        "schema_without_bytes",
+        "fallback_miss",
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        assert_eq!(refine_candidate_count(state), count, "state={state}");
+    }
+}
+
+/// The emitted low-cardinality counters count unique hashes, preserve an exact
+/// miss partition on both schema generations, and advance before a failed
+/// torrents fallback. The three adapters use separate one-connection pools so
+/// each session can shadow production tables with the required temp schema;
+/// one shared collector makes the asserted values deliberately cumulative.
+#[tokio::test]
+async fn refine_metadata_candidate_metrics_are_conservative_across_schemas_and_failure() {
+    let Ok(dsn) = std::env::var("BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BITMAGNET_SEARCH_SERVE_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let metrics = Arc::new(PathsearchMetrics::register());
+
+    // Goose 26: duplicate inputs count once. Of three unique candidates, one
+    // is covered, one has NULL bytes, and one lacks a summary row.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect goose26 metrics pool");
+    sqlx::query(
+        "CREATE TEMP TABLE torrent_file_summary (\
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL, compressed_bytes bigint NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create goose26 summary table");
+    sqlx::query(
+        "CREATE TEMP TABLE torrents (\
+         info_hash bytea PRIMARY KEY, files_count integer NULL, files_data bytea NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create goose26 torrents table");
+    let covered = info_hash(31);
+    let null_bytes = info_hash(32);
+    let missing = info_hash(33);
+    sqlx::query(
+        "INSERT INTO torrent_file_summary (info_hash, file_count, compressed_bytes) VALUES \
+         ($1, 31, 310), ($2, 32, NULL)",
+    )
+    .bind(covered.as_slice())
+    .bind(null_bytes.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert goose26 summaries");
+    sqlx::query(
+        "INSERT INTO torrents (info_hash, files_count, files_data) VALUES \
+         ($1, 32, decode('0102', 'hex')), ($2, 33, decode('010203', 'hex'))",
+    )
+    .bind(null_bytes.as_slice())
+    .bind(missing.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert goose26 fallback rows");
+    PgSearch::new(pool, SearchBuildConfig::default())
+        .with_metrics(metrics.clone())
+        .refine_metadata(&[covered, null_bytes, covered, missing, null_bytes])
+        .await
+        .expect("read duplicate-bearing goose26 metadata");
+    assert_refine_candidate_counts([3, 2, 1, 1, 1, 0, 2]);
+
+    // Pre-00026: one summary row is explicitly classified as schema-without-
+    // bytes, while the other unique candidate is a missing summary.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect pre-00026 metrics pool");
+    sqlx::query(
+        "CREATE TEMP TABLE torrent_file_summary (\
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create pre-00026 summary table");
+    sqlx::query(
+        "CREATE TEMP TABLE torrents (\
+         info_hash bytea PRIMARY KEY, files_count integer NULL, files_data bytea NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create pre-00026 torrents table");
+    let summary = info_hash(34);
+    let absent = info_hash(35);
+    sqlx::query("INSERT INTO torrent_file_summary (info_hash, file_count) VALUES ($1, 34)")
+        .bind(summary.as_slice())
+        .execute(&pool)
+        .await
+        .expect("insert pre-00026 summary");
+    sqlx::query(
+        "INSERT INTO torrents (info_hash, files_count, files_data) VALUES \
+         ($1, 99, decode('01', 'hex')), ($2, 35, decode('0102', 'hex'))",
+    )
+    .bind(summary.as_slice())
+    .bind(absent.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert pre-00026 fallback rows");
+    PgSearch::new(pool, SearchBuildConfig::default())
+        .with_metrics(metrics.clone())
+        .refine_metadata(&[summary, absent, summary])
+        .await
+        .expect("read duplicate-bearing pre-00026 metadata");
+    assert_refine_candidate_counts([5, 3, 1, 2, 1, 1, 4]);
+
+    // A deliberately incompatible temp relation shadows the disposable DB's
+    // seeded public table. Classification has completed, so the attempted
+    // fallback candidate must remain observable even though its SQL query
+    // fails while binding the absent files_count/files_data columns.
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&dsn)
+        .await
+        .expect("connect failed-fallback metrics pool");
+    sqlx::query(
+        "CREATE TEMP TABLE torrent_file_summary (\
+         info_hash bytea PRIMARY KEY, file_count integer NOT NULL, compressed_bytes bigint NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("create failed-fallback summary table");
+    sqlx::query("CREATE TEMP TABLE torrents (info_hash bytea PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .expect("create incompatible failed-fallback torrents table");
+    let failed = info_hash(36);
+    sqlx::query(
+        "INSERT INTO torrent_file_summary (info_hash, file_count, compressed_bytes) \
+         VALUES ($1, 36, NULL)",
+    )
+    .bind(failed.as_slice())
+    .execute(&pool)
+    .await
+    .expect("insert failed-fallback summary");
+    let error = PgSearch::new(pool, SearchBuildConfig::default())
+        .with_metrics(metrics)
+        .refine_metadata(&[failed, failed])
+        .await
+        .expect_err("incompatible torrents relation must fail fallback");
+    assert!(error.to_string().contains("files_count"));
+    assert_refine_candidate_counts([6, 4, 1, 2, 2, 1, 5]);
 }
 
 #[tokio::test]

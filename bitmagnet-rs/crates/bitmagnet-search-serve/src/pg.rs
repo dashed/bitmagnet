@@ -377,6 +377,13 @@ impl PgSearchBackend for PgSearch {
             .copied()
             .filter(|id| !covered.contains(id))
             .collect();
+        debug_assert_eq!(
+            misses.len(),
+            missing_summary_count
+                .saturating_add(null_bytes_count)
+                .saturating_add(schema_without_bytes_count),
+            "refine metadata fallback states must partition unique misses"
+        );
         if let Some(metrics) = &self.metrics {
             for (state, count) in [
                 (RefineMetadataCandidateState::Requested, ids.len()),
