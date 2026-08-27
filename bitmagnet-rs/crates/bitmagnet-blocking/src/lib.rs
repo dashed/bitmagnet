@@ -29,6 +29,16 @@ use tokio::sync::Mutex;
 
 mod pg;
 
+/// Validate one persisted Go-production `blocked_torrents` stable Bloom filter.
+///
+/// This uses the exact production geometry and rejects truncated or trailing
+/// bytes, allowing a serving process to fail startup before accepting deletes.
+pub fn validate_go_blocked_torrents_filter(
+    bytes: &[u8],
+) -> Result<(), bitmagnet_bloom::StableBloomCodecError> {
+    pg::validate_go_blocked_torrents_filter(bytes)
+}
+
 /// Go production's maximum buffered unique hash count.
 const DEFAULT_MAX_BUFFER_SIZE: NonZeroUsize = NonZeroUsize::new(1_000).unwrap();
 /// Go production's maximum delay between successful persistent flushes.

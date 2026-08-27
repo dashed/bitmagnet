@@ -39,8 +39,9 @@ pub use queue_mutations::{
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
 pub use torrent_delete_mutations::{
-    PgTorrentDeleteMutationsRuntime, TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime,
-    TorrentDeleteMutationsRuntimeData, TorrentDeleteRequest, MAX_TORRENT_DELETE_INFO_HASHES,
+    admit_torrent_delete_writer_authority, PgTorrentDeleteMutationsRuntime,
+    TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime, TorrentDeleteMutationsRuntimeData,
+    TorrentDeleteRequest, TorrentDeleteWriterAdmission, MAX_TORRENT_DELETE_INFO_HASHES,
 };
 pub use torrent_files::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,

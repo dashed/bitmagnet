@@ -25,15 +25,15 @@ const ENCODED_BYTES: usize = 25_000_091;
 const BOUNDED_READ_BYTES: usize = ENCODED_BYTES + 1;
 
 const BEGIN_TRANSACTION_SQL: &str = "BEGIN READ WRITE";
-const DELETE_TORRENTS_SQL: &str = "DELETE FROM torrents WHERE info_hash = ANY($1::bytea[])";
-const SELECT_FILTER_OID_SQL: &str = "SELECT oid FROM bloom_filters WHERE key = $1::text";
-const READ_LARGE_OBJECT_SQL: &str = "SELECT lo_get($1::oid, 0::bigint, $2::integer)";
-const CREATE_LARGE_OBJECT_SQL: &str = "SELECT lo_create(0::oid)";
-const WRITE_LARGE_OBJECT_SQL: &str = "SELECT lo_put($1::oid, 0::bigint, $2::bytea)";
-const INSERT_FILTER_SQL: &str = "INSERT INTO bloom_filters \
+const DELETE_TORRENTS_SQL: &str = "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])";
+const SELECT_FILTER_OID_SQL: &str = "SELECT oid FROM public.bloom_filters WHERE key = $1::text";
+const READ_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_get($1::oid, 0::bigint, $2::integer)";
+const CREATE_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_create(0::oid)";
+const WRITE_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_put($1::oid, 0::bigint, $2::bytea)";
+const INSERT_FILTER_SQL: &str = "INSERT INTO public.bloom_filters \
     (key, oid, created_at, updated_at) \
     VALUES ($1::text, $2::oid, $3::timestamptz, $3::timestamptz)";
-const UPDATE_NULL_FILTER_SQL: &str = "UPDATE bloom_filters \
+const UPDATE_NULL_FILTER_SQL: &str = "UPDATE public.bloom_filters \
     SET oid = $1::oid, updated_at = $2::timestamptz \
     WHERE key = $3::text";
 
@@ -207,6 +207,12 @@ fn production_geometry() -> StableBloomGeometry {
     geometry
 }
 
+pub(super) fn validate_go_blocked_torrents_filter(
+    bytes: &[u8],
+) -> Result<(), StableBloomCodecError> {
+    StableBloomFilter::from_bytes(bytes, production_geometry()).map(|_| ())
+}
+
 fn classify_metadata_state(oid_row: Option<Option<Oid>>) -> MetadataState {
     match oid_row {
         None => MetadataState::Missing,
@@ -258,20 +264,23 @@ mod tests {
         assert_eq!(BEGIN_TRANSACTION_SQL, "BEGIN READ WRITE");
         assert_eq!(
             DELETE_TORRENTS_SQL,
-            "DELETE FROM torrents WHERE info_hash = ANY($1::bytea[])"
+            "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])"
         );
         assert_eq!(
             SELECT_FILTER_OID_SQL,
-            "SELECT oid FROM bloom_filters WHERE key = $1::text"
+            "SELECT oid FROM public.bloom_filters WHERE key = $1::text"
         );
         assert_eq!(
             READ_LARGE_OBJECT_SQL,
-            "SELECT lo_get($1::oid, 0::bigint, $2::integer)"
+            "SELECT pg_catalog.lo_get($1::oid, 0::bigint, $2::integer)"
         );
-        assert_eq!(CREATE_LARGE_OBJECT_SQL, "SELECT lo_create(0::oid)");
+        assert_eq!(
+            CREATE_LARGE_OBJECT_SQL,
+            "SELECT pg_catalog.lo_create(0::oid)"
+        );
         assert_eq!(
             WRITE_LARGE_OBJECT_SQL,
-            "SELECT lo_put($1::oid, 0::bigint, $2::bytea)"
+            "SELECT pg_catalog.lo_put($1::oid, 0::bigint, $2::bytea)"
         );
         assert!(INSERT_FILTER_SQL.contains("$3::timestamptz, $3::timestamptz"));
         assert!(UPDATE_NULL_FILTER_SQL.contains("SET oid = $1::oid"));

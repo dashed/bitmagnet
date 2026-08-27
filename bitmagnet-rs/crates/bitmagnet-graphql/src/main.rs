@@ -63,6 +63,9 @@ struct Args {
 
     #[command(flatten)]
     queue_mutations: QueueMutationArgs,
+
+    #[command(flatten)]
+    torrent_delete_mutations: TorrentDeleteMutationArgs,
 }
 
 /// Explicitly gated writer configuration for the torrent-tag mutation family.
@@ -115,6 +118,32 @@ struct QueueMutationArgs {
         value_parser = parse_positive_u32
     )]
     queue_mutation_postgres_max_connections: u32,
+}
+
+/// Explicitly gated writer configuration for `torrent.delete`.
+#[derive(Debug, ClapArgs)]
+struct TorrentDeleteMutationArgs {
+    /// Enable the served torrent-delete runtime.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATIONS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    torrent_delete_mutations_enabled: bool,
+
+    /// Separate PostgreSQL delete-writer DSN, required exactly when enabled.
+    #[arg(long, env = "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_DSN")]
+    torrent_delete_mutation_postgres_dsn: Option<SecretDsn>,
+
+    /// One connection for the process-lived, serialized blocking manager.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        default_value_t = 1,
+        value_parser = parse_positive_u32
+    )]
+    torrent_delete_mutation_postgres_max_connections: u32,
 }
 
 #[derive(Clone)]
@@ -612,6 +641,12 @@ async fn main() -> anyhow::Result<()> {
     let queue_mutations =
         build_queue_mutations_runtime(&args.queue_mutations, args.expected_goose_version, &pool)
             .await?;
+    let torrent_delete_mutations = build_torrent_delete_mutations_runtime(
+        &args.torrent_delete_mutations,
+        args.expected_goose_version,
+        &pool,
+    )
+    .await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Register both C6 metric families exactly once, even while the serving
@@ -632,7 +667,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&search_runtime.runtime),
         tag_mutations,
         queue_mutations,
-        bitmagnet_graphql::TorrentDeleteMutationsRuntimeData::disabled(),
+        torrent_delete_mutations,
     );
     let state = AppState {
         schema,
@@ -722,6 +757,47 @@ async fn build_queue_mutations_runtime(
         "queue mutations enabled with a separate writer pool"
     );
     Ok(bitmagnet_graphql::QueueMutationsRuntimeData::pg(pool))
+}
+
+async fn build_torrent_delete_mutations_runtime(
+    args: &TorrentDeleteMutationArgs,
+    expected_goose_version: i64,
+    read_pool: &PgPool,
+) -> anyhow::Result<bitmagnet_graphql::TorrentDeleteMutationsRuntimeData> {
+    let Some(config) = torrent_delete_mutation_db_config(args)? else {
+        return Ok(bitmagnet_graphql::TorrentDeleteMutationsRuntimeData::disabled());
+    };
+    let pool = bitmagnet_db::connect(&config)
+        .await
+        .context("connect the separately authenticated GraphQL torrent-delete writer")?;
+    let goose_head = bitmagnet_graphql::admit_pg(&pool, expected_goose_version)
+        .await
+        .context("admit the GraphQL torrent-delete writer against the expected Goose head")?;
+    let read_identity = postgres_identity(read_pool)
+        .await
+        .context("read the GraphQL reader PostgreSQL identity")?;
+    let writer_identity = postgres_identity(&pool)
+        .await
+        .context("read the GraphQL torrent-delete writer PostgreSQL identity")?;
+    anyhow::ensure!(
+        writer_identity.0 == read_identity.0 && writer_identity.1 == read_identity.1,
+        "GraphQL reader and torrent-delete writer must target the same PostgreSQL system and database"
+    );
+    anyhow::ensure!(
+        writer_identity.2 != read_identity.2,
+        "GraphQL reader and torrent-delete writer must use different PostgreSQL roles"
+    );
+    let admission = bitmagnet_graphql::admit_torrent_delete_writer_authority(&pool)
+        .await
+        .context("admit exact GraphQL torrent-delete writer authority")?;
+    info!(
+        goose_version = goose_head.version,
+        blocked_torrents_oid = admission.blocked_torrents_oid,
+        "torrent-delete mutations enabled with a separate single-connection writer pool"
+    );
+    Ok(bitmagnet_graphql::TorrentDeleteMutationsRuntimeData::pg(
+        pool,
+    ))
 }
 
 async fn postgres_identity(pool: &PgPool) -> anyhow::Result<(String, String, String)> {
@@ -881,6 +957,32 @@ fn queue_mutation_db_config(
         (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
             dsn: dsn.expose().to_owned(),
             max_connections: args.queue_mutation_postgres_max_connections,
+            ..bitmagnet_db::DbConfig::default()
+        })),
+    }
+}
+
+fn torrent_delete_mutation_db_config(
+    args: &TorrentDeleteMutationArgs,
+) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
+    anyhow::ensure!(
+        args.torrent_delete_mutation_postgres_max_connections == 1,
+        "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_MAX_CONNECTIONS must be exactly 1"
+    );
+    match (
+        args.torrent_delete_mutations_enabled,
+        args.torrent_delete_mutation_postgres_dsn.as_ref(),
+    ) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_DSN is forbidden while torrent-delete mutations are disabled"
+        ),
+        (true, None) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_DSN is required while torrent-delete mutations are enabled"
+        ),
+        (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
+            dsn: dsn.expose().to_owned(),
+            max_connections: args.torrent_delete_mutation_postgres_max_connections,
             ..bitmagnet_db::DbConfig::default()
         })),
     }
@@ -1067,12 +1169,12 @@ mod tests {
 
     use super::{
         app, build_search_runtime, mutation_db_config, parse_go_duration, queue_mutation_db_config,
-        AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
+        torrent_delete_mutation_db_config, AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 42] = [
+    const ARGS_ENV_KEYS: [&str; 45] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
         "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
@@ -1081,6 +1183,9 @@ mod tests {
         "BITMAGNET_GRAPHQL_QUEUE_MUTATIONS_ENABLED",
         "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_DSN",
         "BITMAGNET_GRAPHQL_QUEUE_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATIONS_ENABLED",
+        "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_DSN",
+        "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_MAX_CONNECTIONS",
         "HEALTH_PEER_GRAPHQL_URLS",
         "HEALTH_PEER_TIMEOUT",
         "SEARCH_FILE_SEARCH_ENABLED",
@@ -1202,6 +1307,21 @@ mod tests {
                 .queue_mutations
                 .queue_mutation_postgres_max_connections,
             2
+        );
+        assert!(
+            !defaults
+                .torrent_delete_mutations
+                .torrent_delete_mutations_enabled
+        );
+        assert!(defaults
+            .torrent_delete_mutations
+            .torrent_delete_mutation_postgres_dsn
+            .is_none());
+        assert_eq!(
+            defaults
+                .torrent_delete_mutations
+                .torrent_delete_mutation_postgres_max_connections,
+            1
         );
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
@@ -1354,6 +1474,58 @@ mod tests {
             config.dsn,
             "postgres://queue-writer:secret@localhost/bitmagnet"
         );
+    }
+
+    #[test]
+    fn torrent_delete_writer_requires_a_single_connection_double_gate() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            default_args()
+        };
+        assert!(
+            torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
+                .expect("disabled config")
+                .is_none()
+        );
+
+        args.torrent_delete_mutations
+            .torrent_delete_mutations_enabled = true;
+        let missing = torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
+            .expect_err("enabled torrent-delete writer requires a DSN");
+        assert!(missing.to_string().contains("is required"));
+
+        args.torrent_delete_mutations
+            .torrent_delete_mutations_enabled = false;
+        args.torrent_delete_mutations
+            .torrent_delete_mutation_postgres_dsn = Some(
+            "postgres://delete-writer:secret@localhost/bitmagnet"
+                .parse()
+                .expect("test DSN"),
+        );
+        let debug = format!("{:?}", args.torrent_delete_mutations);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("delete-writer:secret"));
+        let forbidden = torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
+            .expect_err("disabled torrent-delete writer forbids a DSN");
+        assert!(forbidden.to_string().contains("is forbidden"));
+
+        args.torrent_delete_mutations
+            .torrent_delete_mutations_enabled = true;
+        let config = torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
+            .expect("enabled config")
+            .expect("torrent-delete writer config");
+        assert_eq!(config.max_connections, 1);
+        assert_eq!(
+            config.dsn,
+            "postgres://delete-writer:secret@localhost/bitmagnet"
+        );
+
+        args.torrent_delete_mutations
+            .torrent_delete_mutation_postgres_max_connections = 2;
+        let error = torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
+            .expect_err("torrent-delete writer pool must stay single-connection");
+        assert!(error.to_string().contains("must be exactly 1"));
     }
 
     #[test]

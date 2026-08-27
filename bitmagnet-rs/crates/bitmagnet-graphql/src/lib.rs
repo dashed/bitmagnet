@@ -18,6 +18,11 @@ pub use schema::lane_c::LaneCSearchRuntime;
 pub use schema::lane_s::{LaneSSearchBackend, SqlxLaneSSearchBackend};
 pub use schema::runtime::{hydrate_l2_file_rows, PgL2SearchRuntime};
 pub use schema::{
+    admit_torrent_delete_writer_authority, PgTorrentDeleteMutationsRuntime,
+    TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime, TorrentDeleteMutationsRuntimeData,
+    TorrentDeleteRequest, TorrentDeleteWriterAdmission, MAX_TORRENT_DELETE_INFO_HASHES,
+};
+pub use schema::{
     build_runtime_schema, build_runtime_search_schema, build_runtime_search_schema_with_mutations,
     build_runtime_search_schema_with_tag_mutations, build_schema, build_search_schema, schema,
     Mutation, Query, Schema,
@@ -40,10 +45,6 @@ pub use schema::{
     QueueJobsOrder, QueueJobsOrderField, QueueJobsRecord, QueueJobsRequest, QueueJobsRuntime,
     QueueJobsRuntimeData, MAX_QUEUE_JOBS_FILTER_VALUES, MAX_QUEUE_JOBS_LIMIT,
     MAX_QUEUE_JOBS_OFFSET, MAX_QUEUE_NAME_CHARS,
-};
-pub use schema::{
-    PgTorrentDeleteMutationsRuntime, TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime,
-    TorrentDeleteMutationsRuntimeData, TorrentDeleteRequest, MAX_TORRENT_DELETE_INFO_HASHES,
 };
 pub use schema::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
