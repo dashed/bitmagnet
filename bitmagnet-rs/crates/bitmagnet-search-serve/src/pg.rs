@@ -292,11 +292,15 @@ impl PgSearchBackend for PgSearch {
         &self,
         ids: &[bitmagnet_model::InfoHash],
     ) -> crate::Result<HashMap<bitmagnet_model::InfoHash, RefineMetadata>> {
+        // Candidate composition can preserve duplicate hashes until its final
+        // page de-duplication. Metadata is keyed by hash, so probe and account
+        // for each candidate exactly once while preserving first-seen order.
+        let ids = unique_info_hashes(ids);
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
 
-        let requested = bytea_values(ids);
+        let requested = bytea_values(&ids);
         // Summary-first: once the 00026 backfill lands, torrent_file_summary
         // carries both the authoritative file_count AND compressed_bytes, so a
         // fully covered candidate set is answered by this one index probe — the
@@ -357,11 +361,17 @@ impl PgSearchBackend for PgSearch {
             );
         }
 
-        // Miss set = candidates with no summary row OR a NULL compressed_bytes
-        // (the backfill window / blob-less torrents). Empty => skip the torrents
-        // probe entirely, so RefineMetadataTorrents records zero observations on
-        // a fully covered route (documented in CONTRACT.md — no count==1 assert).
+        // Miss set = unique candidates with no summary row, a NULL
+        // compressed_bytes, OR a summary row from a schema where that column
+        // does not yet exist. Empty => skip the torrents probe entirely, so
+        // RefineMetadataTorrents records zero observations on a fully covered
+        // route (documented in CONTRACT.md — no count==1 assert).
         let missing_summary_count = ids.iter().filter(|id| !summary_ids.contains(id)).count();
+        let schema_without_bytes_count = if has_compressed_bytes {
+            0
+        } else {
+            summary_row_count
+        };
         let misses: Vec<bitmagnet_model::InfoHash> = ids
             .iter()
             .copied()
@@ -377,6 +387,10 @@ impl PgSearchBackend for PgSearch {
                     missing_summary_count,
                 ),
                 (RefineMetadataCandidateState::NullBytes, null_bytes_count),
+                (
+                    RefineMetadataCandidateState::SchemaWithoutBytes,
+                    schema_without_bytes_count,
+                ),
                 (RefineMetadataCandidateState::FallbackMiss, misses.len()),
             ] {
                 metrics.add_refine_metadata_candidates(state, count);
@@ -446,6 +460,14 @@ fn bytea_values(ids: &[bitmagnet_model::InfoHash]) -> Vec<Vec<u8>> {
     ids.iter().map(|id| id.as_slice().to_vec()).collect()
 }
 
+fn unique_info_hashes(ids: &[bitmagnet_model::InfoHash]) -> Vec<bitmagnet_model::InfoHash> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter()
+        .copied()
+        .filter(|info_hash| seen.insert(*info_hash))
+        .collect()
+}
+
 /// Read the `compressed_bytes::bigint` column, mapping SQL NULL to `None` and a
 /// (never-expected) negative length to a hard error rather than a silent wrap.
 fn try_get_compressed_bytes(
@@ -480,6 +502,18 @@ mod tests {
 
     fn info_hash(byte: u8) -> bitmagnet_model::InfoHash {
         bitmagnet_model::InfoHash::new([byte; bitmagnet_model::INFO_HASH_LEN])
+    }
+
+    #[test]
+    fn metadata_candidates_are_unique_in_first_seen_order() {
+        let first = info_hash(1);
+        let second = info_hash(2);
+        let third = info_hash(3);
+
+        assert_eq!(
+            unique_info_hashes(&[first, second, first, third, second]),
+            vec![first, second, third]
+        );
     }
 
     #[test]

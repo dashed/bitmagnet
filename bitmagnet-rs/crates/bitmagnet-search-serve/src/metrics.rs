@@ -71,7 +71,11 @@ impl PathsearchPhase {
 ///
 /// These are aggregate counters, never request or torrent identifiers. Their
 /// deltas expose whether a slow fallback was caused by absent summary rows or
-/// NULL denormalized byte counts without adding high-cardinality labels.
+/// NULL denormalized byte counts without adding high-cardinality labels. Every
+/// state counts unique candidates, and the fallback partition is exact:
+/// `fallback_miss = missing_summary + null_bytes + schema_without_bytes`.
+/// `fallback_miss` counts candidates routed to the fallback probe, even if that
+/// subsequent PostgreSQL query fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefineMetadataCandidateState {
     Requested,
@@ -79,16 +83,18 @@ pub(crate) enum RefineMetadataCandidateState {
     Covered,
     MissingSummary,
     NullBytes,
+    SchemaWithoutBytes,
     FallbackMiss,
 }
 
 impl RefineMetadataCandidateState {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Requested,
         Self::SummaryRow,
         Self::Covered,
         Self::MissingSummary,
         Self::NullBytes,
+        Self::SchemaWithoutBytes,
         Self::FallbackMiss,
     ];
 
@@ -99,6 +105,7 @@ impl RefineMetadataCandidateState {
             Self::Covered => "covered",
             Self::MissingSummary => "missing_summary",
             Self::NullBytes => "null_bytes",
+            Self::SchemaWithoutBytes => "schema_without_bytes",
             Self::FallbackMiss => "fallback_miss",
         }
     }
@@ -674,6 +681,23 @@ mod tests {
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(labels.len(), total, "phase labels must stay unique");
+    }
+
+    #[test]
+    fn refine_metadata_candidate_states_form_a_fixed_unique_vocabulary() {
+        assert_eq!(
+            RefineMetadataCandidateState::SchemaWithoutBytes.label(),
+            "schema_without_bytes"
+        );
+
+        let mut labels = RefineMetadataCandidateState::ALL
+            .iter()
+            .map(|state| state.label())
+            .collect::<Vec<_>>();
+        assert_eq!(labels.len(), 7);
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 7, "candidate-state labels must stay unique");
     }
 
     #[test]
