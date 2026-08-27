@@ -145,6 +145,11 @@ func NewMetrics() *Metrics {
 			m.totalCountMatch.WithLabelValues(matched, estimate)
 		}
 	}
+	for _, facet := range FacetKeys {
+		for _, matched := range []string{"true", "false"} {
+			m.facetMatch.WithLabelValues(facet, matched)
+		}
+	}
 
 	return m
 }

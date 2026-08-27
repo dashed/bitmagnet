@@ -55,10 +55,11 @@ func TestMetricsRegisterAndGather(t *testing.T) {
 		t.Errorf("saturated_total = %v, want 1", got)
 	}
 
-	// Only the one observed facet enters the per-facet denominator. A partial
-	// comparison emits no all-facets denominator sample.
-	if got := testutil.CollectAndCount(m.facetMatch); got != 1 {
-		t.Errorf("facet_match series count = %d, want 1", got)
+	// Only the one observed facet increments the per-facet denominator. All 18
+	// finite facet/matched label pairs exist at zero from process start so the
+	// first success or failure survives Prometheus increase().
+	if got := testutil.CollectAndCount(m.facetMatch); got != 2*len(FacetKeys) {
+		t.Errorf("facet_match series count = %d, want %d", got, 2*len(FacetKeys))
 	}
 
 	if got := testutil.CollectAndCount(m.allFacetsMatch); got != 0 {
@@ -82,8 +83,8 @@ func TestMetricsEmitAllFacetsOnlyForCompleteUnion(t *testing.T) {
 
 	m.observe(CompareGraphQL(complete, complete, time.Millisecond, time.Millisecond))
 
-	if got := testutil.CollectAndCount(m.facetMatch); got != len(FacetKeys) {
-		t.Errorf("facet_match series count = %d, want %d", got, len(FacetKeys))
+	if got := testutil.CollectAndCount(m.facetMatch); got != 2*len(FacetKeys) {
+		t.Errorf("facet_match series count = %d, want %d", got, 2*len(FacetKeys))
 	}
 
 	if got := testutil.ToFloat64(m.allFacetsMatch.WithLabelValues("true")); got != 1 {
@@ -172,6 +173,13 @@ func TestMetricsInitializeGateLabelSetsAtZero(t *testing.T) {
 	if got := testutil.CollectAndCount(m.totalCountMatch); got != 4 {
 		t.Fatalf("total_count_match initialized series = %d, want 4", got)
 	}
+	if got := testutil.CollectAndCount(m.facetMatch); got != 2*len(FacetKeys) {
+		t.Fatalf(
+			"facet_match initialized series = %d, want %d",
+			got,
+			2*len(FacetKeys),
+		)
+	}
 
 	for _, matched := range []string{"true", "false"} {
 		if got := testutil.ToFloat64(m.top1Match.WithLabelValues(matched)); got != 0 {
@@ -182,6 +190,33 @@ func TestMetricsInitializeGateLabelSetsAtZero(t *testing.T) {
 				t.Errorf("total_count_match{matched=%s,estimate=%s} = %v, want 0", matched, estimate, got)
 			}
 		}
+		for _, facet := range FacetKeys {
+			if got := testutil.ToFloat64(m.facetMatch.WithLabelValues(facet, matched)); got != 0 {
+				t.Errorf("facet_match{facet=%s,matched=%s} = %v, want 0", facet, matched, got)
+			}
+		}
+	}
+}
+
+func TestMetricsCountFirstFacetFailure(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	rust := GraphQLResult{
+		Facets:         map[string]FacetCounts{"content_type": {"movie": 1}},
+		ObservedFacets: map[string]bool{"content_type": true},
+	}
+	ref := GraphQLResult{
+		Facets:         map[string]FacetCounts{"content_type": {"movie": 2}},
+		ObservedFacets: map[string]bool{"content_type": true},
+	}
+	m.observe(CompareGraphQL(rust, ref, time.Millisecond, time.Millisecond))
+
+	if got := testutil.ToFloat64(m.facetMatch.WithLabelValues("content_type", "false")); got != 1 {
+		t.Errorf("first content_type facet failure = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.facetMatch.WithLabelValues("content_type", "true")); got != 0 {
+		t.Errorf("content_type facet success after first failure = %v, want 0", got)
 	}
 }
 
