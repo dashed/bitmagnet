@@ -12,6 +12,7 @@ pub mod runtime;
 pub(crate) mod scalars;
 pub mod search;
 mod search_resolvers;
+pub mod torrent_delete_mutations;
 pub mod torrent_files;
 pub mod torrent_sources;
 pub mod torrent_tag_mutations;
@@ -37,6 +38,10 @@ pub use queue_mutations::{
 };
 pub use roots::{Mutation, Query};
 pub use search::{SearchRuntime, SearchRuntimeData};
+pub use torrent_delete_mutations::{
+    PgTorrentDeleteMutationsRuntime, TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime,
+    TorrentDeleteMutationsRuntimeData, TorrentDeleteRequest, MAX_TORRENT_DELETE_INFO_HASHES,
+};
 pub use torrent_files::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
@@ -70,6 +75,7 @@ pub fn schema() -> Schema {
         .data(QueueJobsRuntimeData::disabled())
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentDeleteMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -86,6 +92,7 @@ pub fn build_schema(version: String) -> Schema {
         .data(QueueJobsRuntimeData::disabled())
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentDeleteMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -102,6 +109,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
         .data(QueueJobsRuntimeData::disabled())
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
+        .data(TorrentDeleteMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -124,6 +132,7 @@ pub fn build_runtime_schema(
         .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
+        .data(TorrentDeleteMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::pg(pool))
@@ -167,6 +176,7 @@ pub fn build_runtime_search_schema_with_tag_mutations(
         search,
         tag_mutations,
         QueueMutationsRuntimeData::disabled(),
+        TorrentDeleteMutationsRuntimeData::disabled(),
     )
 }
 
@@ -182,6 +192,7 @@ pub fn build_runtime_search_schema_with_mutations(
     search: std::sync::Arc<dyn SearchRuntime>,
     tag_mutations: TorrentTagMutationsRuntimeData,
     queue_mutations: QueueMutationsRuntimeData,
+    torrent_delete_mutations: TorrentDeleteMutationsRuntimeData,
 ) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
@@ -191,6 +202,7 @@ pub fn build_runtime_search_schema_with_mutations(
         .data(QueueJobsRuntimeData::pg(pool.clone()))
         .data(queue_mutations)
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
+        .data(torrent_delete_mutations)
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(tag_mutations)
         .data(TorrentTagsRuntimeData::pg(pool))
@@ -240,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mutations_remain_declared_but_are_explicitly_unserved() {
+    async fn unconfigured_delete_mutation_is_declared_but_fails_loudly() {
         let response = build_schema("test".into())
             .execute(
                 r#"mutation {
@@ -254,7 +266,7 @@ mod tests {
         assert_eq!(response.errors.len(), 1);
         assert!(response.errors[0]
             .message
-            .contains("declared for SDL parity but is not served"));
+            .contains("torrent delete mutations are disabled"));
     }
 
     #[tokio::test]

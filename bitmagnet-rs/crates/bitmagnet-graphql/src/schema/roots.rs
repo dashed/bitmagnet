@@ -191,9 +191,15 @@ pub(crate) struct TorrentMutation;
 
 #[Object]
 impl TorrentMutation {
-    async fn delete(&self, info_hashes: Vec<Hash20>) -> async_graphql::Result<Option<Void>> {
-        let _ = &info_hashes;
-        unserved("torrent mutation")
+    async fn delete(
+        &self,
+        ctx: &Context<'_>,
+        info_hashes: Vec<Hash20>,
+    ) -> async_graphql::Result<Option<Void>> {
+        let runtime =
+            ctx.data::<super::torrent_delete_mutations::TorrentDeleteMutationsRuntimeData>()?;
+        super::torrent_delete_mutations::resolve(runtime, info_hashes).await?;
+        Ok(None)
     }
 
     async fn delete_tags(

@@ -42,6 +42,10 @@ pub use schema::{
     MAX_QUEUE_JOBS_OFFSET, MAX_QUEUE_NAME_CHARS,
 };
 pub use schema::{
+    PgTorrentDeleteMutationsRuntime, TorrentDeleteMutationsError, TorrentDeleteMutationsRuntime,
+    TorrentDeleteMutationsRuntimeData, TorrentDeleteRequest, MAX_TORRENT_DELETE_INFO_HASHES,
+};
+pub use schema::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };

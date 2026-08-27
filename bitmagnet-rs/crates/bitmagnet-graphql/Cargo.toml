@@ -9,6 +9,7 @@ name = "bitmagnet-graphql"
 path = "src/main.rs"
 
 [dependencies]
+bitmagnet-blocking = { path = "../bitmagnet-blocking" }
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-model = { path = "../bitmagnet-model" }

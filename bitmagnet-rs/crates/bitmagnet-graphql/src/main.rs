@@ -632,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&search_runtime.runtime),
         tag_mutations,
         queue_mutations,
+        bitmagnet_graphql::TorrentDeleteMutationsRuntimeData::disabled(),
     );
     let state = AppState {
         schema,

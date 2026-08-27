@@ -1042,6 +1042,7 @@ dependencies = [
  "async-graphql-parser",
  "async-trait",
  "axum",
+ "bitmagnet-blocking",
  "bitmagnet-common",
  "bitmagnet-db",
  "bitmagnet-model",
