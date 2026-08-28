@@ -83,8 +83,9 @@ pub fn project_unattached_persistence(
 ///
 /// An unattached row requires `None`; an attached row requires `Some` and both
 /// foreign-key components. Keeping the base vector as an explicit input lets
-/// the flags-off production shadow retain its current read-only ACL while a
-/// later writer-only resolver supplies complete content and associations.
+/// the flags-off production shadow retain its current read-only ACL while the
+/// disconnected writer loader supplies complete existing content and
+/// associations without changing the classifier's null resolver.
 pub fn project_torrent_persistence(
     row: &TorrentContentWrite,
     classifier_input: &ClassifierInput,

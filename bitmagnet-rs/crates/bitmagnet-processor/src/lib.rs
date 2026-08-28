@@ -8,9 +8,11 @@
 //! transaction, while the production shadow path remains flags-off and reads
 //! stable and volatile-writer comparison images under the frozen restricted
 //! role.
-//! The durable supported-subset dark shadow runtime is included; attached
-//! writer-only content enrichment, post-commit Tantivy dual-write, and production-safe
-//! row-scoped queue privileges remain later milestones. Contract:
+//! The durable supported-subset dark shadow runtime is included. Disconnected
+//! writer planning can reuse a completely hydrated existing source-backed
+//! association, while the production shadow still rejects that input under its
+//! frozen ACL. Post-commit Tantivy dual-write and production-safe row-scoped
+//! queue privileges remain later milestones. Contract:
 //! `docs/dev/rust-rewrite/phase3-contracts.md` §5.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,22 +81,19 @@ pub struct LoadedTorrent {
     pub info_hash: String,
     pub classifier_input: ClassifierInput,
     pub existing_content_ids: Vec<String>,
-    /// Whether Go would apply a sourced/enriched explicit hint or reuse a
-    /// source-backed association before classification.
-    ///
-    /// The shadow runtime REFUSES such a job outright rather than comparing it.
-    ///
-    /// 🚧 T9 landed the reuse half: the loader now hydrates the associated
-    /// `content` rows and the classifier pre-attaches them exactly as
-    /// `runner.Run` does, so a torrent excluded only by the source-backed-reuse
-    /// clause could in principle now be compared. The flag is deliberately NOT
-    /// narrowed yet — admitting those torrents changes which rows the write-set
-    /// gate compares, which re-baselines it, so it needs a gate re-run as
-    /// evidence rather than an assumption. Bare type-only explicit hints are
-    /// supported; sourced or enriched hints remain excluded. A hinted content
-    /// ID reaches `attach_local_content_by_id`, which needs a live resolver the
-    /// shadow does not have.
+    /// Whether Go would apply a sourced or enriched explicit hint before
+    /// classification. Bare type-only explicit hints are supported; a hinted
+    /// content ID reaches `attach_local_content_by_id`, which needs a live
+    /// resolver the flags-off lane deliberately does not have.
     pub attach_hint_unsupported: bool,
+    /// Whether default-mode hint synthesis selected a reusable source-backed
+    /// `torrent_contents` association.
+    ///
+    /// This is separate from [`Self::attach_hint_unsupported`]: disconnected
+    /// writer planning can hydrate and admit the selected existing association,
+    /// while the production shadow runtime keeps its independent categorical
+    /// `SourceBackedContentPresent` rejection and frozen ACL.
+    pub source_backed_content_present: bool,
 }
 
 /// The stable, classification-derived projection of a `torrent_contents` row.
@@ -594,6 +593,7 @@ mod tests {
             },
             existing_content_ids: Vec::new(),
             attach_hint_unsupported: false,
+            source_backed_content_present: false,
         }
     }
 

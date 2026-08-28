@@ -69,11 +69,13 @@ fn writer_plan_composes_every_go_write_set_fixture_without_cloning_inputs() {
         let mut classifier = fixture.input.classifier;
         classifier.id.clone_from(&fixture.input.info_hash);
         let loaded = vec![WriterLoadedTorrent {
+            reusable_content_fully_hydrated: false,
             loaded: LoadedTorrent {
                 info_hash: fixture.input.info_hash,
                 classifier_input: classifier,
                 existing_content_ids: fixture.input.existing_content_ids,
                 attach_hint_unsupported: false,
+                source_backed_content_present: false,
             },
             torrent_snapshot: TorrentSnapshot {
                 created_at_micros: 1_700_000_000_123_456,

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use bitmagnet_processor::{
     load_writer_plan, load_writer_torrents, project_unattached_persistence, Materializer,
-    TorrentContentWrite, WriterLoadError, WriterLoadedTorrent,
+    TorrentContentWrite, WriterLoadError, WriterLoadedTorrent, WriterPlanError,
 };
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use serde_json::Value;
@@ -75,7 +75,7 @@ fn supported_params(info_hashes: Vec<ProtocolId>) -> ProcessTorrentParams {
 #[ignore = "requires BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
 async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
     let pool = connect_disposable_database().await;
-    sqlx::query("TRUNCATE torrent_tags, torrent_contents, torrents CASCADE")
+    sqlx::query("TRUNCATE torrent_tags, torrent_contents, torrents, content CASCADE")
         .execute(&pool)
         .await
         .expect("reset processor-owned fixture rows");
@@ -280,6 +280,109 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
         0,
         "writer planning must not persist torrent_tags"
     );
+
+    sqlx::query(
+        "INSERT INTO content \
+         (type, source, id, title, release_year, original_language, tsv, created_at, updated_at) \
+         VALUES ('movie', 'tmdb', '42', 'Reusable Movie', 1999, 'fr', \
+                 ''::tsvector, NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed reusable content root");
+    sqlx::query(
+        "INSERT INTO content_attributes \
+         (content_type, content_source, content_id, source, key, value, created_at, updated_at) \
+         VALUES ('movie', 'tmdb', '42', 'imdb', 'id', 'tt0042', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed reusable content attribute");
+    sqlx::query(
+        "INSERT INTO content_collections (type, source, id, name, created_at, updated_at) \
+         VALUES ('genre', 'tmdb', '7', 'Mystery', NOW(), NOW())",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed reusable content collection");
+    sqlx::query(
+        "INSERT INTO content_collections_content \
+         (content_type, content_source, content_id, content_collection_type, \
+          content_collection_source, content_collection_id) \
+         VALUES ('movie', 'tmdb', '42', 'genre', 'tmdb', '7')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed reusable content collection link");
+    sqlx::query(
+        "INSERT INTO torrent_contents \
+         (info_hash, content_type, content_source, content_id, languages, episodes, \
+          created_at, updated_at, tsv, published_at, size) \
+         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', '[]'::jsonb, '{}'::jsonb, \
+                 NOW(), NOW(), ''::tsvector, NOW(), 43)",
+    )
+    .bind(HASH_B)
+    .execute(&pool)
+    .await
+    .expect("seed reusable torrent association");
+
+    let reused = load_writer_torrents(&pool, &supported_params(vec![id_b]))
+        .await
+        .expect("hydrate reusable association for disconnected writer");
+    assert!(reused[0].loaded.source_backed_content_present);
+    assert!(!reused[0].loaded.attach_hint_unsupported);
+    assert!(reused[0].reusable_content_fully_hydrated);
+    let hydrated = reused[0].loaded.classifier_input.contents[0]
+        .content
+        .as_ref()
+        .expect("selected association has hydrated content");
+    assert_eq!(hydrated.attributes.len(), 1);
+    assert_eq!(hydrated.collections.len(), 1);
+
+    let reused_plan = load_writer_plan(&pool, &materializer, &supported_params(vec![id_b]))
+        .await
+        .expect("compose flags-off reused-content writer plan");
+    let reused_row = &reused_plan.write_set().torrent_contents[0];
+    assert_eq!(reused_row.content_source.as_deref(), Some("tmdb"));
+    assert_eq!(reused_row.content_id.as_deref(), Some("42"));
+    let reused_content = reused_plan
+        .content_persistence()
+        .values()
+        .next()
+        .expect("plan carries reused content TSV image");
+    assert!(
+        reused_content.upsert().is_none(),
+        "existing content is not upserted"
+    );
+    let base_tsv = reused_content.base_tsv().to_string();
+    for lexeme in ["reusable", "1999", "mystery", "tt0042"] {
+        assert!(
+            base_tsv.contains(lexeme),
+            "missing {lexeme} from {base_tsv}"
+        );
+    }
+
+    sqlx::query(
+        "INSERT INTO torrent_hints \
+         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', NOW(), NOW())",
+    )
+    .bind(HASH_B)
+    .execute(&pool)
+    .await
+    .expect("seed sourced explicit hint");
+    let sourced_hint_error = load_writer_plan(&pool, &materializer, &supported_params(vec![id_b]))
+        .await
+        .expect_err("sourced explicit hints remain outside disconnected writer scope");
+    assert!(matches!(
+        sourced_hint_error,
+        WriterPlanError::AttachHintUnsupported { ref info_hash } if info_hash == HASH_B
+    ));
+    sqlx::query("DELETE FROM torrent_hints WHERE info_hash=decode($1, 'hex')")
+        .bind(HASH_B)
+        .execute(&pool)
+        .await
+        .expect("remove sourced explicit hint fixture");
 
     sqlx::query(
         "UPDATE torrents_torrent_sources SET seeders = -1 \

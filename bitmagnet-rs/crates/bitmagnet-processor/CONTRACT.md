@@ -23,8 +23,9 @@ This milestone intentionally stops before DB behavior:
 - `LoadedTorrent.classifier_input` must already contain the effective hint from
   the read/hydration stage;
 - runtime classifier overrides currently accept the core bool flags only;
-- attached-content persistence is rejected because the current writer image
-  does not carry the base content TSV and association rows; and
+- at this historical checkpoint attached-content persistence was rejected; the
+  later persistence and disconnected-writer milestones now carry the base
+  content TSV and complete association rows; and
 - persistence, Tantivy dual-write, queue polling/mirroring, live-row diffing,
   and the SELECT-only role negative control require the Coder+PG milestone.
 
@@ -141,8 +142,9 @@ capability.
 
 This is not yet the complete runtime persistence milestone:
 
-- attached `content` remains rejected until the writer projection carries the
-  base content TSV and the persistence kernel owns its association rows;
+- the persistence kernel now accepts complete attached `content` images and
+  owns their additive attribute, collection, and link rows; the disconnected
+  writer admits reused rows only after bounded full hydration;
 - the plan still needs a persisting writer runtime and live-queue lifecycle after
   the remaining safety gates pass;
 - application composition still needs to share the manager across callers and
@@ -260,6 +262,16 @@ creating a torn or cross-run image. The returned causal result binds both
 evidence planes to the envelope's exact source job ID and `ran_at`. This is
 causal live-state evidence, not historical event replay: row deletion has no
 tombstone.
+
+That source-backed exclusion is production-runtime policy, not a remaining
+writer-planning limitation. The disconnected `load_writer_plan` path keeps all
+attach flags explicitly false and the `NullContentResolver`, but can reuse the
+single association selected by Go hint synthesis after its scalar content row,
+attributes, collection links, and linked collection rows are all hydrated under
+bounded sentinel scans in the same repeatable-read transaction. Sourced or
+enriched explicit hints remain categorically unsupported, and the production
+runtime's `SourceBackedContentPresent` rejection and shadow-role ACL are
+unchanged.
 
 The version-1 rollout can be staged with mirror sampling fixed at zero: the new
 consumer remains non-persisting and the only DB mutation is still scoped scratch

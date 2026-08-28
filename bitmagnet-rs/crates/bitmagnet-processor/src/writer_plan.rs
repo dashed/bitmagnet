@@ -381,9 +381,11 @@ pub async fn load_writer_plan(
 ///
 /// Hydrated classifier inputs are borrowed rather than cloned. This matters
 /// because the loader permits bounded but potentially large decompressed file
-/// lists. Complete attached content is carried in a separate persistence image;
-/// the current loader admission still requires all attachment flags off until a
-/// writer-only resolver and ACL are introduced. Direct callers must supply
+/// lists. Complete attached content is carried in a separate persistence image.
+/// The writer loader admits only the selected existing source-backed
+/// association after bounded association hydration; all attachment flags remain
+/// explicitly off and the classifier still uses its `NullContentResolver`.
+/// Direct callers must supply
 /// values already admitted by the bounded loader; this pure composer does not
 /// reconstruct compressed-size or source-scan evidence from in-memory values.
 pub fn compose_writer_plan(
@@ -532,6 +534,7 @@ fn index_loaded_torrents(
                 info_hash: torrent.loaded.info_hash.clone(),
             });
         }
+        validate_reusable_content_hydration(torrent)?;
         if torrent.loaded.info_hash != torrent.loaded.classifier_input.id {
             return Err(WriterPlanError::LoadedInfoHashMismatch {
                 loaded_info_hash: torrent.loaded.info_hash.clone(),
@@ -548,6 +551,65 @@ fn index_loaded_torrents(
         }
     }
     Ok(indexed)
+}
+
+fn validate_reusable_content_hydration(
+    torrent: &WriterLoadedTorrent,
+) -> Result<(), WriterPlanError> {
+    let info_hash = &torrent.loaded.info_hash;
+    if !torrent.loaded.source_backed_content_present {
+        return if torrent.reusable_content_fully_hydrated {
+            Err(WriterPlanError::UnexpectedReusableContentHydration {
+                info_hash: info_hash.clone(),
+            })
+        } else {
+            Ok(())
+        };
+    }
+    if !torrent.reusable_content_fully_hydrated {
+        return Err(WriterPlanError::ReusableContentNotFullyHydrated {
+            info_hash: info_hash.clone(),
+        });
+    }
+    let hint = torrent
+        .loaded
+        .classifier_input
+        .hint
+        .as_ref()
+        .filter(|hint| !hint.content_source.is_empty())
+        .ok_or_else(|| WriterPlanError::ReusableContentNotFullyHydrated {
+            info_hash: info_hash.clone(),
+        })?;
+    let content = torrent
+        .loaded
+        .classifier_input
+        .contents
+        .iter()
+        .find(|association| {
+            association.content_type == hint.content_type
+                && association.content_source == hint.content_source
+                && association.content_id == hint.content_id
+        })
+        .and_then(|association| association.content.as_ref())
+        .filter(|content| {
+            content.content_type.as_str() == hint.content_type
+                && content.source == hint.content_source
+                && content.id == hint.content_id
+                && content.created_at.is_some()
+        })
+        .ok_or_else(|| WriterPlanError::ReusableContentNotFullyHydrated {
+            info_hash: info_hash.clone(),
+        })?;
+    if content.attributes.iter().any(|attribute| {
+        attribute.content_type != content.content_type
+            || attribute.content_source != content.source
+            || attribute.content_id != content.id
+    }) {
+        return Err(WriterPlanError::ReusableContentNotFullyHydrated {
+            info_hash: info_hash.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn project_persistence(
@@ -615,6 +677,10 @@ pub enum WriterPlanError {
     AttachFlagsNotExplicitlyDisabled,
     #[error("writer plan cannot reproduce the complete Go hint/enrichment path for {info_hash}")]
     AttachHintUnsupported { info_hash: String },
+    #[error("writer plan reusable content is not fully hydrated for {info_hash}")]
+    ReusableContentNotFullyHydrated { info_hash: String },
+    #[error("writer plan has reusable-content hydration without reuse for {info_hash}")]
+    UnexpectedReusableContentHydration { info_hash: String },
     #[error(
         "loaded torrent key {loaded_info_hash} does not match classifier key {classifier_info_hash}"
     )]
@@ -670,6 +736,7 @@ mod tests {
 
     fn loaded(info_hash: &str) -> WriterLoadedTorrent {
         WriterLoadedTorrent {
+            reusable_content_fully_hydrated: false,
             loaded: LoadedTorrent {
                 info_hash: info_hash.to_owned(),
                 classifier_input: ClassifierInput {
@@ -685,6 +752,7 @@ mod tests {
                 },
                 existing_content_ids: Vec::new(),
                 attach_hint_unsupported: false,
+                source_backed_content_present: false,
             },
             torrent_snapshot: TorrentSnapshot {
                 created_at_micros: 1,
@@ -1298,6 +1366,22 @@ mod tests {
         assert!(matches!(
             index_loaded_torrents(&[unsupported]),
             Err(WriterPlanError::AttachHintUnsupported { info_hash })
+                if info_hash == HASH_A
+        ));
+
+        let mut incomplete_reuse = loaded(HASH_A);
+        incomplete_reuse.loaded.source_backed_content_present = true;
+        assert!(matches!(
+            index_loaded_torrents(&[incomplete_reuse]),
+            Err(WriterPlanError::ReusableContentNotFullyHydrated { info_hash })
+                if info_hash == HASH_A
+        ));
+
+        let mut stray_hydration = loaded(HASH_A);
+        stray_hydration.reusable_content_fully_hydrated = true;
+        assert!(matches!(
+            index_loaded_torrents(&[stray_hydration]),
+            Err(WriterPlanError::UnexpectedReusableContentHydration { info_hash })
                 if info_hash == HASH_A
         ));
     }

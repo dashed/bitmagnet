@@ -195,8 +195,7 @@ pub(crate) async fn load_torrents_in(
         let allow_content_reuse = params.classify_mode != CLASSIFY_MODE_REMATCH;
         let attach_hint_unsupported = explicit
             .as_ref()
-            .is_some_and(|hint| !hint.is_supported_type_only())
-            || (allow_content_reuse && existing.iter().any(CurrentContent::is_source_backed));
+            .is_some_and(|hint| !hint.is_supported_type_only());
         let files_status: String = row.try_get("files_status")?;
         let hint = effective_hint(
             explicit,
@@ -204,6 +203,14 @@ pub(crate) async fn load_torrents_in(
             allow_content_reuse,
             has_stored_file_list(&files_status),
         );
+        let source_backed_content_present = hint.as_ref().is_some_and(|hint| {
+            !hint.content_source.is_empty()
+                && existing.iter().any(|content| {
+                    content.content_type.as_deref() == Some(hint.content_type.as_str())
+                        && content.content_source.as_deref() == Some(hint.content_source.as_str())
+                        && content.content_id.as_deref().unwrap_or_default() == hint.content_id
+                })
+        });
         loaded.push(LoadedTorrent {
             info_hash: info_hash.clone(),
             classifier_input: ClassifierInput {
@@ -227,6 +234,7 @@ pub(crate) async fn load_torrents_in(
             },
             existing_content_ids: existing.iter().map(|content| content.id.clone()).collect(),
             attach_hint_unsupported,
+            source_backed_content_present,
         });
     }
     Ok(loaded)
@@ -349,10 +357,6 @@ impl CurrentContent {
             content_id: self.content_id.clone().unwrap_or_default(),
             content: self.key().and_then(|key| hydrated.get(&key)).cloned(),
         }
-    }
-
-    fn is_source_backed(&self) -> bool {
-        self.content_type.is_some() && self.content_source.is_some()
     }
 
     fn as_reusable_hint(&self) -> Option<InputHint> {
@@ -509,7 +513,6 @@ mod tests {
             content_source: Some(String::new()),
             content_id: None,
         };
-        assert!(empty_but_non_null.is_source_backed());
         assert_eq!(
             empty_but_non_null
                 .as_reusable_hint()

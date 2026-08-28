@@ -208,6 +208,7 @@ fn rerun_record(
                 classifier_input: input,
                 existing_content_ids: processor_state.existing_content_ids.clone(),
                 attach_hint_unsupported: false,
+                source_backed_content_present: false,
             },
             classification,
             outcome,
