@@ -75,10 +75,12 @@ fn supported_params(info_hashes: Vec<ProtocolId>) -> ProcessTorrentParams {
 #[ignore = "requires BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL pointing at disposable Goose-34 PostgreSQL"]
 async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
     let pool = connect_disposable_database().await;
-    sqlx::query("TRUNCATE torrent_tags, torrent_contents, torrents, content CASCADE")
-        .execute(&pool)
-        .await
-        .expect("reset processor-owned fixture rows");
+    sqlx::query(
+        "TRUNCATE torrent_tags, torrent_contents, torrents, content, content_collections CASCADE",
+    )
+    .execute(&pool)
+    .await
+    .expect("reset processor-owned fixture rows");
     sqlx::query(
         "INSERT INTO torrents \
          (info_hash, name, size, private, created_at, updated_at) \
