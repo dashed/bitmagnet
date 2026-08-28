@@ -1,0 +1,59 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Utility Suite 2024 v3.1 x64</title>
+      <guid>36bd99cc0dca4da6c2f93daa4a0a7a3575fbc300</guid>
+      <pubDate>Sat, 04 Jan 2020 00:00:00 +0000</pubDate>
+      <category>software</category>
+      <size>340000000</size>
+      <enclosure length="340000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:36bd99cc0dca4da6c2f93daa4a0a7a3575fbc300&amp;dn=Utility+Suite+2024+v3.1+x64&amp;xl=340000000"/>
+      <torznab:attr name="infohash" value="36bd99cc0dca4da6c2f93daa4a0a7a3575fbc300"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:36bd99cc0dca4da6c2f93daa4a0a7a3575fbc300&amp;dn=Utility+Suite+2024+v3.1+x64&amp;xl=340000000"/>
+      <torznab:attr name="category" value="4000"/>
+      <torznab:attr name="size" value="340000000"/>
+      <torznab:attr name="publishdate" value="Sat, 04 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="70"/>
+      <torznab:attr name="leechers" value="9"/>
+      <torznab:attr name="peers" value="79"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>Space Racer Deluxe-RELOADED</title>
+      <guid>da125a683bf60cfc8fc01733bdf6274f38224694</guid>
+      <pubDate>Fri, 03 Jan 2020 00:00:00 +0000</pubDate>
+      <category>game</category>
+      <size>5300000000</size>
+      <enclosure length="5300000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:da125a683bf60cfc8fc01733bdf6274f38224694&amp;dn=Space+Racer+Deluxe-RELOADED&amp;xl=5300000000"/>
+      <torznab:attr name="infohash" value="da125a683bf60cfc8fc01733bdf6274f38224694"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:da125a683bf60cfc8fc01733bdf6274f38224694&amp;dn=Space+Racer+Deluxe-RELOADED&amp;xl=5300000000"/>
+      <torznab:attr name="category" value="4050"/>
+      <torznab:attr name="size" value="5300000000"/>
+      <torznab:attr name="publishdate" value="Fri, 03 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="130"/>
+      <torznab:attr name="leechers" value="11"/>
+      <torznab:attr name="peers" value="141"/>
+      <torznab:attr name="files" value="2"/>
+    </item>
+    <item>
+      <title>Mystery Bundle Pack</title>
+      <guid>4b594b976f5fa0811fe817039e0f7166001337ea</guid>
+      <pubDate>Thu, 02 Jan 2020 00:00:00 +0000</pubDate>
+      <category>Unknown</category>
+      <size>120000000</size>
+      <enclosure length="120000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="infohash" value="4b594b976f5fa0811fe817039e0f7166001337ea"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="category" value="8000"/>
+      <torznab:attr name="size" value="120000000"/>
+      <torznab:attr name="publishdate" value="Thu, 02 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="8"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="9"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

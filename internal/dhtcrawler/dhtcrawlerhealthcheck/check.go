@@ -21,21 +21,26 @@ func NewCheck(
 		},
 		Timeout: time.Second,
 		Check: func(context.Context) error {
-			lr := lastResponses.Get()
-			if lr.StartTime.IsZero() {
-				return nil
-			}
-			now := time.Now()
-			if lr.LastSuccess.IsZero() {
-				if now.Sub(lr.StartTime) < 30*time.Second {
-					return nil
-				}
-				return errors.New("no response within 30 seconds")
-			}
-			if now.Sub(lr.LastSuccess) > time.Minute {
-				return errors.New("no successful responses within last minute")
-			}
-			return nil
+			return checkLastResponsesAt(time.Now(), lastResponses.Get())
 		},
 	}
+}
+
+// checkLastResponsesAt keeps the production threshold policy independently
+// testable at its exact time boundaries. LastResponse is intentionally not
+// consulted: the existing health contract is based on successful queries.
+func checkLastResponsesAt(now time.Time, lr server.LastResponses) error {
+	if lr.StartTime.IsZero() {
+		return nil
+	}
+	if lr.LastSuccess.IsZero() {
+		if now.Sub(lr.StartTime) < 30*time.Second {
+			return nil
+		}
+		return errors.New("no response within 30 seconds")
+	}
+	if now.Sub(lr.LastSuccess) > time.Minute {
+		return errors.New("no successful responses within last minute")
+	}
+	return nil
 }

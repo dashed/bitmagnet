@@ -1,0 +1,72 @@
+{
+  "name": "bitmagnet-webui-react",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.10.0",
+  "scripts": {
+    "codegen": "graphql-codegen -c ./codegen.ts && prettier --write src/graphql/generated",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "budget:js": "node ./scripts/check-js-budgets.mjs",
+    "size": "size-limit && pnpm budget:js",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write ."
+  },
+  "size-limit": [
+    {
+      "name": "search route initial JS",
+      "path": "dist/assets/index-*.js",
+      "limit": "250 KB",
+      "gzip": true
+    },
+    {
+      "name": "lazy chunks (total, sum of all)",
+      "path": "dist/assets/!(index)-*.js",
+      "limit": "350 KB",
+      "gzip": true
+    }
+  ],
+  "dependencies": {
+    "@graphql-typed-document-node/core": "3.2.0",
+    "@mantine/core": "9.4.0",
+    "@mantine/hooks": "9.4.0",
+    "@tanstack/react-query": "5.90.21",
+    "@tanstack/react-router": "1.170.17",
+    "graphql": "16.12.0",
+    "graphql-request": "7.4.0",
+    "i18next": "23.16.8",
+    "i18next-browser-languagedetector": "8.2.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-i18next": "15.7.4",
+    "recharts": "2.15.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.3",
+    "@graphql-codegen/cli": "6.1.1",
+    "@graphql-codegen/client-preset": "5.2.2",
+    "@size-limit/file": "11.1.4",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "25.9.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "axe-core": "4.12.1",
+    "eslint": "9.39.3",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "globals": "16.2.0",
+    "jsdom": "29.1.1",
+    "prettier": "3.8.4",
+    "size-limit": "11.1.4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.56.1",
+    "vite": "8.1.0",
+    "vitest": "4.1.9"
+  }
+}

@@ -2,6 +2,7 @@ package classifier
 
 import (
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classification"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 )
 
 const attachLocalContentBySearchName = "attach_local_content_by_search"
@@ -24,6 +25,9 @@ func (attachLocalContentBySearchAction) compileAction(ctx compilerContext) (acti
 
 	return action{
 		run: func(ctx executionContext) (classification.Result, error) {
+			if err := tape.EnterAction(ctx.Context, attachLocalContentBySearchName); err != nil {
+				return ctx.result, err
+			}
 			cl := ctx.result
 			if !cl.ContentType.Valid || !cl.BaseTitle.Valid {
 				return cl, classification.ErrUnmatched

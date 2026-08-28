@@ -1,5 +1,26 @@
 bitmagnet.io/schemas/**/*.*
 webui/dist/**/*.*
+webui-react/dist/**/*.*
+webui-react/coverage/**/*.*
 webui/src/app/graphql/generated/**/*.*
 webui/src/app/i18n/translations/*.json
 webui/.angular
+
+# Rust migration contracts and byte-exact fixtures are reviewed by Rust/parity
+# gates rather than the root JavaScript formatter.
+bitmagnet-rs/**/*.md
+bitmagnet-rs/**/fixtures/**/*.json
+
+# Evidence, parity corpora, and operator handoffs are provenance-sensitive.
+bench/graphql-rss/
+docs/dev/rust-rewrite/
+observability/grafana-dashboards/
+testdata/parity/
+SITEM_SPEC.md
+handoff-*.md
+
+# The React workspace owns a newer Prettier and its own configuration.
+webui-react/
+
+# Dockerfiles use role suffixes; `.graphql` is not a GraphQL document.
+bitmagnet-rs/docker/Dockerfile.*

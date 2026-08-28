@@ -1,0 +1,27 @@
+# THROWAWAY bench tooling — NOT part of the bitmagnet-rs workspace.
+# Path-depends on the fork crates (model + db) read-only; modifies none of them.
+# Team: bitmagnet-bench / RUN-0a. Decodes torrents.files_data -> Parquet for the
+# DuckDB-on-blobs latency benchmark (docs/dev/duckdb-on-blobs-benchmark-spec.md).
+[package]
+name = "blob_export"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "blob_export"
+path = "src/main.rs"
+
+[dependencies]
+bitmagnet-model = { path = "../../bitmagnet-rs/crates/bitmagnet-model" }
+bitmagnet-db = { path = "../../bitmagnet-rs/crates/bitmagnet-db" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+anyhow = "1"
+hex = "0.4"
+arrow = "53"
+parquet = { version = "53", features = ["arrow", "zstd"] }
+
+# Keep the throwaway build snappy and unaffected by the parent workspace lints.
+[profile.release]
+opt-level = 3

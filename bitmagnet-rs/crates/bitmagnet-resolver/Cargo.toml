@@ -1,0 +1,18 @@
+[package]
+name = "bitmagnet-resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "B′ enrichment parity — the live ContentResolver, composing the PostgreSQL local search with the TMDB HTTP client."
+
+[dependencies]
+bitmagnet-classifier = { path = "../bitmagnet-classifier" }
+bitmagnet-content-search = { path = "../bitmagnet-content-search" }
+bitmagnet-tmdb = { path = "../bitmagnet-tmdb" }
+bitmagnet-model = { path = "../bitmagnet-model" }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

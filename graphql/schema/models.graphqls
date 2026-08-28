@@ -1,5 +1,7 @@
 type Torrent {
   infoHash: Hash20!
+  infoHashV2: Hash32
+  metaVersion: Int
   name: String!
   size: Int!
   hasFilesInfo: Boolean!
@@ -9,6 +11,7 @@ type Torrent {
   filesCount: Int
   fileType: FileType
   fileTypes: [FileType!]
+  fileExtensions: [String!]!
   files: [TorrentFile!]
   sources: [TorrentSourceInfo!]!
   seeders: Int
@@ -41,6 +44,9 @@ type TorrentSourceInfo {
   importId: String
   seeders: Int
   leechers: Int
+  seenCount: Int!
+  firstSeenAt: DateTime!
+  lastSeenAt: DateTime!
 }
 
 type TorrentContent {
@@ -62,6 +68,9 @@ type TorrentContent {
   releaseGroup: String
   seeders: Int
   leechers: Int
+  dhtSeenCount: Int!
+  dhtFirstSeenAt: DateTime
+  dhtLastSeenAt: DateTime
   publishedAt: DateTime!
   createdAt: DateTime!
   updatedAt: DateTime!

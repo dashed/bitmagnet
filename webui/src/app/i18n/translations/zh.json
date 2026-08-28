@@ -33,6 +33,11 @@
       "processed": "已处理",
       "updated": "已更新"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "全部",
       "days": "天",
@@ -51,8 +56,17 @@
       "seconds_30": "30秒",
       "weeks_1": "1周"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "事件",
+      "no_data": "__missing__",
       "resolution": "分辨率",
       "throughput": "吞吐量",
       "timeframe": "时间范围",
@@ -84,6 +98,22 @@
       "total_counts_by_status": "按状态统计总数"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "内容类型",
     "file_type": "文件类型",
@@ -109,6 +139,7 @@
   },
   "general": {
     "all": "全部",
+    "apply": "__missing__",
     "dismiss": "忽略",
     "error": "错误",
     "none": "无",
@@ -239,12 +270,17 @@
   "torrents": {
     "classification": "分类",
     "clear_search": "清除搜索",
+    "clear_size_filter": "__missing__",
     "copy": "复制",
     "copy_to_clipboard": "复制到剪贴板",
     "delete": "删除",
     "delete_action_cannot_be_undone": "此操作无法撤销",
     "delete_are_you_sure": "您确定要删除此种子吗？",
     "deselect_all": "取消全选",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "编辑标签",
     "episodes": "剧集",
     "external_links": "外部链接",
@@ -263,6 +299,8 @@
     "leechers": "下载者",
     "magnet": "磁力链接",
     "magnet_links": "磁力链接",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "新标签",
     "order_by": "排序依据",
     "order_direction_toggle": "切换方向",
@@ -281,6 +319,7 @@
     "permalink": "永久链接",
     "poster": "海报",
     "published": "已发布",
+    "published_date_filter": "__missing__",
     "rating": "评分",
     "refresh": "刷新结果",
     "reprocess": {
@@ -295,6 +334,17 @@
     "select_all": "全选",
     "showing_x_of_y_files": "显示{{x}}个，共{{y}}个文件",
     "size": "大小",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "种子来源",
     "summary": "摘要",
     "tags": {
@@ -308,6 +358,7 @@
     },
     "title": "标题",
     "toggle_drawer": "切换抽屉",
+    "unit": "__missing__",
     "votes_count_n": "{{count}}票"
   },
   "version": {

@@ -1,0 +1,22 @@
+[package]
+name = "bitmagnet-textmatch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "B′ enrichment parity — fuzzy title matching (Go `levenshteinFindBestMatch`)."
+
+[dependencies]
+# The `wordTokenRegex` port. Only `\p{L}` uses the crate's Unicode tables;
+# every other class is ASCII-pinned to match Go's RE2 (see `src/normalize.rs`).
+regex = { workspace = true }
+# Go's `transform.Chain(norm.NFD, norm.NFC)` in `regex.NormalizeString`.
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

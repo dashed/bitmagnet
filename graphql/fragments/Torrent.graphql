@@ -9,9 +9,13 @@ fragment Torrent on Torrent {
   hasFilesInfo
   singleFile
   fileType
+  fileExtensions
   sources {
     key
     name
+    seenCount
+    firstSeenAt
+    lastSeenAt
   }
   seeders
   leechers

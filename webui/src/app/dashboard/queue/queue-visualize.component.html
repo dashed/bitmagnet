@@ -2,8 +2,18 @@
   <app-document-title
     [parts]="[t('routes.visualize'), t('routes.queues'), t('routes.dashboard')]"
   />
-  <mat-card>
-    <mat-card-content>
+  <section class="metrics-panel">
+    <app-metrics-live-status
+      [autoRefresh]="queueMetricsController.params.autoRefresh"
+      [intervals]="autoRefreshIntervalNames"
+      [loading]="queueMetricsController.loading"
+      [lastUpdatedAt]="queueMetricsController.lastUpdatedAt"
+      (autoRefreshChange)="
+        queueMetricsController.setAutoRefreshInterval($event)
+      "
+      (refresh)="queueMetricsController.refresh()"
+    />
+    <div class="metrics-controls">
       <mat-grid-list
         [cols]="
           breakpoints.sizeAtLeast('Large')
@@ -326,7 +336,7 @@
                     )
                   "
                 >
-                  <mat-option value="_all">All</mat-option>
+                  <mat-option value="_all">{{ t("general.all") }}</mat-option>
                   @for (event of eventNames; track event) {
                     <mat-option [value]="event">{{
                       t("dashboard.event." + event)
@@ -398,72 +408,35 @@
             </mat-card-content>
           </mat-card>
         </mat-grid-tile>
-        <mat-grid-tile [colspan]="1" [rowspan]="2">
-          <mat-card class="form-refresh">
-            <mat-card-header>
-              <mat-card-title>
-                <h4>{{ t("general.refresh") }}</h4>
-              </mat-card-title>
-            </mat-card-header>
-            <mat-card-content>
-              <mat-form-field subscriptSizing="dynamic">
-                <mat-select
-                  [value]="queueMetricsController.params.autoRefresh"
-                  (valueChange)="
-                    queueMetricsController.setAutoRefreshInterval($event)
-                  "
-                >
-                  @for (name of autoRefreshIntervalNames; track name) {
-                    <mat-option [value]="name">{{
-                      t("dashboard.interval." + name)
-                    }}</mat-option>
-                  }
-                </mat-select>
-              </mat-form-field>
-              <div class="actions">
-                <button
-                  mat-icon-button
-                  [matTooltip]="t('general.refresh')"
-                  (click)="queueMetricsController.refresh()"
-                >
-                  <mat-icon>sync</mat-icon>
-                </button>
-              </div>
-            </mat-card-content>
-          </mat-card>
-        </mat-grid-tile>
       </mat-grid-list>
-      <div class="progress-bar-container">
-        <mat-progress-bar
-          [mode]="
-            queueMetricsController.loading ? 'indeterminate' : 'determinate'
-          "
-          [value]="0"
-        ></mat-progress-bar>
+    </div>
+    <div class="progress-bar-container">
+      <mat-progress-bar
+        [mode]="
+          queueMetricsController.loading ? 'indeterminate' : 'determinate'
+        "
+        [value]="0"
+      ></mat-progress-bar>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-panel">
+        <app-chart
+          [title]="t('dashboard.queues.total_counts_by_status')"
+          [adapter]="totals"
+          [$data]="queueMetricsController.result$"
+          [height]="400"
+          [width]="550"
+        />
       </div>
-      <mat-grid-list
-        [cols]="breakpoints.sizeAtLeast('Large') ? 2 : 1"
-        rowHeight="100px"
-      >
-        <mat-grid-tile [colspan]="1" [rowspan]="5">
-          <app-chart
-            [title]="t('dashboard.queues.total_counts_by_status')"
-            [adapter]="totals"
-            [$data]="queueMetricsController.result$"
-            [height]="400"
-            [width]="550"
-          />
-        </mat-grid-tile>
-        <mat-grid-tile [colspan]="1" [rowspan]="5">
-          <app-chart
-            [title]="t('dashboard.metrics.throughput')"
-            [adapter]="timeline"
-            [$data]="queueMetricsController.result$"
-            [height]="400"
-            [width]="550"
-          />
-        </mat-grid-tile>
-      </mat-grid-list>
-    </mat-card-content>
-  </mat-card>
+      <div class="chart-panel">
+        <app-chart
+          [title]="t('dashboard.metrics.throughput')"
+          [adapter]="timeline"
+          [$data]="queueMetricsController.result$"
+          [height]="400"
+          [width]="550"
+        />
+      </div>
+    </div>
+  </section>
 </ng-container>

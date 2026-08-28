@@ -9,6 +9,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classification"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protobuf"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types/ref"
 )
@@ -24,6 +25,8 @@ type Runner interface {
 type compiler struct {
 	options      []compilerOption
 	dependencies dependencies
+	// recorder is nil unless observation recording is configured.
+	recorder *tape.Recorder
 }
 
 type compilerContext struct {
@@ -135,6 +138,7 @@ func (c compiler) Compile(source Source) (Runner, error) {
 		flagDefinitions: source.FlagDefinitions,
 		compiledFlags:   cfs,
 		workflows:       workflows,
+		recorder:        c.recorder,
 	}, nil
 }
 

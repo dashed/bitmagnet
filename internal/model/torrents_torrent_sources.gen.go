@@ -23,6 +23,7 @@ type TorrentsTorrentSource struct {
 	PublishedAt   sql.NullTime  `gorm:"column:published_at" json:"publishedAt"`
 	CreatedAt     time.Time     `gorm:"column:created_at;not null;<-:create" json:"createdAt"`
 	UpdatedAt     time.Time     `gorm:"column:updated_at;not null" json:"updatedAt"`
+	SeenCount     uint          `gorm:"column:seen_count;not null;default:1" json:"seenCount"`
 	TorrentSource TorrentSource `gorm:"foreignKey:Source" json:"torrent_source"`
 }
 

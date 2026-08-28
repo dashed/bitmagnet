@@ -21,6 +21,7 @@ export type Scalars = {
   DateTime: { input: string; output: string; }
   Duration: { input: string; output: string; }
   Hash20: { input: string; output: string; }
+  Hash32: { input: string; output: string; }
   Void: { input: void; output: void; }
   Year: { input: number; output: number; }
 };
@@ -109,6 +110,91 @@ export type ExternalLink = {
 export type FacetLogic =
   | 'and'
   | 'or';
+
+export type FileFacetAgg = {
+  __typename?: 'FileFacetAgg';
+  buckets: Array<FileFacetBucketAgg>;
+  field: FileFacetField;
+};
+
+/**
+ * One aggregated facet value and its exact match count. totalSize is the summed
+ * byte size of the matching files in the bucket. isEstimate mirrors the
+ * torrentContent aggregation contract; L2 facet counts are exact so it is always
+ * false in v1.
+ */
+export type FileFacetBucketAgg = {
+  __typename?: 'FileFacetBucketAgg';
+  count: Scalars['Int']['output'];
+  isEstimate: Scalars['Boolean']['output'];
+  totalSize: Scalars['Int']['output'];
+  value: Scalars['String']['output'];
+};
+
+export type FileFacetField =
+  | 'extension';
+
+export type FileSearchFacetsInput = {
+  extensions?: InputMaybe<Array<Scalars['String']['input']>>;
+  /**
+   * Which facet fields to aggregate. v1 supports only `extension`; unknown values
+   * are ignored. Omitted/empty requests the default set (extension).
+   */
+  facets?: InputMaybe<Array<FileFacetField>>;
+  maxSize?: InputMaybe<Scalars['Int']['input']>;
+  minSize?: InputMaybe<Scalars['Int']['input']>;
+  query?: InputMaybe<Scalars['String']['input']>;
+};
+
+export type FileSearchFacetsResult = {
+  __typename?: 'FileSearchFacetsResult';
+  facets: Array<FileFacetAgg>;
+};
+
+export type FileSearchInput = {
+  extensions?: InputMaybe<Array<Scalars['String']['input']>>;
+  infoHash?: InputMaybe<Scalars['Hash20']['input']>;
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  maxSize?: InputMaybe<Scalars['Int']['input']>;
+  minSize?: InputMaybe<Scalars['Int']['input']>;
+  offset?: InputMaybe<Scalars['Int']['input']>;
+  query?: InputMaybe<Scalars['String']['input']>;
+  sort?: InputMaybe<Array<FileSearchSortInput>>;
+  /**
+   * When false, skip the exact L2 count RPC and return totalCount as 0.
+   * Omitted defaults to true for compatibility with existing callers.
+   */
+  totalCount?: InputMaybe<Scalars['Boolean']['input']>;
+};
+
+export type FileSearchItem = {
+  __typename?: 'FileSearchItem';
+  extension: Scalars['String']['output'];
+  index: Scalars['Int']['output'];
+  infoHash: Scalars['Hash20']['output'];
+  path: Scalars['String']['output'];
+  size: Scalars['Int']['output'];
+  torrentContent: TorrentContent;
+};
+
+export type FileSearchResult = {
+  __typename?: 'FileSearchResult';
+  hasNextPage: Scalars['Boolean']['output'];
+  items: Array<FileSearchItem>;
+  totalCount: Scalars['Int']['output'];
+  /**
+   * totalCountIsEstimate is true when totalCount is an approximation rather than an
+   * exact matching-file count. The L3 pathsearch text route returns candidate_total
+   * (a torrent-doc recall upper bound), so it is true; the L2 sidecar route counts
+   * files exactly, so it is false. Mirrors TorrentContentSearchResult.
+   */
+  totalCountIsEstimate: Scalars['Boolean']['output'];
+};
+
+export type FileSearchSortInput = {
+  descending?: InputMaybe<Scalars['Boolean']['input']>;
+  field: Scalars['String']['input'];
+};
 
 export type FileType =
   | 'archive'
@@ -258,6 +344,16 @@ export type Mutation = {
   __typename?: 'Mutation';
   queue: QueueMutation;
   torrent: TorrentMutation;
+};
+
+export type PathTypeaheadInput = {
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  prefix: Scalars['String']['input'];
+};
+
+export type PathTypeaheadResult = {
+  __typename?: 'PathTypeaheadResult';
+  suggestions: Array<Scalars['String']['output']>;
 };
 
 export type Query = {
@@ -447,6 +543,11 @@ export type Season = {
   season: Scalars['Int']['output'];
 };
 
+export type SizeRangeInput = {
+  max?: InputMaybe<Scalars['Int']['input']>;
+  min?: InputMaybe<Scalars['Int']['input']>;
+};
+
 export type SuggestTagsQueryInput = {
   exclusions?: InputMaybe<Array<Scalars['String']['input']>>;
   prefix?: InputMaybe<Scalars['String']['input']>;
@@ -462,6 +563,7 @@ export type Torrent = {
   __typename?: 'Torrent';
   createdAt: Scalars['DateTime']['output'];
   extension?: Maybe<Scalars['String']['output']>;
+  fileExtensions: Array<Scalars['String']['output']>;
   fileType?: Maybe<FileType>;
   fileTypes?: Maybe<Array<FileType>>;
   files?: Maybe<Array<TorrentFile>>;
@@ -469,8 +571,10 @@ export type Torrent = {
   filesStatus: FilesStatus;
   hasFilesInfo: Scalars['Boolean']['output'];
   infoHash: Scalars['Hash20']['output'];
+  infoHashV2?: Maybe<Scalars['Hash32']['output']>;
   leechers?: Maybe<Scalars['Int']['output']>;
   magnetUri: Scalars['String']['output'];
+  metaVersion?: Maybe<Scalars['Int']['output']>;
   name: Scalars['String']['output'];
   seeders?: Maybe<Scalars['Int']['output']>;
   singleFile?: Maybe<Scalars['Boolean']['output']>;
@@ -487,6 +591,9 @@ export type TorrentContent = {
   contentSource?: Maybe<Scalars['String']['output']>;
   contentType?: Maybe<ContentType>;
   createdAt: Scalars['DateTime']['output'];
+  dhtFirstSeenAt?: Maybe<Scalars['DateTime']['output']>;
+  dhtLastSeenAt?: Maybe<Scalars['DateTime']['output']>;
+  dhtSeenCount: Scalars['Int']['output'];
   episodes?: Maybe<Episodes>;
   id: Scalars['ID']['output'];
   infoHash: Scalars['Hash20']['output'];
@@ -518,11 +625,29 @@ export type TorrentContentAggregations = {
   videoSource?: Maybe<Array<VideoSourceAgg>>;
 };
 
+/**
+ * TorrentContentCollapsePathsInput drives the collapse:path query: the L3-routed
+ * grouping of matching torrents by their distinct matched file path. It carries the
+ * raw path free-text only (no facets in v1).
+ */
+export type TorrentContentCollapsePathsInput = {
+  limit?: InputMaybe<Scalars['Int']['input']>;
+  offset?: InputMaybe<Scalars['Int']['input']>;
+  queryString: Scalars['String']['input'];
+};
+
+export type TorrentContentCollapsePathsResult = {
+  __typename?: 'TorrentContentCollapsePathsResult';
+  groups: Array<TorrentContentPathGroup>;
+};
+
 export type TorrentContentFacetsInput = {
   contentType?: InputMaybe<ContentTypeFacetInput>;
   genre?: InputMaybe<GenreFacetInput>;
   language?: InputMaybe<LanguageFacetInput>;
+  publishedAt?: InputMaybe<Scalars['String']['input']>;
   releaseYear?: InputMaybe<ReleaseYearFacetInput>;
+  sizeRange?: InputMaybe<SizeRangeInput>;
   torrentFileType?: InputMaybe<TorrentFileTypeFacetInput>;
   torrentSource?: InputMaybe<TorrentSourceFacetInput>;
   torrentTag?: InputMaybe<TorrentTagFacetInput>;
@@ -546,9 +671,44 @@ export type TorrentContentOrderByInput = {
   field: TorrentContentOrderByField;
 };
 
+/**
+ * TorrentContentPathGroup is one distinct matched file path and the info hashes of
+ * the candidate torrents that contain a file at that path. v1 is UNHYDRATED: it
+ * returns raw info hashes only; clients hydrate via the existing search-by-infoHashes.
+ */
+export type TorrentContentPathGroup = {
+  __typename?: 'TorrentContentPathGroup';
+  infoHashes: Array<Scalars['Hash20']['output']>;
+  path: Scalars['String']['output'];
+};
+
 export type TorrentContentQuery = {
   __typename?: 'TorrentContentQuery';
+  collapsePaths: TorrentContentCollapsePathsResult;
+  fileSearch: FileSearchResult;
+  fileSearchFacets: FileSearchFacetsResult;
+  pathTypeahead: PathTypeaheadResult;
   search: TorrentContentSearchResult;
+};
+
+
+export type TorrentContentQueryCollapsePathsArgs = {
+  input: TorrentContentCollapsePathsInput;
+};
+
+
+export type TorrentContentQueryFileSearchArgs = {
+  input: FileSearchInput;
+};
+
+
+export type TorrentContentQueryFileSearchFacetsArgs = {
+  input: FileSearchFacetsInput;
+};
+
+
+export type TorrentContentQueryPathTypeaheadArgs = {
+  input: PathTypeaheadInput;
 };
 
 
@@ -751,11 +911,14 @@ export type TorrentSourceFacetInput = {
 
 export type TorrentSourceInfo = {
   __typename?: 'TorrentSourceInfo';
+  firstSeenAt: Scalars['DateTime']['output'];
   importId?: Maybe<Scalars['String']['output']>;
   key: Scalars['String']['output'];
+  lastSeenAt: Scalars['DateTime']['output'];
   leechers?: Maybe<Scalars['Int']['output']>;
   name: Scalars['String']['output'];
   seeders?: Maybe<Scalars['Int']['output']>;
+  seenCount: Scalars['Int']['output'];
 };
 
 export type TorrentSuggestTagsResult = {
@@ -868,11 +1031,11 @@ export type QueueJobFragment = { __typename?: 'QueueJob', id: string, queue: str
 
 export type QueueJobsQueryResultFragment = { __typename?: 'QueueJobsQueryResult', totalCount: number, hasNextPage?: boolean | null, items: Array<{ __typename?: 'QueueJob', id: string, queue: string, status: QueueJobStatus, payload: string, priority: number, retries: number, maxRetries: number, runAfter: string, ranAt?: string | null, error?: string | null, createdAt: string }>, aggregations: { __typename?: 'QueueJobsAggregations', queue?: Array<{ __typename?: 'QueueJobQueueAgg', value: string, label: string, count: number }> | null, status?: Array<{ __typename?: 'QueueJobStatusAgg', value: QueueJobStatus, label: string, count: number }> | null } };
 
-export type TorrentFragment = { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string }> };
+export type TorrentFragment = { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, fileExtensions: Array<string>, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string, seenCount: number, firstSeenAt: string, lastSeenAt: string }> };
 
-export type TorrentContentFragment = { __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null };
+export type TorrentContentFragment = { __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, dhtSeenCount: number, dhtFirstSeenAt?: string | null, dhtLastSeenAt?: string | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, fileExtensions: Array<string>, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string, seenCount: number, firstSeenAt: string, lastSeenAt: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null };
 
-export type TorrentContentSearchResultFragment = { __typename?: 'TorrentContentSearchResult', totalCount: number, totalCountIsEstimate: boolean, hasNextPage?: boolean | null, items: Array<{ __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null }>, aggregations: { __typename?: 'TorrentContentAggregations', contentType?: Array<{ __typename?: 'ContentTypeAgg', value?: ContentType | null, label: string, count: number, isEstimate: boolean }> | null, torrentSource?: Array<{ __typename?: 'TorrentSourceAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentTag?: Array<{ __typename?: 'TorrentTagAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentFileType?: Array<{ __typename?: 'TorrentFileTypeAgg', value: FileType, label: string, count: number, isEstimate: boolean }> | null, language?: Array<{ __typename?: 'LanguageAgg', value: Language, label: string, count: number, isEstimate: boolean }> | null, genre?: Array<{ __typename?: 'GenreAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, releaseYear?: Array<{ __typename?: 'ReleaseYearAgg', value?: number | null, label: string, count: number, isEstimate: boolean }> | null, videoResolution?: Array<{ __typename?: 'VideoResolutionAgg', value?: VideoResolution | null, label: string, count: number, isEstimate: boolean }> | null, videoSource?: Array<{ __typename?: 'VideoSourceAgg', value?: VideoSource | null, label: string, count: number, isEstimate: boolean }> | null } };
+export type TorrentContentSearchResultFragment = { __typename?: 'TorrentContentSearchResult', totalCount: number, totalCountIsEstimate: boolean, hasNextPage?: boolean | null, items: Array<{ __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, dhtSeenCount: number, dhtFirstSeenAt?: string | null, dhtLastSeenAt?: string | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, fileExtensions: Array<string>, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string, seenCount: number, firstSeenAt: string, lastSeenAt: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null }>, aggregations: { __typename?: 'TorrentContentAggregations', contentType?: Array<{ __typename?: 'ContentTypeAgg', value?: ContentType | null, label: string, count: number, isEstimate: boolean }> | null, torrentSource?: Array<{ __typename?: 'TorrentSourceAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentTag?: Array<{ __typename?: 'TorrentTagAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentFileType?: Array<{ __typename?: 'TorrentFileTypeAgg', value: FileType, label: string, count: number, isEstimate: boolean }> | null, language?: Array<{ __typename?: 'LanguageAgg', value: Language, label: string, count: number, isEstimate: boolean }> | null, genre?: Array<{ __typename?: 'GenreAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, releaseYear?: Array<{ __typename?: 'ReleaseYearAgg', value?: number | null, label: string, count: number, isEstimate: boolean }> | null, videoResolution?: Array<{ __typename?: 'VideoResolutionAgg', value?: VideoResolution | null, label: string, count: number, isEstimate: boolean }> | null, videoSource?: Array<{ __typename?: 'VideoSourceAgg', value?: VideoSource | null, label: string, count: number, isEstimate: boolean }> | null } };
 
 export type TorrentFileFragment = { __typename?: 'TorrentFile', infoHash: string, index: number, path: string, size: number, fileType?: FileType | null, createdAt: string, updatedAt: string };
 
@@ -954,7 +1117,7 @@ export type TorrentContentSearchQueryVariables = Exact<{
 }>;
 
 
-export type TorrentContentSearchQuery = { __typename?: 'Query', torrentContent: { __typename?: 'TorrentContentQuery', search: { __typename?: 'TorrentContentSearchResult', totalCount: number, totalCountIsEstimate: boolean, hasNextPage?: boolean | null, items: Array<{ __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null }>, aggregations: { __typename?: 'TorrentContentAggregations', contentType?: Array<{ __typename?: 'ContentTypeAgg', value?: ContentType | null, label: string, count: number, isEstimate: boolean }> | null, torrentSource?: Array<{ __typename?: 'TorrentSourceAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentTag?: Array<{ __typename?: 'TorrentTagAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentFileType?: Array<{ __typename?: 'TorrentFileTypeAgg', value: FileType, label: string, count: number, isEstimate: boolean }> | null, language?: Array<{ __typename?: 'LanguageAgg', value: Language, label: string, count: number, isEstimate: boolean }> | null, genre?: Array<{ __typename?: 'GenreAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, releaseYear?: Array<{ __typename?: 'ReleaseYearAgg', value?: number | null, label: string, count: number, isEstimate: boolean }> | null, videoResolution?: Array<{ __typename?: 'VideoResolutionAgg', value?: VideoResolution | null, label: string, count: number, isEstimate: boolean }> | null, videoSource?: Array<{ __typename?: 'VideoSourceAgg', value?: VideoSource | null, label: string, count: number, isEstimate: boolean }> | null } } } };
+export type TorrentContentSearchQuery = { __typename?: 'Query', torrentContent: { __typename?: 'TorrentContentQuery', search: { __typename?: 'TorrentContentSearchResult', totalCount: number, totalCountIsEstimate: boolean, hasNextPage?: boolean | null, items: Array<{ __typename?: 'TorrentContent', id: string, infoHash: string, contentType?: ContentType | null, title: string, video3d?: Video3D | null, videoCodec?: VideoCodec | null, videoModifier?: VideoModifier | null, videoResolution?: VideoResolution | null, videoSource?: VideoSource | null, seeders?: number | null, leechers?: number | null, dhtSeenCount: number, dhtFirstSeenAt?: string | null, dhtLastSeenAt?: string | null, publishedAt: string, createdAt: string, updatedAt: string, torrent: { __typename?: 'Torrent', infoHash: string, name: string, size: number, filesStatus: FilesStatus, filesCount?: number | null, hasFilesInfo: boolean, singleFile?: boolean | null, fileType?: FileType | null, fileExtensions: Array<string>, seeders?: number | null, leechers?: number | null, tagNames: Array<string>, magnetUri: string, createdAt: string, updatedAt: string, sources: Array<{ __typename?: 'TorrentSourceInfo', key: string, name: string, seenCount: number, firstSeenAt: string, lastSeenAt: string }> }, content?: { __typename?: 'Content', type: ContentType, source: string, id: string, title: string, releaseDate?: string | null, releaseYear?: number | null, overview?: string | null, runtime?: number | null, voteAverage?: number | null, voteCount?: number | null, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string }, originalLanguage?: { __typename?: 'LanguageInfo', id: string, name: string } | null, attributes: Array<{ __typename?: 'ContentAttribute', source: string, key: string, value: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, collections: Array<{ __typename?: 'ContentCollection', type: string, source: string, id: string, name: string, createdAt: string, updatedAt: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }>, externalLinks: Array<{ __typename?: 'ExternalLink', url: string, metadataSource: { __typename?: 'MetadataSource', key: string, name: string } }> } | null, languages?: Array<{ __typename?: 'LanguageInfo', id: string, name: string }> | null, episodes?: { __typename?: 'Episodes', label: string, seasons: Array<{ __typename?: 'Season', season: number, episodes?: Array<number> | null }> } | null }>, aggregations: { __typename?: 'TorrentContentAggregations', contentType?: Array<{ __typename?: 'ContentTypeAgg', value?: ContentType | null, label: string, count: number, isEstimate: boolean }> | null, torrentSource?: Array<{ __typename?: 'TorrentSourceAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentTag?: Array<{ __typename?: 'TorrentTagAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, torrentFileType?: Array<{ __typename?: 'TorrentFileTypeAgg', value: FileType, label: string, count: number, isEstimate: boolean }> | null, language?: Array<{ __typename?: 'LanguageAgg', value: Language, label: string, count: number, isEstimate: boolean }> | null, genre?: Array<{ __typename?: 'GenreAgg', value: string, label: string, count: number, isEstimate: boolean }> | null, releaseYear?: Array<{ __typename?: 'ReleaseYearAgg', value?: number | null, label: string, count: number, isEstimate: boolean }> | null, videoResolution?: Array<{ __typename?: 'VideoResolutionAgg', value?: VideoResolution | null, label: string, count: number, isEstimate: boolean }> | null, videoSource?: Array<{ __typename?: 'VideoSourceAgg', value?: VideoSource | null, label: string, count: number, isEstimate: boolean }> | null } } } };
 
 export type TorrentFilesQueryVariables = Exact<{
   input: TorrentFilesQueryInput;
@@ -1028,9 +1191,13 @@ export const TorrentFragmentDoc = gql`
   hasFilesInfo
   singleFile
   fileType
+  fileExtensions
   sources {
     key
     name
+    seenCount
+    firstSeenAt
+    lastSeenAt
   }
   seeders
   leechers
@@ -1124,6 +1291,9 @@ export const TorrentContentFragmentDoc = gql`
   videoSource
   seeders
   leechers
+  dhtSeenCount
+  dhtFirstSeenAt
+  dhtLastSeenAt
   publishedAt
   createdAt
   updatedAt

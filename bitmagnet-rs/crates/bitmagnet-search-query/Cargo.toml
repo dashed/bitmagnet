@@ -1,0 +1,21 @@
+[package]
+name = "bitmagnet-search-query"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+bitmagnet-db = { path = "../bitmagnet-db" }
+bitmagnet-fts = { path = "../bitmagnet-fts" }
+bitmagnet-model = { path = "../bitmagnet-model" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+bitmagnet-diff = { path = "../bitmagnet-diff" }
+tokio = { workspace = true }
+anyhow = { workspace = true }

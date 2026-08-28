@@ -1,0 +1,182 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bitmagnet-proto",
+    "crates/bitmagnet-resolver",
+    "crates/bitmagnet-common",
+    "crates/bitmagnet-model",
+    "crates/bitmagnet-db",
+    "crates/bitmagnet-search",
+    "crates/bitmagnet-parquet",
+    "crates/bitmagnet-filesearch",
+    "crates/bitmagnet-shadow",
+    "crates/bitmagnet-diff",
+    "crates/bitmagnet-search-query",
+    "crates/bitmagnet-torznab",
+    "crates/bitmagnet-fts",
+    "crates/bitmagnet-search-serve",
+    "crates/bitmagnet-graphql",
+    "crates/bitmagnet-queue",
+    "crates/bitmagnet-release",
+    "crates/bitmagnet-classifier",
+    "crates/bitmagnet-processor",
+    # B′-0 seam placeholders. Registered up-front (with stub `lib.rs`es) so the
+    # later enrichment-parity lanes can fill them in without ever touching this
+    # manifest — only the seam lane owns it.
+    "crates/bitmagnet-textmatch",
+    "crates/bitmagnet-tmdb",
+    "crates/bitmagnet-content-search",
+    # B′ oracle reader: replays the flags-ON tape Go records.
+    "crates/bitmagnet-tape",
+    "crates/bitmagnet-bloom",
+    "crates/bitmagnet-blocking",
+    "crates/bitmagnet-metainfo",
+    "crates/bitmagnet-dht",
+    "crates/bitmagnet-dht-crawler",
+    "crates/bitmagnet-dht-crawler-app",
+    "crates/bitmagnet-dht-observe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["bitmagnet contributors"]
+repository = "https://github.com/bitmagnet-io/bitmagnet"
+
+# Centrally pinned dependency versions. A member crate opts in with, e.g.,
+# `tonic.workspace = true` and may *add* features locally (features are
+# additive). Versions verified against crates.io on 2026-05-28 with the
+# toolchain rustc/cargo 1.95.0.
+[workspace.dependencies]
+# gRPC / protobuf. tonic 0.14 split the prost-specific codec + codegen out of
+# `tonic` / `tonic-build` into the `tonic-prost` (runtime) and
+# `tonic-prost-build` (build script) crates.
+tonic = "0.14"
+tonic-health = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+
+# Observability.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Prometheus client_golang analog with exact metric-name, label, and bucket
+# control for dashboard compatibility.
+prometheus = { version = "0.14", features = ["process"] }
+
+# Error handling.
+thiserror = "2"
+anyhow = "1"
+
+# Serialization + file-blob format (MessagePack -> ZSTD, mirrors the Go
+# `internal/blobmigration` serializer).
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+zstd = "0.13"
+# JSON — currently test-only (the tokenizer parity fixtures); pinned centrally
+# so member crates reference it via `serde_json.workspace = true`.
+serde_json = "1"
+url = "2"
+
+# Layered config provider-stack selected in
+# docs/dev/rust-rewrite/03-ecosystem-mapping.md §7 (defaults < file < env).
+# The explicit strcase env-key mapping, not Figment, is the compatibility contract.
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# Database. NOTE: sqlx 0.7+ split the combined `runtime-tokio-rustls` feature
+# into separate `runtime-*` and `tls-*` features.
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "macros",
+    "json",
+    "chrono",
+] }
+
+# Search engine. 0.26 is the upstream target that motivated the sidecar (the
+# tantivy-go FFI bindings are pinned to 0.22).
+tantivy = "0.26"
+fst = "0.4"
+memmap2 = "0.9"
+
+# CLI.
+clap = { version = "4", features = ["derive", "env"] }
+
+# Columnar export (L2 — bitmagnet-parquet). 55.x (not the bench's 53.x: arrow
+# 53's `arrow-arith` fails to compile against chrono ≥0.4.45 — a `quarter`
+# method-ambiguity fixed in arrow 54+). `parquet` opts into arrow + zstd so the
+# fact/rollup files are ZSTD-compressed Arrow.
+arrow = "55"
+parquet = { version = "55", features = ["arrow", "zstd"] }
+
+# Embedded analytical engine for the file-search sidecar (L2b —
+# bitmagnet-filesearch). `bundled` statically compiles libduckdb (needs a C++
+# toolchain), so it is opt-in behind that crate's `duckdb-engine` feature; the
+# default workspace build/test never compiles it.
+# 🚨 `parquet` is LOAD-BEARING: it statically compiles the parquet extension
+# into the bundled libduckdb. Without it `read_parquet` is not in the catalog
+# and the FB-B1d lockdown (autoinstall/autoload=false) rightly blocks loading
+# it at runtime — every sidecar query fails (caught by the FSN1 duck-e2e run;
+# the l2-1/l2-2 images shipped without it and cannot serve).
+duckdb = { version = "1.3", features = ["bundled", "parquet"] }
+
+# Async stream combinators (client-streaming gRPC, DB row streams).
+futures = "0.3"
+# `async fn` in object-safe traits. Native RPITIT (stable since 1.75) is not
+# `dyn`-safe, and the B′-0 `ContentResolver` seam is consumed as a
+# `dyn ContentResolver` so a recording/replaying tape can be swapped in for the
+# live PG/TMDB implementation without a generic parameter infecting every
+# `Classifier` call site.
+async-trait = "0.1"
+
+# HTTP client for the TMDB API (B′ enrichment lanes). Promoted from
+# `bitmagnet-graphql`'s local dependency table so the TMDB client crate and the
+# GraphQL crate cannot drift on version or TLS backend. `default-features =
+# false` + `rustls-tls` keeps OpenSSL off the build.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+# UDS / TCP listener wrappers for the gRPC transport.
+tokio-stream = { version = "0.1", features = ["net"] }
+# Hex for info-hash <-> text at the export/Parquet boundary.
+hex = "0.4"
+
+# Regex engine for release-name parsing (Lane R). The Go release parser compiles
+# keyword-glob DSL + alias tables to RE2 patterns; the `regex` crate is the RE2
+# analog. Parity note: Go `regexp` `\d` is ASCII [0-9] while this crate's `\d`
+# is Unicode by default, so the Lane R port emits `[0-9]` (never `\d`) and keeps
+# `\p{L}` in Unicode mode (matching Go's `[\p{L}\d]` word-char helper).
+regex = "1"
+
+# Strict canonical bencode for the pure Phase-4 DHT KRPC wire boundary.
+bendy = "=0.6.1"
+# SHA-1 for BEP-33's two scrape-bloom bit indexes. This is protocol hashing,
+# not a password or signature primitive.
+sha1 = "0.10"
+# SHA-256 for BEP-52 full info hashes. As with SHA-1 above, this verifies
+# protocol identity and is not a password or signature primitive.
+sha2 = "0.10"
+# MD5 for the deployed BEP-5 announce-token derivation. This is compatibility
+# hashing, not a password or signature primitive.
+md-5 = { version = "0.11", default-features = false }
+# OS entropy for unpredictable two-byte DHT transaction IDs.
+getrandom = "0.3"
+# Per-instance random decrement starts for the process-local stable DHT
+# info-hash deduper. Exact Go math/rand sequences are intentionally not parity.
+fastrand = "2.4.1"
+
+# Lints inherited by every member via `[lints] workspace = true`. Kept at
+# `warn` (not `deny`) so local builds stay green; CI can promote to `-D
+# warnings`.
+[workspace.lints.rust]
+rust_2018_idioms = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

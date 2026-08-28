@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the bitmagnet Tantivy search sidecar.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.search -t bitmagnet-search bitmagnet-rs
+#
+# Builder and runtime are both pinned to Debian bookworm so the glibc the binary
+# is linked against matches the runtime image.
+
+# ---- builder ----------------------------------------------------------------
+FROM rust:1.95-slim-bookworm AS builder
+
+# protoc is required by the bitmagnet-proto build script (tonic-prost-build).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the whole workspace; .dockerignore keeps target/ and VCS noise out.
+COPY . .
+
+# Build only the search sidecar, in release mode.
+RUN cargo build --release -p bitmagnet-search
+
+# ---- runtime ----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# Non-root user (uid/gid 65532, the conventional "nonroot" id).
+RUN groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet \
+    && mkdir -p /var/lib/bitmagnet/search /var/lib/bitmagnet/pathsearch \
+    && chown -R 65532:65532 /var/lib/bitmagnet
+
+COPY --from=builder /build/target/release/bitmagnet-search /usr/local/bin/bitmagnet-search
+# Main-search backfill bin (src/bin/backfill.rs auto-discovers as `backfill`);
+# shipped as bitmagnet-backfill — the k8s backfill Job's entrypoint. Was the
+# long-standing P3-plan prereq that never landed (caught by the first real Job).
+COPY --from=builder /build/target/release/backfill /usr/local/bin/bitmagnet-backfill
+COPY --from=builder /build/target/release/bitmagnet-pathsearch /usr/local/bin/bitmagnet-pathsearch
+COPY --from=builder /build/target/release/bitmagnet-pathsearch-backfill /usr/local/bin/bitmagnet-pathsearch-backfill
+
+# Listen on all interfaces inside the container; the index dirs live under
+# /var/lib/bitmagnet, which the orchestrator backs with a persistent volume
+# mounted at that PARENT path.
+ENV BITMAGNET_SEARCH_ADDR=0.0.0.0:50051 \
+    BITMAGNET_SEARCH_INDEX=/var/lib/bitmagnet/search \
+    BITMAGNET_PATHSEARCH_ADDR=0.0.0.0:50053 \
+    BITMAGNET_PATHSEARCH_INDEX=/var/lib/bitmagnet/pathsearch
+# No image VOLUME here: index dirs are expected to be mounted by the runtime
+# (for example via a Kubernetes PVC).
+
+USER 65532:65532
+# 50051 = SearchService (default entrypoint); 50053 = PathSearchService when the
+# image is run as the bitmagnet-pathsearch binary.
+EXPOSE 50051 50053
+# Standard grpc.health.v1.Health supports grpc_health_probe; the custom
+# SearchService.HealthCheck RPC remains available for bitmagnet clients.
+ENTRYPOINT ["/usr/local/bin/bitmagnet-search"]

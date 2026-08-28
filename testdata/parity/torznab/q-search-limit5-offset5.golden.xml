@@ -1,0 +1,117 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response offset="5" xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Quasar 2023 1080p WEB x264-AXIS</title>
+      <guid>f0958739887453f248b21c0fa92b6b30ebd9934c</guid>
+      <pubDate>Tue, 21 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1900000000</size>
+      <enclosure length="1900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="infohash" value="f0958739887453f248b21c0fa92b6b30ebd9934c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1900000000"/>
+      <torznab:attr name="publishdate" value="Tue, 21 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="300"/>
+      <torznab:attr name="leechers" value="8"/>
+      <torznab:attr name="peers" value="308"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2023"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="AXIS"/>
+      <torznab:attr name="tmdb" value="106"/>
+    </item>
+    <item>
+      <title>Pulsar 2017 720p BRRip x264-GRP</title>
+      <guid>9cd6504c6a1165bff923172c27ead0e8d92eee79</guid>
+      <pubDate>Mon, 20 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1100000000</size>
+      <enclosure length="1100000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:9cd6504c6a1165bff923172c27ead0e8d92eee79&amp;dn=Pulsar+2017+720p+BRRip+x264-GRP&amp;xl=1100000000"/>
+      <torznab:attr name="infohash" value="9cd6504c6a1165bff923172c27ead0e8d92eee79"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:9cd6504c6a1165bff923172c27ead0e8d92eee79&amp;dn=Pulsar+2017+720p+BRRip+x264-GRP&amp;xl=1100000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1100000000"/>
+      <torznab:attr name="publishdate" value="Mon, 20 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="40"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="42"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="GRP"/>
+    </item>
+    <item>
+      <title>Meteor 2016 480p WEBRip x264</title>
+      <guid>18f19bd92e28ae94ee49208ca3aeb23765d4d72c</guid>
+      <pubDate>Sun, 19 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>410000000</size>
+      <enclosure length="410000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="infohash" value="18f19bd92e28ae94ee49208ca3aeb23765d4d72c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="410000000"/>
+      <torznab:attr name="publishdate" value="Sun, 19 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="15"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="16"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="480p"/>
+    </item>
+    <item>
+      <title>Nebula S01E02 720p HDTV x264-FLEET</title>
+      <guid>59ecbf312f12bb268e28b0c866fb9222a75c8e58</guid>
+      <pubDate>Sat, 18 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>900000000</size>
+      <enclosure length="900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="infohash" value="59ecbf312f12bb268e28b0c866fb9222a75c8e58"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="900000000"/>
+      <torznab:attr name="publishdate" value="Sat, 18 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="250"/>
+      <torznab:attr name="leechers" value="12"/>
+      <torznab:attr name="peers" value="262"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2020"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="FLEET"/>
+      <torznab:attr name="tmdb" value="201"/>
+      <torznab:attr name="imdb" value="2010101"/>
+    </item>
+    <item>
+      <title>Aurora S03E05 1080p WEB x265-DRACO</title>
+      <guid>58c718eb15c659bb2a8b162b87a0f67731807a90</guid>
+      <pubDate>Fri, 17 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>1600000000</size>
+      <enclosure length="1600000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:58c718eb15c659bb2a8b162b87a0f67731807a90&amp;dn=Aurora+S03E05+1080p+WEB+x265-DRACO&amp;xl=1600000000"/>
+      <torznab:attr name="infohash" value="58c718eb15c659bb2a8b162b87a0f67731807a90"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:58c718eb15c659bb2a8b162b87a0f67731807a90&amp;dn=Aurora+S03E05+1080p+WEB+x265-DRACO&amp;xl=1600000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="1600000000"/>
+      <torznab:attr name="publishdate" value="Fri, 17 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="180"/>
+      <torznab:attr name="leechers" value="9"/>
+      <torznab:attr name="peers" value="189"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2019"/>
+      <torznab:attr name="season" value="3"/>
+      <torznab:attr name="episode" value="5"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="DRACO"/>
+      <torznab:attr name="tmdb" value="202"/>
+    </item>
+  </channel>
+</rss>

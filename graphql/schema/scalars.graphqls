@@ -1,4 +1,5 @@
 scalar Hash20
+scalar Hash32
 scalar Date
 scalar DateTime
 scalar Duration

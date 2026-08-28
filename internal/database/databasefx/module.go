@@ -17,6 +17,11 @@ func New() fx.Option {
 		"database",
 		configfx.NewConfigModule[postgres.Config]("postgres", postgres.NewDefaultConfig()),
 		configfx.NewConfigModule[cache.Config]("gorm_cache", cache.NewDefaultConfig()),
+		configfx.NewConfigModule[search.FeatureFlagsConfig](
+			"search_features",
+			search.NewDefaultFeatureFlagsConfig(),
+		),
+		fx.Invoke(search.ApplyFeatureFlags),
 		fx.Provide(
 			cache.NewInMemoryCacher,
 			cache.NewPlugin,

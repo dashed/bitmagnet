@@ -73,10 +73,29 @@ app-torrent-content {
   overflow: hidden;
 }
 
-.td-published-at abbr {
+.td-published-at abbr,
+.td-dht-seen abbr {
   cursor: default;
   text-decoration: underline;
   text-decoration-style: dotted;
+}
+
+.td-dht-seen {
+  white-space: nowrap;
+}
+
+.dht-seen-count {
+  display: inline-flex;
+  align-items: center;
+  min-width: 24px;
+  height: 20px;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  opacity: 0.72;
 }
 
 .cdk-column-peers {

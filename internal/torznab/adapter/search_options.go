@@ -16,9 +16,9 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 	switch r.Type {
 	case torznab.FunctionSearch:
 	case torznab.FunctionMovie:
-		options = append(options, query.Where(search.TorrentContentTypeCriteria(model.ContentTypeMovie)))
+		options = append(options, query.Where(search.TorrentContentTypeOrNullCriteria(model.ContentTypeMovie)))
 	case torznab.FunctionTV:
-		options = append(options, query.Where(search.TorrentContentTypeCriteria(model.ContentTypeTvShow)))
+		options = append(options, query.Where(search.TorrentContentTypeOrNullCriteria(model.ContentTypeTvShow)))
 
 		if r.Season.Valid {
 			episodes := make(model.Episodes)
@@ -31,9 +31,9 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 			options = append(options, query.Where(search.TorrentContentEpisodesCriteria(episodes)))
 		}
 	case torznab.FunctionMusic:
-		options = append(options, query.Where(search.TorrentContentTypeCriteria(model.ContentTypeMusic)))
+		options = append(options, query.Where(search.TorrentContentTypeOrNullCriteria(model.ContentTypeMusic)))
 	case torznab.FunctionBook:
-		options = append(options, query.Where(search.TorrentContentTypeCriteria(
+		options = append(options, query.Where(search.TorrentContentTypeOrNullCriteria(
 			model.ContentTypeEbook,
 			model.ContentTypeComic,
 			model.ContentTypeAudiobook,
@@ -66,7 +66,7 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 			if r.Type != torznab.FunctionMovie || torznab.CategoryMovies.ID == cat {
 				catCriteria = append(
 					catCriteria,
-					search.TorrentContentTypeCriteria(model.ContentTypeMovie),
+					search.TorrentContentTypeOrNullCriteria(model.ContentTypeMovie),
 				)
 			}
 
@@ -99,7 +99,7 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 			if r.Type != torznab.FunctionTV || torznab.CategoryTV.ID == cat {
 				catCriteria = append(
 					catCriteria,
-					search.TorrentContentTypeCriteria(model.ContentTypeTvShow),
+					search.TorrentContentTypeOrNullCriteria(model.ContentTypeTvShow),
 				)
 			}
 
@@ -123,18 +123,18 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 				)
 			}
 		case torznab.CategoryXXX.Has(cat):
-			catCriteria = append(catCriteria, search.TorrentContentTypeCriteria(model.ContentTypeXxx))
+			catCriteria = append(catCriteria, search.TorrentContentTypeOrNullCriteria(model.ContentTypeXxx))
 		case torznab.CategoryPC.Has(cat):
 			catCriteria = append(catCriteria,
-				search.TorrentContentTypeCriteria(model.ContentTypeSoftware, model.ContentTypeGame))
+				search.TorrentContentTypeOrNullCriteria(model.ContentTypeSoftware, model.ContentTypeGame))
 		case torznab.CategoryAudioAudiobook.Has(cat):
-			catCriteria = append(catCriteria, search.TorrentContentTypeCriteria(model.ContentTypeAudiobook))
+			catCriteria = append(catCriteria, search.TorrentContentTypeOrNullCriteria(model.ContentTypeAudiobook))
 		case torznab.CategoryAudio.Has(cat):
-			catCriteria = append(catCriteria, search.TorrentContentTypeCriteria(model.ContentTypeMusic))
+			catCriteria = append(catCriteria, search.TorrentContentTypeOrNullCriteria(model.ContentTypeMusic))
 		case torznab.CategoryBooksComics.Has(cat):
-			catCriteria = append(catCriteria, search.TorrentContentTypeCriteria(model.ContentTypeComic))
+			catCriteria = append(catCriteria, search.TorrentContentTypeOrNullCriteria(model.ContentTypeComic))
 		case torznab.CategoryBooks.Has(cat):
-			options = append(options, query.Where(search.TorrentContentTypeCriteria(
+			options = append(options, query.Where(search.TorrentContentTypeOrNullCriteria(
 				model.ContentTypeEbook,
 				model.ContentTypeComic,
 				model.ContentTypeAudiobook,
@@ -156,15 +156,8 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 			imdbID = "tt" + imdbID
 		}
 
-		var ct model.ContentType
-		if r.Type != torznab.FunctionTV {
-			ct = model.ContentTypeMovie
-		} else if r.Type != torznab.FunctionMovie {
-			ct = model.ContentTypeTvShow
-		}
-
 		options = append(options, query.Where(search.ContentAlternativeIdentifierCriteria(model.ContentRef{
-			Type:   ct,
+			Type:   identifierContentType(r.Type),
 			Source: "imdb",
 			ID:     imdbID,
 		})))
@@ -173,15 +166,8 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 	if r.TMDBID.Valid {
 		tmdbID := r.TMDBID.String
 
-		var ct model.ContentType
-		if r.Type != torznab.FunctionTV {
-			ct = model.ContentTypeMovie
-		} else if r.Type != torznab.FunctionMovie {
-			ct = model.ContentTypeTvShow
-		}
-
 		options = append(options, query.Where(search.ContentCanonicalIdentifierCriteria(model.ContentRef{
-			Type:   ct,
+			Type:   identifierContentType(r.Type),
 			Source: "tmdb",
 			ID:     tmdbID,
 		})))
@@ -205,4 +191,22 @@ func searchRequestToQueryOptions(r torznab.SearchRequest) ([]query.Option, error
 	}
 
 	return options, nil
+}
+
+// identifierContentType constrains an imdb/tmdb identifier lookup by content type
+// only for the two functions where the type is unambiguous: t=movie ⇒ movie,
+// t=tvsearch ⇒ tv_show. For t=search, t=music and t=book it returns the nil
+// content type so the identifier matches regardless of type. The previous
+// `if r.Type != FunctionTV { movie } else if r.Type != FunctionMovie { tvshow }`
+// branches could never leave the type unset, forcing content.type='movie' for
+// t=search — so a TV imdbid requested via t=search matched nothing (F6).
+func identifierContentType(function string) model.ContentType {
+	switch function {
+	case torznab.FunctionMovie:
+		return model.ContentTypeMovie
+	case torznab.FunctionTV:
+		return model.ContentTypeTvShow
+	default:
+		return ""
+	}
 }

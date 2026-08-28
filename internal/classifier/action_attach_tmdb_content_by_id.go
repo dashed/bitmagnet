@@ -5,6 +5,7 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classification"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 )
 
 const attachTMDBContentByIDName = "attach_tmdb_content_by_id"
@@ -27,6 +28,9 @@ func (attachTMDBContentByIDAction) compileAction(ctx compilerContext) (action, e
 
 	return action{
 		run: func(ctx executionContext) (classification.Result, error) {
+			if err := tape.EnterAction(ctx.Context, attachTMDBContentByIDName); err != nil {
+				return ctx.result, err
+			}
 			cl := ctx.result
 			var ref model.ContentRef
 			maybeRef := ctx.torrent.Hint.ContentRef()

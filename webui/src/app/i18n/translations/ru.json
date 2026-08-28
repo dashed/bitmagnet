@@ -33,6 +33,11 @@
       "processed": "Обработано",
       "updated": "Обновлено"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Все",
       "days": "Дни",
@@ -51,8 +56,17 @@
       "seconds_30": "30 секунд",
       "weeks_1": "1 неделя"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Событие",
+      "no_data": "__missing__",
       "resolution": "Разрешение",
       "throughput": "Пропускная способность",
       "timeframe": "Период времени",
@@ -84,6 +98,22 @@
       "total_counts_by_status": "Общее количество по статусам"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Тип контента",
     "file_type": "Тип файла",
@@ -109,6 +139,7 @@
   },
   "general": {
     "all": "Все",
+    "apply": "__missing__",
     "dismiss": "Закрыть",
     "error": "Ошибка",
     "none": "Нет",
@@ -239,12 +270,17 @@
   "torrents": {
     "classification": "Классификация",
     "clear_search": "Очистить поиск",
+    "clear_size_filter": "__missing__",
     "copy": "Копировать",
     "copy_to_clipboard": "Копировать в буфер обмена",
     "delete": "Удалить",
     "delete_action_cannot_be_undone": "Это действие нельзя отменить",
     "delete_are_you_sure": "Вы уверены, что хотите удалить этот торрент?",
     "deselect_all": "Снять выделение",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Редактировать теги",
     "episodes": "Эпизоды",
     "external_links": "Внешние ссылки",
@@ -263,6 +299,8 @@
     "leechers": "Личеры",
     "magnet": "Магнет",
     "magnet_links": "Магнет ссылки",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Новый тег",
     "order_by": "Сортировать по",
     "order_direction_toggle": "Переключить направление",
@@ -281,6 +319,7 @@
     "permalink": "Постоянная ссылка",
     "poster": "Постер",
     "published": "Опубликовано",
+    "published_date_filter": "__missing__",
     "rating": "Рейтинг",
     "refresh": "Обновить результаты",
     "reprocess": {
@@ -295,6 +334,17 @@
     "select_all": "Выбрать все",
     "showing_x_of_y_files": "Показано {{x}} из {{y}} файлов",
     "size": "Размер",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Источник торрента",
     "summary": "Сводка",
     "tags": {
@@ -308,6 +358,7 @@
     },
     "title": "Название",
     "toggle_drawer": "Переключить панель",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} голосов"
   },
   "version": {

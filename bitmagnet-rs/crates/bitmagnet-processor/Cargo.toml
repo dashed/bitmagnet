@@ -1,0 +1,56 @@
+[package]
+name = "bitmagnet-processor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase-3 Lane P — processor orchestration + write-shadow for the bitmagnet Rust rewrite."
+
+[dependencies]
+bitmagnet-blocking = { path = "../bitmagnet-blocking" }
+bitmagnet-classifier = { path = "../bitmagnet-classifier" }
+bitmagnet-common = { path = "../bitmagnet-common" }
+bitmagnet-fts = { path = "../bitmagnet-fts" }
+bitmagnet-model = { path = "../bitmagnet-model" }
+bitmagnet-queue = { path = "../bitmagnet-queue" }
+anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap.workspace = true
+futures.workspace = true
+hex.workspace = true
+prometheus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+sqlx.workspace = true
+# T9: the shared `content` row select list + decoder.
+bitmagnet-content-search = { path = "../bitmagnet-content-search" }
+# Reads the recorded tape the live local search is compared against.
+bitmagnet-tape = { path = "../bitmagnet-tape" }
+# Go `Languages.Slice()` ordering for the torrent_contents language list.
+bitmagnet-release = { path = "../bitmagnet-release" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+
+[[bin]]
+name = "bitmagnet-ingest-shadow"
+path = "src/bin/bitmagnet-ingest-shadow.rs"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bitmagnet-localsearch-replay"
+path = "src/bin/bitmagnet-localsearch-replay.rs"
+
+[[bin]]
+name = "bitmagnet-tape-rerun"
+path = "src/bin/bitmagnet-tape-rerun.rs"
+
+[[bin]]
+name = "bitmagnet-process-torrent-batch"
+path = "src/bin/bitmagnet-process-torrent-batch.rs"

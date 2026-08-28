@@ -1,0 +1,674 @@
+{
+  "recorded_at": "2026-07-16T08:35:40Z",
+  "host": "maple-bastion",
+  "source": {
+    "repository": "https://github.com/dashed/bitmagnet.git",
+    "ref": "refs/heads/rust-rewrite-phase2-integration-20260713",
+    "fetched_tip": "693ae1fc284d151e79c84cfd4e1e7a00edaa2a71",
+    "commit": "7ba5a75c4c5bee76cc12bb9f0b7886c762232198"
+  },
+  "mode": "gate",
+  "workload_exit_code": 0,
+  "final_exit_code": 0,
+  "safety_errors": [],
+  "hermes": {
+    "before": [
+      {
+        "containers": [
+          {
+            "containerID": "containerd://5fcac0f9b09714f52c5edb04cebb4d68d572bc5284d35643014a488b39dfd099",
+            "name": "dind",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:12Z"
+          },
+          {
+            "containerID": "containerd://279182f4aff33998557c82c8d4ca51aa79c7eaa4b513a694661276505c825cda",
+            "name": "hermes-agent",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:11Z"
+          },
+          {
+            "containerID": "containerd://f48c612aeb418a59cc912d1a73485c1f76c47b7689c8236322824353ad3e73f3",
+            "name": "log-tailer",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:12Z"
+          }
+        ],
+        "name": "hermes-agent-59dc7c9884-7vcg5",
+        "phase": "Running",
+        "startTime": "2026-07-09T21:31:25Z",
+        "uid": "35ea9b0b-4577-49df-9fbd-d89f3f7862b2"
+      }
+    ],
+    "after": [
+      {
+        "containers": [
+          {
+            "containerID": "containerd://5fcac0f9b09714f52c5edb04cebb4d68d572bc5284d35643014a488b39dfd099",
+            "name": "dind",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:12Z"
+          },
+          {
+            "containerID": "containerd://279182f4aff33998557c82c8d4ca51aa79c7eaa4b513a694661276505c825cda",
+            "name": "hermes-agent",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:11Z"
+          },
+          {
+            "containerID": "containerd://f48c612aeb418a59cc912d1a73485c1f76c47b7689c8236322824353ad3e73f3",
+            "name": "log-tailer",
+            "ready": true,
+            "restartCount": 1,
+            "startedAt": "2026-07-10T09:04:12Z"
+          }
+        ],
+        "name": "hermes-agent-59dc7c9884-7vcg5",
+        "phase": "Running",
+        "startTime": "2026-07-09T21:31:25Z",
+        "uid": "35ea9b0b-4577-49df-9fbd-d89f3f7862b2"
+      }
+    ]
+  },
+  "cleanup_observation": {
+    "containers": [],
+    "networks": [],
+    "volumes": []
+  },
+  "docker": {
+    "system_df_before": [
+      {
+        "Active": "0",
+        "Reclaimable": "1.986GB (59%)",
+        "Size": "3.344GB",
+        "TotalCount": "13",
+        "Type": "Images"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Containers"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Local Volumes"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "2.508GB",
+        "Size": "2.791GB",
+        "TotalCount": "36",
+        "Type": "Build Cache"
+      }
+    ],
+    "system_df_after": [
+      {
+        "Active": "0",
+        "Reclaimable": "2.179GB (58%)",
+        "Size": "3.755GB",
+        "TotalCount": "17",
+        "Type": "Images"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Containers"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Local Volumes"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "2.887GB",
+        "Size": "3.169GB",
+        "TotalCount": "39",
+        "Type": "Build Cache"
+      }
+    ],
+    "benchmark_images_before": [
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 22:18:01 -0400 EDT",
+        "CreatedSince": "6 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:422526288d0f99b0ab9dbec40db627dfd65435d9e6250dfdfbfa8ff5da21003c",
+        "Repository": "bm-rss-e60ca738ef-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 22:18:01 -0400 EDT",
+        "CreatedSince": "6 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4565ea7d174825909de7f90c00c8d0c8a5a599153efa0194233fea9f86549dc1",
+        "Repository": "bm-rss-670bbc3fdb-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:62be48b5dff2fea4707d0e994156a6632983df9ca8e80219e267438d6eff2e39",
+        "Repository": "bm-rss-9a22a902a8-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:ed1381d5044c7ffd5df2b34b367c3ecc419d4d440cb24655cb7ad491606109c3",
+        "Repository": "bm-rss-670bbc3fdb-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4df703a83867f48b028d5a219ae66e1e3dbfc29335f6bfc81323e449d4a6a9a1",
+        "Repository": "bm-rss-43e73ec5c0-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:de84ebf88b83c86ae213ca26fd91acd105ac7c557bed6462459d15dd9139f95d",
+        "Repository": "bm-rss-ad27f85516-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:034aca20010ced3c9b2ee7bd811230083c000ac8e53bfc67f4426a0d8e10894e",
+        "Repository": "bm-rss-e60ca738ef-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:10 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:ab60ecda91dc3d4eead581c5944766317b42b816e7e13b55a85c2a725dcc8307",
+        "Repository": "bm-rss-4698280ac0-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:a503f1cf4c111f7b41aa012c92322fe2ac38eb8b0e71f7f17d59ac1a8a740b54",
+        "Repository": "bm-rss-43e73ec5c0-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:be6416a7897659d80790c2fccaaaf5cd4b418389f71c9b275bf56c9261b29cdb",
+        "Repository": "bm-rss-9a22a902a8-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4816d063ac358a5d9b22c35d6432163e0b0c9e1e5df6f3aebc7ed50334a21d56",
+        "Repository": "bm-rss-ad27f85516-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:818210ac70ca6796245246269f8a7e58f9f78c0034c1a996729d48d9361279ac",
+        "Repository": "bm-rss-4698280ac0-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      }
+    ],
+    "benchmark_images_after": [
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-16 04:34:04 -0400 EDT",
+        "CreatedSince": "About a minute ago",
+        "Digest": "<none>",
+        "ID": "sha256:c75683102ed7050f716b15c4b0cf5b8b62846a31f91dcd4f5c14d8f6763f9c94",
+        "Repository": "bm-rss-b5a57172c8-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-16 04:34:04 -0400 EDT",
+        "CreatedSince": "About a minute ago",
+        "Digest": "<none>",
+        "ID": "sha256:23c406f5fcba14d0174f40dc20f83f274b4f19ab6b0e4793f73180774e213a03",
+        "Repository": "bm-rss-00b631d0ef-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 22:18:01 -0400 EDT",
+        "CreatedSince": "6 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4565ea7d174825909de7f90c00c8d0c8a5a599153efa0194233fea9f86549dc1",
+        "Repository": "bm-rss-670bbc3fdb-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 22:18:01 -0400 EDT",
+        "CreatedSince": "6 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:422526288d0f99b0ab9dbec40db627dfd65435d9e6250dfdfbfa8ff5da21003c",
+        "Repository": "bm-rss-e60ca738ef-graphql",
+        "SharedSize": "N/A",
+        "Size": "169MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:de84ebf88b83c86ae213ca26fd91acd105ac7c557bed6462459d15dd9139f95d",
+        "Repository": "bm-rss-ad27f85516-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:95d52b3d59ff8f7527c0e129fa6d9ff769381276380613670758b07244222a6d",
+        "Repository": "bm-rss-b5a57172c8-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:034aca20010ced3c9b2ee7bd811230083c000ac8e53bfc67f4426a0d8e10894e",
+        "Repository": "bm-rss-e60ca738ef-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:ed1381d5044c7ffd5df2b34b367c3ecc419d4d440cb24655cb7ad491606109c3",
+        "Repository": "bm-rss-670bbc3fdb-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:62be48b5dff2fea4707d0e994156a6632983df9ca8e80219e267438d6eff2e39",
+        "Repository": "bm-rss-9a22a902a8-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4df703a83867f48b028d5a219ae66e1e3dbfc29335f6bfc81323e449d4a6a9a1",
+        "Repository": "bm-rss-43e73ec5c0-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 01:19:40 -0400 EDT",
+        "CreatedSince": "27 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:73830df097083b8d3c79c1dd1be4086197ff65e5f44a491d198cebd2b226f503",
+        "Repository": "bm-rss-00b631d0ef-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:10 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:ab60ecda91dc3d4eead581c5944766317b42b816e7e13b55a85c2a725dcc8307",
+        "Repository": "bm-rss-4698280ac0-helper",
+        "SharedSize": "N/A",
+        "Size": "282MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:4816d063ac358a5d9b22c35d6432163e0b0c9e1e5df6f3aebc7ed50334a21d56",
+        "Repository": "bm-rss-ad27f85516-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:be6416a7897659d80790c2fccaaaf5cd4b418389f71c9b275bf56c9261b29cdb",
+        "Repository": "bm-rss-9a22a902a8-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:a503f1cf4c111f7b41aa012c92322fe2ac38eb8b0e71f7f17d59ac1a8a740b54",
+        "Repository": "bm-rss-43e73ec5c0-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      },
+      {
+        "Containers": "0",
+        "CreatedAt": "2026-07-15 00:34:03 -0400 EDT",
+        "CreatedSince": "28 hours ago",
+        "Digest": "<none>",
+        "ID": "sha256:818210ac70ca6796245246269f8a7e58f9f78c0034c1a996729d48d9361279ac",
+        "Repository": "bm-rss-4698280ac0-graphql",
+        "SharedSize": "N/A",
+        "Size": "168MB",
+        "Tag": "local",
+        "UniqueSize": "N/A"
+      }
+    ]
+  },
+  "evidence": [
+    {
+      "path": "graphql-rss-gate-maple-20260716-7ba5a75c.smoke.jsonl",
+      "sha256": "cdb6563acd18f75a58808ae6646fbb22147eea17f0cd81f1f29f42f862f080dc",
+      "valid_json": true,
+      "session_ids": [
+        "b5a57172c8424e8faeb2adfe210dacb7"
+      ],
+      "profiles": [
+        "smoke"
+      ],
+      "commits": [
+        "7ba5a75c4c5bee76cc12bb9f0b7886c762232198"
+      ],
+      "setup_images": [
+        {
+          "session_id": "b5a57172c8424e8faeb2adfe210dacb7",
+          "images": {
+            "graphql": {
+              "architecture": "amd64",
+              "created": "2026-07-16T04:34:04.95118163-04:00",
+              "id": "sha256:c75683102ed7050f716b15c4b0cf5b8b62846a31f91dcd4f5c14d8f6763f9c94",
+              "os": "linux",
+              "repo_digests": [
+                "bm-rss-b5a57172c8-graphql@sha256:c75683102ed7050f716b15c4b0cf5b8b62846a31f91dcd4f5c14d8f6763f9c94"
+              ],
+              "requested": "bm-rss-b5a57172c8-graphql:local",
+              "rootfs_layers": [
+                "sha256:81f823b9617547261c907396f63f770deaa554748ff739bedfa650e3bb74595a",
+                "sha256:ee718217da19b02d1c2465d7f6222de8cc4cf91a499063761f066456e8859636",
+                "sha256:a50dd140c6da846b097b7d91b29884e72b7c61a67d34400392d488ef2592fda8"
+              ]
+            },
+            "helper": {
+              "architecture": "amd64",
+              "created": "2026-07-15T01:19:40.311363621-04:00",
+              "id": "sha256:95d52b3d59ff8f7527c0e129fa6d9ff769381276380613670758b07244222a6d",
+              "os": "linux",
+              "repo_digests": [
+                "bm-rss-b5a57172c8-helper@sha256:95d52b3d59ff8f7527c0e129fa6d9ff769381276380613670758b07244222a6d"
+              ],
+              "requested": "bm-rss-b5a57172c8-helper:local",
+              "rootfs_layers": [
+                "sha256:7cc7fe68eff66f19872441a51938eecc4ad33746d2baa3abc081c1e6fe25988e",
+                "sha256:9621f68f1f5ddfd1fa67faa2a5c513986b9d4b015f06999152893fc9bcefb093",
+                "sha256:547f1fc1a2bb7ad4fbecb26c04a6ba82c067e668e79ab229bd932745636781c7",
+                "sha256:7d8e4ce94100ff12329e91295efd7fb69bfc45c0525dd1ff94e577a22903d44c",
+                "sha256:c74ef67e592edaa8542af23391149eff6a43bb49a7eb9c86f1ed4c3c997e660c",
+                "sha256:1662202475cd28e0508175be24b7b3be59a38beadc51d5ecc329636016affc05",
+                "sha256:cda01997c0410de8dcbdf27a73a969c1125517da3fa0f81b55cd53603704cbff",
+                "sha256:2ce191b5f9501af4eaad3412d62ce55e8b8ce572cfcb1e28f4a2387429d539d8",
+                "sha256:5a4de910ebb7df1bf81815b28d2641066578317a1d6251652507814371ee6be4",
+                "sha256:17009a2de59f246d90833fb7bab2da960225062c7e8c66df1b32243642c64c75"
+              ]
+            },
+            "postgres": {
+              "architecture": "amd64",
+              "created": "2025-06-06T18:27:47Z",
+              "id": "sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4",
+              "os": "linux",
+              "repo_digests": [
+                "postgres@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
+              ],
+              "requested": "postgres:17.5-bookworm",
+              "rootfs_layers": [
+                "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+                "sha256:c7f10a5bc827ed1a1f783583837a0deca92e3382d3288475c2a930bd391d42e9",
+                "sha256:19652f712d62df7f6083917fb9938fb66708a1b86a44a844b3b6104ef68f122a",
+                "sha256:da8bc6573c3007d636a70e386af339127b8f75d5bfaf3984fabce35afc0cecc2",
+                "sha256:a322bfe9a70e23592a18f616b5367e3cffb2d399747911f3a65d28be1ace9e98",
+                "sha256:d58ff8258d53ee95b53f6906b6f567d849e816573211d7aa1b49a5d1992569cc",
+                "sha256:ec6426e54bf36a905da3830569f473bf7b6db2fe407ce0fc64e7dc1b273ec08a",
+                "sha256:860d60efe28f2c300a882817d79d30bae349d60a3f4b105133940e056415d5d5",
+                "sha256:e454d22e3461906737c29ba4ebafa6421cc02979c08a4d5ad2856fb64c27cb4f",
+                "sha256:1395aabe9252d5786c3723aa2e2f71373bcc73953f4001f9e3f0b94f3760e43a",
+                "sha256:5f390beeb897845ce3448e47e82a0d5476f7701d2bd2af70453374e6355ea659",
+                "sha256:b86b44f71f0a4cf910c4f10f805cc43d813e7020df9e706c46408d1a687b6825",
+                "sha256:8d7c325a1de4f832f759eff99033e836f88560368c7d93144dc5babf4e5db6b1",
+                "sha256:b93544a4c8c82c8651f6898552bae42f12a9d8e42caaffa15e9412707dbe4afa"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "path": "graphql-rss-gate-maple-20260716-7ba5a75c.jsonl",
+      "sha256": "40692bb6e3137642966a31e1f2db2d64c66a6f262be11d6cbc55c3ded4c9ba65",
+      "valid_json": true,
+      "session_ids": [
+        "00b631d0ef534bdeac46780f3f5fcf88"
+      ],
+      "profiles": [
+        "gate"
+      ],
+      "commits": [
+        "7ba5a75c4c5bee76cc12bb9f0b7886c762232198"
+      ],
+      "setup_images": [
+        {
+          "session_id": "00b631d0ef534bdeac46780f3f5fcf88",
+          "images": {
+            "graphql": {
+              "architecture": "amd64",
+              "created": "2026-07-16T04:34:04.95118163-04:00",
+              "id": "sha256:23c406f5fcba14d0174f40dc20f83f274b4f19ab6b0e4793f73180774e213a03",
+              "os": "linux",
+              "repo_digests": [
+                "bm-rss-00b631d0ef-graphql@sha256:23c406f5fcba14d0174f40dc20f83f274b4f19ab6b0e4793f73180774e213a03"
+              ],
+              "requested": "bm-rss-00b631d0ef-graphql:local",
+              "rootfs_layers": [
+                "sha256:81f823b9617547261c907396f63f770deaa554748ff739bedfa650e3bb74595a",
+                "sha256:ee718217da19b02d1c2465d7f6222de8cc4cf91a499063761f066456e8859636",
+                "sha256:a50dd140c6da846b097b7d91b29884e72b7c61a67d34400392d488ef2592fda8"
+              ]
+            },
+            "helper": {
+              "architecture": "amd64",
+              "created": "2026-07-15T01:19:40.311363621-04:00",
+              "id": "sha256:73830df097083b8d3c79c1dd1be4086197ff65e5f44a491d198cebd2b226f503",
+              "os": "linux",
+              "repo_digests": [
+                "bm-rss-00b631d0ef-helper@sha256:73830df097083b8d3c79c1dd1be4086197ff65e5f44a491d198cebd2b226f503"
+              ],
+              "requested": "bm-rss-00b631d0ef-helper:local",
+              "rootfs_layers": [
+                "sha256:7cc7fe68eff66f19872441a51938eecc4ad33746d2baa3abc081c1e6fe25988e",
+                "sha256:9621f68f1f5ddfd1fa67faa2a5c513986b9d4b015f06999152893fc9bcefb093",
+                "sha256:547f1fc1a2bb7ad4fbecb26c04a6ba82c067e668e79ab229bd932745636781c7",
+                "sha256:7d8e4ce94100ff12329e91295efd7fb69bfc45c0525dd1ff94e577a22903d44c",
+                "sha256:c74ef67e592edaa8542af23391149eff6a43bb49a7eb9c86f1ed4c3c997e660c",
+                "sha256:1662202475cd28e0508175be24b7b3be59a38beadc51d5ecc329636016affc05",
+                "sha256:cda01997c0410de8dcbdf27a73a969c1125517da3fa0f81b55cd53603704cbff",
+                "sha256:2ce191b5f9501af4eaad3412d62ce55e8b8ce572cfcb1e28f4a2387429d539d8",
+                "sha256:5a4de910ebb7df1bf81815b28d2641066578317a1d6251652507814371ee6be4",
+                "sha256:17009a2de59f246d90833fb7bab2da960225062c7e8c66df1b32243642c64c75"
+              ]
+            },
+            "postgres": {
+              "architecture": "amd64",
+              "created": "2025-06-06T18:27:47Z",
+              "id": "sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4",
+              "os": "linux",
+              "repo_digests": [
+                "postgres@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
+              ],
+              "requested": "postgres:17.5-bookworm",
+              "rootfs_layers": [
+                "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+                "sha256:c7f10a5bc827ed1a1f783583837a0deca92e3382d3288475c2a930bd391d42e9",
+                "sha256:19652f712d62df7f6083917fb9938fb66708a1b86a44a844b3b6104ef68f122a",
+                "sha256:da8bc6573c3007d636a70e386af339127b8f75d5bfaf3984fabce35afc0cecc2",
+                "sha256:a322bfe9a70e23592a18f616b5367e3cffb2d399747911f3a65d28be1ace9e98",
+                "sha256:d58ff8258d53ee95b53f6906b6f567d849e816573211d7aa1b49a5d1992569cc",
+                "sha256:ec6426e54bf36a905da3830569f473bf7b6db2fe407ce0fc64e7dc1b273ec08a",
+                "sha256:860d60efe28f2c300a882817d79d30bae349d60a3f4b105133940e056415d5d5",
+                "sha256:e454d22e3461906737c29ba4ebafa6421cc02979c08a4d5ad2856fb64c27cb4f",
+                "sha256:1395aabe9252d5786c3723aa2e2f71373bcc73953f4001f9e3f0b94f3760e43a",
+                "sha256:5f390beeb897845ce3448e47e82a0d5476f7701d2bd2af70453374e6355ea659",
+                "sha256:b86b44f71f0a4cf910c4f10f805cc43d813e7020df9e706c46408d1a687b6825",
+                "sha256:8d7c325a1de4f832f759eff99033e836f88560368c7d93144dc5babf4e5db6b1",
+                "sha256:b93544a4c8c82c8651f6898552bae42f12a9d8e42caaffa15e9412707dbe4afa"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "headroom_artifact": {
+    "path": "graphql-rss-gate-maple-20260716-7ba5a75c.headroom.jsonl",
+    "sha256": "37ca14c667f5df865455ffda3c020bf7fc767df7758b1d9367c7b71bf571efa8",
+    "valid_json": true
+  },
+  "headroom": {
+    "kind": "headroom_summary",
+    "recorded_at": "2026-07-16T08:35:38Z",
+    "samples": 26,
+    "min_mem_available_kib": 21172304,
+    "min_docker_root_available_kib": 879449288,
+    "max_psi_memory_some_avg10": 0.00,
+    "max_psi_memory_full_avg10": 0.00,
+    "max_load_one": 8.55,
+    "docker_stats_failures": 0,
+    "docker_system_df_retry_samples": 8,
+    "docker_system_df_transient_attempts": 8,
+    "docker_system_df_failures": 0
+  }
+}

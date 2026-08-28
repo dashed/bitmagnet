@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -11,6 +12,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/bitmagnet-io/bitmagnet/internal/httpserver"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
 	"github.com/gin-gonic/gin"
 	"github.com/vektah/gqlparser/v2/ast"
 	"go.uber.org/fx"
@@ -21,6 +23,7 @@ type Params struct {
 	fx.In
 	Schema lazy.Lazy[graphql.ExecutableSchema]
 	Logger *zap.SugaredLogger
+	Shadow *graphqlshadow.Hook
 }
 
 type Result struct {
@@ -32,12 +35,14 @@ func New(p Params) Result {
 	return Result{
 		Option: &builder{
 			schema: p.Schema,
+			shadow: p.Shadow,
 		},
 	}
 }
 
 type builder struct {
 	schema lazy.Lazy[graphql.ExecutableSchema]
+	shadow *graphqlshadow.Hook
 }
 
 func (builder) Key() string {
@@ -50,7 +55,7 @@ func (b builder) Apply(e *gin.Engine) error {
 		return err
 	}
 
-	gql := newServer(schema)
+	gql := newHandler(schema, b.shadow)
 
 	e.POST("/graphql", func(c *gin.Context) {
 		gql.ServeHTTP(c.Writer, c.Request)
@@ -65,7 +70,7 @@ func (b builder) Apply(e *gin.Engine) error {
 	return nil
 }
 
-func newServer(es graphql.ExecutableSchema) *handler.Server {
+func newServer(es graphql.ExecutableSchema, shadow *graphqlshadow.Hook) *handler.Server {
 	srv := handler.New(es)
 
 	srv.AddTransport(transport.Websocket{
@@ -83,5 +88,25 @@ func newServer(es graphql.ExecutableSchema) *handler.Server {
 		Cache: lru.New[string](100),
 	})
 
+	if shadow != nil {
+		srv.AroundResponses(shadow.CaptureResponse)
+	}
+
 	return srv
+}
+
+// newHandler records request entry before gqlgen runs. The response middleware
+// seals the pre-write response-generation duration as soon as its handler
+// returns; Finish waits until ServeHTTP completes only to dispatch shadow work.
+func newHandler(es graphql.ExecutableSchema, shadow *graphqlshadow.Hook) http.Handler {
+	server := newServer(es, shadow)
+	if shadow == nil {
+		return server
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, capture := shadow.Begin(r.Context())
+		server.ServeHTTP(w, r.WithContext(ctx))
+		shadow.Finish(ctx, capture)
+	})
 }

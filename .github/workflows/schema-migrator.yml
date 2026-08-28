@@ -1,0 +1,341 @@
+name: Schema Migrator Image
+
+on:
+  push:
+    branches: [alberto/my-fork, "codex/schema-migrator-*"]
+    paths:
+      - "cmd/bitmagnet-schema-migrator/**"
+      - "internal/database/migrations/**"
+      - "internal/schemamigrator/**"
+      - "internal/version/**"
+      - "migrations/**"
+      - "bitmagnet-rs/docker/Dockerfile.schema-migrator"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/schema-migrator.yml"
+  pull_request:
+    paths:
+      - "cmd/bitmagnet-schema-migrator/**"
+      - "internal/database/migrations/**"
+      - "internal/schemamigrator/**"
+      - "internal/version/**"
+      - "migrations/**"
+      - "bitmagnet-rs/docker/Dockerfile.schema-migrator"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/schema-migrator.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema-migrator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: bounded CLI and dependency contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.6"
+          cache: true
+      - run: make schema-migrator-check
+
+  docker:
+    name: build and smoke migration-only image
+    runs-on: ubuntu-latest
+    outputs:
+      archive-sha256: ${{ steps.export.outputs.archive-sha256 }}
+      artifact-name: ${{ steps.export.outputs.artifact-name }}
+      builder-attempt: ${{ steps.export.outputs.builder-attempt }}
+      image-id: ${{ steps.export.outputs.image-id }}
+      source-commit: ${{ steps.source.outputs.commit }}
+      source-tree: ${{ steps.source.outputs.tree }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Resolve exact source identity
+        id: source
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: bitmagnet-rs/docker/Dockerfile.schema-migrator
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bitmagnet-schema-migrator:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=schema-migrator
+          cache-to: type=gha,mode=max,scope=schema-migrator
+      - name: Verify image contract and executable boundary
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          image=bitmagnet-schema-migrator:ci
+          inspect="$(mktemp)"
+          version_report="$(mktemp)"
+          rejected="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-schema-migrator"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            (.[0].Config.ExposedPorts == null or (.[0].Config.ExposedPorts | length) == 0) and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.schema-migrator-mode"] == "migration-only" and
+            .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-34/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+          ' "$inspect"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            "$image" version | tee "$version_report"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            .schema == "bitmagnet.schema-migrator-version/v1" and
+            .version == $commit and
+            .sourceCommit == $commit and
+            .sourceTree == $tree
+          ' "$version_report"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            "$image" --help | grep -F "bitmagnet-schema-migrator"
+          if docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            "$image" migrate up --version 35 2>"$rejected"; then
+            echo "wrong up target unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -Fx 'migrate up requires --version 34; got "35"' "$rejected"
+          if docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 \
+            "$image" migrate down --version 29 2>"$rejected"; then
+            echo "migration without POSTGRES_DSN unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -Fx 'POSTGRES_DSN is required' "$rejected"
+      - name: Export verified image for guarded publication
+        id: export
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          artifact_dir="$RUNNER_TEMP/bitmagnet-schema-migrator-image"
+          archive="$artifact_dir/bitmagnet-schema-migrator.tar"
+          builder_attempt="$GITHUB_RUN_ATTEMPT"
+          artifact_name="schema-migrator-image-${SOURCE_COMMIT}-attempt-${builder_attempt}"
+          printf '%s' "$builder_attempt" | grep -Eq '^[1-9][0-9]*$'
+          mkdir -p "$artifact_dir"
+          docker image save --output "$archive" bitmagnet-schema-migrator:ci
+          image_id="$(docker image inspect --format '{{.Id}}' bitmagnet-schema-migrator:ci)"
+          archive_sha256="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          jq -n \
+            --arg schema "bitmagnet.schema-migrator-image-build/v1" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$image_id" \
+            --arg archiveSha256 "$archive_sha256" \
+            --argjson builderAttempt "$builder_attempt" \
+            '{
+              schema: $schema,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              builderAttempt: $builderAttempt
+            }' > "$artifact_dir/build-receipt.json"
+          printf '%s  %s\n' "$archive_sha256" "bitmagnet-schema-migrator.tar" \
+            > "$artifact_dir/bitmagnet-schema-migrator.tar.sha256"
+          {
+            echo "artifact-name=$artifact_name"
+            echo "archive-sha256=$archive_sha256"
+            echo "builder-attempt=$builder_attempt"
+            echo "image-id=$image_id"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload verified image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.export.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-schema-migrator-image
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: publish digest-authoritative schema migrator image
+    if: >-
+      success() &&
+      github.repository == 'dashed/bitmagnet' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/alberto/my-fork'
+    needs: [test, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/dashed/bitmagnet-schema-migrator
+      BUILD_ARTIFACT_NAME: ${{ needs.docker.outputs.artifact-name }}
+      BUILDER_ATTEMPT: ${{ needs.docker.outputs.builder-attempt }}
+      SOURCE_COMMIT: ${{ needs.docker.outputs.source-commit }}
+      SOURCE_TREE: ${{ needs.docker.outputs.source-tree }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.docker.outputs.archive-sha256 }}
+      EXPECTED_IMAGE_ID: ${{ needs.docker.outputs.image-id }}
+    steps:
+      - name: Download verified image artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.docker.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-schema-migrator-image
+      - name: Verify and load exact smoked image
+        working-directory: ${{ runner.temp }}/bitmagnet-schema-migrator-image
+        run: |
+          test "$SOURCE_COMMIT" = "$GITHUB_SHA"
+          printf '%s' "$BUILDER_ATTEMPT" | grep -Eq '^[1-9][0-9]*$'
+          test "$BUILD_ARTIFACT_NAME" \
+            = "schema-migrator-image-${SOURCE_COMMIT}-attempt-${BUILDER_ATTEMPT}"
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$SOURCE_TREE" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$EXPECTED_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$EXPECTED_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" "bitmagnet-schema-migrator.tar" \
+            | sha256sum --check --strict -
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            '.schema == "bitmagnet.schema-migrator-image-build/v1" and
+             .sourceCommit == $commit and
+             .sourceTree == $tree and
+             .imageId == $imageId and
+             .archiveSha256 == $archiveSha256 and
+             .builderAttempt == $builderAttempt' \
+            build-receipt.json
+          docker image load --input bitmagnet-schema-migrator.tar
+          test "$(docker image inspect --format '{{.Id}}' bitmagnet-schema-migrator:ci)" \
+            = "$EXPECTED_IMAGE_ID"
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish and verify immutable digest
+        id: publish
+        working-directory: ${{ runner.temp }}/bitmagnet-schema-migrator-image
+        run: |
+          image_ref="$IMAGE_REPOSITORY:$SOURCE_COMMIT"
+          tag_state=pushed
+          inspect_error="$(mktemp)"
+          if remote_inspect="$(docker buildx imagetools inspect "$image_ref" 2>"$inspect_error")"; then
+            tag_state=reused
+          elif ! grep -Eqi 'manifest unknown|not found' "$inspect_error"; then
+            cat "$inspect_error" >&2
+            exit 1
+          else
+            docker image tag bitmagnet-schema-migrator:ci "$image_ref"
+            docker image push "$image_ref"
+            remote_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          fi
+          printf '%s\n' "$remote_inspect"
+          digest="$(printf '%s\n' "$remote_inspect" | awk '$1 == "Digest:" { print $2; exit }')"
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+
+          immutable_ref="$IMAGE_REPOSITORY@$digest"
+          docker buildx imagetools inspect "$immutable_ref"
+          docker image pull "$immutable_ref"
+          inspect="$(mktemp)"
+          docker image inspect "$immutable_ref" | tee "$inspect"
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg immutableRef "$immutable_ref" '
+              length == 1 and
+              .[0].Id == $imageId and
+              (.[0].RepoDigests | index($immutableRef)) != null and
+              .[0].Os == "linux" and
+              .[0].Architecture == "amd64" and
+              .[0].Config.User == "65532:65532" and
+              .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-schema-migrator"] and
+              .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+              .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+              .[0].Config.Labels["io.bitmagnet.schema-migrator-mode"] == "migration-only" and
+              .[0].Config.Labels["io.bitmagnet.schema-migrator-contract"] == "goose-29-34/v1"
+            ' "$inspect"
+
+          final_tag_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          printf '%s\n' "$final_tag_inspect"
+          final_tag_digest="$(printf '%s\n' "$final_tag_inspect" \
+            | awk '$1 == "Digest:" { print $2; exit }')"
+          test "$final_tag_digest" = "$digest"
+
+          jq -n \
+            --arg schema "bitmagnet.schema-migrator-image-publication/v2" \
+            --arg imageRepository "$IMAGE_REPOSITORY" \
+            --arg tag "$SOURCE_COMMIT" \
+            --arg tagRef "$image_ref" \
+            --arg tagPolicy "mutable-convenience-only" \
+            --arg deploymentAuthority "digest" \
+            --arg digest "$digest" \
+            --arg immutableRef "$immutable_ref" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --arg tagState "$tag_state" \
+            --arg workflowRun "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            --argjson publisherAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: $schema,
+              imageRepository: $imageRepository,
+              tag: $tag,
+              tagRef: $tagRef,
+              tagPolicy: $tagPolicy,
+              deploymentAuthority: $deploymentAuthority,
+              digest: $digest,
+              immutableRef: $immutableRef,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              tagState: $tagState,
+              workflowRun: $workflowRun,
+              builderAttempt: $builderAttempt,
+              publisherAttempt: $publisherAttempt
+            }' > publication-receipt.json
+          {
+            echo '### Schema migrator image publication'
+            echo
+            echo "- Source commit: \`$SOURCE_COMMIT\`"
+            echo "- Source tree: \`$SOURCE_TREE\`"
+            echo "- Deployment authority: \`$immutable_ref\`"
+            echo "- Full-SHA tag (mutable convenience): \`$image_ref\` (\`$tag_state\`)"
+            echo "- Builder attempt: \`$BUILDER_ATTEMPT\`"
+            echo "- Publisher attempt: \`$GITHUB_RUN_ATTEMPT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "immutable-ref=$immutable_ref" >> "$GITHUB_OUTPUT"
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schema-migrator-publication-${{ needs.docker.outputs.source-commit }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bitmagnet-schema-migrator-image/publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,190 @@
+name: WebUI React
+
+on:
+  push:
+    paths:
+      - webui-react/**
+      - graphql/schema/**
+      - .github/workflows/webui-react.yml
+  pull_request:
+    paths:
+      - webui-react/**
+      - graphql/schema/**
+      - .github/workflows/webui-react.yml
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: 1.23.6
+  LHCI_CLI_VERSION: 0.15.1
+  NODE_VERSION: 22.17.0
+  PNPM_VERSION: 10.10.0
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: webui-react
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          version: ${{ env.PNPM_VERSION }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('webui-react/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate GraphQL types
+        run: pnpm codegen
+      - name: Check generated GraphQL drift
+        run: git diff --exit-code -- src/graphql/generated
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Test
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+
+  budgets:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: webui-react
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          version: ${{ env.PNPM_VERSION }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('webui-react/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Enforce gzip JS budgets
+        run: pnpm size
+
+  embed-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          version: ${{ env.PNPM_VERSION }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Get pnpm store directory
+        id: pnpm-store
+        working-directory: webui-react
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('webui-react/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          cache: true
+          cache-dependency-path: go.sum
+          go-version: ${{ env.GO_VERSION }}
+      - name: Install dependencies
+        working-directory: webui-react
+        run: pnpm install --frozen-lockfile
+      - name: Build React dist for embed
+        working-directory: webui-react
+        run: pnpm build
+      - name: Build tagged Go packages
+        run: go build -tags webuireact ./...
+      - name: Test React embed package
+        run: go test -tags webuireact ./webui-react/...
+
+  lighthouse:
+    # P0 records Lighthouse numbers as a soft gate. P0 exit reviews these
+    # results, and P1 should remove continue-on-error to make the gate hard.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: webui-react
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          version: ${{ env.PNPM_VERSION }}
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('webui-react/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Soft-gate notice
+        run: >-
+          echo "::warning title=Lighthouse P0 soft gate::Review LCP and TBT
+          numbers for P0 exit; P1 should make this job a hard gate."
+      - name: Run Lighthouse CI
+        run: >-
+          pnpm --package="@lhci/cli@${LHCI_CLI_VERSION}" dlx lhci autorun
+          --config=./lighthouserc.cjs

@@ -1,0 +1,64 @@
+[package]
+name = "bitmagnet-classifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Phase-3 Lane C — content classifier for the bitmagnet Rust rewrite."
+
+[dependencies]
+bitmagnet-fts = { path = "../bitmagnet-fts" }
+# B′-1: Go's levenshteinFindBestMatch, the tie-break over the candidate window.
+bitmagnet-textmatch = { path = "../bitmagnet-textmatch" }
+bitmagnet-tape = { path = "../bitmagnet-tape" }
+# CEL engine (cel-rust). `structs` enables custom struct defs, `json` enables
+# Value<->JSON conversion, `regex` powers the built-in `matches()`. Version
+# pinned locally rather than in the workspace table to keep Lane C's dependency
+# edge off the shared manifest during the lane race.
+cel = { version = "0.14.0", features = ["json", "structs", "regex"] }
+# YAML source loader for `classifier.core.yml`.
+serde_yaml = "0.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+# The B′-0 dependency seam. `async-trait` boxes the `ContentResolver` futures so
+# the trait stays `dyn`-safe (a recording/replaying tape is swapped in for the
+# live PG/TMDB backends without a generic parameter); `futures` supplies the
+# `BoxFuture` the recursive action executor needs and the `block_on` the
+# still-synchronous callers bridge with.
+async-trait = { workspace = true }
+futures = { workspace = true }
+# `model.Content` — what the four `attach_*` actions attach.
+bitmagnet-model = { path = "../bitmagnet-model" }
+sha2 = "0.10"
+# Tape replay of TMDB: Go records the HTTP body base64-encoded alongside its
+# sha256, and both are verified before the body is decoded.
+base64 = "0.22"
+regex = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Enum discriminants for the CEL `contentType` / `fileType` namespaces and the
+# `result.contentType` binding — sourced from the shared proto so they cannot
+# drift from the Go `bitmagnet.Classification` enum (frozen contract §0.5).
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+# Lane R release-name parsers (keyword-glob -> regex compiler + video-attribute
+# parsers + episode parser). Contract §3: Lane R blocks Lane C.
+bitmagnet-release = { path = "../bitmagnet-release" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The ContentResolver trait is async, so its tests need a runtime.
+tokio = { workspace = true }
+# The prod-corpus gate replays Go's PRE-ATTACH, which depends on the hint the
+# PROCESSOR synthesises from existing torrent_contents -- not on the stored
+# torrent_hints row. Reusing `load::effective_hint` keeps that logic in one
+# tested place; hand-copying it into the test would be the exact drift this
+# parity work exists to catch.
+#
+# 🔑 This is a dev-dependency CYCLE (bitmagnet-processor depends on this crate).
+# Cargo permits that for dev-dependencies specifically, and it is the reason
+# this is not a normal dependency.
+bitmagnet-processor = { path = "../bitmagnet-processor" }

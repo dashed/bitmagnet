@@ -1,0 +1,8 @@
+grpcio==1.73.1
+grpcio-tools==1.73.1
+msgpack==1.1.1
+protobuf==6.31.1
+psycopg[binary]==3.2.9
+setuptools==80.9.0
+typing-extensions==4.14.0
+zstandard==0.23.0

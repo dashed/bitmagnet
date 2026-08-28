@@ -1,0 +1,33 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Nebula S01E02 720p HDTV x264-FLEET</title>
+      <guid>59ecbf312f12bb268e28b0c866fb9222a75c8e58</guid>
+      <pubDate>Sat, 18 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>900000000</size>
+      <enclosure length="900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="infohash" value="59ecbf312f12bb268e28b0c866fb9222a75c8e58"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="900000000"/>
+      <torznab:attr name="publishdate" value="Sat, 18 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="250"/>
+      <torznab:attr name="leechers" value="12"/>
+      <torznab:attr name="peers" value="262"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2020"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="FLEET"/>
+      <torznab:attr name="tmdb" value="201"/>
+      <torznab:attr name="imdb" value="2010101"/>
+    </item>
+  </channel>
+</rss>

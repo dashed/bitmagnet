@@ -8,7 +8,6 @@ import (
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
-	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/responder"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
@@ -25,13 +24,14 @@ type Params struct {
 
 type Result struct {
 	fx.Out
-	Server            lazy.Lazy[Server]
-	LastResponses     *concurrency.AtomicValue[LastResponses] `name:"dht_server_last_responses"`
-	AppHook           fx.Hook                                 `group:"app_hooks"`
-	QueryDuration     prometheus.Collector                    `group:"prometheus_collectors"`
-	QuerySuccessTotal prometheus.Collector                    `group:"prometheus_collectors"`
-	QueryErrorTotal   prometheus.Collector                    `group:"prometheus_collectors"`
-	QueryConcurrency  prometheus.Collector                    `group:"prometheus_collectors"`
+	Server               lazy.Lazy[Server]
+	LastResponses        *concurrency.AtomicValue[LastResponses] `name:"dht_server_last_responses"`
+	AppHook              fx.Hook                                 `group:"app_hooks"`
+	QueryDuration        prometheus.Collector                    `group:"prometheus_collectors"`
+	QuerySuccessTotal    prometheus.Collector                    `group:"prometheus_collectors"`
+	QueryErrorTotal      prometheus.Collector                    `group:"prometheus_collectors"`
+	QueryConcurrency     prometheus.Collector                    `group:"prometheus_collectors"`
+	ResponseDroppedTotal prometheus.Collector                    `group:"prometheus_collectors"`
 }
 
 const (
@@ -54,11 +54,12 @@ func New(p Params) Result {
 							p.Config.Port,
 						),
 						socket:           NewSocket(),
-						queries:          make(map[string]chan dht.RecvMsg),
+						queries:          make(map[string]pendingQuery),
 						queryTimeout:     p.Config.QueryTimeout,
 						responder:        p.Responder,
 						responderTimeout: time.Second * 5,
-						idIssuer:         &variantIDIssuer{},
+						idIssuer:         cryptoIDIssuer{},
+						responseDropped:  collector.responseDroppedTotal,
 						logger:           p.Logger.Named(subsystem),
 					},
 					lastResponses: lastResponses,
@@ -83,10 +84,11 @@ func New(p Params) Result {
 				})
 			},
 		},
-		LastResponses:     lastResponses,
-		QueryDuration:     collector.queryDuration,
-		QuerySuccessTotal: collector.querySuccessTotal,
-		QueryErrorTotal:   collector.queryErrorTotal,
-		QueryConcurrency:  collector.queryConcurrency,
+		LastResponses:        lastResponses,
+		QueryDuration:        collector.queryDuration,
+		QuerySuccessTotal:    collector.querySuccessTotal,
+		QueryErrorTotal:      collector.queryErrorTotal,
+		QueryConcurrency:     collector.queryConcurrency,
+		ResponseDroppedTotal: collector.responseDroppedTotal,
 	}
 }

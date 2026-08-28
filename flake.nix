@@ -24,8 +24,10 @@
             jekyll
             nodejs_22
             nodePackages.prettier
+            prometheus.cli
             protobuf
             protoc-gen-go
+            protoc-gen-go-grpc
             ruby
           ] ++ (if stdenv.isLinux then [
             chromium

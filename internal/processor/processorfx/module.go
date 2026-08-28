@@ -4,6 +4,8 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	batchqueue "github.com/bitmagnet-io/bitmagnet/internal/processor/batch/queue"
 	processorqueue "github.com/bitmagnet-io/bitmagnet/internal/processor/queue"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/searchfx"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy"
 	"go.uber.org/fx"
 )
 
@@ -14,6 +16,19 @@ func New() fx.Option {
 			processor.New,
 			processorqueue.New,
 			batchqueue.New,
+			provideSearchIndexer,
 		),
 	)
+}
+
+// provideSearchIndexer adapts the (optional) Tantivy client into the processor's
+// SearchIndexer. A nil client or disabled dual-write yields a nil interface,
+// returned explicitly so it is a true nil (not a typed-nil that would defeat the
+// processor's nil check). The client remains available to the search router.
+func provideSearchIndexer(client *tantivy.Client, cfg searchfx.Config) processor.SearchIndexer {
+	if client == nil || !cfg.DualWriteEnabled {
+		return nil
+	}
+
+	return client
 }

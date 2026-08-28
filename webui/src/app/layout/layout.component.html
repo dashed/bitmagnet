@@ -102,6 +102,10 @@
       <mat-icon svgIcon="external-link" />
     </button>
     <mat-menu #externalLinksMenu="matMenu" class="layout-header-menu">
+      <!-- Plain text by design: avoids touching all Angular locale files for this beta switch. -->
+      <a mat-menu-item href="/?frontend=react"
+        ><mat-icon>science</mat-icon>New UI (beta)</a
+      >
       <a mat-menu-item href="https://bitmagnet.io" target="_blank"
         >bitmagnet.io</a
       >

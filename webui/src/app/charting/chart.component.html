@@ -3,15 +3,20 @@
     <mat-card-header>
       <mat-card-title>
         <h4>
-          <mat-icon
+          <button
+            type="button"
+            mat-icon-button
             [matTooltip]="t('dashboard.metrics.toggle_legend')"
             [class]="
-              'icon-toggle-legend ' +
+              'button-toggle-legend ' +
               (legend ? 'icon-toggle-legend-active' : '')
             "
+            [attr.aria-label]="t('dashboard.metrics.toggle_legend')"
             (click)="toggleLegend()"
-            >legend_toggle</mat-icon
-          >{{ title }}
+          >
+            <mat-icon>legend_toggle</mat-icon>
+          </button>
+          {{ title }}
         </h4>
       </mat-card-title>
     </mat-card-header>
@@ -30,6 +35,9 @@
           [width]="width"
         >
         </canvas>
+        @if (!hasData) {
+          <div class="chart-empty">{{ t("dashboard.metrics.no_data") }}</div>
+        }
       </div>
     </mat-card-content>
   </mat-card>

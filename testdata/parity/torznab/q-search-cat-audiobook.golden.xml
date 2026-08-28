@@ -1,0 +1,42 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Cosmos - A Journey Audiobook M4B</title>
+      <guid>6ef6caa563fbc8e40a3a7437b687168f3b47ae8f</guid>
+      <pubDate>Tue, 07 Jan 2020 00:00:00 +0000</pubDate>
+      <category>audiobook</category>
+      <size>540000000</size>
+      <enclosure length="540000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:6ef6caa563fbc8e40a3a7437b687168f3b47ae8f&amp;dn=Cosmos+-+A+Journey+Audiobook+M4B&amp;xl=540000000"/>
+      <torznab:attr name="infohash" value="6ef6caa563fbc8e40a3a7437b687168f3b47ae8f"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:6ef6caa563fbc8e40a3a7437b687168f3b47ae8f&amp;dn=Cosmos+-+A+Journey+Audiobook+M4B&amp;xl=540000000"/>
+      <torznab:attr name="category" value="3030"/>
+      <torznab:attr name="size" value="540000000"/>
+      <torznab:attr name="publishdate" value="Tue, 07 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="18"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="19"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>Mystery Bundle Pack</title>
+      <guid>4b594b976f5fa0811fe817039e0f7166001337ea</guid>
+      <pubDate>Thu, 02 Jan 2020 00:00:00 +0000</pubDate>
+      <category>Unknown</category>
+      <size>120000000</size>
+      <enclosure length="120000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="infohash" value="4b594b976f5fa0811fe817039e0f7166001337ea"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="category" value="8000"/>
+      <torznab:attr name="size" value="120000000"/>
+      <torznab:attr name="publishdate" value="Thu, 02 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="8"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="9"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

@@ -14,6 +14,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/gql/gqlmodel/gen"
 	"github.com/bitmagnet-io/bitmagnet/internal/health"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/version"
 )
 
@@ -31,6 +32,7 @@ func (r *queryResolver) Workers(ctx context.Context) (gen.WorkersQuery, error) {
 			Started: w.Started(),
 		})
 	}
+	workers = r.Resolver.mergePeerWorkers(ctx, workers)
 
 	return gen.WorkersQuery{
 		ListAll: gen.WorkersListAllQueryResult{
@@ -80,6 +82,7 @@ func (r *queryResolver) Health(ctx context.Context) (gen.HealthQuery, error) {
 		Status: transformHealthCheckStatus(check.Status),
 		Checks: checks,
 	}
+	result = r.Resolver.mergePeerHealth(ctx, result)
 
 	return result, nil
 }
@@ -102,12 +105,70 @@ func (r *queryResolver) Torrent(ctx context.Context) (gqlmodel.TorrentQuery, err
 func (r *queryResolver) TorrentContent(ctx context.Context) (gqlmodel.TorrentContentQuery, error) {
 	return gqlmodel.TorrentContentQuery{
 		TorrentContentSearch: r.Search,
+		Pathsearch:           r.Pathsearch,
+		FileSearchClient:     r.FileSearch,
 	}, nil
+}
+
+// FileSearch is the resolver for the fileSearch field.
+func (r *torrentContentQueryResolver) FileSearch(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.FileSearchInput) (filesearch.FileSearchResult, error) {
+	if obj != nil {
+		return obj.FileSearch(ctx, input)
+	}
+
+	return gqlmodel.FileSearchQuery{
+		Client:               r.Resolver.FileSearch,
+		Pathsearch:           r.Resolver.Pathsearch,
+		TorrentContentSearch: r.Resolver.Search,
+	}.Search(ctx, input)
+}
+
+// FileSearchFacets is the resolver for the fileSearchFacets field.
+func (r *torrentContentQueryResolver) FileSearchFacets(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gen.FileSearchFacetsInput) (gen.FileSearchFacetsResult, error) {
+	params := gqlmodel.NewFileSearchFacetsParams(input)
+
+	var (
+		result filesearch.FacetsResult
+		err    error
+	)
+
+	if obj != nil {
+		result, err = obj.FileSearchFacets(ctx, params)
+	} else {
+		result, err = (gqlmodel.FileSearchQuery{
+			Client:               r.Resolver.FileSearch,
+			Pathsearch:           r.Resolver.Pathsearch,
+			TorrentContentSearch: r.Resolver.Search,
+		}).FileSearchFacets(ctx, params)
+	}
+
+	if err != nil {
+		return gen.FileSearchFacetsResult{}, err
+	}
+
+	return gqlmodel.NewFileSearchFacetsResult(result), nil
+}
+
+// PathTypeahead is the resolver for the pathTypeahead field.
+func (r *torrentContentQueryResolver) PathTypeahead(ctx context.Context, obj *gqlmodel.TorrentContentQuery, input gqlmodel.PathTypeaheadInput) (filesearch.PathTypeaheadResult, error) {
+	if obj != nil {
+		return obj.PathTypeahead(ctx, input)
+	}
+
+	return gqlmodel.FileSearchQuery{
+		Client:               r.Resolver.FileSearch,
+		Pathsearch:           r.Resolver.Pathsearch,
+		TorrentContentSearch: r.Resolver.Search,
+	}.PathTypeahead(ctx, input)
 }
 
 // Files is the resolver for the files field.
 func (r *torrentQueryResolver) Files(ctx context.Context, obj *gqlmodel.TorrentQuery, input gqlmodel.TorrentFilesQueryInput) (query.GenericResult[model.TorrentFile], error) {
+	// Construct with the SAME deps as queryResolver.Torrent: the legacy path
+	// only used Search (so a Search-only construction never mattered), but the
+	// G2 blob path (filesFromBlob) needs Dao — leaving it nil panics.
 	return gqlmodel.TorrentQuery{
+		Dao:    r.Dao,
 		Search: r.Search,
 	}.Files(ctx, input)
 }
@@ -115,8 +176,14 @@ func (r *torrentQueryResolver) Files(ctx context.Context, obj *gqlmodel.TorrentQ
 // Query returns gql.QueryResolver implementation.
 func (r *Resolver) Query() gql.QueryResolver { return &queryResolver{r} }
 
+// TorrentContentQuery returns gql.TorrentContentQueryResolver implementation.
+func (r *Resolver) TorrentContentQuery() gql.TorrentContentQueryResolver {
+	return &torrentContentQueryResolver{r}
+}
+
 // TorrentQuery returns gql.TorrentQueryResolver implementation.
 func (r *Resolver) TorrentQuery() gql.TorrentQueryResolver { return &torrentQueryResolver{r} }
 
 type queryResolver struct{ *Resolver }
+type torrentContentQueryResolver struct{ *Resolver }
 type torrentQueryResolver struct{ *Resolver }

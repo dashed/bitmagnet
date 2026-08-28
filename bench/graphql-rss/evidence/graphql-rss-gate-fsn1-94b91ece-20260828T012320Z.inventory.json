@@ -1,0 +1,466 @@
+{
+  "recorded_at": "2026-08-28T01:24:52.144514Z",
+  "host": "alberto-hetzner-fsn1",
+  "source": {
+    "repository": "https://github.com/dashed/bitmagnet.git",
+    "ref": "refs/heads/alberto/my-fork",
+    "fetched_tip": "d56a401a17d7b5e5571ffdc1562484d1aca47b0d",
+    "harness": {
+      "commit": "d56a401a17d7b5e5571ffdc1562484d1aca47b0d",
+      "tree": "dc0c06ee5c2c0c0ce92ec7f66a138c5094e0b36b",
+      "bitmagnet_rs_tree": "8bcd860c81000b5fdd1ebc7d6e10141d6b1235d4"
+    },
+    "target_runtime": {
+      "commit": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+      "tree": "3c6f7690aa385808f50f52144b844897e46a06f0",
+      "bitmagnet_rs_tree": "8bcd860c81000b5fdd1ebc7d6e10141d6b1235d4"
+    }
+  },
+  "publication_receipt": {
+    "archiveSha256": "7ae3fa8cc8f62618fef119ec1fdcf407b18063f3630e6ebf96d3135c8cd1ff7a",
+    "builderAttempt": 1,
+    "deploymentAuthority": "digest",
+    "digest": "sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c",
+    "imageId": "sha256:74e2e45215234d72c4022bb78f5fffaa59dc3f90946869317acf12b7b9211475",
+    "imageRepository": "ghcr.io/dashed/bitmagnet-graphql",
+    "immutableRef": "ghcr.io/dashed/bitmagnet-graphql@sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c",
+    "publisherAttempt": 1,
+    "receiptSha256": "c4b0d78b87df2e761cadd2d251e343a3af1db23118ea9564db064900a3e2dd88",
+    "schema": "bitmagnet.graphql-image-publication/v2",
+    "sourceCommit": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+    "sourceTree": "3c6f7690aa385808f50f52144b844897e46a06f0",
+    "tag": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+    "tagPolicy": "mutable-convenience-only",
+    "tagRef": "ghcr.io/dashed/bitmagnet-graphql:94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+    "tagState": "pushed",
+    "workflowRun": "https://github.com/dashed/bitmagnet/actions/runs/33130983959"
+  },
+  "mode": "gate",
+  "workload_exit_code": 0,
+  "final_exit_code": 0,
+  "safety_errors": [],
+  "k3s": {
+    "before": {
+      "active_state": "active",
+      "sub_state": "running",
+      "result": "success",
+      "n_restarts": 0
+    },
+    "after": {
+      "active_state": "active",
+      "sub_state": "running",
+      "result": "success",
+      "n_restarts": 0
+    }
+  },
+  "cleanup_observation": {
+    "containers": [],
+    "networks": [],
+    "volumes": [],
+    "images": []
+  },
+  "docker": {
+    "system_df_before": [
+      {
+        "Active": "0",
+        "Reclaimable": "6.906GB (86%)",
+        "Size": "7.953GB",
+        "TotalCount": "29",
+        "Type": "Images"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Containers"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "5.049GB (100%)",
+        "Size": "5.049GB",
+        "TotalCount": "8",
+        "Type": "Local Volumes"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "7.513GB",
+        "Size": "13.27GB",
+        "TotalCount": "126",
+        "Type": "Build Cache"
+      }
+    ],
+    "system_df_after": [
+      {
+        "Active": "0",
+        "Reclaimable": "6.906GB (86%)",
+        "Size": "7.953GB",
+        "TotalCount": "29",
+        "Type": "Images"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "0B",
+        "Size": "0B",
+        "TotalCount": "0",
+        "Type": "Containers"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "5.049GB (100%)",
+        "Size": "5.049GB",
+        "TotalCount": "8",
+        "Type": "Local Volumes"
+      },
+      {
+        "Active": "0",
+        "Reclaimable": "7.513GB",
+        "Size": "13.27GB",
+        "TotalCount": "126",
+        "Type": "Build Cache"
+      }
+    ],
+    "bm_rss_objects_before": {
+      "containers": [],
+      "networks": [],
+      "volumes": [],
+      "images": []
+    },
+    "bm_rss_objects_after": {
+      "containers": [],
+      "networks": [],
+      "volumes": [],
+      "images": []
+    }
+  },
+  "evidence": [
+    {
+      "path": "graphql-rss-gate-fsn1-94b91ece-20260828T012320Z.smoke.jsonl",
+      "sha256": "7fbd6729fef4e146e89f5eb461da7dc8a37bce48fd1702d338a93f1e26b1c6b0",
+      "valid_json": true,
+      "session_ids": [
+        "d504bb91c1df4bb3b3952b092c34c700"
+      ],
+      "profiles": [
+        "smoke"
+      ],
+      "commits": [
+        "d56a401a17d7b5e5571ffdc1562484d1aca47b0d"
+      ],
+      "setup_images": [
+        {
+          "session_id": "d504bb91c1df4bb3b3952b092c34c700",
+          "images": {
+            "graphql": {
+              "architecture": "amd64",
+              "created": "2026-08-28T00:55:22.308913272Z",
+              "id": "sha256:74e2e45215234d72c4022bb78f5fffaa59dc3f90946869317acf12b7b9211475",
+              "os": "linux",
+              "repo_digests": [
+                "ghcr.io/dashed/bitmagnet-graphql@sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c"
+              ],
+              "requested": "ghcr.io/dashed/bitmagnet-graphql@sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c",
+              "rootfs_layers": [
+                "sha256:1d69a5fd31932841d7825ef4780c06f008eea65aaa9f3110fe09d5832ed5c7d8",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:4c8d70d151f0123c43eb283138ef7a9b7da0aa94870e5ddf799d06befa3e44a5",
+                "sha256:4febabe5e21dd4e53bc59bb66dbf9961e7c2d902210ddfc8d1157224ff0f45b4"
+              ],
+              "runtime_contract": {
+                "cmd": null,
+                "entrypoint": [
+                  "/usr/local/bin/bitmagnet-graphql"
+                ],
+                "environment": {
+                  "BITMAGNET_SOURCE_COMMIT": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+                  "BITMAGNET_SOURCE_TREE": "3c6f7690aa385808f50f52144b844897e46a06f0",
+                  "LISTEN_ADDR": "0.0.0.0:3337",
+                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                },
+                "exposed_ports": [
+                  "3337/tcp",
+                  "9090/tcp"
+                ],
+                "labels": {
+                  "io.bitmagnet.graphql-mode": "read-default",
+                  "io.bitmagnet.graphql-mutation-contract": "torrent-tags/opt-in-writer/v1",
+                  "io.bitmagnet.graphql-queue-mutation-contract": "queue-admin/opt-in-writer/v1",
+                  "io.bitmagnet.graphql-read-contract": "read-only/v1",
+                  "io.bitmagnet.graphql-torrent-delete-mutation-contract": "torrent-delete/opt-in-blocking-writer/v1",
+                  "io.bitmagnet.source-tree": "3c6f7690aa385808f50f52144b844897e46a06f0",
+                  "org.opencontainers.image.licenses": "MIT",
+                  "org.opencontainers.image.revision": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+                  "org.opencontainers.image.source": "https://github.com/dashed/bitmagnet"
+                },
+                "stop_signal": "SIGTERM",
+                "user": "65532:65532"
+              }
+            },
+            "helper": {
+              "architecture": "amd64",
+              "created": "2026-08-27T22:43:06.50528833Z",
+              "id": "sha256:d4006b313923b76bac90126365cf86d55a6cf0d45aee3dd3fe4a5c505572e0db",
+              "os": "linux",
+              "repo_digests": [],
+              "requested": "bm-rss-d504bb91c1-helper:local",
+              "rootfs_layers": [
+                "sha256:7cc7fe68eff66f19872441a51938eecc4ad33746d2baa3abc081c1e6fe25988e",
+                "sha256:9621f68f1f5ddfd1fa67faa2a5c513986b9d4b015f06999152893fc9bcefb093",
+                "sha256:547f1fc1a2bb7ad4fbecb26c04a6ba82c067e668e79ab229bd932745636781c7",
+                "sha256:7d8e4ce94100ff12329e91295efd7fb69bfc45c0525dd1ff94e577a22903d44c",
+                "sha256:5f7a87d0c9283ba236a588e32261af7cbdb78734fa7ec9a802f90dee2c829104",
+                "sha256:f0580f01b1b22962ef308eb9872c1b8f5fce03ceb0141a9e3a92a9c8c5497462",
+                "sha256:d4a572621fb0acdd8b677dae96aff94820f14d03dfce525d79e58e19c083c86d",
+                "sha256:f0ac4625e1eb1b6e8926a146679f10348654610e6dc811cfaa75b0850ab094a6",
+                "sha256:9b00e8a2965a4784f068d718e553068c117b5392faa3383c8419c6822c56f604",
+                "sha256:40a963039d68cba67953f2b4ac3b8009617a99ec03ee04d630d1dbe8bd03d64b"
+              ],
+              "runtime_contract": {
+                "cmd": null,
+                "entrypoint": [
+                  "python",
+                  "/app/helper.py"
+                ],
+                "environment": {
+                  "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
+                  "PATH": "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                  "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                  "PYTHONDONTWRITEBYTECODE": "1",
+                  "PYTHONUNBUFFERED": "1",
+                  "PYTHON_SHA256": "93e583f243454e6e9e4588ca2c2662206ad961659863277afcdb96801647d640",
+                  "PYTHON_VERSION": "3.13.5"
+                },
+                "exposed_ports": [],
+                "labels": {},
+                "stop_signal": null,
+                "user": null
+              }
+            },
+            "postgres": {
+              "architecture": "amd64",
+              "created": "2025-06-06T18:27:47Z",
+              "id": "sha256:b38465c419a96f68c550a8bfa9d15e2fac70d2f4c7b30bccd6615043cc9b0f2d",
+              "os": "linux",
+              "repo_digests": [
+                "postgres@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
+              ],
+              "requested": "postgres:17.5-bookworm@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4",
+              "rootfs_layers": [
+                "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+                "sha256:c7f10a5bc827ed1a1f783583837a0deca92e3382d3288475c2a930bd391d42e9",
+                "sha256:19652f712d62df7f6083917fb9938fb66708a1b86a44a844b3b6104ef68f122a",
+                "sha256:da8bc6573c3007d636a70e386af339127b8f75d5bfaf3984fabce35afc0cecc2",
+                "sha256:a322bfe9a70e23592a18f616b5367e3cffb2d399747911f3a65d28be1ace9e98",
+                "sha256:d58ff8258d53ee95b53f6906b6f567d849e816573211d7aa1b49a5d1992569cc",
+                "sha256:ec6426e54bf36a905da3830569f473bf7b6db2fe407ce0fc64e7dc1b273ec08a",
+                "sha256:860d60efe28f2c300a882817d79d30bae349d60a3f4b105133940e056415d5d5",
+                "sha256:e454d22e3461906737c29ba4ebafa6421cc02979c08a4d5ad2856fb64c27cb4f",
+                "sha256:1395aabe9252d5786c3723aa2e2f71373bcc73953f4001f9e3f0b94f3760e43a",
+                "sha256:5f390beeb897845ce3448e47e82a0d5476f7701d2bd2af70453374e6355ea659",
+                "sha256:b86b44f71f0a4cf910c4f10f805cc43d813e7020df9e706c46408d1a687b6825",
+                "sha256:8d7c325a1de4f832f759eff99033e836f88560368c7d93144dc5babf4e5db6b1",
+                "sha256:b93544a4c8c82c8651f6898552bae42f12a9d8e42caaffa15e9412707dbe4afa"
+              ],
+              "runtime_contract": {
+                "cmd": [
+                  "postgres"
+                ],
+                "entrypoint": [
+                  "docker-entrypoint.sh"
+                ],
+                "environment": {
+                  "GOSU_VERSION": "1.17",
+                  "LANG": "en_US.utf8",
+                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/17/bin",
+                  "PGDATA": "/var/lib/postgresql/data",
+                  "PG_MAJOR": "17",
+                  "PG_VERSION": "17.5-1.pgdg120+1"
+                },
+                "exposed_ports": [
+                  "5432/tcp"
+                ],
+                "labels": {},
+                "stop_signal": "SIGINT",
+                "user": null
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "path": "graphql-rss-gate-fsn1-94b91ece-20260828T012320Z.jsonl",
+      "sha256": "863fb57df304baff6d51801fe70378b94aee3f8ab1a85a15c44e3d5ac1b1ed90",
+      "valid_json": true,
+      "session_ids": [
+        "9c4af7081c934751827999109f7ec9f3"
+      ],
+      "profiles": [
+        "gate"
+      ],
+      "commits": [
+        "d56a401a17d7b5e5571ffdc1562484d1aca47b0d"
+      ],
+      "setup_images": [
+        {
+          "session_id": "9c4af7081c934751827999109f7ec9f3",
+          "images": {
+            "graphql": {
+              "architecture": "amd64",
+              "created": "2026-08-28T00:55:22.308913272Z",
+              "id": "sha256:74e2e45215234d72c4022bb78f5fffaa59dc3f90946869317acf12b7b9211475",
+              "os": "linux",
+              "repo_digests": [
+                "ghcr.io/dashed/bitmagnet-graphql@sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c"
+              ],
+              "requested": "ghcr.io/dashed/bitmagnet-graphql@sha256:68d4c6062b40851fcb4e718f400341e8a3d81c830b229a4089e344691a9fe24c",
+              "rootfs_layers": [
+                "sha256:1d69a5fd31932841d7825ef4780c06f008eea65aaa9f3110fe09d5832ed5c7d8",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:4c8d70d151f0123c43eb283138ef7a9b7da0aa94870e5ddf799d06befa3e44a5",
+                "sha256:4febabe5e21dd4e53bc59bb66dbf9961e7c2d902210ddfc8d1157224ff0f45b4"
+              ],
+              "runtime_contract": {
+                "cmd": null,
+                "entrypoint": [
+                  "/usr/local/bin/bitmagnet-graphql"
+                ],
+                "environment": {
+                  "BITMAGNET_SOURCE_COMMIT": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+                  "BITMAGNET_SOURCE_TREE": "3c6f7690aa385808f50f52144b844897e46a06f0",
+                  "LISTEN_ADDR": "0.0.0.0:3337",
+                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                },
+                "exposed_ports": [
+                  "3337/tcp",
+                  "9090/tcp"
+                ],
+                "labels": {
+                  "io.bitmagnet.graphql-mode": "read-default",
+                  "io.bitmagnet.graphql-mutation-contract": "torrent-tags/opt-in-writer/v1",
+                  "io.bitmagnet.graphql-queue-mutation-contract": "queue-admin/opt-in-writer/v1",
+                  "io.bitmagnet.graphql-read-contract": "read-only/v1",
+                  "io.bitmagnet.graphql-torrent-delete-mutation-contract": "torrent-delete/opt-in-blocking-writer/v1",
+                  "io.bitmagnet.source-tree": "3c6f7690aa385808f50f52144b844897e46a06f0",
+                  "org.opencontainers.image.licenses": "MIT",
+                  "org.opencontainers.image.revision": "94b91eceb8724d9fba0932a17fb3ac2d8739c6cf",
+                  "org.opencontainers.image.source": "https://github.com/dashed/bitmagnet"
+                },
+                "stop_signal": "SIGTERM",
+                "user": "65532:65532"
+              }
+            },
+            "helper": {
+              "architecture": "amd64",
+              "created": "2026-08-27T22:43:06.50528833Z",
+              "id": "sha256:d4006b313923b76bac90126365cf86d55a6cf0d45aee3dd3fe4a5c505572e0db",
+              "os": "linux",
+              "repo_digests": [],
+              "requested": "bm-rss-9c4af7081c-helper:local",
+              "rootfs_layers": [
+                "sha256:7cc7fe68eff66f19872441a51938eecc4ad33746d2baa3abc081c1e6fe25988e",
+                "sha256:9621f68f1f5ddfd1fa67faa2a5c513986b9d4b015f06999152893fc9bcefb093",
+                "sha256:547f1fc1a2bb7ad4fbecb26c04a6ba82c067e668e79ab229bd932745636781c7",
+                "sha256:7d8e4ce94100ff12329e91295efd7fb69bfc45c0525dd1ff94e577a22903d44c",
+                "sha256:5f7a87d0c9283ba236a588e32261af7cbdb78734fa7ec9a802f90dee2c829104",
+                "sha256:f0580f01b1b22962ef308eb9872c1b8f5fce03ceb0141a9e3a92a9c8c5497462",
+                "sha256:d4a572621fb0acdd8b677dae96aff94820f14d03dfce525d79e58e19c083c86d",
+                "sha256:f0ac4625e1eb1b6e8926a146679f10348654610e6dc811cfaa75b0850ab094a6",
+                "sha256:9b00e8a2965a4784f068d718e553068c117b5392faa3383c8419c6822c56f604",
+                "sha256:40a963039d68cba67953f2b4ac3b8009617a99ec03ee04d630d1dbe8bd03d64b"
+              ],
+              "runtime_contract": {
+                "cmd": null,
+                "entrypoint": [
+                  "python",
+                  "/app/helper.py"
+                ],
+                "environment": {
+                  "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
+                  "PATH": "/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                  "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                  "PYTHONDONTWRITEBYTECODE": "1",
+                  "PYTHONUNBUFFERED": "1",
+                  "PYTHON_SHA256": "93e583f243454e6e9e4588ca2c2662206ad961659863277afcdb96801647d640",
+                  "PYTHON_VERSION": "3.13.5"
+                },
+                "exposed_ports": [],
+                "labels": {},
+                "stop_signal": null,
+                "user": null
+              }
+            },
+            "postgres": {
+              "architecture": "amd64",
+              "created": "2025-06-06T18:27:47Z",
+              "id": "sha256:b38465c419a96f68c550a8bfa9d15e2fac70d2f4c7b30bccd6615043cc9b0f2d",
+              "os": "linux",
+              "repo_digests": [
+                "postgres@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4"
+              ],
+              "requested": "postgres:17.5-bookworm@sha256:fbcea1bd13b6a882cd6caa6b58db3ae5c102efe50ec625b3e2a5cbc50db5bfe4",
+              "rootfs_layers": [
+                "sha256:eb5f13bce9936c760b9fa73aeb1b608787daa36106cc888104132e353ed37252",
+                "sha256:c7f10a5bc827ed1a1f783583837a0deca92e3382d3288475c2a930bd391d42e9",
+                "sha256:19652f712d62df7f6083917fb9938fb66708a1b86a44a844b3b6104ef68f122a",
+                "sha256:da8bc6573c3007d636a70e386af339127b8f75d5bfaf3984fabce35afc0cecc2",
+                "sha256:a322bfe9a70e23592a18f616b5367e3cffb2d399747911f3a65d28be1ace9e98",
+                "sha256:d58ff8258d53ee95b53f6906b6f567d849e816573211d7aa1b49a5d1992569cc",
+                "sha256:ec6426e54bf36a905da3830569f473bf7b6db2fe407ce0fc64e7dc1b273ec08a",
+                "sha256:860d60efe28f2c300a882817d79d30bae349d60a3f4b105133940e056415d5d5",
+                "sha256:e454d22e3461906737c29ba4ebafa6421cc02979c08a4d5ad2856fb64c27cb4f",
+                "sha256:1395aabe9252d5786c3723aa2e2f71373bcc73953f4001f9e3f0b94f3760e43a",
+                "sha256:5f390beeb897845ce3448e47e82a0d5476f7701d2bd2af70453374e6355ea659",
+                "sha256:b86b44f71f0a4cf910c4f10f805cc43d813e7020df9e706c46408d1a687b6825",
+                "sha256:8d7c325a1de4f832f759eff99033e836f88560368c7d93144dc5babf4e5db6b1",
+                "sha256:b93544a4c8c82c8651f6898552bae42f12a9d8e42caaffa15e9412707dbe4afa"
+              ],
+              "runtime_contract": {
+                "cmd": [
+                  "postgres"
+                ],
+                "entrypoint": [
+                  "docker-entrypoint.sh"
+                ],
+                "environment": {
+                  "GOSU_VERSION": "1.17",
+                  "LANG": "en_US.utf8",
+                  "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/17/bin",
+                  "PGDATA": "/var/lib/postgresql/data",
+                  "PG_MAJOR": "17",
+                  "PG_VERSION": "17.5-1.pgdg120+1"
+                },
+                "exposed_ports": [
+                  "5432/tcp"
+                ],
+                "labels": {},
+                "stop_signal": "SIGINT",
+                "user": null
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "headroom_artifact": {
+    "path": "graphql-rss-gate-fsn1-94b91ece-20260828T012320Z.headroom.jsonl",
+    "sha256": "dd32ffa7cb3d848a7a8a208373ac455cbf1f6b7d81b97234d54ada390171b0d1",
+    "valid_json": true
+  },
+  "headroom": {
+    "kind": "headroom_summary",
+    "recorded_at": "2026-08-28T01:24:51Z",
+    "samples": 14,
+    "min_mem_available_kib": 100373604,
+    "min_docker_root_available_kib": 567620644,
+    "max_psi_memory_some_avg10": 2.21,
+    "max_psi_memory_full_avg10": 1.99,
+    "max_load_one": 5.69,
+    "docker_stats_failures": 0,
+    "docker_system_df_retry_samples": 0,
+    "docker_system_df_transient_attempts": 0,
+    "docker_system_df_failures": 0,
+    "k3s_unhealthy_samples": 0
+  }
+}

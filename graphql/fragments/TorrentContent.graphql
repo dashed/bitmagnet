@@ -30,6 +30,9 @@ fragment TorrentContent on TorrentContent {
   videoSource
   seeders
   leechers
+  dhtSeenCount
+  dhtFirstSeenAt
+  dhtLastSeenAt
   publishedAt
   createdAt
   updatedAt

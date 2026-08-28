@@ -1,0 +1,330 @@
+{"id":"audiobook-0001-m4b-extension","name":"Synthetic Story.m4b","size":60000000,"filesStatus":"single","extension":"m4b"}
+{"id":"audiobook-0002-boundary-above","name":"Synthetic Boundary Story.m4b","size":50000001,"filesStatus":"single","extension":"m4b"}
+{"id":"audiobook-0003-boundary-equal","name":"Synthetic Boundary Equal.m4b","size":50000000,"filesStatus":"single","extension":"m4b"}
+{"id":"audiobook-0004-boundary-below","name":"Synthetic Boundary Below.m4b","size":49999999,"filesStatus":"single","extension":"m4b"}
+{"id":"audiobook-0005-keyword-audiobook","name":"Synthetic Audiobook Collection.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0006-keyword-books","name":"Synthetic Books Collection.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0007-keyword-unabridged","name":"Synthetic Unabridged Edition.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0008-keyword-abridged","name":"Synthetic Abridged Edition.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0009-keyword-narrated","name":"Synthetic Narrated Edition.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0010-keyword-novels","name":"Synthetic Novels Collection.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0011-keyword-biography","name":"Synthetic Biography Recording.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0012-keyword-autobiography","name":"Synthetic Autobiography Recording.mp3","size":80000000,"filesStatus":"single","extension":"mp3"}
+{"id":"audiobook-0013-multi-audio","name":"Synthetic Narrated Multi","size":70000000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"disc01/chapter01.mp3","extension":"mp3","size":35000000},{"index":1,"path":"disc01/chapter02.flac","extension":"flac","size":35000000}]}
+{"id":"audiobook-0014-multi-signed-positive","name":"Synthetic Audiobook Mixed","size":61000000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"book/chapter.mp3","extension":"mp3","size":60000000},{"index":1,"path":"book/readme.txt","extension":"txt","size":1000000}]}
+{"id":"audiobook-0015-over-threshold","name":"Synthetic Books Archive","size":90000000,"filesStatus":"over_threshold","filesCount":1,"files":[{"index":0,"path":"book/part01.m4b","extension":"m4b","size":90000000}]}
+{"id":"audiobook-0016-multi-boundary-below","name":"Synthetic Narrated Small","size":50000001,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"book/chapter.mp3","extension":"mp3","size":50000000},{"index":1,"path":"book/cover.jpg","extension":"jpg","size":1}]}
+{"id":"banned-0001-paedo","name":"Synthetic paedo marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0002-pedo","name":"Synthetic pedo marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0003-paedophil","name":"Synthetic paedophil marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0004-preteen","name":"Synthetic preteen marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0005-pthc","name":"Synthetic pthc marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0006-ptsc","name":"Synthetic ptsc marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0007-lsbar","name":"Synthetic lsbar marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0008-lsm","name":"Synthetic lsm marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0009-underage","name":"Synthetic underage marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0010-hebefilia","name":"Synthetic hebefilia marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0011-opva","name":"Synthetic opva marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0012-child-porn","name":"Synthetic child porn marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0013-child-lover","name":"Synthetic child lover marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0014-porno-child","name":"Synthetic porno child marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0015-kiddy-porn","name":"Synthetic kiddy porn marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0016-young-video-models","name":"Synthetic young video models marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0017-childfugga","name":"Synthetic childfugga marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0018-kinderkutje","name":"Synthetic kinderkutje marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0019-yvm","name":"Synthetic yvm marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"banned-0020-age-patterns","name":"Synthetic 10 y o marker.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"codec-0001-h264","name":"Codec Probe 2000 1080p BluRay H264-H264TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0002-x264","name":"Codec Probe 2001 1080p BluRay x264-X264TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0003-x265","name":"Codec Probe 2002 1080p BluRay x265-X265TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0004-xvid","name":"Codec Probe 2003 1080p BluRay XviD-XVIDTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0005-divx","name":"Codec Probe 2004 1080p BluRay DivX-DIVXTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0006-mpeg2","name":"Codec Probe 2005 1080p BluRay MPEG2-MPEG2TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0007-mpeg4","name":"Codec Probe 2006 1080p BluRay MPEG4-MPEG4TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0008-avc-alias","name":"Codec Probe 2007 1080p BluRay AVC-AVCTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0009-lower-h264","name":"Codec Probe 2008 1080p BluRay h264-LOWERTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0010-upper-x264","name":"Codec Probe 2009 1080p BluRay X264-UPPERTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0011-upper-x265","name":"Codec Probe 2010 1080p BluRay X265-UPPER265.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0012-h265-negative","name":"Codec Probe 2011 1080p BluRay H265-H265TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0013-hevc-negative","name":"Codec Probe 2012 1080p BluRay HEVC-HEVCTEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0014-av1-negative","name":"Codec Probe 2013 1080p BluRay AV1-AV1TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0015-vp9-negative","name":"Codec Probe 2014 1080p BluRay VP9-VP9TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"codec-0016-x266-negative","name":"Codec Probe 2015 1080p BluRay x266-X266TEAM.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"comic-0001-single-cb7","name":"Synthetic Comic CB7.cb7","size":20000000,"filesStatus":"single","extension":"cb7"}
+{"id":"comic-0002-single-cba","name":"Synthetic Comic CBA.cba","size":20000000,"filesStatus":"single","extension":"cba"}
+{"id":"comic-0003-single-cbr","name":"Synthetic Comic CBR.cbr","size":20000000,"filesStatus":"single","extension":"cbr"}
+{"id":"comic-0004-single-cbt","name":"Synthetic Comic CBT.cbt","size":20000000,"filesStatus":"single","extension":"cbt"}
+{"id":"comic-0005-single-cbz","name":"Synthetic Comic CBZ.cbz","size":20000000,"filesStatus":"single","extension":"cbz"}
+{"id":"comic-0006-multi-cbz","name":"Synthetic Comic Multi CBZ","size":26000000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"issues/issue01.cbz","extension":"cbz","size":25000000},{"index":1,"path":"issues/cover.jpg","extension":"jpg","size":1000000}]}
+{"id":"comic-0007-multi-cbr","name":"Synthetic Comic Multi CBR","size":30001000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"issues/issue01.cbr","extension":"cbr","size":30000000},{"index":1,"path":"issues/notes.txt","extension":"txt","size":1000}]}
+{"id":"comic-0008-over-threshold-cbt","name":"Synthetic Comic Large CBT","size":40000000,"filesStatus":"over_threshold","filesCount":1,"files":[{"index":0,"path":"issues/collection.cbt","extension":"cbt","size":40000000}]}
+{"id":"date-0001-ymd-dash","name":"Daily Probe 2020-01-15 1080p HDTV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0002-dmy-dash","name":"Daily Probe 15-01-2020 1080p HDTV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0003-dmy-month-short","name":"Daily Probe 15-Jan-2020 1080p HDTV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0004-mdy-month-short","name":"Daily Probe Jan-15-2020 1080p HDTV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0005-ymd-dot","name":"Daily.Probe.2021.09.11.720p.WEBDL.x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0006-ymd-space","name":"Daily Probe 2022 12 31 1080p WEBRip x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0007-ymd-slash","name":"Daily Probe 2019/07/16 1080p TV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0008-two-digit-ymd","name":"Daily.Probe.23.02.01.1080p.WEBRip.x265-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0009-dmy-dot","name":"Daily.Probe.13.10.2017.1080p.BluRay.x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"date-0010-long-month","name":"Daily Probe 2018 July 04 720p HDTV x264-DATE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"ebook-0001-single-azw","name":"Synthetic Reference AZW.azw","size":5000000,"filesStatus":"single","extension":"azw"}
+{"id":"ebook-0002-single-azw3","name":"Synthetic Reference AZW3.azw3","size":5000000,"filesStatus":"single","extension":"azw3"}
+{"id":"ebook-0003-single-azw4","name":"Synthetic Reference AZW4.azw4","size":5000000,"filesStatus":"single","extension":"azw4"}
+{"id":"ebook-0004-single-azw8","name":"Synthetic Reference AZW8.azw8","size":5000000,"filesStatus":"single","extension":"azw8"}
+{"id":"ebook-0005-single-chm","name":"Synthetic Reference CHM.chm","size":5000000,"filesStatus":"single","extension":"chm"}
+{"id":"ebook-0006-single-doc","name":"Synthetic Reference DOC.doc","size":5000000,"filesStatus":"single","extension":"doc"}
+{"id":"ebook-0007-single-docx","name":"Synthetic Reference DOCX.docx","size":5000000,"filesStatus":"single","extension":"docx"}
+{"id":"ebook-0008-single-djvu","name":"Synthetic Reference DJVU.djvu","size":5000000,"filesStatus":"single","extension":"djvu"}
+{"id":"ebook-0009-single-epub","name":"Synthetic Reference EPUB.epub","size":5000000,"filesStatus":"single","extension":"epub"}
+{"id":"ebook-0010-single-lit","name":"Synthetic Reference LIT.lit","size":5000000,"filesStatus":"single","extension":"lit"}
+{"id":"ebook-0011-single-mobi","name":"Synthetic Reference MOBI.mobi","size":5000000,"filesStatus":"single","extension":"mobi"}
+{"id":"ebook-0012-single-odt","name":"Synthetic Reference ODT.odt","size":5000000,"filesStatus":"single","extension":"odt"}
+{"id":"ebook-0013-single-pdf","name":"Synthetic Reference PDF.pdf","size":5000000,"filesStatus":"single","extension":"pdf"}
+{"id":"ebook-0014-single-rtf","name":"Synthetic Reference RTF.rtf","size":5000000,"filesStatus":"single","extension":"rtf"}
+{"id":"ebook-0015-multi-epub","name":"Synthetic Reference Multi EPUB","size":4500000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"library/book.epub","extension":"epub","size":4000000},{"index":1,"path":"library/cover.jpg","extension":"jpg","size":500000}]}
+{"id":"ebook-0016-over-threshold-pdf","name":"Synthetic Reference PDF Set","size":12001000,"filesStatus":"over_threshold","filesCount":2,"files":[{"index":0,"path":"library/volume.pdf","extension":"pdf","size":12000000},{"index":1,"path":"library/index.txt","extension":"txt","size":1000}]}
+{"id":"edge-0001-leading-separators","name":"...Leading.Title.2001.1080p.BluRay.x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0002-trailing-separators","name":"Trailing Title ... 2002 ... 720p WEBDL x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0003-allcaps","name":"ALLCAPS TITLE 2003 1080p HDTV x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0004-mixed-case","name":"MiXeD CaSe Title 2004 1080p WEBRip x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0005-swat","name":"S.W.A.T. 2005 1080p BluRay x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0006-va","name":"V.A. Chronicle 2006 1080p WEBDL x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0007-repeated-dots","name":"Repeated....Dots....Title.2007.1080p.BluRay.x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0008-repeated-dashes","name":"Repeated---Dashes---Title-2008-1080p-WEBRip-x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0009-unicode-mixed","name":"Mélange 東京 Title 2009 1080p BluRay x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0010-underscores","name":"__Under__Score__Title__2010__720p__HDTV__x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0011-colon-apostrophe","name":"Agent's Case: Redux 2011 1080p BluRay x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"edge-0012-bracket-prefix","name":"[Fixture] Bracketed Title 2012 1080p WEBDL x264-EDGE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"file-status-0001-movie-single","name":"Status Movie (2001).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"file-status-0002-movie-multi","name":"Status Movie (2001).mkv","size":800000000,"filesStatus":"multi","filesCount":1,"files":[{"index":0,"path":"Status Movie (2001)/feature.mkv","extension":"mkv","size":800000000}]}
+{"id":"file-status-0003-movie-over-threshold","name":"Status Movie (2001).mkv","size":800000000,"filesStatus":"over_threshold","filesCount":1001,"files":[{"index":0,"path":"Status Movie (2001)/feature.mkv","extension":"mkv","size":800000000}]}
+{"id":"file-status-0004-movie-no-info","name":"Status Movie (2001).mkv","size":800000000,"filesStatus":"no_info"}
+{"id":"file-status-0005-comic-single","name":"Status Comic.cbz","size":20000000,"filesStatus":"single","extension":"cbz"}
+{"id":"file-status-0006-comic-multi","name":"Status Comic.cbz","size":20000000,"filesStatus":"multi","filesCount":1,"files":[{"index":0,"path":"Status Comic/issue.cbz","extension":"cbz","size":20000000}]}
+{"id":"file-status-0007-comic-over-threshold","name":"Status Comic.cbz","size":20000000,"filesStatus":"over_threshold","filesCount":1001,"files":[{"index":0,"path":"Status Comic/issue.cbz","extension":"cbz","size":20000000}]}
+{"id":"file-status-0008-comic-no-info","name":"Status Comic.cbz","size":20000000,"filesStatus":"no_info"}
+{"id":"file-status-0009-music-single","name":"Status Music.flac","size":20000000,"filesStatus":"single","extension":"flac"}
+{"id":"file-status-0010-music-multi","name":"Status Music.flac","size":20000000,"filesStatus":"multi","filesCount":1,"files":[{"index":0,"path":"Status Music/track.flac","extension":"flac","size":20000000}]}
+{"id":"file-status-0011-music-over-threshold","name":"Status Music.flac","size":20000000,"filesStatus":"over_threshold","filesCount":1001,"files":[{"index":0,"path":"Status Music/track.flac","extension":"flac","size":20000000}]}
+{"id":"file-status-0012-music-no-info","name":"Status Music.flac","size":20000000,"filesStatus":"no_info"}
+{"id":"hint-id-0001-movie-tmdb","name":"Hinted Movie (2019) 1080p BluRay x264-GRP.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"movie","contentSource":"tmdb","contentId":"42"}}
+{"id":"hint-id-0002-movie-local","name":"Another Hinted Movie (2005) 720p WEB-DL x265-GRP.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"movie","contentSource":"local","contentId":"movie-42"}}
+{"id":"hint-id-0003-tv-tmdb","name":"Hinted Show S02E05 1080p HDTV x264-GRP.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show","contentSource":"tmdb","contentId":"84"}}
+{"id":"hint-id-0004-xxx-tmdb","name":"Hinted Studio Scene 12 1080p.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"xxx","contentSource":"tmdb","contentId":"126"}}
+{"id":"hint-type-0001-movie-year","name":"Forced Movie (2005).txt","size":1000,"filesStatus":"single","extension":"txt","hint":{"contentType":"movie"}}
+{"id":"hint-type-0002-movie-technical","name":"Forced Movie 1080p BluRay x264-HINT.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"movie"}}
+{"id":"hint-type-0003-movie-date","name":"Forced Movie 2020-02-03 720p WEBDL x264-HINT.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"movie"}}
+{"id":"hint-type-0004-tv-episode","name":"Forced Show S03E04 1080p HDTV x264-HINT.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"hint-type-0005-tv-season","name":"Forced Show Season 2 720p WEBRip x264-HINT.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"hint-type-0006-tv-complete","name":"Forced Show Complete 1080p WEBDL x264-HINT.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"hint-type-0007-movie-small-video","name":"Forced Tiny Movie (1999).mkv","size":1000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"movie"}}
+{"id":"hint-type-0008-tv-text-file","name":"Forced Text Show S01E01.txt","size":1000,"filesStatus":"single","extension":"txt","hint":{"contentType":"tv_show"}}
+{"id":"language-0001-multi-french-german","name":"Language Probe 2001 MULTi FRENCH GERMAN 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0002-dual-ita-esp","name":"Language Probe 2002 DUAL ITA ESP 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0003-vostfr","name":"Language Probe 2003 VOSTFR 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0004-french","name":"Language Probe 2004 FRENCH 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0005-german","name":"Language Probe 2005 GERMAN 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0006-ita","name":"Language Probe 2006 ITA 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0007-esp","name":"Language Probe 2007 ESP 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0008-italian-mixed-case","name":"Language Probe 2008 iTALiAN 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0009-truefrench","name":"Language Probe 2009 TRUEFRENCH 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"language-0010-rus-eng-japanese","name":"Language Probe 2010 RUS ENG Japanese 1080p WEBDL x264-LANG.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0001-regional","name":"Modifier Probe 2000 1080p BluRay REGIONAL x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0002-screener","name":"Modifier Probe 2001 1080p BluRay SCREENER x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0003-rawhd","name":"Modifier Probe 2002 1080p BluRay RAWHD x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0004-brdisk","name":"Modifier Probe 2003 1080p BluRay BRDISK x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0005-remux","name":"Modifier Probe 2004 1080p BluRay REMUX x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0006-proper-negative","name":"Modifier Probe 2005 1080p BluRay PROPER x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0007-repack-negative","name":"Modifier Probe 2006 1080p BluRay REPACK x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0008-extended-negative","name":"Modifier Probe 2007 1080p BluRay EXTENDED x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"modifier-0009-uncut-negative","name":"Modifier Probe 2008 1080p BluRay UNCUT x264-MOD.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0001-standard-parentheses","name":"The Regular Movie (2000).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0002-dotted-release","name":"Alpha.Year.2001.1080p.BluRay.x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0003-dashed-release","name":"Alpha-Adventure-2002-1080p-WEBDL-x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0004-spaced-release","name":"Alpha Adventure 2003 720p HDTV x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0005-underscored-release","name":"Alpha_Adventure_2004_1080p_WEBRip_x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0006-apollo-13","name":"Apollo 13 (1995).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0007-numeric-title-2001","name":"2001 A Space Odyssey (1968).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0008-blade-runner-2049","name":"Blade Runner 2049 (2017).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0009-numeric-title-1917","name":"1917 (2019).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0010-catch-22","name":"Catch-22 (1970).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0011-apostrophe-oceans","name":"Ocean's Eleven (2001).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0012-alphanumeric-se7en","name":"Se7en (1995).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0013-year-lower-bound","name":"Boundary Picture (1900).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0014-year-upper-bound","name":"Future Picture (2030).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0015-millennium-eve","name":"Millennium Eve (1999).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0016-millennium","name":"Millennium Day (2000).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0017-pokemon-unicode","name":"Pokémon Detective (2019).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0018-amelie-unicode","name":"Amélie (2001).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0019-leon-unicode","name":"Léon The Professional (1994).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0020-multiword","name":"Crouching Tiger Hidden Dragon (2000).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0021-roman-two","name":"Synthetic Saga II (1982).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0022-roman-three","name":"Synthetic Saga III (1983).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0023-roman-four","name":"Synthetic Saga IV (1984).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0024-roman-nine","name":"Synthetic Saga IX (1989).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0025-colon-title","name":"Mission: Example (2005).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0026-apostrophe-title","name":"Director's Example (2006).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0027-ampersand-title","name":"Example & Companion (2007).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0028-article-the","name":"The Example Picture (2008).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0029-article-a","name":"A Quiet Example (2009).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0030-article-an","name":"An Ordinary Example (2010).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0031-dotted-multiword","name":"The.Long.Example.Picture.2011.1080p.BluRay.x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0032-dashed-multiword","name":"The-Long-Example-Picture-2012-720p-WEBRip-x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0033-spaced-multiword","name":"The Long Example Picture 2013 1080p WEBDL x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0034-curly-apostrophe","name":"L’Example Moderne (2014).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0035-em-dash","name":"Example — A Chronicle (2015).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0036-spanish-unicode","name":"El Niño Valiente (2016).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0037-german-unicode","name":"Über Den Wolken (2017).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0038-japanese-unicode","name":"東京物語 (1953).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0039-greek-unicode","name":"Το Παράδειγμα (2018).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0040-district-nine","name":"District 9 (2009).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0041-room-237","name":"Room 237 (2012).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0042-four-hundred","name":"The 400 Blows (1959).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0043-twelve-angry","name":"12 Angry Men (1957).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0044-eight-and-half","name":"8½ Example (1963).mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0045-resolution-number-title","name":"Future 2160 (2029) 2160p BluRay x265-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0046-dimensions-vs-year","name":"Resolution 1920x1080 (2018) 1080p WEBDL x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0047-repeated-dots","name":"Title.With.Repeated...Dots.2024.1080p.WEBRip.x264-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"movie-0048-final-2030","name":"Final Picture (2030).2160p.BluRay.x265-MOVIE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"music-0001-extension-ape","name":"Synthetic Recording.ape","size":20000000,"filesStatus":"single","extension":"ape"}
+{"id":"music-0002-extension-dsf","name":"Synthetic Recording.dsf","size":20000000,"filesStatus":"single","extension":"dsf"}
+{"id":"music-0003-extension-flac","name":"Synthetic Recording.flac","size":20000000,"filesStatus":"single","extension":"flac"}
+{"id":"music-0004-discography","name":"Synthetic Discography.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0005-music","name":"Synthetic Music Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0006-album","name":"Synthetic Album Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0007-va","name":"Synthetic V.A. Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0008-various-artists","name":"Synthetic Various Artists Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0009-compilation","name":"Synthetic Compilation Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0010-ep","name":"Synthetic EP Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0011-lp","name":"Synthetic LP Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0012-single","name":"Synthetic Single Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0013-vinyl","name":"Synthetic Vinyl Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0014-classical","name":"Synthetic Classical Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0015-disco","name":"Synthetic Disco Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0016-folk","name":"Synthetic Folk Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0017-hits","name":"Synthetic Hits Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0018-house","name":"Synthetic House Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0019-indie","name":"Synthetic Indie Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0020-jazz","name":"Synthetic Jazz Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0021-metal","name":"Synthetic Metal Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0022-pop","name":"Synthetic Pop Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0023-reggae","name":"Synthetic Reggae Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0024-rock","name":"Synthetic Rock Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"music-0025-trance","name":"Synthetic Trance Collection.mp3","size":20000000,"filesStatus":"single","extension":"mp3"}
+{"id":"no-match-0001-bare-name","name":"Readme","size":1000,"filesStatus":"no_info"}
+{"id":"no-match-0002-single-txt","name":"Synthetic Notes.txt","size":1000,"filesStatus":"single","extension":"txt"}
+{"id":"no-match-0003-multi-empty","name":"Synthetic Empty Multi","size":0,"filesStatus":"multi","filesCount":0,"files":[]}
+{"id":"no-match-0004-multi-text","name":"Synthetic Text Multi","size":2000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"docs/readme.txt","extension":"txt","size":1000},{"index":1,"path":"docs/license.nfo","extension":"nfo","size":1000}]}
+{"id":"no-match-0005-over-empty","name":"Synthetic Empty Over Threshold","size":900000000,"filesStatus":"over_threshold","filesCount":1001,"files":[]}
+{"id":"no-match-0006-single-no-extension","name":"Synthetic Extensionless","size":1000,"filesStatus":"single"}
+{"id":"no-match-0007-single-nfo","name":"Synthetic Metadata.nfo","size":1000,"filesStatus":"single","extension":"nfo"}
+{"id":"no-match-0008-image-without-keyword","name":"Synthetic Photograph.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"resolution-0001-360p","name":"Resolution Probe 2000 360p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0002-480p","name":"Resolution Probe 2001 480p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0003-540p","name":"Resolution Probe 2002 540p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0004-576p","name":"Resolution Probe 2003 576p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0005-720p","name":"Resolution Probe 2004 720p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0006-1080p","name":"Resolution Probe 2005 1080p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0007-1440p","name":"Resolution Probe 2006 1440p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0008-2160p","name":"Resolution Probe 2007 2160p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"resolution-0009-4320p","name":"Resolution Probe 2008 4320p WEBDL x264-RES.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"software-0001-single-apk","name":"Synthetic Utility APK.apk","size":100000000,"filesStatus":"single","extension":"apk"}
+{"id":"software-0002-single-app","name":"Synthetic Utility APP.app","size":100000000,"filesStatus":"single","extension":"app"}
+{"id":"software-0003-single-bat","name":"Synthetic Utility BAT.bat","size":100000000,"filesStatus":"single","extension":"bat"}
+{"id":"software-0004-single-bin","name":"Synthetic Utility BIN.bin","size":100000000,"filesStatus":"single","extension":"bin"}
+{"id":"software-0005-single-deb","name":"Synthetic Utility DEB.deb","size":100000000,"filesStatus":"single","extension":"deb"}
+{"id":"software-0006-single-dll","name":"Synthetic Utility DLL.dll","size":100000000,"filesStatus":"single","extension":"dll"}
+{"id":"software-0007-single-dmg","name":"Synthetic Utility DMG.dmg","size":100000000,"filesStatus":"single","extension":"dmg"}
+{"id":"software-0008-single-exe","name":"Synthetic Utility EXE.exe","size":100000000,"filesStatus":"single","extension":"exe"}
+{"id":"software-0009-single-iso","name":"Synthetic Utility ISO.iso","size":100000000,"filesStatus":"single","extension":"iso"}
+{"id":"software-0010-single-jar","name":"Synthetic Utility JAR.jar","size":100000000,"filesStatus":"single","extension":"jar"}
+{"id":"software-0011-single-lua","name":"Synthetic Utility LUA.lua","size":100000000,"filesStatus":"single","extension":"lua"}
+{"id":"software-0012-single-msi","name":"Synthetic Utility MSI.msi","size":100000000,"filesStatus":"single","extension":"msi"}
+{"id":"software-0013-single-package","name":"Synthetic Utility PACKAGE.package","size":100000000,"filesStatus":"single","extension":"package"}
+{"id":"software-0014-single-pkg","name":"Synthetic Utility PKG.pkg","size":100000000,"filesStatus":"single","extension":"pkg"}
+{"id":"software-0015-single-rpm","name":"Synthetic Utility RPM.rpm","size":100000000,"filesStatus":"single","extension":"rpm"}
+{"id":"software-0016-single-sh","name":"Synthetic Utility SH.sh","size":100000000,"filesStatus":"single","extension":"sh"}
+{"id":"software-0017-multi-exe","name":"Synthetic Utility Bundle","size":120001000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"setup/installer.exe","extension":"exe","size":120000000},{"index":1,"path":"setup/readme.txt","extension":"txt","size":1000}]}
+{"id":"source-0001-cam","name":"Source Probe 2000 1080p CAM x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0002-telesync","name":"Source Probe 2001 1080p TELESYNC x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0003-telecine","name":"Source Probe 2002 1080p TELECINE x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0004-workprint","name":"Source Probe 2003 1080p WORKPRINT x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0005-dvd","name":"Source Probe 2004 1080p DVD x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0006-tv","name":"Source Probe 2005 1080p TV x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0007-web-dl","name":"Source Probe 2006 1080p WEBDL x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0008-webrip","name":"Source Probe 2007 1080p WEBRip x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0009-bluray","name":"Source Probe 2008 1080p BluRay x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0010-bdrip-alias","name":"Source Probe 2009 1080p BDRip x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0011-dvdrip-alias","name":"Source Probe 2010 1080p DVDRip x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0012-hdtv-alias","name":"Source Probe 2011 1080p HDTV x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"source-0013-bdremux-alias","name":"Source Probe 2012 1080p BDREMUX x264-SOURCE.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0001-3d","name":"Three D Probe 2000 1080p BluRay 3D x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0002-3dsbs","name":"Three D Probe 2001 1080p BluRay 3DSBS x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0003-3dou","name":"Three D Probe 2002 1080p BluRay 3DOU x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0004-hsbs-negative","name":"Three D Probe 2003 1080p BluRay HSBS x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0005-sbs-negative","name":"Three D Probe 2004 1080p BluRay SBS x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"three-d-0006-hou-negative","name":"Three D Probe 2005 1080p BluRay HOU x264-THREED.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0001-s01e01","name":"Example Show S01E01 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0002-lower-s02e03","name":"Example Show s02e03 720p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0003-one-x-one","name":"Example Show 1x01 1080p WEBRip x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0004-upper-x","name":"Example Show 2X07 1080p BluRay x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0005-season-pack","name":"Example Show S01 1080p BluRay x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0006-season-range","name":"Example Show S01-S03 1080p BluRay x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0007-season-word","name":"Example Show Season 1 720p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0008-season-word-range","name":"Example Show Season 2-4 720p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0009-complete-season-range","name":"Complete Example Show S01-S05 1080p WEBRip x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0010-episode-range-with-e","name":"Example Show S01E01-E03 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0011-episode-range","name":"Example Show S01E01-03 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0012-episode-list","name":"Example Show S01E01,E02 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0013-episode-adjacent","name":"Example Show S01E01E02 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0014-episode-sparse-list","name":"Example Show S01E01,E03,E05 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0015-episode-ten","name":"Example Show S02E10 1080p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0016-special-season","name":"Example Show S00E01 1080p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0017-high-episode","name":"Example Show S10E99 1080p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0018-title-year-episode","name":"Example Show 2020 S01E01 1080p WEBRip x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0019-parenthesized-year-episode","name":"Example Show (2019) S02E04 1080p BluRay x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0020-compact-season-episode","name":"Example Show S1E1 720p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0021-word-season-episode","name":"Example Show Season 1 Episode 2 720p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0022-abbrev-season-episode","name":"Example Show S1 Ep2 720p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0023-x-episode-range","name":"Example Show 1x01-03 1080p WEBRip x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0024-season-list","name":"Example Show S1,S2 1080p WEBRip x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0025-daily-dot-date","name":"Example.Show.2020.01.15.1080p.HDTV.x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0026-daily-dash-date","name":"Example Show 2021-02-16 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0027-anime-brackets","name":"[Fixture] Anime Example - 01 [1080p].mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"tv-0028-anime-unicode","name":"【Fixture】 アニメ Example - 02 [720p].mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"tv-0029-complete-hinted","name":"Example Show Complete 1080p WEBDL x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv","hint":{"contentType":"tv_show"}}
+{"id":"tv-0030-multi-file","name":"Multi Example Show S01E01 1080p WEBDL x264-TV","size":800100000,"filesStatus":"multi","filesCount":2,"files":[{"index":0,"path":"show/episode01.mkv","extension":"mkv","size":800000000},{"index":1,"path":"show/episode01.srt","extension":"srt","size":100000}]}
+{"id":"tv-0031-over-threshold","name":"Large Example Show S01E02 1080p WEBDL x264-TV","size":800000000,"filesStatus":"over_threshold","filesCount":1001,"files":[{"index":0,"path":"show/episode02.mkv","extension":"mkv","size":800000000}]}
+{"id":"tv-0032-no-info","name":"No Info Example Show S01E03.mkv","size":800000000,"filesStatus":"no_info"}
+{"id":"tv-0033-mp4","name":"MP4 Example Show S03E01 1080p WEBRip x264-TV.mp4","size":800000000,"filesStatus":"single","extension":"mp4"}
+{"id":"tv-0034-avi","name":"AVI Example Show 3x02 576p DVDRip XviD-TV.avi","size":800000000,"filesStatus":"single","extension":"avi"}
+{"id":"tv-0035-uppercase-season","name":"EXAMPLE SHOW SEASON 4 1080p HDTV x264-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"tv-0036-mixed-separators","name":"Example.Show_-_S05E06_-_1080p_WEBDL_x265-TV.mkv","size":800000000,"filesStatus":"single","extension":"mkv"}
+{"id":"xxx-0001-anal","name":"Synthetic anal video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0002-ass","name":"Synthetic ass image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"xxx-0003-blowjob","name":"Synthetic blowjob video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0004-boob","name":"Synthetic boobs video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0005-cock","name":"Synthetic cock video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0006-cum","name":"Synthetic cumming video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0007-dick","name":"Synthetic dicks image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"xxx-0008-erotic","name":"Synthetic erotic video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0009-fuck","name":"Synthetic fucking video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0010-gloryhole","name":"Synthetic gloryhole video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0011-hardcore","name":"Synthetic hardcore video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0012-kink","name":"Synthetic kinky image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"xxx-0013-milf","name":"Synthetic milfs video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0014-nubile","name":"Synthetic nubile video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0015-onlyfans","name":"Synthetic onlyfans video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0016-orgasm","name":"Synthetic orgasmic video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0017-orgy","name":"Synthetic orgy image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"xxx-0018-porn","name":"Synthetic pornographic video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0019-pov","name":"Synthetic pov video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0020-pussy","name":"Synthetic pussy video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0021-seduc","name":"Synthetic seductive video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0022-sex","name":"Synthetic sexual image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}
+{"id":"xxx-0023-slut","name":"Synthetic sluts video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0024-tits","name":"Synthetic tits video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0025-threesome","name":"Synthetic threesome video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0026-wank","name":"Synthetic wanking video 1080p.mp4","size":500000000,"filesStatus":"single","extension":"mp4"}
+{"id":"xxx-0027-xxx","name":"Synthetic xxx image.jpg","size":20000000,"filesStatus":"single","extension":"jpg"}

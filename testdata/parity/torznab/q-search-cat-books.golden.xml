@@ -1,0 +1,93 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Eclipse - The Long Dark Novel EPUB</title>
+      <guid>295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb</guid>
+      <pubDate>Thu, 09 Jan 2020 00:00:00 +0000</pubDate>
+      <category>ebook</category>
+      <size>4200000</size>
+      <enclosure length="4200000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb&amp;dn=Eclipse+-+The+Long+Dark+Novel+EPUB&amp;xl=4200000"/>
+      <torznab:attr name="infohash" value="295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:295f6caa0bdc90e7eedf9b2e2246a6fe7924faeb&amp;dn=Eclipse+-+The+Long+Dark+Novel+EPUB&amp;xl=4200000"/>
+      <torznab:attr name="category" value="7000"/>
+      <torznab:attr name="size" value="4200000"/>
+      <torznab:attr name="publishdate" value="Thu, 09 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="45"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="47"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>Orbit Comics 012 (2023) CBR</title>
+      <guid>cdb68f903e72ad8c3bc0140cba015cc2088ac5f2</guid>
+      <pubDate>Wed, 08 Jan 2020 00:00:00 +0000</pubDate>
+      <category>comic</category>
+      <size>62000000</size>
+      <enclosure length="62000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:cdb68f903e72ad8c3bc0140cba015cc2088ac5f2&amp;dn=Orbit+Comics+012+%282023%29+CBR&amp;xl=62000000"/>
+      <torznab:attr name="infohash" value="cdb68f903e72ad8c3bc0140cba015cc2088ac5f2"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:cdb68f903e72ad8c3bc0140cba015cc2088ac5f2&amp;dn=Orbit+Comics+012+%282023%29+CBR&amp;xl=62000000"/>
+      <torznab:attr name="category" value="7030"/>
+      <torznab:attr name="size" value="62000000"/>
+      <torznab:attr name="publishdate" value="Wed, 08 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="33"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="peers" value="36"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>Cosmos - A Journey Audiobook M4B</title>
+      <guid>6ef6caa563fbc8e40a3a7437b687168f3b47ae8f</guid>
+      <pubDate>Tue, 07 Jan 2020 00:00:00 +0000</pubDate>
+      <category>audiobook</category>
+      <size>540000000</size>
+      <enclosure length="540000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:6ef6caa563fbc8e40a3a7437b687168f3b47ae8f&amp;dn=Cosmos+-+A+Journey+Audiobook+M4B&amp;xl=540000000"/>
+      <torznab:attr name="infohash" value="6ef6caa563fbc8e40a3a7437b687168f3b47ae8f"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:6ef6caa563fbc8e40a3a7437b687168f3b47ae8f&amp;dn=Cosmos+-+A+Journey+Audiobook+M4B&amp;xl=540000000"/>
+      <torznab:attr name="category" value="3030"/>
+      <torznab:attr name="size" value="540000000"/>
+      <torznab:attr name="publishdate" value="Tue, 07 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="18"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="19"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>The Star Field Guide PDF</title>
+      <guid>fe012fcfb2437026206d1968ef4e74ce08370026</guid>
+      <pubDate>Mon, 06 Jan 2020 00:00:00 +0000</pubDate>
+      <category>ebook</category>
+      <size>15000000</size>
+      <enclosure length="15000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:fe012fcfb2437026206d1968ef4e74ce08370026&amp;dn=The+Star+Field+Guide+PDF&amp;xl=15000000"/>
+      <torznab:attr name="infohash" value="fe012fcfb2437026206d1968ef4e74ce08370026"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:fe012fcfb2437026206d1968ef4e74ce08370026&amp;dn=The+Star+Field+Guide+PDF&amp;xl=15000000"/>
+      <torznab:attr name="category" value="7000"/>
+      <torznab:attr name="size" value="15000000"/>
+      <torznab:attr name="publishdate" value="Mon, 06 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="27"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="29"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+    <item>
+      <title>Mystery Bundle Pack</title>
+      <guid>4b594b976f5fa0811fe817039e0f7166001337ea</guid>
+      <pubDate>Thu, 02 Jan 2020 00:00:00 +0000</pubDate>
+      <category>Unknown</category>
+      <size>120000000</size>
+      <enclosure length="120000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="infohash" value="4b594b976f5fa0811fe817039e0f7166001337ea"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="category" value="8000"/>
+      <torznab:attr name="size" value="120000000"/>
+      <torznab:attr name="publishdate" value="Thu, 02 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="8"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="9"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

@@ -2,6 +2,7 @@ package model
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/keywords"
@@ -33,9 +34,18 @@ var videoSourceAliases = map[string]VideoSource{
 
 func createVideoSourceRegex() *regexp.Regexp {
 	names := namesToLower(VideoSourceNames()...)
+	aliases := make([]string, 0, len(videoSourceAliases))
 	for alias := range videoSourceAliases {
-		names = append(names, alias)
+		aliases = append(aliases, alias)
 	}
+	sort.Slice(aliases, func(i, j int) bool {
+		if len(aliases[i]) != len(aliases[j]) {
+			return len(aliases[i]) > len(aliases[j])
+		}
+
+		return aliases[i] < aliases[j]
+	})
+	names = append(names, aliases...)
 
 	return keywords.MustNewRegexFromKeywords(names...)
 }

@@ -3,6 +3,7 @@ package gqlfx
 import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
+	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/gql"
@@ -15,6 +16,9 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/metrics/torrentmetrics"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/manager"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/graphqlshadow"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"go.uber.org/fx"
 )
@@ -22,9 +26,16 @@ import (
 func New() fx.Option {
 	return fx.Module(
 		"graphql",
+		configfx.NewConfigModule[graphqlshadow.Config](
+			"graphql_shadow",
+			graphqlshadow.NewDefaultConfig(),
+		),
 		fx.Provide(
 			config.New,
 			httpserver.New,
+			graphqlshadow.New,
+			graphqlshadow.NewHTTPExecutor,
+			graphqlshadow.NewHook,
 			func(
 				lcfg lazy.Lazy[gql.Config],
 			) lazy.Lazy[graphql.ExecutableSchema] {
@@ -74,15 +85,22 @@ func New() fx.Option {
 						if err != nil {
 							return nil, err
 						}
+						ps, err := p.Pathsearch.Get()
+						if err != nil {
+							return nil, err
+						}
 						return &resolvers.Resolver{
 							Dao:                  d,
 							Search:               s,
 							Checker:              ch,
+							HealthPeerConfig:     p.HealthPeerConfig,
 							QueueMetricsClient:   qmc,
 							QueueManager:         qm,
 							TorrentMetricsClient: tm,
 							Processor:            pr,
 							BlockingManager:      bm,
+							Pathsearch:           ps,
+							FileSearch:           p.FileSearch,
 						}, nil
 					}),
 				}
@@ -106,11 +124,14 @@ type Params struct {
 	Search               lazy.Lazy[search.Search]
 	Dao                  lazy.Lazy[*dao.Query]
 	Checker              lazy.Lazy[health.Checker]
+	HealthPeerConfig     health.PeerConfig
 	QueueMetricsClient   lazy.Lazy[queuemetrics.Client]
 	QueueManager         lazy.Lazy[manager.Manager]
 	TorrentMetricsClient lazy.Lazy[torrentmetrics.Client]
 	Processor            lazy.Lazy[processor.Processor]
 	BlockingManager      lazy.Lazy[blocking.Manager]
+	Pathsearch           lazy.Lazy[*pathsearch.Composer]
+	FileSearch           filesearch.Client
 }
 
 type Result struct {

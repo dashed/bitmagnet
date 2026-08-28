@@ -1,0 +1,32 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Titan S02E10 2160p WEB x265-ZONE</title>
+      <guid>f0e68c086ec7981ced58cf7502b45b18c44c258f</guid>
+      <pubDate>Wed, 15 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>4200000000</size>
+      <enclosure length="4200000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:f0e68c086ec7981ced58cf7502b45b18c44c258f&amp;dn=Titan+S02E10+2160p+WEB+x265-ZONE&amp;xl=4200000000"/>
+      <torznab:attr name="infohash" value="f0e68c086ec7981ced58cf7502b45b18c44c258f"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:f0e68c086ec7981ced58cf7502b45b18c44c258f&amp;dn=Titan+S02E10+2160p+WEB+x265-ZONE&amp;xl=4200000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="4200000000"/>
+      <torznab:attr name="publishdate" value="Wed, 15 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="400"/>
+      <torznab:attr name="leechers" value="20"/>
+      <torznab:attr name="peers" value="420"/>
+      <torznab:attr name="files" value="2"/>
+      <torznab:attr name="year" value="2018"/>
+      <torznab:attr name="season" value="2"/>
+      <torznab:attr name="episode" value="10"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="2160p"/>
+      <torznab:attr name="team" value="ZONE"/>
+      <torznab:attr name="tmdb" value="204"/>
+    </item>
+  </channel>
+</rss>

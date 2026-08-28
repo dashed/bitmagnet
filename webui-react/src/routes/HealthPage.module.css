@@ -1,0 +1,363 @@
+.root {
+  display: grid;
+  gap: 24px;
+  margin: 0 auto;
+  max-width: 960px;
+  padding: 8px 0 32px;
+}
+
+.header {
+  align-items: start;
+  display: grid;
+  gap: 16px;
+}
+
+.header h1,
+.statusCopy h2,
+.sectionHeader h2,
+.errorPanel h2 {
+  line-height: 1.2;
+  margin: 0;
+}
+
+.header h1 {
+  font-size: 24px;
+}
+
+.header p,
+.statusCopy p,
+.errorPanel p {
+  color: var(--mantine-color-dimmed);
+  margin: 0;
+}
+
+.refreshButton {
+  align-items: center;
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.refreshButton:hover:not(:disabled) {
+  background: var(--mantine-color-default-hover);
+}
+
+.refreshButton:disabled {
+  color: var(--mantine-color-dimmed);
+  cursor: wait;
+}
+
+.statusBanner {
+  --banner-accent: var(--mantine-color-yellow-7);
+  --banner-bg: color-mix(in srgb, var(--mantine-color-yellow-0), transparent 22%);
+  --banner-border: color-mix(in srgb, var(--mantine-color-yellow-6), transparent 28%);
+
+  align-items: start;
+  background: var(--banner-bg);
+  border: 1px solid var(--banner-border);
+  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 16px;
+}
+
+.statusBanner[data-tone="ok"] {
+  --banner-accent: var(--mantine-color-green-7);
+  --banner-bg: color-mix(in srgb, var(--mantine-color-green-0), transparent 18%);
+  --banner-border: color-mix(in srgb, var(--mantine-color-green-6), transparent 30%);
+}
+
+.statusMarker {
+  background: var(--banner-accent);
+  border-radius: 999px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--banner-accent), transparent 84%);
+  height: 12px;
+  margin-top: 5px;
+  width: 12px;
+}
+
+.statusCopy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.statusCopy h2 {
+  color: var(--mantine-color-text);
+  font-size: 20px;
+}
+
+.updatedText {
+  font-size: var(--mantine-font-size-sm);
+}
+
+.panel,
+.errorPanel {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.errorPanel {
+  border-color: color-mix(in srgb, var(--mantine-color-red-6), transparent 35%);
+}
+
+.errorPanel h2 {
+  color: var(--mantine-color-red-8);
+  font-size: 18px;
+}
+
+.sectionHeader {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.sectionHeader h2 {
+  font-size: 18px;
+}
+
+.tableScroll {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.checksTable {
+  border-collapse: collapse;
+  min-width: 720px;
+  width: 100%;
+}
+
+.checksTable th,
+.checksTable td {
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  padding: 12px;
+  text-align: start;
+  vertical-align: top;
+}
+
+.checksTable th {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.checksTable td {
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-sm);
+}
+
+.checksTable tr:last-child td {
+  border-bottom: 0;
+}
+
+.checksTable code,
+.workerItem code {
+  color: var(--mantine-color-text);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.statusBadge {
+  --badge-bg: var(--mantine-color-gray-1);
+  --badge-border: var(--mantine-color-gray-4);
+  --badge-color: var(--mantine-color-gray-8);
+
+  align-items: center;
+  background: var(--badge-bg);
+  border: 1px solid var(--badge-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--badge-color);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  justify-content: center;
+  line-height: 1;
+  min-height: 26px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
+.statusBadge[data-status="up"],
+.statusBadge[data-status="started"] {
+  --badge-bg: var(--mantine-color-green-0);
+  --badge-border: var(--mantine-color-green-4);
+  --badge-color: var(--mantine-color-green-9);
+}
+
+.statusBadge[data-status="down"],
+.statusBadge[data-status="stopped"] {
+  --badge-bg: var(--mantine-color-yellow-0);
+  --badge-border: var(--mantine-color-yellow-5);
+  --badge-color: var(--mantine-color-yellow-9);
+}
+
+.statusBadge[data-status="inactive"],
+.statusBadge[data-status="unknown"] {
+  --badge-bg: var(--mantine-color-gray-0);
+  --badge-border: var(--mantine-color-gray-4);
+  --badge-color: var(--mantine-color-gray-8);
+}
+
+.errorText {
+  color: var(--mantine-color-red-8);
+  overflow-wrap: anywhere;
+}
+
+.mutedText,
+.emptyText {
+  color: var(--mantine-color-dimmed);
+}
+
+.emptyText {
+  margin: 0;
+}
+
+.workersList {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workerItem {
+  align-items: center;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 48px;
+  padding: 10px 12px;
+}
+
+:global([data-mantine-color-scheme="dark"]) .statusBanner {
+  --banner-bg: color-mix(in srgb, var(--mantine-color-yellow-9), transparent 82%);
+  --banner-border: color-mix(in srgb, var(--mantine-color-yellow-6), transparent 38%);
+}
+
+:global([data-mantine-color-scheme="dark"]) .statusBanner[data-tone="ok"] {
+  --banner-bg: color-mix(in srgb, var(--mantine-color-green-9), transparent 84%);
+  --banner-border: color-mix(in srgb, var(--mantine-color-green-6), transparent 44%);
+}
+
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="up"],
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="started"] {
+  --badge-bg: color-mix(in srgb, var(--mantine-color-green-9), transparent 78%);
+  --badge-border: color-mix(in srgb, var(--mantine-color-green-5), transparent 35%);
+  --badge-color: var(--mantine-color-green-2);
+}
+
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="down"],
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="stopped"] {
+  --badge-bg: color-mix(in srgb, var(--mantine-color-yellow-9), transparent 78%);
+  --badge-border: color-mix(in srgb, var(--mantine-color-yellow-5), transparent 35%);
+  --badge-color: var(--mantine-color-yellow-2);
+}
+
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="inactive"],
+:global([data-mantine-color-scheme="dark"]) .statusBadge[data-status="unknown"] {
+  --badge-bg: var(--mantine-color-dark-5);
+  --badge-border: var(--mantine-color-dark-3);
+  --badge-color: var(--mantine-color-gray-2);
+}
+
+:global([data-mantine-color-scheme="dark"]) .errorPanel h2,
+:global([data-mantine-color-scheme="dark"]) .errorText {
+  color: var(--mantine-color-red-3);
+}
+
+@media (min-width: 48em) {
+  .header {
+    align-items: center;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+@media (max-width: 47.999em) {
+  .refreshButton {
+    min-height: 44px;
+    width: 100%;
+  }
+
+  .tableScroll {
+    border: 0;
+    overflow: visible;
+  }
+
+  .checksTable {
+    min-width: 0;
+  }
+
+  .checksTable,
+  .checksTable tbody,
+  .checksTable tr,
+  .checksTable td {
+    display: block;
+  }
+
+  .checksTable thead {
+    display: none;
+  }
+
+  .checksTable tr {
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+
+  .checksTable tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .checksTable td {
+    align-items: start;
+    display: grid;
+    gap: 8px;
+    grid-template-columns: 104px minmax(0, 1fr);
+    min-height: 42px;
+    padding: 10px 12px;
+  }
+
+  .checksTable td::before {
+    color: var(--mantine-color-dimmed);
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .workerItem {
+    align-items: start;
+    grid-template-columns: 1fr;
+  }
+}

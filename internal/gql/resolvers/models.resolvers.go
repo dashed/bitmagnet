@@ -22,6 +22,28 @@ func (r *contentResolver) OriginalLanguage(ctx context.Context, obj *model.Conte
 	return language, nil
 }
 
+// FileExtensions is the resolver for the fileExtensions field.
+//
+// It mirrors the extension facet and the Tantivy document builder
+// (internal/search/tantivy fileExtensionsForDoc): a single-file torrent has no
+// per-file rows, so its extension is derived from the torrent name; multi-file
+// torrents use the denormalised file_extensions JSONB column (the FileExts model
+// field), which is populated at crawl time and is what search preloads (the Files
+// relation is not). Binding straight to the column returned an empty list for
+// single-file torrents even though the facet counts them by their name-derived
+// extension.
+func (r *torrentResolver) FileExtensions(ctx context.Context, obj *model.Torrent) ([]string, error) {
+	if obj.SingleFile() {
+		if ext := model.FileExtensionFromPath(obj.Name); ext.Valid {
+			return []string{ext.String}, nil
+		}
+
+		return []string{}, nil
+	}
+
+	return obj.FileExts, nil
+}
+
 // Sources is the resolver for the sources field.
 func (r *torrentResolver) Sources(ctx context.Context, obj *model.Torrent) ([]gqlmodel.TorrentSourceInfo, error) {
 	return gqlmodel.TorrentSourceInfosFromTorrent(*obj), nil

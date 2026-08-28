@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "subsystem": "dht_runtime_lifecycle",
+  "evidence": {
+    "generator": "tools/parity/dht_runtime_lifecycle",
+    "mode": "production public calls plus Go AST structural validation",
+    "productionFiles": [
+      "internal/lazy/lazy.go",
+      "internal/protocol/dht/dhtfx/module.go",
+      "internal/protocol/dht/responder/factory.go",
+      "internal/protocol/dht/server/config.go",
+      "internal/protocol/dht/server/factory.go",
+      "internal/protocol/dht/server/server.go",
+      "internal/protocol/id.go"
+    ]
+  },
+  "defaults": {
+    "configNamespace": "dht_server",
+    "bindIp": "0.0.0.0",
+    "bindPort": 3334,
+    "bindAddrPort": "0.0.0.0:3334",
+    "queryTimeoutNanos": 4000000000,
+    "responderTimeoutNanos": 5000000000,
+    "sampleInfoHashesIntervalSeconds": 10
+  },
+  "identity": {
+    "provider": "protocol.RandomNodeIDWithClientSuffix",
+    "totalBytes": 20,
+    "randomPrefixBytes": 12,
+    "suffixOffsetBytes": 12,
+    "suffixAscii": "-BM0001-",
+    "suffixHex": "2d424d303030312d",
+    "samplesChecked": 64,
+    "allSamplesMatchSuffixShape": true
+  },
+  "lifecycle": {
+    "constructionIsLazy": true,
+    "startTrigger": "first lazy.Get attempt; initialization result is cached",
+    "stopBeforeInitializationIsNoOp": true,
+    "socketOpenBeforeGoroutines": true,
+    "stopMechanism": "unguarded close(stopped)",
+    "stopIsIdempotent": false,
+    "secondStopPanics": true,
+    "shutdownWorkerDetached": true,
+    "readLoopDetached": true,
+    "queryHandlersDetached": true,
+    "responseHandlersDetached": true,
+    "stopWaitsForReadLoop": false,
+    "stopWaitsForHandlers": false,
+    "socketCloseErrorIgnored": true,
+    "activeReceiveErrorPolicy": "panic in detached read goroutine while context is active",
+    "pendingQueries": {
+      "registryInitiallyEmpty": true,
+      "responseChannelCapacity": 1,
+      "cleanupOnlyWhenQueryReturns": true,
+      "stopTouchesRegistry": false,
+      "stopClosesResponseChannels": false,
+      "querySelectInputs": [
+        "query_context",
+        "response_channel"
+      ],
+      "stopSignalSelectedByQuery": false
+    }
+  },
+  "limitations": {
+    "socketOpened": false,
+    "networkUsed": false,
+    "goroutinesStarted": false,
+    "timingObserved": false,
+    "lifecycleEvidenceClass": "source-derived AST invariants; not behaviorally executed",
+    "detachedCompletionOrder": "not asserted",
+    "pendingAtStopCount": "not observed; only absence of stop-side registry draining is asserted"
+  }
+}

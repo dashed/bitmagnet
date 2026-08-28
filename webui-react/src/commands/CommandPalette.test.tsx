@@ -1,0 +1,224 @@
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import "../i18n/i18n";
+import { createAppRouter } from "../appRouter";
+import { execute } from "../graphql/client";
+import { AppProviders } from "../providers/AppProviders";
+import { recordRecentSearch } from "../searches/recentSearches";
+import { addSavedSearch } from "../searches/savedSearches";
+
+vi.mock("../graphql/client", () => ({
+  execute: vi.fn(),
+}));
+
+const executeMock = vi.mocked(execute);
+const RECENT_SEARCHES_STORAGE_KEY = "bitmagnet-recent-searches";
+const SAVED_SEARCHES_STORAGE_KEY = "bitmagnet-saved-searches";
+
+async function renderAt(initialEntry: string) {
+  const router = createAppRouter({
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
+  });
+
+  await router.load();
+
+  render(
+    <AppProviders>
+      <RouterProvider router={router} />
+    </AppProviders>,
+  );
+
+  return router;
+}
+
+async function openPalette() {
+  fireEvent.keyDown(document.body, { key: "k", metaKey: true });
+
+  return screen.findByRole("combobox", { name: "Command palette" });
+}
+
+describe("CommandPalette", () => {
+  beforeEach(() => {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SAVED_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: RECENT_SEARCHES_STORAGE_KEY,
+      }),
+    );
+    executeMock.mockReset();
+    executeMock.mockImplementation(() => new Promise<never>(() => undefined));
+  });
+
+  it("opens with Cmd or Ctrl+K and closes with Escape", async () => {
+    await renderAt("/app/");
+
+    expect(await openPalette()).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("combobox", { name: "Command palette" })).toBeNull();
+    });
+
+    fireEvent.keyDown(document.body, { ctrlKey: true, key: "k" });
+
+    expect(await screen.findByRole("combobox", { name: "Command palette" })).toBeTruthy();
+  });
+
+  it("focuses search with slash without hijacking slash inside an input", async () => {
+    await renderAt("/app/");
+
+    const searchInput = await screen.findByLabelText("Search torrents");
+    document.body.focus();
+
+    fireEvent.keyDown(document.body, { key: "/" });
+
+    expect(document.activeElement).toBe(searchInput);
+    expect(screen.queryByRole("combobox", { name: "Command palette" })).toBeNull();
+
+    fireEvent.keyDown(searchInput, { key: "/" });
+
+    expect(document.activeElement).toBe(searchInput);
+    expect(screen.queryByRole("combobox", { name: "Command palette" })).toBeNull();
+  });
+
+  it("filters commands and enters the active navigation result", async () => {
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "health" } });
+
+    const healthOption = await screen.findByRole("option", { name: "Health" });
+    expect(screen.queryByRole("option", { name: "Dashboard" })).toBeNull();
+
+    // The pinned "Search for …" command is highlighted first; arrow down to the nav result.
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(healthOption.id);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(router.latestLocation.pathname).toBe("/health");
+    });
+  });
+
+  it("runs the pinned search command with the typed query", async () => {
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "ubuntu" } });
+
+    expect(
+      await screen.findByRole("option", { name: "Search torrents for “ubuntu”" }),
+    ).toBeTruthy();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(router.latestLocation.pathname).toBe("/");
+      expect(router.latestLocation.search).toEqual({ query: "ubuntu" });
+    });
+  });
+
+  it("does not run or close the active command while Enter confirms IME composition", async () => {
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "health" } });
+
+    const healthOption = await screen.findByRole("option", { name: "Health" });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(healthOption.id);
+    expect(fireEvent.keyDown(input, { isComposing: true, key: "Enter" })).toBe(true);
+    expect(router.latestLocation.pathname).toBe("/");
+    expect(screen.getByRole("combobox", { name: "Command palette" })).toBe(input);
+  });
+
+  it("connects the combobox to its listbox and active option", async () => {
+    await renderAt("/app/");
+
+    const input = await openPalette();
+    const listbox = screen.getByRole("listbox");
+    const options = within(listbox).getAllByRole("option");
+
+    expect(input.getAttribute("aria-controls")).toBe(listbox.id);
+    expect(options.length).toBeGreaterThan(0);
+
+    // The first option is highlighted on open so the default Enter target is visible.
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[0]?.id);
+    expect(options[0]?.getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[1]?.id);
+    expect(options[1]?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("shows a saved search and applies it with Enter", async () => {
+    const savedParams = {
+      content_type: "software" as const,
+      desc: 0 as const,
+      order: "published_at" as const,
+      query: "nightly linux",
+    };
+    addSavedSearch("Weekly Arch", savedParams);
+
+    const router = await renderAt("/app/");
+    const input = await openPalette();
+
+    fireEvent.change(input, { target: { value: "Weekly Arch" } });
+
+    // The pinned "Search torrents for …" option echoes the typed text, so anchor the
+    // match: only the saved-search option's name starts with the saved name.
+    const savedOption = await screen.findByRole("option", { name: /^Weekly Arch/ });
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+
+    expect(input.getAttribute("aria-activedescendant")).toBe(savedOption.id);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(router.latestLocation.pathname).toBe("/");
+      expect(router.latestLocation.search).toEqual(savedParams);
+    });
+  });
+
+  it("shows recent searches only while the palette query is empty", async () => {
+    recordRecentSearch("Ubuntu");
+
+    const router = await renderAt("/app/");
+    await openPalette();
+
+    const listbox = screen.getByRole("listbox");
+    const recentTitle = within(listbox).getByText("Ubuntu");
+    const recentOption = recentTitle.closest('[role="option"]');
+
+    expect(recentOption).toBeTruthy();
+    expect(within(listbox).getByText("Recent search")).toBeTruthy();
+
+    fireEvent.click(recentOption!);
+
+    await waitFor(() => {
+      expect(router.latestLocation.search).toEqual({ query: "Ubuntu" });
+    });
+
+    const input = await openPalette();
+    fireEvent.change(input, { target: { value: "ubu" } });
+
+    await waitFor(() => {
+      expect(within(screen.getByRole("listbox")).queryByText("Recent search")).toBeNull();
+    });
+    expect(
+      screen.getByRole("option", { name: "Search torrents for “ubu”" }),
+    ).toBeTruthy();
+  });
+});

@@ -14,9 +14,19 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb"
+	"go.uber.org/zap"
 	"gorm.io/gen/field"
 	"gorm.io/gorm/clause"
 )
+
+// SearchIndexer is the slice of the Tantivy sidecar client the dual-write needs
+// (*tantivy.Client satisfies it). A nil SearchIndexer means the search feature
+// or processor dual-write is disabled and the dual-write is a no-op.
+type SearchIndexer interface {
+	IndexDocument(ctx context.Context, doc *pb.TorrentDocument) (*pb.IndexDocumentResponse, error)
+	DeleteDocument(ctx context.Context, infoHash []byte) (*pb.DeleteDocumentResponse, error)
+}
 
 type Processor interface {
 	Process(ctx context.Context, params MessageParams) error
@@ -28,6 +38,10 @@ type processor struct {
 	runner          classifier.Runner
 	dao             *dao.Query
 	blockingManager blocking.Manager
+	// searchIndexer dual-writes to the Tantivy sidecar; nil when search or the
+	// dual-write sub-feature is disabled, in which case it is a no-op.
+	searchIndexer SearchIndexer
+	logger        *zap.SugaredLogger
 }
 
 type MissingHashesError struct {
@@ -47,13 +61,7 @@ func (c processor) Process(ctx context.Context, params MessageParams) error {
 	searchResult, searchErr := c.search.TorrentsWithMissingInfoHashes(
 		ctx,
 		params.InfoHashes,
-		query.Preload(func(q *dao.Query) []field.RelationField {
-			return []field.RelationField{
-				q.Torrent.Files.RelationField,
-				q.Torrent.Hint.RelationField,
-				q.Torrent.Sources.RelationField,
-			}
-		}),
+		query.Preload(processorTorrentPreloads),
 	)
 	if searchErr != nil {
 		return searchErr
@@ -122,6 +130,24 @@ func (c processor) Process(ctx context.Context, params MessageParams) error {
 					torrent.Hint.ContentSource = tc.ContentSource
 					torrent.Hint.ContentID = tc.ContentID
 					foundMatch = true
+				}
+			}
+
+			// The reuse above requires tc.ContentSource.Valid, so it only ever
+			// covers *sourced* matches (tmdb/imdb). A rule-derived content type
+			// such as `xxx` has no content source and was never reused — so when
+			// the torrent has no stored file list, the rules that would re-derive
+			// it cannot fire, and a reprocess silently cleared content_type.
+			// Measured at ~21.5% of `xxx` torrents (~1.4M) prod-wide.
+			//
+			// Preserve the stored type in that case. This is deliberately NOT
+			// gated on ClassifyMode: rematch means re-derive, and when derivation
+			// is impossible `unknown` is data loss rather than a fresh verdict.
+			// Only the type is carried over — never source/ID — so this cannot
+			// resurrect a stale content match.
+			if !foundMatch && torrent.Hint.IsNil() {
+				if contentType, ok := preservedRuleDerivedContentType(torrent); ok {
+					torrent.Hint.ContentType = contentType
 				}
 			}
 
@@ -231,4 +257,42 @@ func newTorrentContent(t model.Torrent, c classification.Result) model.TorrentCo
 	tc.UpdateTsv()
 
 	return tc
+}
+
+// preservedRuleDerivedContentType returns a stored content type that must
+// survive a reprocess untouched, and whether preservation applies.
+//
+// A rule-derived content type (`xxx`, `comic`, ...) carries no content_source,
+// so the source-backed hint reuse in run() never carries it over. When the
+// torrent also has no stored file list, the classifier rules that would
+// re-derive it cannot fire at all, and the reprocess silently cleared
+// content_type — measured at ~21.5% of `xxx` torrents (~1.4M) prod-wide.
+//
+// Only the type is returned, never source/ID, so this can never resurrect a
+// stale content match. It deliberately ignores ClassifyMode: rematch means
+// re-derive, and when derivation is impossible `unknown` is data loss rather
+// than a fresh verdict. Mirrored in Rust by effective_hint's fallback in
+// bitmagnet-processor/src/load.rs — the two must change together.
+func preservedRuleDerivedContentType(torrent model.Torrent) (model.ContentType, bool) {
+	if torrent.FilesStatus.HasStoredFileList() {
+		return "", false
+	}
+
+	for _, tc := range torrent.Contents {
+		if tc.ContentType.Valid && !tc.ContentSource.Valid {
+			return tc.ContentType.ContentType, true
+		}
+	}
+
+	return "", false
+}
+
+func processorTorrentPreloads(q *dao.Query) []field.RelationField {
+	// Files intentionally stays out of the association preload list. SelectAll()
+	// loads torrents.files_data, and model.Torrent.AfterFind hydrates Torrent.Files
+	// from that L1 blob; preloading Torrent.Files would read legacy torrent_files.
+	return []field.RelationField{
+		q.Torrent.Hint.RelationField,
+		q.Torrent.Sources.RelationField,
+	}
 }
