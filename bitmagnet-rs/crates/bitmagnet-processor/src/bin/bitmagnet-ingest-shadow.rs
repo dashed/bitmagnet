@@ -312,7 +312,7 @@ async fn run_mirror(
         tokio::select! {
             result = store.mirror_processed_page(&config) => {
                 let report = result.context("mirroring processed queue rows")?;
-                metrics.observe(&report).context("recording mirror cursor metrics")?;
+                metrics.observe(&report);
                 tracing::info!(
                     scanned = report.scanned,
                     sampled = report.sampled,

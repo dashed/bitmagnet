@@ -526,6 +526,7 @@ pub struct MirrorMetrics {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct MirrorCursorMetricSnapshot {
     initialized: bool,
+    ran_at_finite: bool,
     ran_at_microseconds: i64,
     observed_at_microseconds: i64,
     source_job_id_sha256_words: [u32; 8],
@@ -580,14 +581,24 @@ impl MirrorMetrics {
         })
     }
 
-    pub fn observe(&self, report: &MirrorReport) -> Result<(), chrono::ParseError> {
+    pub fn observe(&self, report: &MirrorReport) {
         let cursor = match &report.cursor {
-            Some(cursor) => MirrorCursorMetricSnapshot {
-                initialized: true,
-                ran_at_microseconds: parse_pg_timestamptz_microseconds(&cursor.ran_at)?,
-                observed_at_microseconds: chrono::Utc::now().timestamp_micros(),
-                source_job_id_sha256_words: sha256_words(&cursor.id),
-            },
+            Some(cursor) => {
+                let ran_at = parse_pg_timestamptz_microseconds(&cursor.ran_at);
+                if ran_at.is_none() {
+                    tracing::warn!(
+                        cursor_ran_at = %cursor.ran_at,
+                        "mirror cursor timestamp is non-finite or unparseable; control telemetry will refuse it"
+                    );
+                }
+                MirrorCursorMetricSnapshot {
+                    initialized: true,
+                    ran_at_finite: ran_at.is_some(),
+                    ran_at_microseconds: ran_at.unwrap_or_default(),
+                    observed_at_microseconds: chrono::Utc::now().timestamp_micros(),
+                    source_job_id_sha256_words: sha256_words(&cursor.id),
+                }
+            }
             None => MirrorCursorMetricSnapshot::default(),
         };
         self.pages.inc();
@@ -606,7 +617,6 @@ impl MirrorMetrics {
             .cursor
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = cursor;
-        Ok(())
     }
 
     /// Build one coherent, bounded cursor snapshot for the mirror process's
@@ -622,8 +632,9 @@ impl MirrorMetrics {
     }
 }
 
-fn parse_pg_timestamptz_microseconds(value: &str) -> Result<i64, chrono::ParseError> {
+fn parse_pg_timestamptz_microseconds(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%#z")
+        .ok()
         .map(|timestamp| timestamp.timestamp_micros())
 }
 
@@ -651,6 +662,13 @@ fn mirror_cursor_metric_families(
     )
     .expect("the mirror cursor initialized descriptor must be valid");
     initialized.set(i64::from(snapshot.initialized));
+
+    let ran_at_finite = prometheus::IntGauge::new(
+        "bitmagnet_ingest_shadow_mirror_cursor_ran_at_finite",
+        "Whether the reported mirror cursor timestamp is finite and exactly representable.",
+    )
+    .expect("the mirror cursor finite descriptor must be valid");
+    ran_at_finite.set(i64::from(snapshot.ran_at_finite));
 
     let ran_at = prometheus::IntGauge::new(
         "bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds",
@@ -681,6 +699,7 @@ fn mirror_cursor_metric_families(
     }
 
     let mut families = initialized.collect();
+    families.extend(ran_at_finite.collect());
     families.extend(ran_at.collect());
     families.extend(observed_at.collect());
     families.extend(source_id.collect());
@@ -771,6 +790,7 @@ mod tests {
 
         let families = mirror_cursor_metric_families(MirrorCursorMetricSnapshot {
             initialized: true,
+            ran_at_finite: true,
             ran_at_microseconds: ran_at,
             observed_at_microseconds: ran_at + 10,
             source_job_id_sha256_words: sha256_words("source-a"),
@@ -781,6 +801,7 @@ mod tests {
             .expect("encode cursor families");
         let text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
         assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_initialized 1"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_ran_at_finite 1"));
         assert!(text.contains(&format!(
             "bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds {ran_at}"
         )));
@@ -798,6 +819,27 @@ mod tests {
                 .count(),
             8
         );
+    }
+
+    #[test]
+    fn non_finite_cursor_is_explicitly_refused_without_a_parse_error() {
+        assert_eq!(parse_pg_timestamptz_microseconds("infinity"), None);
+        assert_eq!(parse_pg_timestamptz_microseconds("-infinity"), None);
+        let families = mirror_cursor_metric_families(MirrorCursorMetricSnapshot {
+            initialized: true,
+            ran_at_finite: false,
+            ran_at_microseconds: 0,
+            observed_at_microseconds: 1_787_747_696_123_456,
+            source_job_id_sha256_words: sha256_words("source-infinity"),
+        });
+        let mut encoded = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&families, &mut encoded)
+            .expect("encode non-finite cursor families");
+        let text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_initialized 1"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_ran_at_finite 0"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds 0"));
     }
 
     #[test]

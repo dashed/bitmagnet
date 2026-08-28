@@ -10,6 +10,20 @@ pub const QUEUE_JOBS_METRIC_HELP: &str =
     "Number of tasks enqueued; broken down by queue and status.";
 pub const INGEST_SHADOW_GOOSE_VERSION_METRIC_NAME: &str = "bitmagnet_ingest_shadow_goose_version";
 pub const INGEST_SHADOW_SCRATCH_JOBS_METRIC_NAME: &str = "bitmagnet_ingest_shadow_scratch_jobs";
+const INGEST_SHADOW_STATUS_SQL: &str = "WITH latest AS ( \
+   SELECT DISTINCT ON (version_id) id, version_id, is_applied \
+   FROM public.goose_db_version \
+   ORDER BY version_id, id DESC \
+ ), applied_head AS ( \
+   SELECT version_id FROM latest WHERE is_applied ORDER BY id DESC LIMIT 1 \
+ ) \
+ SELECT \
+   (SELECT version_id FROM applied_head) AS goose_version, \
+   count(*) FILTER (WHERE status = 'pending')::bigint AS pending, \
+   count(*) FILTER (WHERE status = 'retry')::bigint AS retry, \
+   count(*) FILTER (WHERE status = 'failed')::bigint AS failed \
+ FROM public.queue_jobs \
+ WHERE queue = 'process_torrent_shadow'";
 
 /// One fixed, read-only database snapshot for ingest-shadow admission and drain
 /// planning. No caller-controlled queue name or status enters the query.
@@ -39,22 +53,9 @@ impl QueueStore {
     pub async fn ingest_shadow_status_snapshot(
         &self,
     ) -> Result<IngestShadowStatusSnapshot, QueuePgError> {
-        let row = sqlx::query(
-            "WITH latest AS ( \
-               SELECT DISTINCT ON (version_id) version_id, is_applied \
-               FROM public.goose_db_version \
-               ORDER BY version_id, id DESC \
-             ) \
-             SELECT \
-               (SELECT max(version_id) FROM latest WHERE is_applied) AS goose_version, \
-               count(*) FILTER (WHERE status = 'pending')::bigint AS pending, \
-               count(*) FILTER (WHERE status = 'retry')::bigint AS retry, \
-               count(*) FILTER (WHERE status = 'failed')::bigint AS failed \
-             FROM public.queue_jobs \
-             WHERE queue = 'process_torrent_shadow'",
-        )
-        .fetch_one(self.pool())
-        .await?;
+        let row = sqlx::query(INGEST_SHADOW_STATUS_SQL)
+            .fetch_one(self.pool())
+            .await?;
 
         let goose_version: Option<i64> = row.try_get("goose_version")?;
         let goose_version = goose_version.ok_or(QueuePgError::InvalidMirrorConfig(
@@ -194,7 +195,19 @@ fn ingest_shadow_status_metric_families(
 mod tests {
     use prometheus::Encoder as _;
 
-    use super::{ingest_shadow_status_metric_families, IngestShadowStatusSnapshot};
+    use super::{
+        ingest_shadow_status_metric_families, IngestShadowStatusSnapshot, INGEST_SHADOW_STATUS_SQL,
+    };
+
+    #[test]
+    fn ingest_shadow_head_uses_goose_row_identity_not_max_version() {
+        assert!(INGEST_SHADOW_STATUS_SQL
+            .contains("SELECT DISTINCT ON (version_id) id, version_id, is_applied"));
+        assert!(INGEST_SHADOW_STATUS_SQL.contains("ORDER BY version_id, id DESC"));
+        assert!(INGEST_SHADOW_STATUS_SQL
+            .contains("SELECT version_id FROM latest WHERE is_applied ORDER BY id DESC LIMIT 1"));
+        assert!(!INGEST_SHADOW_STATUS_SQL.contains("max(version_id)"));
+    }
 
     #[test]
     fn ingest_shadow_metrics_are_fixed_complete_and_deterministic() {
