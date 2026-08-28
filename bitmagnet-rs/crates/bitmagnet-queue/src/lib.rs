@@ -53,5 +53,7 @@ pub use producer_pg::{
     PgQueueJobValues, PreparedQueueJob,
 };
 pub use status_pg::{
-    ProcessTorrentBatchStatusCount, QUEUE_JOBS_METRIC_HELP, QUEUE_JOBS_METRIC_NAME,
+    IngestShadowStatusSnapshot, ProcessTorrentBatchStatusCount,
+    INGEST_SHADOW_GOOSE_VERSION_METRIC_NAME, INGEST_SHADOW_SCRATCH_JOBS_METRIC_NAME,
+    QUEUE_JOBS_METRIC_HELP, QUEUE_JOBS_METRIC_NAME,
 };
