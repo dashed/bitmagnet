@@ -2752,7 +2752,7 @@ async fn queue_runtime_matches_go_contract() {
         .await
         .expect("grant public schema usage");
     sqlx::query(
-        "GRANT SELECT ON queue_jobs, torrents, torrent_hints, torrent_contents \
+        "GRANT SELECT ON goose_db_version, queue_jobs, torrents, torrent_hints, torrent_contents \
          TO bitmagnet_queue_shadow_test",
     )
     .execute(&pool)
@@ -2862,6 +2862,27 @@ async fn queue_runtime_matches_go_contract() {
         .expect("mirror through row-scoped capabilities");
     assert_eq!(boundary_report.scanned, 1);
     assert_eq!(boundary_report.inserted, 1);
+    let status = shadow_store
+        .ingest_shadow_status_snapshot()
+        .await
+        .expect("read fixed shadow status through existing bounded SELECT grants");
+    assert_eq!(status.goose_version, 34);
+    assert_eq!(status.pending, 1);
+    assert_eq!(status.retry, 0);
+    assert_eq!(status.failed, 0);
+    let families = shadow_store
+        .ingest_shadow_status_metric_families()
+        .await
+        .expect("collect fresh shadow metrics through the minimally granted role");
+    let mut encoded = Vec::new();
+    prometheus::TextEncoder::new()
+        .encode(&families, &mut encoded)
+        .expect("encode minimally granted shadow metrics");
+    let metrics_text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
+    assert!(metrics_text.contains("bitmagnet_ingest_shadow_goose_version 34"));
+    assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"pending\"} 1"));
+    assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"retry\"} 0"));
+    assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"failed\"} 0"));
     let direct_cursor_update = sqlx::query(
         "UPDATE queue_mirror_cursors SET source_job_id = 'forbidden' \
          WHERE source_queue = 'process_torrent' \

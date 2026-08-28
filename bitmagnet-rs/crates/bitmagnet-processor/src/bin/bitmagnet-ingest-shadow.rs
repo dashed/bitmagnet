@@ -16,6 +16,18 @@ struct Args {
     postgres_dsn: String,
     #[arg(long, env = "BITMAGNET_POSTGRES_MAX_CONNECTIONS", default_value_t = 4)]
     postgres_max_connections: u32,
+    #[arg(
+        long,
+        env = "BITMAGNET_POSTGRES_ACQUIRE_TIMEOUT_SECONDS",
+        default_value_t = 5
+    )]
+    postgres_acquire_timeout_seconds: u64,
+    #[arg(
+        long,
+        env = "BITMAGNET_INGEST_SHADOW_METRICS_QUERY_TIMEOUT_SECONDS",
+        default_value_t = 5
+    )]
+    metrics_query_timeout_seconds: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -65,6 +77,7 @@ async fn main() -> Result<()> {
     validate_args(&args)?;
     let pool = PgPoolOptions::new()
         .max_connections(args.postgres_max_connections)
+        .acquire_timeout(Duration::from_secs(args.postgres_acquire_timeout_seconds))
         .connect(&args.postgres_dsn)
         .await
         .context("connecting to PostgreSQL")?;
@@ -88,8 +101,12 @@ async fn main() -> Result<()> {
                 ..MirrorConfig::default()
             };
             let metrics = MirrorMetrics::register().context("registering mirror metrics")?;
-            let _metrics_server =
-                spawn_metrics_server(store.clone(), Some(metrics.clone())).await?;
+            let _metrics_server = spawn_metrics_server(
+                store.clone(),
+                Some(metrics.clone()),
+                Duration::from_secs(args.metrics_query_timeout_seconds),
+            )
+            .await?;
             run_mirror(store, config, Duration::from_secs(idle_seconds), &metrics).await?;
         }
         Command::Consume {
@@ -106,7 +123,12 @@ async fn main() -> Result<()> {
                 expected_classifier_config_digest.as_deref(),
             )?);
             let metrics = ShadowMetrics::register().context("registering shadow metrics")?;
-            let _metrics_server = spawn_metrics_server(store, None).await?;
+            let _metrics_server = spawn_metrics_server(
+                store,
+                None,
+                Duration::from_secs(args.metrics_query_timeout_seconds),
+            )
+            .await?;
             consumer
                 .run_until(
                     move |job| {
@@ -196,17 +218,23 @@ async fn main() -> Result<()> {
 async fn spawn_metrics_server(
     store: QueueStore,
     mirror_metrics: Option<MirrorMetrics>,
+    query_timeout: Duration,
 ) -> Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
     let server =
         bitmagnet_common::metrics::maybe_spawn_metrics_server_with_async_gatherer(move || {
             let store = store.clone();
             let mirror_metrics = mirror_metrics.clone();
             async move {
-                let mut families = store.ingest_shadow_status_metric_families().await?;
+                let mut families = tokio::time::timeout(
+                    query_timeout,
+                    store.ingest_shadow_status_metric_families(),
+                )
+                .await
+                .context("ingest-shadow metrics query timed out")??;
                 if let Some(metrics) = mirror_metrics {
                     families.extend(metrics.cursor_metric_families());
                 }
-                Ok::<_, bitmagnet_queue::QueuePgError>(families)
+                Ok::<_, anyhow::Error>(families)
             }
         })
         .await
@@ -216,8 +244,12 @@ async fn spawn_metrics_server(
 
 fn validate_args(args: &Args) -> Result<()> {
     anyhow::ensure!(
-        args.postgres_max_connections > 0,
-        "postgres-max-connections must be positive"
+        args.postgres_acquire_timeout_seconds > 0,
+        "postgres-acquire-timeout-seconds must be positive"
+    );
+    anyhow::ensure!(
+        args.metrics_query_timeout_seconds > 0,
+        "metrics-query-timeout-seconds must be positive"
     );
     match &args.command {
         Command::Mirror {
@@ -228,6 +260,10 @@ fn validate_args(args: &Args) -> Result<()> {
             archival_seconds,
             idle_seconds,
         } => {
+            anyhow::ensure!(
+                args.postgres_max_connections >= 2,
+                "mirror requires at least two PostgreSQL connections: one for mirror pages and one for fresh scrape-time status"
+            );
             anyhow::ensure!(
                 *sample_basis_points <= 10_000,
                 "sample-basis-points cannot exceed 10000"
@@ -244,8 +280,8 @@ fn validate_args(args: &Args) -> Result<()> {
             job_timeout_seconds,
         } => {
             anyhow::ensure!(
-                args.postgres_max_connections >= 2,
-                "consume requires at least two PostgreSQL connections: one held by the queue transaction and one for shadow reads"
+                args.postgres_max_connections >= 3,
+                "consume requires at least three PostgreSQL connections: one held by the queue transaction, one for shadow reads, and one for fresh scrape-time status"
             );
             anyhow::ensure!(
                 expected_classifier_config_digest
