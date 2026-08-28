@@ -56,6 +56,14 @@ platform, rootfs, non-root runtime, complete OCI labels/environment, ports,
 entrypoint, empty command, and stop signal. There is no tag or source-build
 fallback.
 
+Production admission uses three ordered, distinct commits. The target commit
+is the runtime source named by the publication receipt. A reviewed harness-only
+child may change this benchmark or its documentation, but must preserve the
+target's exact `bitmagnet-rs` tree. After the gate, a reconciliation child adds
+only the four retrieved evidence artifacts and must preserve that same Rust
+tree again. The v4 admission validator rejects collapsed identities or any
+history that is not target -> harness -> reconciliation.
+
 The default helper-image builder is BuildKit. Source-built GraphQL images remain
 available only to the `smoke` profile for harness development. On a Kata
 workspace whose Docker data is backed by virtiofs, use the explicit legacy
