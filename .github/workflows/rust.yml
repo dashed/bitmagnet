@@ -71,7 +71,12 @@ permissions:
 
 concurrency:
   group: rust-${{ github.ref }}
-  cancel-in-progress: true
+  # A push run can mutate GHCR after all gates complete. Never automatically
+  # cancel that branch's active run between the registry push and its durable
+  # publication receipt; later pushes serialize behind it. PR checks remain
+  # replaceable so review feedback stays fast.
+  cancel-in-progress: >-
+    ${{ github.event_name != 'push' || github.ref != 'refs/heads/alberto/my-fork' }}
 
 defaults:
   run:
@@ -441,28 +446,315 @@ jobs:
           retention-days: 90
 
   docker-ingest-shadow:
-    name: docker build (ingest shadow)
+    name: docker build and smoke (ingest shadow)
     runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.export.outputs.artifact-name }}
+      archive-sha256: ${{ steps.export.outputs.archive-sha256 }}
+      builder-attempt: ${{ steps.export.outputs.builder-attempt }}
+      image-id: ${{ steps.export.outputs.image-id }}
+      source-commit: ${{ steps.source.outputs.commit }}
+      source-tree: ${{ steps.source.outputs.tree }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Resolve exact source identity
         id: source
         working-directory: ${{ github.workspace }}
         run: |
+          set -Eeuo pipefail
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: bitmagnet-rs/docker/Dockerfile.ingest-shadow
+          platforms: linux/amd64
           push: false
+          load: true
           tags: bitmagnet-ingest-shadow:ci
           build-args: |
             REVISION=${{ steps.source.outputs.commit }}
             SOURCE_TREE=${{ steps.source.outputs.tree }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ingest-shadow
+          cache-to: type=gha,mode=max,scope=ingest-shadow
+      - name: Verify image contract and executable smoke
+        working-directory: ${{ github.workspace }}
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          set -Eeuo pipefail
+          image=bitmagnet-ingest-shadow:ci
+          inspect="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-ingest-shadow"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            (.[0].Config.ExposedPorts | keys) == ["9090/tcp"] and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.ingest-shadow-contract"] == "live-tables-read-only/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+          ' "$inspect"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 "$image" --help \
+            | grep -F 'Usage: bitmagnet-ingest-shadow'
+      - name: Export exact smoked image
+        id: export
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          set -Eeuo pipefail
+          artifact_name="ingest-shadow-image-${SOURCE_COMMIT}-attempt-${GITHUB_RUN_ATTEMPT}"
+          artifact_root="$RUNNER_TEMP/bitmagnet-ingest-shadow-image"
+          mkdir -p "$artifact_root"
+          archive="$artifact_root/bitmagnet-ingest-shadow.tar"
+          docker image save --output "$archive" bitmagnet-ingest-shadow:ci
+          image_id="$(docker image inspect --format '{{.Id}}' bitmagnet-ingest-shadow:ci)"
+          archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          jq -n \
+            --arg schema "bitmagnet.ingest-shadow-image-build/v1" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$image_id" \
+            --arg archiveSha256 "$archive_sha256" \
+            --argjson builderAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: $schema,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              builderAttempt: $builderAttempt
+            }' > "$artifact_root/build-receipt.json"
+          {
+            echo "artifact-name=$artifact_name"
+            echo "archive-sha256=$archive_sha256"
+            echo "builder-attempt=$GITHUB_RUN_ATTEMPT"
+            echo "image-id=$image_id"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload verified image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.export.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-ingest-shadow-image
+          if-no-files-found: error
+          # Retain the exact smoked input long enough to rerun a publisher that
+          # stopped after the registry accepted the manifest but before the
+          # receipt upload. The reuse path below must match this exact image ID.
+          retention-days: 7
+
+  publish-ingest-shadow:
+    name: publish digest-authoritative ingest-shadow image
+    if: >-
+      success() &&
+      github.repository == 'dashed/bitmagnet' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/alberto/my-fork'
+    needs:
+      - docker-ingest-shadow
+      - fmt
+      - clippy
+      - test
+      - cargo-deny
+      - test-pg
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/dashed/bitmagnet-ingest-shadow
+      BUILD_ARTIFACT_NAME: ${{ needs.docker-ingest-shadow.outputs.artifact-name }}
+      BUILDER_ATTEMPT: ${{ needs.docker-ingest-shadow.outputs.builder-attempt }}
+      SOURCE_COMMIT: ${{ needs.docker-ingest-shadow.outputs.source-commit }}
+      SOURCE_TREE: ${{ needs.docker-ingest-shadow.outputs.source-tree }}
+      EXPECTED_ARCHIVE_SHA256: ${{ needs.docker-ingest-shadow.outputs.archive-sha256 }}
+      EXPECTED_IMAGE_ID: ${{ needs.docker-ingest-shadow.outputs.image-id }}
+    steps:
+      - name: Download verified image artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.docker-ingest-shadow.outputs.artifact-name }}
+          path: ${{ runner.temp }}/bitmagnet-ingest-shadow-image
+      - name: Verify and load exact smoked image
+        working-directory: ${{ runner.temp }}/bitmagnet-ingest-shadow-image
+        run: |
+          set -Eeuo pipefail
+          test "$SOURCE_COMMIT" = "$GITHUB_SHA"
+          printf '%s' "$BUILDER_ATTEMPT" | grep -Eq '^[1-9][0-9]*$'
+          test "$BUILD_ARTIFACT_NAME" \
+            = "ingest-shadow-image-${SOURCE_COMMIT}-attempt-${BUILDER_ATTEMPT}"
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$SOURCE_TREE" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$EXPECTED_ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$EXPECTED_IMAGE_ID" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" \
+            "bitmagnet-ingest-shadow.tar" | sha256sum --check --strict -
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            '.schema == "bitmagnet.ingest-shadow-image-build/v1" and
+             .sourceCommit == $commit and
+             .sourceTree == $tree and
+             .imageId == $imageId and
+             .archiveSha256 == $archiveSha256 and
+             .builderAttempt == $builderAttempt' \
+            build-receipt.json
+          docker image load --input bitmagnet-ingest-shadow.tar
+          test "$(docker image inspect --format '{{.Id}}' bitmagnet-ingest-shadow:ci)" \
+            = "$EXPECTED_IMAGE_ID"
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish and verify immutable digest
+        id: publish
+        working-directory: ${{ runner.temp }}/bitmagnet-ingest-shadow-image
+        run: |
+          set -Eeuo pipefail
+          image_ref="$IMAGE_REPOSITORY:$SOURCE_COMMIT"
+          tag_state=pushed
+          inspect_error="$(mktemp)"
+          if remote_inspect="$(docker buildx imagetools inspect "$image_ref" 2>"$inspect_error")"; then
+            tag_state=reused
+          elif ! grep -Eqi 'manifest unknown|not found' "$inspect_error"; then
+            cat "$inspect_error" >&2
+            exit 1
+          else
+            docker image tag bitmagnet-ingest-shadow:ci "$image_ref"
+            docker image push "$image_ref"
+            remote_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          fi
+          printf '%s\n' "$remote_inspect"
+          digest="$(printf '%s\n' "$remote_inspect" \
+            | awk '$1 == "Digest:" { print $2; exit }')"
+          printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+
+          # Deployment authority must be the one tested linux/amd64 image
+          # manifest, never an index that happens to contain a matching child
+          # plus untested platforms or attestations. The image ID is the config
+          # digest, so this also binds the remote manifest to the exact smoked
+          # image loaded from the build artifact.
+          raw_manifest="$(docker buildx imagetools inspect --raw "$image_ref")"
+          jq -e --arg imageId "$EXPECTED_IMAGE_ID" '
+            .schemaVersion == 2 and
+            (
+              .mediaType == "application/vnd.docker.distribution.manifest.v2+json" or
+              .mediaType == "application/vnd.oci.image.manifest.v1+json"
+            ) and
+            (has("manifests") | not) and
+            .config.digest == $imageId and
+            (.config.size | type == "number" and . > 0) and
+            (.layers | type == "array" and length > 0) and
+            all(.layers[];
+              (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+              (.size | type == "number" and . > 0)
+            )
+          ' <<< "$raw_manifest"
+
+          immutable_ref="$IMAGE_REPOSITORY@$digest"
+          immutable_raw="$(docker buildx imagetools inspect --raw "$immutable_ref")"
+          test "$immutable_raw" = "$raw_manifest"
+          docker image pull "$immutable_ref"
+          inspect="$(mktemp)"
+          docker image inspect "$immutable_ref" | tee "$inspect"
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg tree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg immutableRef "$immutable_ref" '
+              length == 1 and
+              .[0].Id == $imageId and
+              (.[0].RepoDigests | index($immutableRef)) != null and
+              .[0].Os == "linux" and
+              .[0].Architecture == "amd64" and
+              .[0].Config.User == "65532:65532" and
+              .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-ingest-shadow"] and
+              (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+              (.[0].Config.ExposedPorts | keys) == ["9090/tcp"] and
+              .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+              .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+              .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+              .[0].Config.Labels["io.bitmagnet.ingest-shadow-contract"] == "live-tables-read-only/v1" and
+              (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+              (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+            ' "$inspect"
+
+          final_tag_inspect="$(docker buildx imagetools inspect "$image_ref")"
+          printf '%s\n' "$final_tag_inspect"
+          final_tag_digest="$(printf '%s\n' "$final_tag_inspect" \
+            | awk '$1 == "Digest:" { print $2; exit }')"
+          test "$final_tag_digest" = "$digest"
+
+          jq -n \
+            --arg schema "bitmagnet.ingest-shadow-image-publication/v1" \
+            --arg imageRepository "$IMAGE_REPOSITORY" \
+            --arg tag "$SOURCE_COMMIT" \
+            --arg tagRef "$image_ref" \
+            --arg tagPolicy "mutable-convenience-only" \
+            --arg deploymentAuthority "digest" \
+            --arg digest "$digest" \
+            --arg immutableRef "$immutable_ref" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            --arg sourceTree "$SOURCE_TREE" \
+            --arg imageId "$EXPECTED_IMAGE_ID" \
+            --arg archiveSha256 "$EXPECTED_ARCHIVE_SHA256" \
+            --arg tagState "$tag_state" \
+            --arg workflowRun "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --argjson builderAttempt "$BUILDER_ATTEMPT" \
+            --argjson publisherAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{
+              schema: $schema,
+              imageRepository: $imageRepository,
+              tag: $tag,
+              tagRef: $tagRef,
+              tagPolicy: $tagPolicy,
+              deploymentAuthority: $deploymentAuthority,
+              digest: $digest,
+              immutableRef: $immutableRef,
+              sourceCommit: $sourceCommit,
+              sourceTree: $sourceTree,
+              imageId: $imageId,
+              archiveSha256: $archiveSha256,
+              tagState: $tagState,
+              workflowRun: $workflowRun,
+              builderAttempt: $builderAttempt,
+              publisherAttempt: $publisherAttempt
+            }' > publication-receipt.json
+          {
+            echo '### Ingest-shadow image publication'
+            echo
+            echo "- Source commit: \`$SOURCE_COMMIT\`"
+            echo "- Source tree: \`$SOURCE_TREE\`"
+            echo "- Deployment authority: \`$immutable_ref\`"
+            echo "- Full-SHA tag (mutable convenience): \`$image_ref\` (\`$tag_state\`)"
+            echo "- Builder attempt: \`$BUILDER_ATTEMPT\`"
+            echo "- Publisher attempt: \`$GITHUB_RUN_ATTEMPT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "immutable-ref=$immutable_ref" >> "$GITHUB_OUTPUT"
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ingest-shadow-publication-${{ needs.docker-ingest-shadow.outputs.source-commit }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bitmagnet-ingest-shadow-image/publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90
 
   docker-process-torrent-batch:
     name: docker build and smoke (process_torrent_batch worker)
