@@ -3,12 +3,13 @@
 //! This crate implements the pure boundary at the centre of the processor:
 //! consume a `process_torrent` payload plus already-loaded torrents, run Lane
 //! C's classifier, and materialize the canonical write-set that Go constructs
-//! before opening its persistence transaction. The supported unattached-content
-//! path can be persisted in one PostgreSQL transaction, and the shadow path can
-//! read stable and volatile-writer live comparison images under the frozen
-//! restricted role.
+//! before opening its persistence transaction. The persistence kernel supports
+//! both unattached and complete attached-content images in one PostgreSQL
+//! transaction, while the production shadow path remains flags-off and reads
+//! stable and volatile-writer comparison images under the frozen restricted
+//! role.
 //! The durable supported-subset dark shadow runtime is included; attached
-//! content enrichment, post-commit Tantivy dual-write, and production-safe
+//! writer-only content enrichment, post-commit Tantivy dual-write, and production-safe
 //! row-scoped queue privileges remain later milestones. Contract:
 //! `docs/dev/rust-rewrite/phase3-contracts.md` §5.
 
@@ -44,7 +45,8 @@ pub use compare::{
 };
 pub use load::{load_torrents, LoadError};
 pub use persist::{
-    persist_write_set, BlockingManager, BoxError, PersistError, TorrentContentPersistence,
+    persist_write_set, BlockingManager, BoxError, ContentPersistence, ContentPersistenceKey,
+    PersistError, TorrentContentPersistence,
 };
 pub use runtime::{
     CausalShadowComparison, MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError,
@@ -62,7 +64,8 @@ pub use writer_plan::{
     WriterFailures, WriterPlan, WriterPlanError,
 };
 pub use writer_projection::{
-    project_unattached_persistence, TorrentSnapshot, TorrentSourceSnapshot, WriterProjectionError,
+    project_torrent_persistence, project_unattached_persistence, TorrentSnapshot,
+    TorrentSourceSnapshot, WriterProjectionError,
 };
 
 /// A torrent after the processor's read/hydration step.
@@ -151,6 +154,7 @@ pub struct WriteSet {
 impl WriteSet {
     fn canonicalize(&mut self) {
         self.contents.sort();
+        self.contents.dedup();
         self.torrent_contents
             .sort_by(|a, b| (&a.info_hash, &a.id).cmp(&(&b.info_hash, &b.id)));
         self.delete_ids.sort();
@@ -177,9 +181,10 @@ pub(crate) struct ClassifierFailure {
     pub rendered_error: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct MaterializedWriterOutput {
     pub write_set: WriteSet,
+    pub content_persistence: BTreeMap<ContentPersistenceKey, ContentPersistence>,
     pub classifier_failures: Vec<ClassifierFailure>,
 }
 
@@ -243,6 +248,7 @@ impl Materializer {
         }
 
         let mut write_set = WriteSet::default();
+        let mut content_persistence = BTreeMap::new();
         let mut classifier_failures = Vec::new();
         let mut seen = BTreeSet::new();
         for requested in &params.info_hashes {
@@ -271,9 +277,23 @@ impl Materializer {
                 &flags,
                 &torrent.classifier_input,
             ));
-            if let Some(rendered_error) =
-                append_classification_write(&mut write_set, torrent, result, outcome, false)?
-            {
+            let emit_content = if outcome.tag() == "classified" {
+                if let Some(content) = result.content.as_ref() {
+                    register_content_persistence(&mut content_persistence, content)?
+                } else {
+                    true
+                }
+            } else {
+                true
+            };
+            if let Some(rendered_error) = append_classification_write(
+                &mut write_set,
+                torrent,
+                result,
+                outcome,
+                false,
+                emit_content,
+            )? {
                 classifier_failures.push(ClassifierFailure {
                     info_hash,
                     rendered_error,
@@ -284,6 +304,7 @@ impl Materializer {
         write_set.canonicalize();
         Ok(MaterializedWriterOutput {
             write_set,
+            content_persistence,
             classifier_failures,
         })
     }
@@ -305,7 +326,7 @@ impl Materializer {
         validate_info_hash(&torrent.info_hash)?;
 
         let mut write_set = WriteSet::default();
-        let _ = append_classification_write(&mut write_set, &torrent, result, outcome, true)?;
+        let _ = append_classification_write(&mut write_set, &torrent, result, outcome, true, true)?;
         write_set.canonicalize();
         Ok(write_set)
     }
@@ -317,6 +338,7 @@ fn append_classification_write(
     result: Classification,
     outcome: Outcome,
     include_identifiers: bool,
+    emit_content: bool,
 ) -> Result<Option<String>, MaterializeError> {
     let info_hash = torrent.info_hash.clone();
     let rendered_error = match &outcome {
@@ -337,10 +359,12 @@ fn append_classification_write(
             // `Content.CreatedAt.IsZero()` (persist.go), so a reused row is not
             // rewritten -- but the comparison is end-state, not a literal
             // statement log, and the row is present either way.
-            if let Some(content) = result.content.as_ref() {
-                write_set
-                    .contents
-                    .push(content_write(content, include_identifiers));
+            if emit_content {
+                if let Some(content) = result.content.as_ref() {
+                    write_set
+                        .contents
+                        .push(content_write(content, include_identifiers));
+                }
             }
             if !result.tags.is_empty() {
                 write_set
@@ -376,6 +400,12 @@ pub enum MaterializeError {
     UnsupportedFlag { name: String, value: Value },
     #[error("attached content is not exposed by the Lane C normalized result for {info_hash}")]
     AttachedContentUnsupported { info_hash: String },
+    #[error("conflicting attached content images for {content_type}:{content_source}:{id}")]
+    ConflictingAttachedContent {
+        content_type: String,
+        content_source: String,
+        id: String,
+    },
     #[error("classifier returned an unknown outcome '{0}'")]
     UnknownOutcome(String),
 }
@@ -421,6 +451,30 @@ fn content_write(content: &bitmagnet_model::Content, include_identifiers: bool) 
             .release_year
             .and_then(|year| u16::try_from(year).ok()),
         identifiers,
+    }
+}
+
+fn register_content_persistence(
+    persistence: &mut BTreeMap<ContentPersistenceKey, ContentPersistence>,
+    content: &bitmagnet_model::Content,
+) -> Result<bool, MaterializeError> {
+    let projected = ContentPersistence::from_content(content);
+    let key = projected.key();
+    match persistence.entry(key.clone()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(projected);
+            Ok(true)
+        }
+        std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &projected => {
+            Ok(false)
+        }
+        std::collections::btree_map::Entry::Occupied(_) => {
+            Err(MaterializeError::ConflictingAttachedContent {
+                content_type: key.content_type,
+                content_source: key.source,
+                id: key.id,
+            })
+        }
     }
 }
 
@@ -513,10 +567,14 @@ fn validate_info_hash(value: &str) -> Result<(), MaterializeError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use bitmagnet_classifier::{Classification, ClassifierInput, Outcome};
+    use bitmagnet_model::{Content, ContentType};
 
     use super::{
-        append_classification_write, infer_id, validate_info_hash, LoadedTorrent, WriteSet,
+        append_classification_write, infer_id, register_content_persistence, validate_info_hash,
+        ContentWrite, LoadedTorrent, MaterializeError, WriteSet,
     };
 
     fn loaded_torrent() -> LoadedTorrent {
@@ -550,15 +608,69 @@ mod tests {
     #[test]
     fn canonicalize_sorts_and_deduplicates_delete_sets() {
         let mut write_set = WriteSet {
+            contents: vec![
+                ContentWrite {
+                    content_type: "movie".into(),
+                    source: "tmdb".into(),
+                    id: "42".into(),
+                    title: "Title".into(),
+                    release_year: Some(2026),
+                    identifiers: Default::default(),
+                },
+                ContentWrite {
+                    content_type: "movie".into(),
+                    source: "tmdb".into(),
+                    id: "42".into(),
+                    title: "Title".into(),
+                    release_year: Some(2026),
+                    identifiers: Default::default(),
+                },
+            ],
             delete_ids: vec!["z".into(), "a".into(), "z".into()],
             delete_info_hashes: vec!["b".into(), "a".into(), "b".into()],
             failed_info_hashes: vec!["f".into(), "e".into(), "f".into()],
             ..WriteSet::default()
         };
         write_set.canonicalize();
+        assert_eq!(write_set.contents.len(), 1);
         assert_eq!(write_set.delete_ids, ["a", "z"]);
         assert_eq!(write_set.delete_info_hashes, ["a", "b"]);
         assert_eq!(write_set.failed_info_hashes, ["e", "f"]);
+    }
+
+    #[test]
+    fn attached_content_registration_deduplicates_and_rejects_conflicts() {
+        let content = Content {
+            content_type: ContentType::Movie,
+            source: "tmdb".into(),
+            id: "42".into(),
+            title: "Title".into(),
+            release_date: None,
+            release_year: Some(2026),
+            adult: None,
+            original_language: None,
+            original_title: None,
+            overview: None,
+            runtime: None,
+            popularity: None,
+            vote_average: None,
+            vote_count: None,
+            created_at: None,
+            updated_at: None,
+            tsv: Default::default(),
+            collections: Vec::new(),
+            attributes: Vec::new(),
+        };
+        let mut persistence = BTreeMap::new();
+        assert!(register_content_persistence(&mut persistence, &content).unwrap());
+        assert!(!register_content_persistence(&mut persistence, &content).unwrap());
+
+        let mut conflicting = content;
+        conflicting.title = "Different".into();
+        assert!(matches!(
+            register_content_persistence(&mut persistence, &conflicting),
+            Err(MaterializeError::ConflictingAttachedContent { .. })
+        ));
     }
 
     #[test]
@@ -584,6 +696,7 @@ mod tests {
                 Classification::default(),
                 outcome,
                 false,
+                true,
             )
             .expect("append failure write");
 

@@ -20,9 +20,10 @@ use sqlx::PgPool;
 use crate::persist::{persist_write_set, validate_persistence_input};
 use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
 use crate::{
-    load_writer_torrents, project_unattached_persistence, BlockingManager, BoxError,
-    MaterializeError, Materializer, PersistError, TorrentContentPersistence, WriteSet,
-    WriterLoadError, WriterLoadedTorrent, WriterProjectionError,
+    load_writer_torrents, project_torrent_persistence, BlockingManager, BoxError,
+    ContentPersistence, ContentPersistenceKey, MaterializeError, Materializer, PersistError,
+    TorrentContentPersistence, WriteSet, WriterLoadError, WriterLoadedTorrent,
+    WriterProjectionError,
 };
 
 pub use bitmagnet_queue::ActiveJobInsertReceipt as RetryPublishReceipt;
@@ -103,17 +104,19 @@ impl std::error::Error for WriterFailures {}
 /// `persistence` is keyed by generated `torrent_contents.id` and has exactly
 /// one entry for every row in `write_set.torrent_contents`. The fields are
 /// private so callers cannot break that keyset after validation. Holding this
-/// value performs no database mutation.
+/// value performs no database mutation. Complete attached content is keyed by
+/// its three-column identity in a separate, equally validated map.
 ///
 /// Failed hashes remain canonical in the write-set for comparison. The plan also
 /// carries separate ordered retry intent, because queue payload order and missing-
 /// hash multiplicity are fingerprint-significant. Matching Go's mutation boundary
 /// requires any persisting runtime to enqueue that retry successfully before
 /// persisting the successful portion of the same plan.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct WriterPlan {
     write_set: WriteSet,
     persistence: BTreeMap<String, TorrentContentPersistence>,
+    content_persistence: BTreeMap<ContentPersistenceKey, ContentPersistence>,
     retry_info_hashes: Vec<String>,
     retry_job: Option<QueueJob>,
     failures: WriterFailures,
@@ -130,6 +133,13 @@ impl WriterPlan {
     #[must_use]
     pub fn persistence(&self) -> &BTreeMap<String, TorrentContentPersistence> {
         &self.persistence
+    }
+
+    /// Borrow complete attached content keyed independently of the stable
+    /// comparison write-set.
+    #[must_use]
+    pub fn content_persistence(&self) -> &BTreeMap<ContentPersistenceKey, ContentPersistence> {
+        &self.content_persistence
     }
 
     /// Hashes that a persisting writer must republish before persisting successes.
@@ -158,13 +168,19 @@ impl WriterPlan {
         &self.failures
     }
 
-    /// Consume the validated plan into the transaction kernel's two inputs.
+    /// Consume the validated plan into the transaction kernel's three inputs.
     ///
     /// This is a low-level escape hatch that discards retry publication intent.
     /// Persisting callers should use [`persist_writer_plan`] instead.
     #[must_use]
-    pub fn into_parts(self) -> (WriteSet, BTreeMap<String, TorrentContentPersistence>) {
-        (self.write_set, self.persistence)
+    pub fn into_parts(
+        self,
+    ) -> (
+        WriteSet,
+        BTreeMap<String, TorrentContentPersistence>,
+        BTreeMap<ContentPersistenceKey, ContentPersistence>,
+    ) {
+        (self.write_set, self.persistence, self.content_persistence)
     }
 }
 
@@ -237,6 +253,7 @@ trait WriterPlanPersister: Send + Sync {
         &'a self,
         write_set: &'a WriteSet,
         persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+        content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
     ) -> BoxFuture<'a, Result<(), PersistError>>;
 }
 
@@ -253,11 +270,13 @@ where
         &'a self,
         write_set: &'a WriteSet,
         persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+        content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
     ) -> BoxFuture<'a, Result<(), PersistError>> {
         Box::pin(persist_write_set(
             self.pool,
             write_set,
             persistence,
+            content_persistence,
             self.blocking_manager,
         ))
     }
@@ -306,7 +325,14 @@ where
         None
     };
 
-    if let Err(source) = persister.persist(&plan.write_set, &plan.persistence).await {
+    if let Err(source) = persister
+        .persist(
+            &plan.write_set,
+            &plan.persistence,
+            &plan.content_persistence,
+        )
+        .await
+    {
         return Err(PersistWriterPlanError::Persist { retry, source });
     }
     Ok(PersistWriterPlanReceipt {
@@ -355,8 +381,9 @@ pub async fn load_writer_plan(
 ///
 /// Hydrated classifier inputs are borrowed rather than cloned. This matters
 /// because the loader permits bounded but potentially large decompressed file
-/// lists. Attached-content rows fail closed in the projection until the
-/// structured content TSV contract is implemented. Direct callers must supply
+/// lists. Complete attached content is carried in a separate persistence image;
+/// the current loader admission still requires all attachment flags off until a
+/// writer-only resolver and ACL are introduced. Direct callers must supply
 /// values already admitted by the bounded loader; this pure composer does not
 /// reconstruct compressed-size or source-scan evidence from in-memory values.
 pub fn compose_writer_plan(
@@ -370,8 +397,9 @@ pub fn compose_writer_plan(
     let materialized = materializer
         .materialize_borrowed_with_failures(params, loaded.iter().map(|torrent| &torrent.loaded))?;
     let write_set = materialized.write_set;
-    let persistence = project_persistence(&write_set, &indexed)?;
-    validate_persistence_input(&write_set, &persistence)?;
+    let content_persistence = materialized.content_persistence;
+    let persistence = project_persistence(&write_set, &indexed, &content_persistence)?;
+    validate_persistence_input(&write_set, &persistence, &content_persistence)?;
     let failures = compose_writer_failures(params, &indexed, materialized.classifier_failures);
     let retry_info_hashes = failures
         .retry_info_hashes()
@@ -398,6 +426,7 @@ pub fn compose_writer_plan(
     Ok(WriterPlan {
         write_set,
         persistence,
+        content_persistence,
         retry_info_hashes,
         retry_job,
         failures,
@@ -524,6 +553,7 @@ fn index_loaded_torrents(
 fn project_persistence(
     write_set: &WriteSet,
     indexed: &BTreeMap<&str, &WriterLoadedTorrent>,
+    content_persistence: &BTreeMap<ContentPersistenceKey, ContentPersistence>,
 ) -> Result<BTreeMap<String, TorrentContentPersistence>, WriterPlanError> {
     let mut persistence = BTreeMap::new();
     for row in &write_set.torrent_contents {
@@ -532,11 +562,22 @@ fn project_persistence(
                 info_hash: row.info_hash.clone(),
             }
         })?;
-        let projected = project_unattached_persistence(
+        let content_tsv = match (&row.content_type, &row.content_source, &row.content_id) {
+            (Some(content_type), Some(source), Some(id)) => content_persistence
+                .get(&ContentPersistenceKey {
+                    content_type: content_type.clone(),
+                    source: source.clone(),
+                    id: id.clone(),
+                })
+                .map(ContentPersistence::base_tsv),
+            _ => None,
+        };
+        let projected = project_torrent_persistence(
             row,
             &source.loaded.classifier_input,
             source.torrent_snapshot,
             &source.source_snapshots,
+            content_tsv,
         )
         .map_err(|source| WriterPlanError::Projection {
             info_hash: row.info_hash.clone(),
@@ -618,9 +659,9 @@ mod tests {
         WriterFailureCause, WriterFailures, WriterPlan, WriterPlanError, WriterPlanPersister,
     };
     use crate::{
-        BlockingManager, BoxError, ClassifierFailure, LoadedTorrent, PersistError,
-        TorrentContentPersistence, TorrentContentWrite, TorrentSnapshot, WriteSet,
-        WriterLoadedTorrent, WriterProjectionError,
+        BlockingManager, BoxError, ClassifierFailure, ContentPersistence, ContentPersistenceKey,
+        LoadedTorrent, PersistError, TorrentContentPersistence, TorrentContentWrite,
+        TorrentSnapshot, WriteSet, WriterLoadedTorrent, WriterProjectionError,
     };
 
     const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -719,6 +760,7 @@ mod tests {
         WriterPlan {
             write_set,
             persistence,
+            content_persistence: BTreeMap::new(),
             retry_info_hashes,
             retry_job,
             failures,
@@ -812,6 +854,7 @@ mod tests {
             &'a self,
             _write_set: &'a WriteSet,
             _persistence: &'a BTreeMap<String, TorrentContentPersistence>,
+            _content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
         ) -> BoxFuture<'a, Result<(), PersistError>> {
             Box::pin(async move {
                 self.events.lock().expect("events mutex").push("persist");
@@ -1302,7 +1345,8 @@ mod tests {
             torrent_contents: vec![row(HASH_A)],
             ..WriteSet::default()
         };
-        let projected = project_persistence(&write_set, &indexed).expect("project valid row");
+        let projected =
+            project_persistence(&write_set, &indexed, &BTreeMap::new()).expect("project valid row");
         assert_eq!(projected.len(), 1);
         assert!(projected.contains_key(&write_set.torrent_contents[0].id));
 
@@ -1311,7 +1355,7 @@ mod tests {
             ..WriteSet::default()
         };
         assert!(matches!(
-            project_persistence(&missing, &indexed),
+            project_persistence(&missing, &indexed, &BTreeMap::new()),
             Err(WriterPlanError::ProjectionSourceMissing { info_hash })
                 if info_hash == HASH_B
         ));
@@ -1324,7 +1368,7 @@ mod tests {
             ..WriteSet::default()
         };
         assert!(matches!(
-            project_persistence(&attached, &indexed),
+            project_persistence(&attached, &indexed, &BTreeMap::new()),
             Err(WriterPlanError::Projection {
                 source: WriterProjectionError::AttachedContentUnsupported,
                 ..
@@ -1337,7 +1381,7 @@ mod tests {
             ..WriteSet::default()
         };
         assert!(matches!(
-            project_persistence(&duplicate, &indexed),
+            project_persistence(&duplicate, &indexed, &BTreeMap::new()),
             Err(WriterPlanError::DuplicatePersistenceId { .. })
         ));
     }

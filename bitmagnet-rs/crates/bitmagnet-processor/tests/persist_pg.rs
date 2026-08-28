@@ -8,10 +8,12 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use bitmagnet_model::{Content, ContentAttribute, ContentCollection, ContentType};
 use bitmagnet_processor::{
     load_torrents, load_writer_plan, persist_write_set, read_live_snapshot, BlockingManager,
-    BoxError, LiveTorrentState, Materializer, ShadowRuntime, TorrentContentPersistence,
-    TorrentContentWrite, WriteSet, WriterDriftField,
+    BoxError, ContentPersistence, ContentPersistenceKey, ContentWrite, LiveTorrentState,
+    Materializer, ShadowRuntime, TorrentContentPersistence, TorrentContentWrite, WriteSet,
+    WriterDriftField,
 };
 use bitmagnet_queue::{
     DequeuedJob, ProcessTorrentParams, ProtocolId, QueueJobStatus, ShadowJobEnvelopeV1,
@@ -89,6 +91,101 @@ fn metadata(rows: &[TorrentContentWrite]) -> BTreeMap<String, TorrentContentPers
             )
         })
         .collect()
+}
+
+fn attached_content(id: &str, title: &str, created_at: Option<i64>) -> Content {
+    Content {
+        content_type: ContentType::Movie,
+        source: "tmdb".to_owned(),
+        id: id.to_owned(),
+        title: title.to_owned(),
+        release_date: None,
+        release_year: Some(2026),
+        adult: Some(false),
+        original_language: Some("en".to_owned()),
+        original_title: None,
+        overview: Some("attached persistence fixture".to_owned()),
+        runtime: Some(90),
+        popularity: Some(1.5),
+        vote_average: Some(7.0),
+        vote_count: Some(10),
+        created_at,
+        updated_at: None,
+        tsv: Default::default(),
+        collections: vec![ContentCollection {
+            collection_type: "genre".to_owned(),
+            source: "tmdb".to_owned(),
+            id: "7".to_owned(),
+            name: "Mystery".to_owned(),
+        }],
+        attributes: vec![ContentAttribute {
+            content_type: ContentType::Movie,
+            content_source: "tmdb".to_owned(),
+            content_id: id.to_owned(),
+            source: "imdb".to_owned(),
+            key: "id".to_owned(),
+            value: format!("tt{id}"),
+        }],
+    }
+}
+
+fn attached_inputs(
+    info_hash: &str,
+    content: &Content,
+) -> (
+    WriteSet,
+    BTreeMap<String, TorrentContentPersistence>,
+    BTreeMap<ContentPersistenceKey, ContentPersistence>,
+) {
+    let content_type = content.content_type.as_str().to_owned();
+    let row = TorrentContentWrite {
+        id: format!(
+            "{info_hash}:{content_type}:{}:{}",
+            content.source, content.id
+        ),
+        info_hash: info_hash.to_owned(),
+        content_type: Some(content_type.clone()),
+        content_source: Some(content.source.clone()),
+        content_id: Some(content.id.clone()),
+        languages: vec!["en".to_owned()],
+        episodes: String::new(),
+        video_resolution: Some("V1080p".to_owned()),
+        video_source: None,
+        video_codec: None,
+        video_3d: None,
+        video_modifier: None,
+        release_group: None,
+        size: 42,
+        files_count: Some(1),
+    };
+    let content_persistence = ContentPersistence::from_content(content);
+    let write_set = WriteSet {
+        contents: vec![ContentWrite {
+            content_type,
+            source: content.source.clone(),
+            id: content.id.clone(),
+            title: content.title.clone(),
+            release_year: content.release_year.and_then(|year| year.try_into().ok()),
+            identifiers: BTreeMap::new(),
+        }],
+        torrent_contents: vec![row.clone()],
+        ..WriteSet::default()
+    };
+    let torrent_persistence = BTreeMap::from([(
+        row.id.clone(),
+        TorrentContentPersistence {
+            seeders: Some(1),
+            leechers: Some(0),
+            published_at_micros: 1_700_000_000_123_456,
+            tsv: format!("{} 'fixture':99A", content_persistence.base_tsv()),
+        },
+    )]);
+    let content_key = content_persistence.key();
+    (
+        write_set,
+        torrent_persistence,
+        BTreeMap::from([(content_key, content_persistence)]),
+    )
 }
 
 async fn seed_torrent(pool: &PgPool, info_hash: &str, name: &str) {
@@ -176,9 +273,15 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         ..WriteSet::default()
     };
 
-    persist_write_set(&pool, &write_set, &metadata(&rows), &blocker)
-        .await
-        .expect("persist supported write set");
+    persist_write_set(
+        &pool,
+        &write_set,
+        &metadata(&rows),
+        &BTreeMap::new(),
+        &blocker,
+    )
+    .await
+    .expect("persist supported write set");
 
     assert_eq!(
         calls.lock().expect("calls mutex").as_slice(),
@@ -272,6 +375,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         &pool,
         &rollback,
         &metadata(std::slice::from_ref(&rollback_row)),
+        &BTreeMap::new(),
         &blocker,
     )
     .await
@@ -415,6 +519,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         &pool,
         runtime_plan.write_set(),
         runtime_plan.persistence(),
+        runtime_plan.content_persistence(),
         &runtime_blocker,
     )
     .await
@@ -447,6 +552,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         &pool,
         runtime_plan.write_set(),
         runtime_plan.persistence(),
+        runtime_plan.content_persistence(),
         &runtime_blocker,
     )
     .await
@@ -472,6 +578,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         &pool,
         &stale_write_set,
         &metadata(&stale_write_set.torrent_contents),
+        &BTreeMap::new(),
         &runtime_blocker,
     )
     .await
@@ -899,4 +1006,188 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
         .execute(&pool)
         .await
         .expect("drop shadow test role");
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-34 database"]
+async fn attached_content_upserts_additive_associations_and_rolls_back_atomically() {
+    let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
+        eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect disposable PostgreSQL");
+    let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .expect("read disposable database sentinel");
+    assert_eq!(database_name, TEST_DATABASE_NAME);
+
+    sqlx::query("TRUNCATE torrent_tags, torrent_contents, torrents, content CASCADE")
+        .execute(&pool)
+        .await
+        .expect("reset processor and attached content tables");
+    seed_torrent(&pool, HASH_A, "attached A").await;
+
+    let blocker = RecordingBlocker {
+        pool: pool.clone(),
+        calls: Arc::new(Mutex::new(Vec::new())),
+        observed_before_delete: Arc::new(Mutex::new(false)),
+    };
+    let first_content = attached_content("42", "Attached Title", None);
+    let (write_set, torrent_persistence, content_persistence) =
+        attached_inputs(HASH_A, &first_content);
+    persist_write_set(
+        &pool,
+        &write_set,
+        &torrent_persistence,
+        &content_persistence,
+        &blocker,
+    )
+    .await
+    .expect("persist new attached content");
+
+    let root = sqlx::query(
+        "SELECT title, created_at::text AS created_at, tsv::text AS tsv \
+         FROM content WHERE type = 'movie' AND source = 'tmdb' AND id = '42'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read attached content root");
+    assert_eq!(
+        root.try_get::<String, _>("title").unwrap(),
+        "Attached Title"
+    );
+    let created_at = root.try_get::<String, _>("created_at").unwrap();
+    assert!(root
+        .try_get::<String, _>("tsv")
+        .unwrap()
+        .contains("'attached':1A"));
+    let attribute_value: String = sqlx::query_scalar(
+        "SELECT value FROM content_attributes \
+         WHERE content_type = 'movie' AND content_source = 'tmdb' \
+           AND content_id = '42' AND source = 'imdb' AND key = 'id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read attached content attribute");
+    assert_eq!(attribute_value, "tt42");
+    let collection_name: String = sqlx::query_scalar(
+        "SELECT name FROM content_collections \
+         WHERE type = 'genre' AND source = 'tmdb' AND id = '7'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read attached content collection");
+    assert_eq!(collection_name, "Mystery");
+    let link_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM content_collections_content \
+         WHERE content_type = 'movie' AND content_source = 'tmdb' AND content_id = '42'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read attached collection link");
+    assert_eq!(link_count, 1);
+    let torrent_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM torrent_contents \
+         WHERE info_hash = decode($1, 'hex') AND content_id = '42'",
+    )
+    .bind(HASH_A)
+    .fetch_one(&pool)
+    .await
+    .expect("read attached torrent content");
+    assert_eq!(torrent_count, 1);
+
+    let mut conflicting = attached_content("42", "Updated Root", None);
+    conflicting.attributes[0].value = "must-not-replace".to_owned();
+    conflicting.collections[0].name = "Must Not Replace".to_owned();
+    let (write_set, torrent_persistence, content_persistence) =
+        attached_inputs(HASH_A, &conflicting);
+    persist_write_set(
+        &pool,
+        &write_set,
+        &torrent_persistence,
+        &content_persistence,
+        &blocker,
+    )
+    .await
+    .expect("exercise concurrent root conflict");
+    let conflicted = sqlx::query(
+        "SELECT title, created_at::text AS created_at FROM content \
+         WHERE type = 'movie' AND source = 'tmdb' AND id = '42'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read conflicted root");
+    assert_eq!(
+        conflicted.try_get::<String, _>("title").unwrap(),
+        "Updated Root"
+    );
+    assert_eq!(
+        conflicted.try_get::<String, _>("created_at").unwrap(),
+        created_at
+    );
+    let preserved_attribute: String = sqlx::query_scalar(
+        "SELECT value FROM content_attributes \
+         WHERE content_type = 'movie' AND content_source = 'tmdb' \
+           AND content_id = '42' AND source = 'imdb' AND key = 'id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read additive attribute conflict");
+    assert_eq!(preserved_attribute, "tt42");
+    let preserved_collection: String = sqlx::query_scalar(
+        "SELECT name FROM content_collections \
+         WHERE type = 'genre' AND source = 'tmdb' AND id = '7'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read additive collection conflict");
+    assert_eq!(preserved_collection, "Mystery");
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION reject_attached_content_99() RETURNS trigger \
+         LANGUAGE plpgsql AS $$ BEGIN \
+         IF NEW.content_id = '99' THEN RAISE EXCEPTION 'forced attached rollback'; END IF; \
+         RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("install attached rollback trigger function");
+    sqlx::query(
+        "CREATE TRIGGER reject_attached_content_99 BEFORE INSERT OR UPDATE ON torrent_contents \
+         FOR EACH ROW EXECUTE FUNCTION reject_attached_content_99()",
+    )
+    .execute(&pool)
+    .await
+    .expect("install attached rollback trigger");
+    let rollback_content = attached_content("99", "Must Roll Back", None);
+    let (write_set, torrent_persistence, content_persistence) =
+        attached_inputs(HASH_A, &rollback_content);
+    persist_write_set(
+        &pool,
+        &write_set,
+        &torrent_persistence,
+        &content_persistence,
+        &blocker,
+    )
+    .await
+    .expect_err("later torrent-content failure rolls back attached roots");
+    let rolled_back_roots: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM content WHERE type = 'movie' AND source = 'tmdb' AND id = '99'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read rolled-back root count");
+    assert_eq!(rolled_back_roots, 0);
+
+    sqlx::query("DROP TRIGGER reject_attached_content_99 ON torrent_contents")
+        .execute(&pool)
+        .await
+        .expect("drop attached rollback trigger");
+    sqlx::query("DROP FUNCTION reject_attached_content_99()")
+        .execute(&pool)
+        .await
+        .expect("drop attached rollback function");
 }

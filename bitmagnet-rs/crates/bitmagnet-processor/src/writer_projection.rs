@@ -1,4 +1,4 @@
-//! Pure projection of one unattached processor row's volatile persistence fields.
+//! Pure projection of one processor row's volatile persistence fields.
 //!
 //! Go derives these values in `newTorrentContent` and `TorrentContent.UpdateTsv`
 //! before opening the persistence transaction. Keeping the projection pure makes
@@ -34,12 +34,15 @@ pub struct TorrentSourceSnapshot {
     pub created_at_micros: i64,
 }
 
-/// Refusal modes for the deliberately unattached-only projection.
+/// Refusal modes for the persistence projection.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WriterProjectionError {
     /// An attached row needs the attached content's existing TSV as its base.
     #[error("attached torrent_content projection requires the content TSV")]
     AttachedContentUnsupported,
+    /// The attached row must carry both halves of its content foreign key.
+    #[error("torrent_content has a partial attached content reference")]
+    PartialContentReference,
     /// The classifier snapshot and write row must describe the same torrent.
     #[error(
         "torrent_content info hash '{row_info_hash}' does not match classifier input '{classifier_info_hash}'"
@@ -72,6 +75,36 @@ pub fn project_unattached_persistence(
     if row.content_source.is_some() || row.content_id.is_some() {
         return Err(WriterProjectionError::AttachedContentUnsupported);
     }
+    project_torrent_persistence(row, classifier_input, torrent, sources, None)
+}
+
+/// Project one `torrent_contents` row with the exact content TSV base Go gives
+/// `TorrentContent.UpdateTsv`.
+///
+/// An unattached row requires `None`; an attached row requires `Some` and both
+/// foreign-key components. Keeping the base vector as an explicit input lets
+/// the flags-off production shadow retain its current read-only ACL while a
+/// later writer-only resolver supplies complete content and associations.
+pub fn project_torrent_persistence(
+    row: &TorrentContentWrite,
+    classifier_input: &ClassifierInput,
+    torrent: TorrentSnapshot,
+    sources: &[TorrentSourceSnapshot],
+    content_tsv: Option<&Tsvector>,
+) -> Result<TorrentContentPersistence, WriterProjectionError> {
+    let base_tsv = match (
+        row.content_type.as_ref(),
+        row.content_source.as_ref(),
+        row.content_id.as_ref(),
+        content_tsv,
+    ) {
+        (_, None, None, None) => Tsvector::new(),
+        (Some(_), Some(_), Some(_), Some(tsv)) => tsv.clone(),
+        (Some(_), Some(_), Some(_), None) => {
+            return Err(WriterProjectionError::AttachedContentUnsupported)
+        }
+        _ => return Err(WriterProjectionError::PartialContentReference),
+    };
     if row.info_hash != classifier_input.id {
         return Err(WriterProjectionError::InfoHashMismatch {
             row_info_hash: row.info_hash.clone(),
@@ -92,7 +125,7 @@ pub fn project_unattached_persistence(
                 published_at.min(source_published_at)
             });
 
-    let tsv = unattached_tsv(row, classifier_input)?;
+    let tsv = torrent_content_tsv(row, classifier_input, base_tsv)?;
     Ok(TorrentContentPersistence {
         seeders,
         leechers,
@@ -101,12 +134,11 @@ pub fn project_unattached_persistence(
     })
 }
 
-fn unattached_tsv(
+fn torrent_content_tsv(
     row: &TorrentContentWrite,
     classifier_input: &ClassifierInput,
+    mut tsv: Tsvector,
 ) -> Result<Tsvector, WriterProjectionError> {
-    let mut tsv = Tsvector::new();
-
     if let Some(value) = row.video_resolution.as_deref() {
         let label = value
             .strip_prefix('V')
@@ -269,7 +301,7 @@ fn is_go_space(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use bitmagnet_classifier::{ClassifierInput, InputFile};
-    use bitmagnet_fts::MAX_TSVECTOR_BYTES;
+    use bitmagnet_fts::{TsvectorWeight, MAX_TSVECTOR_BYTES};
 
     use super::*;
 
@@ -574,6 +606,63 @@ mod tests {
             ),
             Err(WriterProjectionError::AttachedContentUnsupported)
         );
+    }
+
+    #[test]
+    fn attached_rows_extend_the_rebuilt_content_tsv() {
+        let mut row = row();
+        row.id = format!("{INFO_HASH}:movie:tmdb:42");
+        row.content_source = Some("tmdb".to_owned());
+        row.content_id = Some("42".to_owned());
+        row.video_resolution = Some("V1080p".to_owned());
+
+        let mut content_tsv = Tsvector::new();
+        content_tsv.add_text("Attached Title", TsvectorWeight::A);
+        let persistence = project_torrent_persistence(
+            &row,
+            &input("Release Name", &[]),
+            TorrentSnapshot {
+                created_at_micros: 1,
+            },
+            &[],
+            Some(&content_tsv),
+        )
+        .expect("project attached row from its content base");
+
+        assert!(persistence.tsv.contains("'attached':1A"));
+        assert!(persistence.tsv.contains("'title':2A"));
+        assert!(persistence.tsv.contains("'1080p':4C"));
+        assert!(persistence.tsv.contains(&format!("'{INFO_HASH}':6A")));
+        assert!(persistence.tsv.contains("'release':8A"));
+        assert!(persistence.tsv.contains("'name':9A"));
+    }
+
+    #[test]
+    fn partial_attached_reference_fails_closed() {
+        for (content_type, source, id) in [
+            (Some("movie"), Some("tmdb"), None),
+            (Some("movie"), None, Some("42")),
+            (None, Some("tmdb"), Some("42")),
+            (None, Some("tmdb"), None),
+            (None, None, Some("42")),
+        ] {
+            let mut row = row();
+            row.content_type = content_type.map(str::to_owned);
+            row.content_source = source.map(str::to_owned);
+            row.content_id = id.map(str::to_owned);
+            assert_eq!(
+                project_torrent_persistence(
+                    &row,
+                    &input("Example", &[]),
+                    TorrentSnapshot {
+                        created_at_micros: 1,
+                    },
+                    &[],
+                    None,
+                ),
+                Err(WriterProjectionError::PartialContentReference)
+            );
+        }
     }
 
     #[test]
