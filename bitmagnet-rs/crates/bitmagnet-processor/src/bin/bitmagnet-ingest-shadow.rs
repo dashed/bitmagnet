@@ -68,9 +68,7 @@ async fn main() -> Result<()> {
         .connect(&args.postgres_dsn)
         .await
         .context("connecting to PostgreSQL")?;
-    let _metrics_server = bitmagnet_common::metrics::maybe_spawn_metrics_server()
-        .await
-        .context("starting metrics listener")?;
+    let store = QueueStore::new(pool.clone());
 
     match args.command {
         Command::Mirror {
@@ -90,13 +88,8 @@ async fn main() -> Result<()> {
                 ..MirrorConfig::default()
             };
             let metrics = MirrorMetrics::register().context("registering mirror metrics")?;
-            run_mirror(
-                QueueStore::new(pool.clone()),
-                config,
-                Duration::from_secs(idle_seconds),
-                &metrics,
-            )
-            .await?;
+            let _metrics_server = spawn_metrics_server(store.clone()).await?;
+            run_mirror(store, config, Duration::from_secs(idle_seconds), &metrics).await?;
         }
         Command::Consume {
             expected_classifier_config_digest,
@@ -106,12 +99,13 @@ async fn main() -> Result<()> {
             let mut config = ConsumerConfig::new(bitmagnet_queue::PROCESS_TORRENT_SHADOW);
             config.check_interval = Duration::from_secs(check_interval_seconds);
             config.job_timeout = Duration::from_secs(job_timeout_seconds);
-            let consumer = Consumer::new(QueueStore::new(pool.clone()), config);
+            let consumer = Consumer::new(store.clone(), config);
             let runtime = Arc::new(ShadowRuntime::from_core(
                 pool,
                 expected_classifier_config_digest.as_deref(),
             )?);
             let metrics = ShadowMetrics::register().context("registering shadow metrics")?;
+            let _metrics_server = spawn_metrics_server(store).await?;
             consumer
                 .run_until(
                     move |job| {
@@ -196,6 +190,19 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn spawn_metrics_server(
+    store: QueueStore,
+) -> Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
+    let server =
+        bitmagnet_common::metrics::maybe_spawn_metrics_server_with_async_gatherer(move || {
+            let store = store.clone();
+            async move { store.ingest_shadow_status_metric_families().await }
+        })
+        .await
+        .context("starting metrics listener")?;
+    Ok(server)
 }
 
 fn validate_args(args: &Args) -> Result<()> {
