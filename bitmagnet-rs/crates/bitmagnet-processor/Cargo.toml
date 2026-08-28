@@ -15,6 +15,7 @@ bitmagnet-fts = { path = "../bitmagnet-fts" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-queue = { path = "../bitmagnet-queue" }
 anyhow.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap.workspace = true
 futures.workspace = true
 hex.workspace = true

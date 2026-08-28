@@ -1,6 +1,7 @@
 //! Fail-closed runtime boundary for the non-persisting ingest shadow.
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock};
 
 use bitmagnet_classifier::{core_config_digest, SourceError};
 use bitmagnet_common::metrics::registry;
@@ -8,8 +9,10 @@ use bitmagnet_queue::{
     DequeuedJob, MirrorIneligibleReason, MirrorReport, ProcessTorrentParams, ProtocolId,
     ShadowJobEnvelopeV1, PROCESS_TORRENT, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
+use prometheus::core::Collector as _;
 use prometheus::{IntCounter, IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use sqlx::{PgConnection, PgPool, Row};
 
 use super::{
@@ -517,6 +520,15 @@ pub struct MirrorMetrics {
     inserted: IntCounter,
     capped: IntCounter,
     ineligible: IntCounterVec,
+    cursor: Arc<RwLock<MirrorCursorMetricSnapshot>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MirrorCursorMetricSnapshot {
+    initialized: bool,
+    ran_at_microseconds: i64,
+    observed_at_microseconds: i64,
+    source_job_id_sha256_words: [u32; 8],
 }
 
 impl MirrorMetrics {
@@ -564,10 +576,20 @@ impl MirrorMetrics {
             inserted,
             capped,
             ineligible,
+            cursor: Arc::new(RwLock::new(MirrorCursorMetricSnapshot::default())),
         })
     }
 
-    pub fn observe(&self, report: &MirrorReport) {
+    pub fn observe(&self, report: &MirrorReport) -> Result<(), chrono::ParseError> {
+        let cursor = match &report.cursor {
+            Some(cursor) => MirrorCursorMetricSnapshot {
+                initialized: true,
+                ran_at_microseconds: parse_pg_timestamptz_microseconds(&cursor.ran_at)?,
+                observed_at_microseconds: chrono::Utc::now().timestamp_micros(),
+                source_job_id_sha256_words: sha256_words(&cursor.id),
+            },
+            None => MirrorCursorMetricSnapshot::default(),
+        };
         self.pages.inc();
         self.scanned.inc_by(u64::from(report.scanned));
         self.sampled.inc_by(u64::from(report.sampled));
@@ -580,7 +602,90 @@ impl MirrorMetrics {
                 .with_label_values(&[reason.as_str()])
                 .inc_by(u64::from(*count));
         }
+        *self
+            .cursor
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cursor;
+        Ok(())
     }
+
+    /// Build one coherent, bounded cursor snapshot for the mirror process's
+    /// asynchronous Prometheus scrape. The source job ID is represented as
+    /// eight fixed 32-bit SHA-256 words, avoiding an ever-growing label set.
+    #[must_use]
+    pub fn cursor_metric_families(&self) -> Vec<prometheus::proto::MetricFamily> {
+        let snapshot = *self
+            .cursor
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mirror_cursor_metric_families(snapshot)
+    }
+}
+
+fn parse_pg_timestamptz_microseconds(value: &str) -> Result<i64, chrono::ParseError> {
+    chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%#z")
+        .map(|timestamp| timestamp.timestamp_micros())
+}
+
+fn sha256_words(value: &str) -> [u32; 8] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"bitmagnet.ingest-shadow.cursor-source-job-id/v1\0");
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    std::array::from_fn(|index| {
+        let offset = index * 4;
+        u32::from_be_bytes(
+            digest[offset..offset + 4]
+                .try_into()
+                .expect("a SHA-256 digest contains eight 32-bit words"),
+        )
+    })
+}
+
+fn mirror_cursor_metric_families(
+    snapshot: MirrorCursorMetricSnapshot,
+) -> Vec<prometheus::proto::MetricFamily> {
+    let initialized = prometheus::IntGauge::new(
+        "bitmagnet_ingest_shadow_mirror_cursor_initialized",
+        "Whether the mirror has observed its durable source cursor.",
+    )
+    .expect("the mirror cursor initialized descriptor must be valid");
+    initialized.set(i64::from(snapshot.initialized));
+
+    let ran_at = prometheus::IntGauge::new(
+        "bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds",
+        "Exact Unix epoch microseconds of the mirrored source position.",
+    )
+    .expect("the mirror cursor timestamp descriptor must be valid");
+    ran_at.set(snapshot.ran_at_microseconds);
+
+    let observed_at = prometheus::IntGauge::new(
+        "bitmagnet_ingest_shadow_mirror_cursor_observed_at_microseconds",
+        "Unix epoch microseconds when this process completed the reported mirror page.",
+    )
+    .expect("the mirror cursor observation descriptor must be valid");
+    observed_at.set(snapshot.observed_at_microseconds);
+
+    let source_id = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "bitmagnet_ingest_shadow_mirror_cursor_source_job_id_sha256_word",
+            "Domain-separated SHA-256 of the source job ID as eight bounded, exact 32-bit words.",
+        ),
+        &["word"],
+    )
+    .expect("the mirror cursor source identity descriptor must be valid");
+    for (word, value) in snapshot.source_job_id_sha256_words.iter().enumerate() {
+        source_id
+            .with_label_values(&[&word.to_string()])
+            .set(i64::from(*value));
+    }
+
+    let mut families = initialized.collect();
+    families.extend(ran_at.collect());
+    families.extend(observed_at.collect());
+    families.extend(source_id.collect());
+    families.sort_by(|left, right| left.name().cmp(right.name()));
+    families
 }
 
 #[cfg(test)]
@@ -588,15 +693,17 @@ mod tests {
     use std::collections::BTreeMap;
 
     use bitmagnet_queue::ProcessTorrentParams;
+    use prometheus::Encoder as _;
     use serde_json::json;
 
     use bitmagnet_classifier::core_config_digest;
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        require_default_workflow, require_flags_off, CausalShadowComparison, ShadowComparison,
-        ShadowMetrics, ShadowRuntime, ShadowRuntimeError, WriterCompareError, WriterComparison,
-        WriterDriftField,
+        mirror_cursor_metric_families, parse_pg_timestamptz_microseconds, require_default_workflow,
+        require_flags_off, sha256_words, CausalShadowComparison, MirrorCursorMetricSnapshot,
+        ShadowComparison, ShadowMetrics, ShadowRuntime, ShadowRuntimeError, WriterCompareError,
+        WriterComparison, WriterDriftField,
     };
 
     #[tokio::test]
@@ -640,6 +747,56 @@ mod tests {
                 "stable": {"torrents": []},
                 "writer": {"rows": []}
             })
+        );
+    }
+
+    #[test]
+    fn mirror_cursor_metrics_are_exact_bounded_and_coherent() {
+        let ran_at = parse_pg_timestamptz_microseconds("2026-08-26 12:34:56.123456+00")
+            .expect("parse PostgreSQL timestamptz");
+        assert_eq!(ran_at, 1_787_747_696_123_456);
+        assert_eq!(
+            sha256_words("source-a"),
+            [
+                4_113_768_352,
+                827_029_423,
+                2_817_235_078,
+                1_220_106_478,
+                3_925_658_051,
+                3_600_379_803,
+                1_196_287_462,
+                470_688_865,
+            ]
+        );
+
+        let families = mirror_cursor_metric_families(MirrorCursorMetricSnapshot {
+            initialized: true,
+            ran_at_microseconds: ran_at,
+            observed_at_microseconds: ran_at + 10,
+            source_job_id_sha256_words: sha256_words("source-a"),
+        });
+        let mut encoded = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&families, &mut encoded)
+            .expect("encode cursor families");
+        let text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_initialized 1"));
+        assert!(text.contains(&format!(
+            "bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds {ran_at}"
+        )));
+        assert!(text.contains(&format!(
+            "bitmagnet_ingest_shadow_mirror_cursor_observed_at_microseconds {}",
+            ran_at + 10
+        )));
+        for (word, value) in sha256_words("source-a").iter().enumerate() {
+            assert!(text.contains(&format!(
+                "bitmagnet_ingest_shadow_mirror_cursor_source_job_id_sha256_word{{word=\"{word}\"}} {value}"
+            )));
+        }
+        assert_eq!(
+            text.matches("bitmagnet_ingest_shadow_mirror_cursor_source_job_id_sha256_word{")
+                .count(),
+            8
         );
     }
 

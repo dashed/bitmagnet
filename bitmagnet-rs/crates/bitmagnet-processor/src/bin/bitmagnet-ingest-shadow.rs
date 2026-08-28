@@ -88,7 +88,8 @@ async fn main() -> Result<()> {
                 ..MirrorConfig::default()
             };
             let metrics = MirrorMetrics::register().context("registering mirror metrics")?;
-            let _metrics_server = spawn_metrics_server(store.clone()).await?;
+            let _metrics_server =
+                spawn_metrics_server(store.clone(), Some(metrics.clone())).await?;
             run_mirror(store, config, Duration::from_secs(idle_seconds), &metrics).await?;
         }
         Command::Consume {
@@ -105,7 +106,7 @@ async fn main() -> Result<()> {
                 expected_classifier_config_digest.as_deref(),
             )?);
             let metrics = ShadowMetrics::register().context("registering shadow metrics")?;
-            let _metrics_server = spawn_metrics_server(store).await?;
+            let _metrics_server = spawn_metrics_server(store, None).await?;
             consumer
                 .run_until(
                     move |job| {
@@ -194,11 +195,19 @@ async fn main() -> Result<()> {
 
 async fn spawn_metrics_server(
     store: QueueStore,
+    mirror_metrics: Option<MirrorMetrics>,
 ) -> Result<Option<(tokio::task::JoinHandle<()>, std::net::SocketAddr)>> {
     let server =
         bitmagnet_common::metrics::maybe_spawn_metrics_server_with_async_gatherer(move || {
             let store = store.clone();
-            async move { store.ingest_shadow_status_metric_families().await }
+            let mirror_metrics = mirror_metrics.clone();
+            async move {
+                let mut families = store.ingest_shadow_status_metric_families().await?;
+                if let Some(metrics) = mirror_metrics {
+                    families.extend(metrics.cursor_metric_families());
+                }
+                Ok::<_, bitmagnet_queue::QueuePgError>(families)
+            }
         })
         .await
         .context("starting metrics listener")?;
@@ -267,7 +276,7 @@ async fn run_mirror(
         tokio::select! {
             result = store.mirror_processed_page(&config) => {
                 let report = result.context("mirroring processed queue rows")?;
-                metrics.observe(&report);
+                metrics.observe(&report).context("recording mirror cursor metrics")?;
                 tracing::info!(
                     scanned = report.scanned,
                     sampled = report.sampled,
