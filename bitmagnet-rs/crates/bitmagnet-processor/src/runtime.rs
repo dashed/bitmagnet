@@ -499,7 +499,7 @@ impl ShadowMetrics {
     }
 }
 
-/// Bounded-cardinality Prometheus counters for the mirror's admission funnel.
+/// Bounded-cardinality Prometheus telemetry for the mirror's admission funnel.
 ///
 /// The mirror is the pilot's first stage: it scans archived source jobs and
 /// admits a sampled, eligible subset into the scratch queue. Without these
@@ -507,11 +507,12 @@ impl ShadowMetrics {
 /// to Prometheus, because ineligible candidates are dropped in SQL and never
 /// reach the consumer's `bitmagnet_ingest_shadow_unsupported_total`.
 ///
-/// Every series here is created eagerly at startup, including one child per
-/// [`MirrorIneligibleReason`]: a labelled child only materializes on its first
-/// `with_label_values` call, and a starvation alert must be able to read a
+/// Every counter series here is created eagerly at startup, including one child
+/// per [`MirrorIneligibleReason`]: a labelled child only materializes on its
+/// first `with_label_values` call, and a starvation alert must be able to read a
 /// present-and-zero series from the first scrape rather than waiting for an
-/// absent series to appear.
+/// absent series to appear. Fixed planner gauges are built from one coherent
+/// snapshot on every scrape.
 #[derive(Clone)]
 pub struct MirrorMetrics {
     pages: IntCounter,
@@ -520,16 +521,21 @@ pub struct MirrorMetrics {
     inserted: IntCounter,
     capped: IntCounter,
     ineligible: IntCounterVec,
-    cursor: Arc<RwLock<MirrorCursorMetricSnapshot>>,
+    snapshot: Arc<RwLock<MirrorMetricSnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct MirrorCursorMetricSnapshot {
-    initialized: bool,
-    ran_at_finite: bool,
-    ran_at_microseconds: i64,
-    observed_at_microseconds: i64,
-    source_job_id_sha256_words: [u32; 8],
+struct MirrorMetricSnapshot {
+    latest_page_initialized: bool,
+    latest_page_scanned: u32,
+    latest_page_active_depth: u32,
+    latest_page_capped: bool,
+    latest_page_caught_up: bool,
+    cursor_initialized: bool,
+    cursor_ran_at_finite: bool,
+    cursor_ran_at_microseconds: i64,
+    cursor_observed_at_microseconds: i64,
+    cursor_source_job_id_sha256_words: [u32; 8],
 }
 
 impl MirrorMetrics {
@@ -577,30 +583,13 @@ impl MirrorMetrics {
             inserted,
             capped,
             ineligible,
-            cursor: Arc::new(RwLock::new(MirrorCursorMetricSnapshot::default())),
+            snapshot: Arc::new(RwLock::new(MirrorMetricSnapshot::default())),
         })
     }
 
-    pub fn observe(&self, report: &MirrorReport) {
-        let cursor = match &report.cursor {
-            Some(cursor) => {
-                let ran_at = parse_pg_timestamptz_microseconds(&cursor.ran_at);
-                if ran_at.is_none() {
-                    tracing::warn!(
-                        cursor_ran_at = %cursor.ran_at,
-                        "mirror cursor timestamp is non-finite or unparseable; control telemetry will refuse it"
-                    );
-                }
-                MirrorCursorMetricSnapshot {
-                    initialized: true,
-                    ran_at_finite: ran_at.is_some(),
-                    ran_at_microseconds: ran_at.unwrap_or_default(),
-                    observed_at_microseconds: chrono::Utc::now().timestamp_micros(),
-                    source_job_id_sha256_words: sha256_words(&cursor.id),
-                }
-            }
-            None => MirrorCursorMetricSnapshot::default(),
-        };
+    pub fn observe(&self, report: &MirrorReport, page_size: u32) {
+        let snapshot =
+            mirror_metric_snapshot(report, page_size, chrono::Utc::now().timestamp_micros());
         self.pages.inc();
         self.scanned.inc_by(u64::from(report.scanned));
         self.sampled.inc_by(u64::from(report.sampled));
@@ -614,22 +603,68 @@ impl MirrorMetrics {
                 .inc_by(u64::from(*count));
         }
         *self
-            .cursor
+            .snapshot
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = cursor;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
     }
 
-    /// Build one coherent, bounded cursor snapshot for the mirror process's
-    /// asynchronous Prometheus scrape. The source job ID is represented as
-    /// eight fixed 32-bit SHA-256 words, avoiding an ever-growing label set.
+    /// Build one coherent, bounded planner snapshot for the mirror process's
+    /// asynchronous Prometheus scrape. It contains both the latest committed
+    /// page controls and its durable source cursor. The source job ID is
+    /// represented as eight fixed 32-bit SHA-256 words, avoiding an
+    /// ever-growing label set.
     #[must_use]
-    pub fn cursor_metric_families(&self) -> Vec<prometheus::proto::MetricFamily> {
+    pub fn snapshot_metric_families(&self) -> Vec<prometheus::proto::MetricFamily> {
         let snapshot = *self
-            .cursor
+            .snapshot
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        mirror_cursor_metric_families(snapshot)
+        mirror_metric_families(snapshot)
     }
+}
+
+fn mirror_metric_snapshot(
+    report: &MirrorReport,
+    page_size: u32,
+    observed_at_microseconds: i64,
+) -> MirrorMetricSnapshot {
+    let mut snapshot = MirrorMetricSnapshot {
+        latest_page_initialized: true,
+        latest_page_scanned: report.scanned,
+        latest_page_active_depth: report.active_depth,
+        latest_page_capped: report.capped,
+        latest_page_caught_up: report.scanned < page_size && !report.capped,
+        ..MirrorMetricSnapshot::default()
+    };
+    if let Some(cursor) = &report.cursor {
+        let ran_at = parse_pg_timestamptz_microseconds(&cursor.ran_at);
+        if ran_at.is_none() {
+            tracing::warn!(
+                cursor_ran_at = %cursor.ran_at,
+                "mirror cursor timestamp is non-finite or unparseable; control telemetry will refuse it"
+            );
+        }
+        snapshot.cursor_initialized = true;
+        snapshot.cursor_ran_at_finite = ran_at.is_some();
+        snapshot.cursor_ran_at_microseconds = ran_at.unwrap_or_default();
+        snapshot.cursor_observed_at_microseconds = observed_at_microseconds;
+        snapshot.cursor_source_job_id_sha256_words = sha256_words(&cursor.id);
+    }
+    snapshot
+}
+
+fn bool_gauge(name: &str, help: &str, value: bool) -> prometheus::IntGauge {
+    let gauge =
+        prometheus::IntGauge::new(name, help).expect("the mirror gauge descriptor is valid");
+    gauge.set(i64::from(value));
+    gauge
+}
+
+fn u32_gauge(name: &str, help: &str, value: u32) -> prometheus::IntGauge {
+    let gauge =
+        prometheus::IntGauge::new(name, help).expect("the mirror gauge descriptor is valid");
+    gauge.set(i64::from(value));
+    gauge
 }
 
 fn parse_pg_timestamptz_microseconds(value: &str) -> Option<i64> {
@@ -653,36 +688,60 @@ fn sha256_words(value: &str) -> [u32; 8] {
     })
 }
 
-fn mirror_cursor_metric_families(
-    snapshot: MirrorCursorMetricSnapshot,
-) -> Vec<prometheus::proto::MetricFamily> {
-    let initialized = prometheus::IntGauge::new(
+fn mirror_metric_families(snapshot: MirrorMetricSnapshot) -> Vec<prometheus::proto::MetricFamily> {
+    let latest_page_initialized = bool_gauge(
+        "bitmagnet_ingest_shadow_mirror_latest_page_initialized",
+        "Whether the mirror has committed a page report in this process.",
+        snapshot.latest_page_initialized,
+    );
+    let latest_page_scanned = u32_gauge(
+        "bitmagnet_ingest_shadow_mirror_latest_page_scanned",
+        "Archived source jobs examined in the latest committed mirror page.",
+        snapshot.latest_page_scanned,
+    );
+    let latest_page_active_depth = u32_gauge(
+        "bitmagnet_ingest_shadow_mirror_latest_page_active_depth",
+        "Scratch queue active depth reported by the latest committed mirror page.",
+        snapshot.latest_page_active_depth,
+    );
+    let latest_page_capped = bool_gauge(
+        "bitmagnet_ingest_shadow_mirror_latest_page_capped",
+        "Whether the latest committed mirror page stopped on the active-depth cap.",
+        snapshot.latest_page_capped,
+    );
+    let latest_page_caught_up = bool_gauge(
+        "bitmagnet_ingest_shadow_mirror_latest_page_caught_up",
+        "Whether the latest committed mirror page was shorter than the configured page size and did not stop on the active-depth cap.",
+        snapshot.latest_page_caught_up,
+    );
+
+    let cursor_initialized = prometheus::IntGauge::new(
         "bitmagnet_ingest_shadow_mirror_cursor_initialized",
         "Whether the mirror has observed its durable source cursor.",
     )
     .expect("the mirror cursor initialized descriptor must be valid");
-    initialized.set(i64::from(snapshot.initialized));
+    cursor_initialized.set(i64::from(snapshot.cursor_initialized));
 
     let ran_at_finite = prometheus::IntGauge::new(
         "bitmagnet_ingest_shadow_mirror_cursor_ran_at_finite",
         "Whether the reported mirror cursor timestamp is finite and exactly representable.",
     )
     .expect("the mirror cursor finite descriptor must be valid");
-    ran_at_finite.set(i64::from(snapshot.ran_at_finite));
+    ran_at_finite.set(i64::from(snapshot.cursor_ran_at_finite));
 
     let ran_at = prometheus::IntGauge::new(
         "bitmagnet_ingest_shadow_mirror_cursor_ran_at_microseconds",
         "Exact Unix epoch microseconds of the mirrored source position.",
     )
     .expect("the mirror cursor timestamp descriptor must be valid");
-    ran_at.set(snapshot.ran_at_microseconds);
+    ran_at.set(snapshot.cursor_ran_at_microseconds);
 
     let observed_at = prometheus::IntGauge::new(
         "bitmagnet_ingest_shadow_mirror_cursor_observed_at_microseconds",
         "Unix epoch microseconds when this process completed the reported mirror page.",
     )
     .expect("the mirror cursor observation descriptor must be valid");
-    observed_at.set(snapshot.observed_at_microseconds);
+    observed_at.set(snapshot.cursor_observed_at_microseconds);
 
     let source_id = prometheus::IntGaugeVec::new(
         prometheus::Opts::new(
@@ -692,13 +751,22 @@ fn mirror_cursor_metric_families(
         &["word"],
     )
     .expect("the mirror cursor source identity descriptor must be valid");
-    for (word, value) in snapshot.source_job_id_sha256_words.iter().enumerate() {
+    for (word, value) in snapshot
+        .cursor_source_job_id_sha256_words
+        .iter()
+        .enumerate()
+    {
         source_id
             .with_label_values(&[&word.to_string()])
             .set(i64::from(*value));
     }
 
-    let mut families = initialized.collect();
+    let mut families = latest_page_initialized.collect();
+    families.extend(latest_page_scanned.collect());
+    families.extend(latest_page_active_depth.collect());
+    families.extend(latest_page_capped.collect());
+    families.extend(latest_page_caught_up.collect());
+    families.extend(cursor_initialized.collect());
     families.extend(ran_at_finite.collect());
     families.extend(ran_at.collect());
     families.extend(observed_at.collect());
@@ -711,7 +779,7 @@ fn mirror_cursor_metric_families(
 mod tests {
     use std::collections::BTreeMap;
 
-    use bitmagnet_queue::ProcessTorrentParams;
+    use bitmagnet_queue::{MirrorCursor, MirrorReport, ProcessTorrentParams};
     use prometheus::Encoder as _;
     use serde_json::json;
 
@@ -719,11 +787,23 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{
-        mirror_cursor_metric_families, parse_pg_timestamptz_microseconds, require_default_workflow,
-        require_flags_off, sha256_words, CausalShadowComparison, MirrorCursorMetricSnapshot,
-        ShadowComparison, ShadowMetrics, ShadowRuntime, ShadowRuntimeError, WriterCompareError,
-        WriterComparison, WriterDriftField,
+        mirror_metric_families, mirror_metric_snapshot, parse_pg_timestamptz_microseconds,
+        require_default_workflow, require_flags_off, sha256_words, CausalShadowComparison,
+        MirrorMetricSnapshot, ShadowComparison, ShadowMetrics, ShadowRuntime, ShadowRuntimeError,
+        WriterCompareError, WriterComparison, WriterDriftField,
     };
+
+    fn mirror_report(scanned: u32, active_depth: u32, capped: bool) -> MirrorReport {
+        MirrorReport {
+            cursor: None,
+            scanned,
+            inserted: 0,
+            active_depth,
+            capped,
+            sampled: 0,
+            ineligible: BTreeMap::new(),
+        }
+    }
 
     #[tokio::test]
     async fn classifier_config_digest_is_required_and_must_match_before_consumption() {
@@ -770,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_cursor_metrics_are_exact_bounded_and_coherent() {
+    fn mirror_metrics_are_exact_bounded_and_coherent() {
         let ran_at = parse_pg_timestamptz_microseconds("2026-08-26 12:34:56.123456+00")
             .expect("parse PostgreSQL timestamptz");
         assert_eq!(ran_at, 1_787_747_696_123_456);
@@ -788,18 +868,39 @@ mod tests {
             ]
         );
 
-        let families = mirror_cursor_metric_families(MirrorCursorMetricSnapshot {
-            initialized: true,
-            ran_at_finite: true,
-            ran_at_microseconds: ran_at,
-            observed_at_microseconds: ran_at + 10,
-            source_job_id_sha256_words: sha256_words("source-a"),
+        let mut report = mirror_report(37, 23, false);
+        report.cursor = Some(MirrorCursor {
+            ran_at: "2026-08-26 12:34:56.123456+00".to_owned(),
+            id: "source-a".to_owned(),
         });
+        let snapshot = mirror_metric_snapshot(&report, 100, ran_at + 10);
+        assert_eq!(
+            snapshot,
+            MirrorMetricSnapshot {
+                latest_page_initialized: true,
+                latest_page_scanned: 37,
+                latest_page_active_depth: 23,
+                latest_page_capped: false,
+                latest_page_caught_up: true,
+                cursor_initialized: true,
+                cursor_ran_at_finite: true,
+                cursor_ran_at_microseconds: ran_at,
+                cursor_observed_at_microseconds: ran_at + 10,
+                cursor_source_job_id_sha256_words: sha256_words("source-a"),
+            }
+        );
+
+        let families = mirror_metric_families(snapshot);
         let mut encoded = Vec::new();
         prometheus::TextEncoder::new()
             .encode(&families, &mut encoded)
-            .expect("encode cursor families");
+            .expect("encode mirror families");
         let text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_latest_page_initialized 1"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_latest_page_scanned 37"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_latest_page_active_depth 23"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_latest_page_capped 0"));
+        assert!(text.contains("bitmagnet_ingest_shadow_mirror_latest_page_caught_up 1"));
         assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_initialized 1"));
         assert!(text.contains("bitmagnet_ingest_shadow_mirror_cursor_ran_at_finite 1"));
         assert!(text.contains(&format!(
@@ -822,15 +923,35 @@ mod tests {
     }
 
     #[test]
+    fn mirror_latest_page_controls_use_exact_page_size_and_report_depth() {
+        for (case, scanned, active_depth, capped, page_size, caught_up) in [
+            ("empty", 0, 0, false, 100, true),
+            ("short", 37, 41, false, 100, true),
+            ("full", 100, 42, false, 100, false),
+            ("capped", 12, 43, true, 100, false),
+        ] {
+            let snapshot =
+                mirror_metric_snapshot(&mirror_report(scanned, active_depth, capped), page_size, 1);
+            assert!(snapshot.latest_page_initialized, "{case}");
+            assert_eq!(snapshot.latest_page_scanned, scanned, "{case}");
+            assert_eq!(snapshot.latest_page_active_depth, active_depth, "{case}");
+            assert_eq!(snapshot.latest_page_capped, capped, "{case}");
+            assert_eq!(snapshot.latest_page_caught_up, caught_up, "{case}");
+            assert!(!snapshot.cursor_initialized, "{case}");
+        }
+    }
+
+    #[test]
     fn non_finite_cursor_is_explicitly_refused_without_a_parse_error() {
         assert_eq!(parse_pg_timestamptz_microseconds("infinity"), None);
         assert_eq!(parse_pg_timestamptz_microseconds("-infinity"), None);
-        let families = mirror_cursor_metric_families(MirrorCursorMetricSnapshot {
-            initialized: true,
-            ran_at_finite: false,
-            ran_at_microseconds: 0,
-            observed_at_microseconds: 1_787_747_696_123_456,
-            source_job_id_sha256_words: sha256_words("source-infinity"),
+        let families = mirror_metric_families(MirrorMetricSnapshot {
+            cursor_initialized: true,
+            cursor_ran_at_finite: false,
+            cursor_ran_at_microseconds: 0,
+            cursor_observed_at_microseconds: 1_787_747_696_123_456,
+            cursor_source_job_id_sha256_words: sha256_words("source-infinity"),
+            ..MirrorMetricSnapshot::default()
         });
         let mut encoded = Vec::new();
         prometheus::TextEncoder::new()

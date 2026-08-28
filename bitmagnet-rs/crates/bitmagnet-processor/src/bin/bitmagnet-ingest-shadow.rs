@@ -9,6 +9,8 @@ use bitmagnet_queue::{Consumer, ConsumerConfig, MirrorConfig, QueueStore};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 
+const MAX_DB_TELEMETRY_TIMEOUT_SECONDS: u64 = 5;
+
 #[derive(Debug, Parser)]
 #[command(name = "bitmagnet-ingest-shadow")]
 struct Args {
@@ -232,7 +234,7 @@ async fn spawn_metrics_server(
                 .await
                 .context("ingest-shadow metrics query timed out")??;
                 if let Some(metrics) = mirror_metrics {
-                    families.extend(metrics.cursor_metric_families());
+                    families.extend(metrics.snapshot_metric_families());
                 }
                 Ok::<_, anyhow::Error>(families)
             }
@@ -244,12 +246,12 @@ async fn spawn_metrics_server(
 
 fn validate_args(args: &Args) -> Result<()> {
     anyhow::ensure!(
-        args.postgres_acquire_timeout_seconds > 0,
-        "postgres-acquire-timeout-seconds must be positive"
+        (1..=MAX_DB_TELEMETRY_TIMEOUT_SECONDS).contains(&args.postgres_acquire_timeout_seconds),
+        "postgres-acquire-timeout-seconds must be between 1 and {MAX_DB_TELEMETRY_TIMEOUT_SECONDS}"
     );
     anyhow::ensure!(
-        args.metrics_query_timeout_seconds > 0,
-        "metrics-query-timeout-seconds must be positive"
+        (1..=MAX_DB_TELEMETRY_TIMEOUT_SECONDS).contains(&args.metrics_query_timeout_seconds),
+        "metrics-query-timeout-seconds must be between 1 and {MAX_DB_TELEMETRY_TIMEOUT_SECONDS}"
     );
     match &args.command {
         Command::Mirror {
@@ -312,7 +314,7 @@ async fn run_mirror(
         tokio::select! {
             result = store.mirror_processed_page(&config) => {
                 let report = result.context("mirroring processed queue rows")?;
-                metrics.observe(&report);
+                metrics.observe(&report, config.page_size);
                 tracing::info!(
                     scanned = report.scanned,
                     sampled = report.sampled,
@@ -337,5 +339,73 @@ async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         tracing::warn!(%error, "failed to install shutdown signal");
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_args, Args, Command, MAX_DB_TELEMETRY_TIMEOUT_SECONDS};
+
+    fn mirror_args() -> Args {
+        Args {
+            postgres_dsn: "postgres://example.invalid/bitmagnet".to_owned(),
+            postgres_max_connections: 2,
+            postgres_acquire_timeout_seconds: MAX_DB_TELEMETRY_TIMEOUT_SECONDS,
+            metrics_query_timeout_seconds: MAX_DB_TELEMETRY_TIMEOUT_SECONDS,
+            command: Command::Mirror {
+                sample_basis_points: 0,
+                page_size: 100,
+                active_depth_cap: 1_000,
+                delay_seconds: 30,
+                archival_seconds: 3_600,
+                idle_seconds: 30,
+            },
+        }
+    }
+
+    fn consume_args() -> Args {
+        Args {
+            postgres_dsn: "postgres://example.invalid/bitmagnet".to_owned(),
+            postgres_max_connections: 3,
+            postgres_acquire_timeout_seconds: MAX_DB_TELEMETRY_TIMEOUT_SECONDS,
+            metrics_query_timeout_seconds: MAX_DB_TELEMETRY_TIMEOUT_SECONDS,
+            command: Command::Consume {
+                expected_classifier_config_digest: Some("sha256:test".to_owned()),
+                check_interval_seconds: 30,
+                job_timeout_seconds: 600,
+            },
+        }
+    }
+
+    #[test]
+    fn mirror_and_consume_defaults_satisfy_runtime_contract() {
+        assert!(validate_args(&mirror_args()).is_ok());
+        assert!(validate_args(&consume_args()).is_ok());
+    }
+
+    #[test]
+    fn database_telemetry_timeouts_are_bounded_to_five_seconds() {
+        for timeout in [1, MAX_DB_TELEMETRY_TIMEOUT_SECONDS] {
+            let mut args = mirror_args();
+            args.postgres_acquire_timeout_seconds = timeout;
+            args.metrics_query_timeout_seconds = timeout;
+            assert!(validate_args(&args).is_ok());
+        }
+
+        for invalid_timeout in [0, MAX_DB_TELEMETRY_TIMEOUT_SECONDS + 1] {
+            let mut args = mirror_args();
+            args.postgres_acquire_timeout_seconds = invalid_timeout;
+            assert!(validate_args(&args)
+                .expect_err("PostgreSQL acquire timeout must remain bounded")
+                .to_string()
+                .contains("postgres-acquire-timeout-seconds"));
+
+            let mut args = mirror_args();
+            args.metrics_query_timeout_seconds = invalid_timeout;
+            assert!(validate_args(&args)
+                .expect_err("status query timeout must remain bounded")
+                .to_string()
+                .contains("metrics-query-timeout-seconds"));
+        }
     }
 }
