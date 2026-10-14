@@ -18,7 +18,34 @@ use crate::{fingerprint, QueueJobStatus, PROCESS_TORRENT_BATCH};
 
 pub const PROCESS_TORRENT_SHADOW: &str = "process_torrent_shadow";
 pub const SHADOW_JOB_ENVELOPE_VERSION: u8 = 1;
-const DEADLINE_ERROR: &str = "the job did not complete before its deadline";
+pub(crate) const DEADLINE_ERROR: &str = "the job did not complete before its deadline";
+
+/// Go's `serverHandler.handleJob` claim (`internal/queue/server/server.go`).
+const GENERIC_CLAIM_SQL: &str = "\
+SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
+       retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
+       deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
+FROM queue_jobs \
+WHERE queue = $1 AND status IN ('pending','retry') \
+  AND run_after <= clock_timestamp() \
+ORDER BY (status = 'retry'), priority, run_after \
+FOR UPDATE SKIP LOCKED \
+LIMIT 1";
+
+pub(crate) const GENERIC_SETTLE_RETRY_SQL: &str = "\
+UPDATE queue_jobs \
+SET status = 'retry', retries = $2, ran_at = clock_timestamp(), \
+    error = $3, \
+    run_after = clock_timestamp() + make_interval(secs => $4) \
+WHERE id = $1";
+
+pub(crate) const GENERIC_SETTLE_FAILED_SQL: &str = "\
+UPDATE queue_jobs SET status = 'failed', retries = $2, \
+ran_at = clock_timestamp(), error = $3 WHERE id = $1";
+
+pub(crate) const GENERIC_SETTLE_PROCESSED_SQL: &str = "\
+UPDATE queue_jobs SET status = 'processed', retries = $2, \
+ran_at = clock_timestamp() WHERE id = $1";
 
 /// Exact identity of the settled Go job mirrored into the scratch queue.
 ///
@@ -158,20 +185,10 @@ impl QueueStore {
                 .fetch_optional(&mut *tx)
                 .await?
         } else {
-            sqlx::query(
-                "SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
-                        retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
-                        deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
-                 FROM queue_jobs \
-                 WHERE queue = $1 AND status IN ('pending','retry') \
-                   AND run_after <= clock_timestamp() \
-                 ORDER BY (status = 'retry'), priority, run_after \
-                 FOR UPDATE SKIP LOCKED \
-                 LIMIT 1",
-            )
-            .bind(queue)
-            .fetch_optional(&mut *tx)
-            .await?
+            sqlx::query(GENERIC_CLAIM_SQL)
+                .bind(queue)
+                .fetch_optional(&mut *tx)
+                .await?
         };
         let Some(row) = row else {
             tx.commit().await?;
@@ -236,19 +253,13 @@ impl QueueStore {
                     .execute(&mut *tx)
                     .await?;
                 } else {
-                    sqlx::query(
-                        "UPDATE queue_jobs \
-                         SET status = 'retry', retries = $2, ran_at = clock_timestamp(), \
-                             error = $3, \
-                             run_after = clock_timestamp() + make_interval(secs => $4) \
-                         WHERE id = $1",
-                    )
-                    .bind(&job.id)
-                    .bind(i64::from(job.retries))
-                    .bind(&error)
-                    .bind(delay_seconds)
-                    .execute(&mut *tx)
-                    .await?;
+                    sqlx::query(GENERIC_SETTLE_RETRY_SQL)
+                        .bind(&job.id)
+                        .bind(i64::from(job.retries))
+                        .bind(&error)
+                        .bind(delay_seconds)
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 ConsumeOutcome::RetryScheduled { job, delay }
             } else {
@@ -271,15 +282,12 @@ impl QueueStore {
                     .execute(&mut *tx)
                     .await?;
                 } else {
-                    sqlx::query(
-                        "UPDATE queue_jobs SET status = 'failed', retries = $2, \
-                         ran_at = clock_timestamp(), error = $3 WHERE id = $1",
-                    )
-                    .bind(&job.id)
-                    .bind(i64::from(job.retries))
-                    .bind(&error)
-                    .execute(&mut *tx)
-                    .await?;
+                    sqlx::query(GENERIC_SETTLE_FAILED_SQL)
+                        .bind(&job.id)
+                        .bind(i64::from(job.retries))
+                        .bind(&error)
+                        .execute(&mut *tx)
+                        .await?;
                 }
                 ConsumeOutcome::Failed { job, error }
             }
@@ -301,14 +309,11 @@ impl QueueStore {
                 .execute(&mut *tx)
                 .await?;
             } else {
-                sqlx::query(
-                    "UPDATE queue_jobs SET status = 'processed', retries = $2, \
-                     ran_at = clock_timestamp() WHERE id = $1",
-                )
-                .bind(&job.id)
-                .bind(i64::from(job.retries))
-                .execute(&mut *tx)
-                .await?;
+                sqlx::query(GENERIC_SETTLE_PROCESSED_SQL)
+                    .bind(&job.id)
+                    .bind(i64::from(job.retries))
+                    .execute(&mut *tx)
+                    .await?;
             }
             ConsumeOutcome::Processed { job }
         };
@@ -327,11 +332,11 @@ pub(crate) fn parse_status(value: &str) -> Result<QueueJobStatus, QueuePgError> 
     }
 }
 
-fn to_u32(field: &'static str, value: i64) -> Result<u32, QueuePgError> {
+pub(crate) fn to_u32(field: &'static str, value: i64) -> Result<u32, QueuePgError> {
     u32::try_from(value).map_err(|_| QueuePgError::InvalidInteger { field, value })
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
     payload
         .downcast_ref::<&str>()
         .copied()

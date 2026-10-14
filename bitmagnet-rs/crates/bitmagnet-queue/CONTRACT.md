@@ -191,6 +191,16 @@ rest of the HTTP 200 metrics response intact. At the minimum two-connection pool
 size a scrape can contend with a retained parent transaction plus handler query;
 the bounded acquisition failure degrades only that scrape's queue family.
 
+`QueueStore::consume_admitted_process_torrent` is the claim used by the
+persisting Rust `process_torrent` worker. It is Go's generic claim, ordering,
+deadline, retry-count, backoff, and settlement path with a fixed, hardcoded
+admission predicate (explicit `default` workflow and all three attach flags
+JSON `false`) and a caller-supplied exclusion list. Rows outside the predicate
+are never locked, so the Go worker keeps processing them. A handler may return
+`JobVerdict::Abstain` before causing any side effect; the claim transaction
+then rolls back and the row is left byte-identical and unlocked. A panic is
+always a failure, never an abstention.
+
 Still outstanding before Go queue retirement: guarded single-consumer deployment
 wiring for the batch image, bounded multi-worker orchestration for queues that
 require concurrency greater than one, terminal-row cleanup ownership handoff,

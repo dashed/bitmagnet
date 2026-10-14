@@ -14,7 +14,8 @@
 //!   boundary.
 //!
 //! The PostgreSQL runtime still owns candidate selection, the frozen
-//! dequeue/settlement transaction, the poll-only consumer, and the bounded
+//! dequeue/settlement transaction, the poll-only consumer, the admitted
+//! `process_torrent` claim used by the persisting Rust worker, and the bounded
 //! processed-row shadow mirror.
 
 pub mod backoff;
@@ -26,6 +27,7 @@ pub mod id;
 pub mod job;
 pub mod message;
 pub mod pg;
+mod process_torrent_pg;
 mod producer_pg;
 mod status_pg;
 
@@ -48,6 +50,7 @@ pub use pg::{
     MirrorCursor, MirrorIneligibleReason, MirrorReport, QueuePgError, QueueStore,
     ShadowJobEnvelopeV1, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
+pub use process_torrent_pg::{AdmittedConsumeOutcome, JobVerdict};
 pub use producer_pg::{
     insert_jobs_strict_with_executor, prepare_pg_queue_job_values, ActiveJobInsertReceipt,
     PgQueueJobValues, PreparedQueueJob,
