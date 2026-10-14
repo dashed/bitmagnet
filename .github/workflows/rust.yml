@@ -32,6 +32,7 @@ on:
       - "testdata/parity/graphql-torrent-tag-mutations/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/graphql-metrics/**"
+      - "testdata/parity/graphql-torrent-reprocess/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
@@ -59,6 +60,7 @@ on:
       - "testdata/parity/graphql-torrent-tag-mutations/**"
       - "testdata/parity/graphql-torrent-tags/**"
       - "testdata/parity/graphql-metrics/**"
+      - "testdata/parity/graphql-torrent-reprocess/**"
       - "testdata/parity/queue/**"
       - "testdata/parity/searchquery/**"
       - "testdata/parity/torznab/**"
@@ -1032,6 +1034,7 @@ jobs:
           cargo test -p bitmagnet-queue --test queue_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test persist_pg -- --ignored --test-threads=1
           cargo test -p bitmagnet-processor --test writer_load_pg -- --ignored --test-threads=1
+          cargo test -p bitmagnet-processor --test worker_pg -- --ignored --test-threads=1
       - name: Run GraphQL PostgreSQL read parity
         working-directory: ${{ github.workspace }}
         run: |
@@ -1206,6 +1209,10 @@ jobs:
           cargo test --manifest-path bitmagnet-rs/Cargo.toml \
             -p bitmagnet-graphql --test torrent_reprocess_mutations_pg -- \
             --ignored --exact real_pg_torrent_reprocess_matches_go_with_isolated_writer \
+            --test-threads=1
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-graphql --test torrent_reprocess_mutations_pg -- \
+            --ignored --exact real_pg_torrent_reprocess_refuses_banned_deletions_before_any_write \
             --test-threads=1
       - name: Run full GraphQL reader authority gate
         working-directory: ${{ github.workspace }}
