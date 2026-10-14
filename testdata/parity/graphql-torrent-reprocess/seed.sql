@@ -6,6 +6,7 @@
 --   1000..01  movie-like single file, two sources          -> classified
 --   2000..02  TV episode, one source                        -> classified
 --   3000..03  unparseable name, no file info                -> classified, no content type
+--   4000..04  movie naming two languages                    -> Go name-ordered languages
 --   5000..05  TV episode with a stale `movie` row           -> stale row deleted
 --   6000..06  movie with a reusable tmdb-backed association -> reused unless rematch
 --   7000..07  audiobook with a type-only explicit hint      -> hint applied
@@ -28,6 +29,9 @@ VALUES
   (decode('3000000000000000000000000000000000000003', 'hex'),
    'random upload 2015', 1234, false, 'no_info', NULL,
    '2015-03-01 00:00:00+00', '2015-03-02 00:00:00+00'),
+  (decode('4000000000000000000000000000000000000004', 'hex'),
+   'Some.Film.2010.Italian.Spanish.1080p.BluRay.x264-GRP.mkv', 3000000000, false, 'single', NULL,
+   '2015-04-01 00:00:00+00', '2015-04-02 00:00:00+00'),
   (decode('5000000000000000000000000000000000000005', 'hex'),
    'Planet.Earth.S01E01.1080p.BluRay.x264-GRP.mkv', 4000000000, false, 'single', NULL,
    '2015-05-01 00:00:00+00', '2015-05-02 00:00:00+00'),
