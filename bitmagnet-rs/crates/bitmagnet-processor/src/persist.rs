@@ -495,7 +495,9 @@ struct PreparedTorrentContent {
     content_source: Option<String>,
     content_id: Option<String>,
     languages: Value,
-    episodes: Value,
+    /// `None` binds SQL NULL, which is what gorm's JSON serializer writes for
+    /// Go's nil `Episodes` map.
+    episodes: Option<Value>,
     video_resolution: Option<String>,
     video_source: Option<String>,
     video_codec: Option<String>,
@@ -779,7 +781,7 @@ async fn upsert_torrent_contents(
             .push_bind(&tc.content_source)
             .push_bind(&tc.content_id)
             .push_bind(sqlx::types::Json(&tc.languages))
-            .push_bind(sqlx::types::Json(&tc.episodes))
+            .push_bind(tc.episodes.as_ref().map(sqlx::types::Json))
             .push_bind(&tc.video_resolution)
             .push_bind(&tc.video_source)
             .push_bind(&tc.video_codec)
@@ -841,10 +843,14 @@ async fn insert_tags(
     Ok(())
 }
 
-fn episodes_json(value: &str) -> Result<Value, PersistError> {
+/// Rebuild Go's `Episodes` JSON image from its `String()` form.
+///
+/// An empty string is Go's nil map: `json.Marshal` renders it `null`, and
+/// gorm's JSON serializer stores that as SQL NULL rather than `{}`.
+fn episodes_json(value: &str) -> Result<Option<Value>, PersistError> {
     let mut seasons = Map::new();
     if value.is_empty() {
-        return Ok(Value::Object(seasons));
+        return Ok(None);
     }
 
     for season_part in value.split(", ") {
@@ -869,7 +875,7 @@ fn episodes_json(value: &str) -> Result<Value, PersistError> {
         }
     }
 
-    Ok(Value::Object(seasons))
+    Ok(Some(Value::Object(seasons)))
 }
 
 fn parse_range(raw: &str, image: &str) -> Result<std::ops::RangeInclusive<u16>, PersistError> {
@@ -1111,18 +1117,18 @@ mod tests {
 
     #[test]
     fn episodes_string_converts_to_go_json_shape() {
-        assert_eq!(episodes_json("").unwrap(), json!({}));
-        assert_eq!(episodes_json("S01").unwrap(), json!({"1": {}}));
+        assert_eq!(episodes_json("").unwrap(), None);
+        assert_eq!(episodes_json("S01").unwrap(), Some(json!({"1": {}})));
         assert_eq!(
             episodes_json("S01-03").unwrap(),
-            json!({"1": {}, "2": {}, "3": {}})
+            Some(json!({"1": {}, "2": {}, "3": {}}))
         );
         assert_eq!(
             episodes_json("S01E01-03,E05, S02E07").unwrap(),
-            json!({
+            Some(json!({
                 "1": {"1": {}, "2": {}, "3": {}, "5": {}},
                 "2": {"7": {}}
-            })
+            }))
         );
     }
 
