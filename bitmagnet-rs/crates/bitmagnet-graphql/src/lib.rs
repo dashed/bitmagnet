@@ -23,6 +23,11 @@ pub use schema::{
     TorrentDeleteRequest, TorrentDeleteWriterAdmission, MAX_TORRENT_DELETE_INFO_HASHES,
 };
 pub use schema::{
+    admit_torrent_reprocess_writer_authority, PgTorrentReprocessMutationsRuntime,
+    TorrentReprocessMutationsError, TorrentReprocessMutationsRuntime,
+    TorrentReprocessMutationsRuntimeData, TorrentReprocessRequest,
+};
+pub use schema::{
     build_runtime_schema, build_runtime_search_schema, build_runtime_search_schema_with_mutations,
     build_runtime_search_schema_with_tag_mutations, build_schema, build_search_schema, schema,
     Mutation, Query, Schema,
