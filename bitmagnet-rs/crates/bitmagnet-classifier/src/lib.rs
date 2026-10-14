@@ -313,10 +313,9 @@ impl Classifier {
             }
         }
 
+        let scope = self.env.run_scope(torrent_val, flags_val);
         let ctx = ExecCtx {
-            env: &self.env,
-            torrent_val: &torrent_val,
-            flags_val: &flags_val,
+            scope: &scope,
             input,
             workflows: &self.workflows,
             action_entries: &action_entries,
