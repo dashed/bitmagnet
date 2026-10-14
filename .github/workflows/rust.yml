@@ -975,6 +975,8 @@ jobs:
       BITMAGNET_GRAPHQL_TORRENT_DELETE_TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_graphql_torrent_delete_test?sslmode=disable
       BITMAGNET_GRAPHQL_TORRENT_DELETE_TEST_GO_DATABASE_URL: postgres://bitmagnet_graphql_torrent_delete_go_writer_ci:graphql-torrent-delete-go-writer-ci-only@localhost:5432/bitmagnet_graphql_torrent_delete_test?sslmode=disable
       BITMAGNET_GRAPHQL_TORRENT_DELETE_TEST_DATABASE_URL: postgres://bitmagnet_graphql_torrent_delete_writer_ci:graphql-torrent-delete-writer-ci-only@localhost:5432/bitmagnet_graphql_torrent_delete_test?sslmode=disable
+      BITMAGNET_GRAPHQL_TORRENT_REPROCESS_TEST_ADMIN_DATABASE_URL: postgres://postgres:postgres@localhost:5432/bitmagnet_graphql_torrent_reprocess_test?sslmode=disable
+      BITMAGNET_GRAPHQL_TORRENT_REPROCESS_TEST_DATABASE_URL: postgres://bitmagnet_graphql_torrent_reprocess_writer_ci:graphql-torrent-reprocess-writer-ci-only@localhost:5432/bitmagnet_graphql_torrent_reprocess_test?sslmode=disable
       BITMAGNET_GRAPHQL_METRICS_TEST_DATABASE_URL: postgres://bitmagnet_graphql_metrics_reader_ci:graphql-metrics-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_GRAPHQL_FULL_READER_TEST_DATABASE_URL: postgres://bitmagnet_graphql_full_reader_ci:graphql-full-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
       BITMAGNET_TORZNAB_TEST_DATABASE_URL: postgres://bitmagnet_torznab_reader_ci:torznab-reader-ci-only@localhost:5432/bitmagnet?sslmode=disable
@@ -995,7 +997,8 @@ jobs:
             -c 'CREATE DATABASE bitmagnet_processor_writer_load_test' \
             -c 'CREATE DATABASE bitmagnet_graphql_mutation_test' \
             -c 'CREATE DATABASE bitmagnet_graphql_queue_mutation_test' \
-            -c 'CREATE DATABASE bitmagnet_graphql_torrent_delete_test'
+            -c 'CREATE DATABASE bitmagnet_graphql_torrent_delete_test' \
+            -c 'CREATE DATABASE bitmagnet_graphql_torrent_reprocess_test'
           "$(go env GOPATH)/bin/goose" -dir migrations postgres \
             "$BITMAGNET_DHT_CRAWLER_TEST_DATABASE_URL" up
           "$(go env GOPATH)/bin/goose" -dir migrations postgres \
@@ -1193,6 +1196,17 @@ jobs:
 
           go test -tags integration -count=1 ./internal/blocking \
             -run '^TestTorrentDeleteParityGoVerifyAfterRust$'
+      - name: Run GraphQL torrent-reprocess Go-oracle differential
+        working-directory: ${{ github.workspace }}
+        run: |
+          go test -tags integration -count=1 ./internal/gql/resolvers \
+            -run '^TestTorrentReprocessParityGo$'
+          psql -X "$BITMAGNET_GRAPHQL_TORRENT_REPROCESS_TEST_ADMIN_DATABASE_URL" \
+            -v ON_ERROR_STOP=1 -f testdata/parity/graphql-torrent-reprocess/writer-role.sql
+          cargo test --manifest-path bitmagnet-rs/Cargo.toml \
+            -p bitmagnet-graphql --test torrent_reprocess_mutations_pg -- \
+            --ignored --exact real_pg_torrent_reprocess_matches_go_with_isolated_writer \
+            --test-threads=1
       - name: Run full GraphQL reader authority gate
         working-directory: ${{ github.workspace }}
         run: |
