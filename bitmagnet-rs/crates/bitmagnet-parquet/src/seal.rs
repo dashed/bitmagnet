@@ -650,7 +650,16 @@ fn segment_layer(layout: &Layout, s: &SegmentEntry) -> FoldLayer {
     }
 }
 
-/// Build the rank-aware SELECT for one folded artifact.
+/// Build the rank-aware SELECT for one folded artifact: a row from layer `i`
+/// survives unless a NEWER layer's tombstones list its torrent.
+///
+/// One multi-file scan per artifact kind and a single anti-join on the layer
+/// rank, so the plan does not grow with the input count. The earlier per-layer
+/// `NOT EXISTS` over a UNION of newer tombstones planned one hash anti-join per
+/// layer and re-scanned every newer tombstone file for each one: 19 joins and
+/// 210 Parquet scans for 20 inputs. The rank comes from a `CASE` on the scanned
+/// `filename`; an unmapped file fails instead of silently keeping superseded
+/// rows.
 pub fn layered_select_sql(layers: &[FoldLayer], artifact: LayeredArtifact) -> Result<String> {
     if layers.is_empty() {
         anyhow::bail!("layered SELECT requires at least one layer");
@@ -659,24 +668,55 @@ pub fn layered_select_sql(layers: &[FoldLayer], artifact: LayeredArtifact) -> Re
         LayeredArtifact::Fact => "info_hash, file_index, path, extension, size, is_padding",
         LayeredArtifact::AggTorrentExt => "info_hash, extension, file_count, total_size, max_size",
     };
-    let mut selects = Vec::with_capacity(layers.len());
-    for (i, layer) in layers.iter().enumerate() {
-        let path = match artifact {
-            LayeredArtifact::Fact => &layer.fact,
-            LayeredArtifact::AggTorrentExt => &layer.agg_torrent_ext,
-        };
-        let alias = format!("l{i}");
-        let mut select = format!(
-            "SELECT {columns} FROM read_parquet('{}') AS {alias}",
-            sql_path(path)
-        );
-        if let Some(pred) = newer_tombstone_predicate(layers, i, &alias) {
-            select.push_str(" WHERE ");
-            select.push_str(&pred);
-        }
-        selects.push(select);
+    let data: Vec<(usize, &Path)> = layers
+        .iter()
+        .map(|layer| match artifact {
+            LayeredArtifact::Fact => layer.fact.as_path(),
+            LayeredArtifact::AggTorrentExt => layer.agg_torrent_ext.as_path(),
+        })
+        .enumerate()
+        .collect();
+    // The oldest layer's tombstones hide nothing: no input is older than it.
+    let tombstones: Vec<(usize, &Path)> = layers
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(rank, layer)| layer.tombstones.as_deref().map(|t| (rank, t)))
+        .collect();
+    if tombstones.is_empty() {
+        return Ok(format!(
+            "SELECT {columns} FROM read_parquet({})",
+            path_list(&data)
+        ));
     }
-    Ok(selects.join("\nUNION ALL\n"))
+    Ok(format!(
+        "SELECT {columns} FROM (\nSELECT {columns}, {} AS layer FROM read_parquet({}, filename = true)\n) AS r\n\
+         ANTI JOIN (\nSELECT info_hash, {} AS layer FROM read_parquet({}, filename = true)\n) AS t\n\
+         ON t.info_hash = r.info_hash AND t.layer > r.layer",
+        layer_rank(&data),
+        path_list(&data),
+        layer_rank(&tombstones),
+        path_list(&tombstones),
+    ))
+}
+
+fn path_list(files: &[(usize, &Path)]) -> String {
+    let quoted: Vec<String> = files
+        .iter()
+        .map(|(_, path)| format!("'{}'", sql_path(path)))
+        .collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+fn layer_rank(files: &[(usize, &Path)]) -> String {
+    let arms: Vec<String> = files
+        .iter()
+        .map(|(rank, path)| format!("WHEN '{}' THEN {rank}", sql_path(path)))
+        .collect();
+    format!(
+        "CASE filename {} ELSE error('fold: unmapped layer file ' || filename) END",
+        arms.join(" ")
+    )
 }
 
 /// Build the `UNION DISTINCT` tombstone SELECT for a folded segment.
@@ -694,28 +734,6 @@ pub fn tombstone_union_select_sql(layers: &[FoldLayer]) -> Result<String> {
         .collect();
     Ok(format!(
         "SELECT DISTINCT info_hash FROM (\n{}\n) AS all_tombstones",
-        selects.join("\nUNION ALL\n")
-    ))
-}
-
-fn newer_tombstone_predicate(
-    layers: &[FoldLayer],
-    layer_index: usize,
-    alias: &str,
-) -> Option<String> {
-    let tombs: Vec<&PathBuf> = layers[layer_index + 1..]
-        .iter()
-        .filter_map(|l| l.tombstones.as_ref())
-        .collect();
-    if tombs.is_empty() {
-        return None;
-    }
-    let selects: Vec<String> = tombs
-        .iter()
-        .map(|p| format!("SELECT info_hash FROM read_parquet('{}')", sql_path(p)))
-        .collect();
-    Some(format!(
-        "NOT EXISTS (SELECT 1 FROM (\n{}\n) AS newer_tombstones WHERE newer_tombstones.info_hash = {alias}.info_hash)",
         selects.join("\nUNION ALL\n")
     ))
 }
@@ -1111,34 +1129,68 @@ mod tests {
         assert_eq!(layout.read_watermark(), 130);
     }
 
+    fn three_segments() -> Vec<FoldLayer> {
+        (1..=3)
+            .map(|v| FoldLayer {
+                fact: format!("/g/seg/v{v}/fact.parquet").into(),
+                agg_torrent_ext: format!("/g/seg/v{v}/agg_torrent_ext.parquet").into(),
+                tombstones: Some(format!("/g/seg/v{v}/tombstones.parquet").into()),
+            })
+            .collect()
+    }
+
     #[test]
-    fn layered_rank_rule_mentions_only_newer_tombstones() {
-        let layers = vec![
-            FoldLayer {
-                fact: "seg/v1/fact.parquet".into(),
-                agg_torrent_ext: "seg/v1/agg_torrent_ext.parquet".into(),
-                tombstones: Some("seg/v1/tombstones.parquet".into()),
-            },
-            FoldLayer {
-                fact: "seg/v2/fact.parquet".into(),
-                agg_torrent_ext: "seg/v2/agg_torrent_ext.parquet".into(),
-                tombstones: Some("seg/v2/tombstones.parquet".into()),
-            },
-            FoldLayer {
-                fact: "seg/v3/fact.parquet".into(),
-                agg_torrent_ext: "seg/v3/agg_torrent_ext.parquet".into(),
-                tombstones: Some("seg/v3/tombstones.parquet".into()),
-            },
-        ];
+    fn layered_rank_rule_is_one_anti_join_on_newer_tombstones() {
+        let sql = layered_select_sql(&three_segments(), LayeredArtifact::Fact).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT info_hash, file_index, path, extension, size, is_padding FROM (\n\
+             SELECT info_hash, file_index, path, extension, size, is_padding, \
+             CASE filename WHEN '/g/seg/v1/fact.parquet' THEN 0 WHEN '/g/seg/v2/fact.parquet' THEN 1 \
+             WHEN '/g/seg/v3/fact.parquet' THEN 2 ELSE error('fold: unmapped layer file ' || filename) END AS layer \
+             FROM read_parquet(['/g/seg/v1/fact.parquet', '/g/seg/v2/fact.parquet', '/g/seg/v3/fact.parquet'], filename = true)\n\
+             ) AS r\n\
+             ANTI JOIN (\nSELECT info_hash, \
+             CASE filename WHEN '/g/seg/v2/tombstones.parquet' THEN 1 WHEN '/g/seg/v3/tombstones.parquet' THEN 2 \
+             ELSE error('fold: unmapped layer file ' || filename) END AS layer \
+             FROM read_parquet(['/g/seg/v2/tombstones.parquet', '/g/seg/v3/tombstones.parquet'], filename = true)\n\
+             ) AS t\n\
+             ON t.info_hash = r.info_hash AND t.layer > r.layer"
+        );
+        // The oldest input's tombstones hide nothing inside the fold.
+        assert!(!sql.contains("/g/seg/v1/tombstones.parquet"));
+    }
+
+    #[test]
+    fn layered_select_without_newer_tombstones_is_a_plain_read() {
+        let mut layers = three_segments();
+        layers.truncate(1);
+        layers[0].tombstones = None;
+        layers.push(FoldLayer {
+            tombstones: None,
+            ..three_segments().pop().unwrap()
+        });
+        let sql = layered_select_sql(&layers, LayeredArtifact::AggTorrentExt).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT info_hash, extension, file_count, total_size, max_size FROM \
+             read_parquet(['/g/seg/v1/agg_torrent_ext.parquet', '/g/seg/v3/agg_torrent_ext.parquet'])"
+        );
+    }
+
+    #[test]
+    fn layered_plan_does_not_grow_with_the_input_count() {
+        let layers: Vec<FoldLayer> = (0..40)
+            .map(|v| FoldLayer {
+                fact: format!("/g/seg/v{v}/fact.parquet").into(),
+                agg_torrent_ext: format!("/g/seg/v{v}/agg_torrent_ext.parquet").into(),
+                tombstones: (v > 0).then(|| format!("/g/seg/v{v}/tombstones.parquet").into()),
+            })
+            .collect();
         let sql = layered_select_sql(&layers, LayeredArtifact::Fact).unwrap();
-        let l1_pos = sql.find("seg/v1/fact.parquet").unwrap();
-        let t2_pos = sql.find("seg/v2/tombstones.parquet").unwrap();
-        let t3_pos = sql.find("seg/v3/tombstones.parquet").unwrap();
-        let l3_pos = sql.find("seg/v3/fact.parquet").unwrap();
-        assert!(l1_pos < t2_pos);
-        assert!(l1_pos < t3_pos);
-        assert!(l3_pos > t3_pos);
-        assert_eq!(sql.matches("NOT EXISTS").count(), 2);
+        assert_eq!(sql.matches("read_parquet(").count(), 2);
+        assert_eq!(sql.matches("ANTI JOIN").count(), 1);
+        assert_eq!(sql.matches("NOT EXISTS").count(), 0);
     }
 
     #[test]
@@ -1324,5 +1376,129 @@ mod tests {
         assert_eq!(layout.read_watermark(), 110);
         assert_eq!(next_base.cut, 130);
         assert_eq!(next_base.version, 200);
+    }
+
+    /// Write one fold input with DuckDB: (info_hash, path, size) mkv rows.
+    #[cfg(feature = "duckdb-sort")]
+    fn write_fold_layer(
+        dir: &Path,
+        files: &[(&str, &str, u64)],
+        tombstones: Option<&[&str]>,
+    ) -> FoldLayer {
+        fs::create_dir_all(dir).unwrap();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let rows: Vec<String> = files
+            .iter()
+            .enumerate()
+            .map(|(i, (ih, path, size))| format!("('{ih}', {i}, '{path}', 'mkv', {size})"))
+            .collect();
+        let values = if rows.is_empty() {
+            "SELECT NULL, NULL, NULL, NULL, NULL WHERE false".to_owned()
+        } else {
+            format!("VALUES {}", rows.join(", "))
+        };
+        let d = dir.display();
+        conn.execute_batch(&format!(
+            "CREATE TABLE f AS SELECT c0::VARCHAR AS info_hash, c1::UINTEGER AS file_index, \
+               c2::VARCHAR AS path, c3::VARCHAR AS extension, c4::UBIGINT AS size, \
+               false AS is_padding FROM ({values}) v(c0, c1, c2, c3, c4); \
+             COPY f TO '{d}/fact.parquet' (FORMAT parquet); \
+             COPY (SELECT info_hash, extension, count(*)::UBIGINT AS file_count, \
+                     sum(size)::UBIGINT AS total_size, max(size) AS max_size \
+                   FROM f GROUP BY ALL) TO '{d}/agg_torrent_ext.parquet' (FORMAT parquet);"
+        ))
+        .unwrap();
+        let tombstones = tombstones.map(|hashes| {
+            let select = if hashes.is_empty() {
+                "SELECT NULL::VARCHAR AS info_hash WHERE false".to_owned()
+            } else {
+                let t: Vec<String> = hashes.iter().map(|h| format!("('{h}')")).collect();
+                format!(
+                    "SELECT c0::VARCHAR AS info_hash FROM (VALUES {}) v(c0)",
+                    t.join(", ")
+                )
+            };
+            conn.execute_batch(&format!(
+                "COPY ({select}) TO '{d}/tombstones.parquet' (FORMAT parquet);"
+            ))
+            .unwrap();
+            dir.join("tombstones.parquet")
+        });
+        FoldLayer {
+            fact: dir.join("fact.parquet"),
+            agg_torrent_ext: dir.join("agg_torrent_ext.parquet"),
+            tombstones,
+        }
+    }
+
+    #[cfg(feature = "duckdb-sort")]
+    fn read_sorted(sql: &str) -> Vec<(String, String)> {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let mut stmt = conn.prepare(sql).unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    #[cfg(feature = "duckdb-sort")]
+    #[test]
+    fn merge_base_keeps_only_each_torrents_newest_layer() {
+        let root = tmp("fold-e2e");
+        let layers = vec![
+            write_fold_layer(
+                &root.join("base"),
+                &[
+                    ("aa", "a/base.mkv", 10),
+                    ("bb", "b/base.mkv", 20),
+                    ("cc", "c/base.mkv", 30),
+                ],
+                None,
+            ),
+            // aa re-crawled, dd new
+            write_fold_layer(
+                &root.join("s1"),
+                &[("aa", "a/s1.mkv", 11), ("dd", "d/s1.mkv", 40)],
+                Some(&["aa", "dd"]),
+            ),
+            // an empty seal
+            write_fold_layer(&root.join("s2"), &[], Some(&[])),
+            // aa deleted, cc re-crawled
+            write_fold_layer(
+                &root.join("s3"),
+                &[("cc", "c/s3.mkv", 31)],
+                Some(&["aa", "cc"]),
+            ),
+        ];
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        materialize_layers(&layers, &out, true).unwrap();
+
+        let fact = read_sorted(&format!(
+            "SELECT info_hash, path FROM read_parquet('{}/fact.parquet') ORDER BY ALL",
+            out.display()
+        ));
+        let want = [("bb", "b/base.mkv"), ("cc", "c/s3.mkv"), ("dd", "d/s1.mkv")];
+        assert_eq!(
+            fact,
+            want.map(|(h, p)| (h.to_owned(), p.to_owned())).to_vec()
+        );
+        let att = read_sorted(&format!(
+            "SELECT info_hash, max_size::VARCHAR FROM read_parquet('{}/agg_torrent_ext.parquet') ORDER BY ALL",
+            out.display()
+        ));
+        let want = [("bb", "20"), ("cc", "31"), ("dd", "40")];
+        assert_eq!(
+            att,
+            want.map(|(h, p)| (h.to_owned(), p.to_owned())).to_vec()
+        );
+        // A folded segment carries every input's tombstones, the oldest's too.
+        let tombs = read_sorted(&format!(
+            "SELECT info_hash, '' FROM read_parquet('{}/tombstones.parquet') ORDER BY ALL",
+            out.display()
+        ));
+        let hashes: Vec<&str> = tombs.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hashes, ["aa", "cc", "dd"]);
+        assert!(!out.join(".fold-tmp").exists());
     }
 }
