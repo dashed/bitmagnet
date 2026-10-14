@@ -251,3 +251,113 @@ fn register_functions(ctx: &mut Context<'_>) {
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Target/pattern pairs beyond the keyword patterns: anchors, word
+    /// boundaries, flags, Unicode classes and case folding, multi-byte text,
+    /// the empty pattern, and patterns the `regex` crate rejects.
+    const CASES: &[(&str, &str)] = &[
+        ("abc", "^[a-z]*$"),
+        ("abc1", "^[a-z]*$"),
+        ("abc", "b"),
+        ("abc", "^b"),
+        ("abc", "c$"),
+        ("line1\nline2", "^line2$"),
+        ("line1\nline2", "(?m)^line2$"),
+        ("The Matrix 1999", r"\b1999\b"),
+        ("The Matrix 19999", r"\b1999\b"),
+        ("ÉTÉ", r"(?i)été"),
+        ("été", r"^\p{L}+$"),
+        ("été", r"^(?-u:\w)+$"),
+        ("日本語", r"^\p{Han}+$"),
+        ("٣", r"^\d$"),
+        ("٣", r"^(?-u:\d)$"),
+        ("ǅ", r"(?i)ǆ"),
+        ("a.b", r"a\.b"),
+        ("axb", r"a\.b"),
+        ("", ""),
+        ("abc", ""),
+        ("abc", "("),
+        ("abc", "[a-"),
+        ("abc", r"\p{NotAClass}"),
+        ("abc", "a{2,1}"),
+        ("abc", "(?=a)"),
+        ("abc", r"\1"),
+    ];
+
+    fn root() -> Context<'static> {
+        let mut ctx = Context::with_env(Arc::new(cel::Env::stdlib()));
+        register_functions(&mut ctx);
+        ctx
+    }
+
+    fn eval(ctx: &Context<'_>, expr: &str, target: &str, pattern: &str) -> cel::ResolveResult {
+        let mut scope = ctx.new_inner_scope();
+        scope.add_variable_from_value("s", target);
+        scope.add_variable_from_value("p", pattern);
+        Program::compile(expr).expect("compile").execute(&scope)
+    }
+
+    /// cel-rust's stdlib `matches` (behind the `regex` feature this crate
+    /// leaves off) is `Regex::new(pattern)` then `is_match`, failing with this
+    /// exact `FunctionError` when the pattern does not compile.
+    fn stdlib_definition(target: &str, pattern: &str) -> cel::ResolveResult {
+        match Regex::new(pattern) {
+            Ok(regex) => Ok(Value::Bool(regex.is_match(target))),
+            Err(err) => Err(ExecutionError::function_error(
+                "matches",
+                format!("'{pattern}' not a valid regex:\n{err}"),
+            )),
+        }
+    }
+
+    #[test]
+    fn matches_agrees_with_the_cel_stdlib_definition_on_hits_and_misses() {
+        let ctx = root();
+        // Twice, so the second pass is served from the cache.
+        for _ in 0..2 {
+            for (target, pattern) in CASES {
+                assert_eq!(
+                    eval(&ctx, "s.matches(p)", target, pattern),
+                    stdlib_definition(target, pattern),
+                    "{target:?}.matches({pattern:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_patterns_are_errors_and_never_cached() {
+        let ctx = root();
+        for _ in 0..2 {
+            assert!(matches!(
+                eval(&ctx, "s.matches(p)", "abc", "("),
+                Err(ExecutionError::FunctionError { .. })
+            ));
+        }
+        assert_eq!(
+            eval(&ctx, "s.matches(p)", "abc", "a"),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn call_shapes_the_stdlib_overload_never_declared_stay_undeclared() {
+        let ctx = root();
+        for expr in [
+            "matches(s, p)",
+            "s.matches(1)",
+            "s.matches(p, p)",
+            "1.matches(p)",
+        ] {
+            assert_eq!(
+                eval(&ctx, expr, "abc", "a"),
+                Err(ExecutionError::undeclared_reference("matches")),
+                "{expr}"
+            );
+        }
+    }
+}
