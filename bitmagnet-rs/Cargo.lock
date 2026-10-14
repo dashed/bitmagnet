@@ -1043,6 +1043,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bitmagnet-blocking",
+ "bitmagnet-classifier",
  "bitmagnet-common",
  "bitmagnet-db",
  "bitmagnet-model",

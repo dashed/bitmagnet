@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 bitmagnet-blocking = { path = "../bitmagnet-blocking" }
+# Embedded core classifier digest admitted against the live Go processor.
+bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 bitmagnet-common = { path = "../bitmagnet-common" }
 bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-model = { path = "../bitmagnet-model" }
