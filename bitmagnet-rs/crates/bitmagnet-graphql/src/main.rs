@@ -66,6 +66,9 @@ struct Args {
 
     #[command(flatten)]
     torrent_delete_mutations: TorrentDeleteMutationArgs,
+
+    #[command(flatten)]
+    torrent_reprocess_mutations: TorrentReprocessMutationArgs,
 }
 
 /// Explicitly gated writer configuration for the torrent-tag mutation family.
@@ -144,6 +147,41 @@ struct TorrentDeleteMutationArgs {
         value_parser = parse_positive_u32
     )]
     torrent_delete_mutation_postgres_max_connections: u32,
+}
+
+/// Explicitly gated writer configuration for `torrent.reprocess`.
+///
+/// Go runs the processor synchronously in the request, so an enabled runtime
+/// writes `torrent_contents`, `torrent_tags` and partial-failure retry
+/// `queue_jobs` rows. Only the attachment-free core-workflow subset is served;
+/// it classifies with the embedded core classifier, not a merged
+/// `classifier.yml`, so the Go deployment must also run the core config.
+#[derive(Debug, ClapArgs)]
+struct TorrentReprocessMutationArgs {
+    /// Enable the served torrent-reprocess runtime.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATIONS_ENABLED",
+        default_value_t = false,
+        value_parser = parse_go_bool
+    )]
+    torrent_reprocess_mutations_enabled: bool,
+
+    /// Separate PostgreSQL reprocess-writer DSN, required exactly when enabled.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN"
+    )]
+    torrent_reprocess_mutation_postgres_dsn: Option<SecretDsn>,
+
+    /// Maximum connections in the separately authenticated reprocess-writer pool.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        default_value_t = 2,
+        value_parser = parse_positive_u32
+    )]
+    torrent_reprocess_mutation_postgres_max_connections: u32,
 }
 
 #[derive(Clone)]
@@ -647,6 +685,12 @@ async fn main() -> anyhow::Result<()> {
         &pool,
     )
     .await?;
+    let torrent_reprocess_mutations = build_torrent_reprocess_mutations_runtime(
+        &args.torrent_reprocess_mutations,
+        args.expected_goose_version,
+        &pool,
+    )
+    .await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     // Register both C6 metric families exactly once, even while the serving
@@ -668,6 +712,7 @@ async fn main() -> anyhow::Result<()> {
         tag_mutations,
         queue_mutations,
         torrent_delete_mutations,
+        torrent_reprocess_mutations,
     );
     let state = AppState {
         schema,
@@ -800,6 +845,46 @@ async fn build_torrent_delete_mutations_runtime(
     ))
 }
 
+async fn build_torrent_reprocess_mutations_runtime(
+    args: &TorrentReprocessMutationArgs,
+    expected_goose_version: i64,
+    read_pool: &PgPool,
+) -> anyhow::Result<bitmagnet_graphql::TorrentReprocessMutationsRuntimeData> {
+    let Some(config) = torrent_reprocess_mutation_db_config(args)? else {
+        return Ok(bitmagnet_graphql::TorrentReprocessMutationsRuntimeData::disabled());
+    };
+    let pool = bitmagnet_db::connect(&config)
+        .await
+        .context("connect the separately authenticated GraphQL torrent-reprocess writer")?;
+    let goose_head = bitmagnet_graphql::admit_pg(&pool, expected_goose_version)
+        .await
+        .context("admit the GraphQL torrent-reprocess writer against the expected Goose head")?;
+    let read_identity = postgres_identity(read_pool)
+        .await
+        .context("read the GraphQL reader PostgreSQL identity")?;
+    let writer_identity = postgres_identity(&pool)
+        .await
+        .context("read the GraphQL torrent-reprocess writer PostgreSQL identity")?;
+    anyhow::ensure!(
+        writer_identity.0 == read_identity.0 && writer_identity.1 == read_identity.1,
+        "GraphQL reader and torrent-reprocess writer must target the same PostgreSQL system and database"
+    );
+    anyhow::ensure!(
+        writer_identity.2 != read_identity.2,
+        "GraphQL reader and torrent-reprocess writer must use different PostgreSQL roles"
+    );
+    bitmagnet_graphql::admit_torrent_reprocess_writer_authority(&pool)
+        .await
+        .context("admit exact GraphQL torrent-reprocess writer authority")?;
+    let runtime = bitmagnet_graphql::TorrentReprocessMutationsRuntimeData::pg(pool)
+        .context("compile the embedded core classifier for torrent reprocess")?;
+    info!(
+        goose_version = goose_head.version,
+        "torrent-reprocess mutations enabled with a separate writer pool"
+    );
+    Ok(runtime)
+}
+
 async fn postgres_identity(pool: &PgPool) -> anyhow::Result<(String, String, String)> {
     Ok(sqlx::query_as::<_, (String, String, String)>(
         "SELECT current_database()::text, system_identifier::text, current_user::text \
@@ -921,6 +1006,28 @@ async fn admit_mutation_writer_authority(
     }
 
     Ok(())
+}
+
+fn torrent_reprocess_mutation_db_config(
+    args: &TorrentReprocessMutationArgs,
+) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
+    match (
+        args.torrent_reprocess_mutations_enabled,
+        args.torrent_reprocess_mutation_postgres_dsn.as_ref(),
+    ) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN is forbidden while torrent-reprocess mutations are disabled"
+        ),
+        (true, None) => anyhow::bail!(
+            "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN is required while torrent-reprocess mutations are enabled"
+        ),
+        (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
+            dsn: dsn.expose().to_owned(),
+            max_connections: args.torrent_reprocess_mutation_postgres_max_connections,
+            ..bitmagnet_db::DbConfig::default()
+        })),
+    }
 }
 
 fn mutation_db_config(args: &MutationArgs) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
@@ -1169,12 +1276,13 @@ mod tests {
 
     use super::{
         app, build_search_runtime, mutation_db_config, parse_go_duration, queue_mutation_db_config,
-        torrent_delete_mutation_db_config, AppState, Args, GRAPHQL_HANDLER_DURATION_HEADER,
+        torrent_delete_mutation_db_config, torrent_reprocess_mutation_db_config, AppState, Args,
+        GRAPHQL_HANDLER_DURATION_HEADER,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 45] = [
+    const ARGS_ENV_KEYS: [&str; 48] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
         "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
@@ -1186,6 +1294,9 @@ mod tests {
         "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATIONS_ENABLED",
         "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_DSN",
         "BITMAGNET_GRAPHQL_TORRENT_DELETE_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATIONS_ENABLED",
+        "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN",
+        "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_MAX_CONNECTIONS",
         "HEALTH_PEER_GRAPHQL_URLS",
         "HEALTH_PEER_TIMEOUT",
         "SEARCH_FILE_SEARCH_ENABLED",
@@ -1322,6 +1433,21 @@ mod tests {
                 .torrent_delete_mutations
                 .torrent_delete_mutation_postgres_max_connections,
             1
+        );
+        assert!(
+            !defaults
+                .torrent_reprocess_mutations
+                .torrent_reprocess_mutations_enabled
+        );
+        assert!(defaults
+            .torrent_reprocess_mutations
+            .torrent_reprocess_mutation_postgres_dsn
+            .is_none());
+        assert_eq!(
+            defaults
+                .torrent_reprocess_mutations
+                .torrent_reprocess_mutation_postgres_max_connections,
+            2
         );
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
@@ -1526,6 +1652,52 @@ mod tests {
         let error = torrent_delete_mutation_db_config(&args.torrent_delete_mutations)
             .expect_err("torrent-delete writer pool must stay single-connection");
         assert!(error.to_string().contains("must be exactly 1"));
+    }
+
+    #[test]
+    fn torrent_reprocess_writer_requires_the_double_gate() {
+        let mut args = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let _restore = ArgsEnvRestore::clear();
+            default_args()
+        };
+        assert!(
+            torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+                .expect("disabled config")
+                .is_none()
+        );
+
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutations_enabled = true;
+        let missing = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect_err("enabled torrent-reprocess writer requires a DSN");
+        assert!(missing.to_string().contains("is required"));
+
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutations_enabled = false;
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutation_postgres_dsn = Some(
+            "postgres://reprocess-writer:secret@localhost/bitmagnet"
+                .parse()
+                .expect("test DSN"),
+        );
+        let debug = format!("{:?}", args.torrent_reprocess_mutations);
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("reprocess-writer:secret"));
+        let forbidden = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect_err("disabled torrent-reprocess writer forbids a DSN");
+        assert!(forbidden.to_string().contains("is forbidden"));
+
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutations_enabled = true;
+        let config = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect("enabled config")
+            .expect("torrent-reprocess writer config");
+        assert_eq!(config.max_connections, 2);
+        assert_eq!(
+            config.dsn,
+            "postgres://reprocess-writer:secret@localhost/bitmagnet"
+        );
     }
 
     #[test]

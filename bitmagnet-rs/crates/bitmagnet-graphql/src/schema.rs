@@ -14,6 +14,7 @@ pub mod search;
 mod search_resolvers;
 pub mod torrent_delete_mutations;
 pub mod torrent_files;
+pub mod torrent_reprocess_mutations;
 pub mod torrent_sources;
 pub mod torrent_tag_mutations;
 pub mod torrent_tags;
@@ -47,6 +48,11 @@ pub use torrent_files::{
     PgTorrentFilesRuntime, TorrentFilesBlob, TorrentFilesError, TorrentFilesLimits,
     TorrentFilesRuntime, TorrentFilesRuntimeData, TORRENT_FILES_SQL,
 };
+pub use torrent_reprocess_mutations::{
+    admit_torrent_reprocess_writer_authority, PgTorrentReprocessMutationsRuntime,
+    TorrentReprocessMutationsError, TorrentReprocessMutationsRuntime,
+    TorrentReprocessMutationsRuntimeData, TorrentReprocessRequest,
+};
 pub use torrent_sources::{
     PgTorrentSourcesRuntime, TorrentSourceRecord, TorrentSourcesError, TorrentSourcesRuntime,
     TorrentSourcesRuntimeData, MAX_TORRENT_SOURCES,
@@ -77,6 +83,7 @@ pub fn schema() -> Schema {
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentDeleteMutationsRuntimeData::disabled())
+        .data(TorrentReprocessMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -94,6 +101,7 @@ pub fn build_schema(version: String) -> Schema {
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentDeleteMutationsRuntimeData::disabled())
+        .data(TorrentReprocessMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -111,6 +119,7 @@ pub fn build_search_schema(version: String, search: std::sync::Arc<dyn SearchRun
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::disabled())
         .data(TorrentDeleteMutationsRuntimeData::disabled())
+        .data(TorrentReprocessMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::disabled())
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::disabled())
@@ -134,6 +143,7 @@ pub fn build_runtime_schema(
         .data(QueueMutationsRuntimeData::disabled())
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(TorrentDeleteMutationsRuntimeData::disabled())
+        .data(TorrentReprocessMutationsRuntimeData::disabled())
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(TorrentTagMutationsRuntimeData::disabled())
         .data(TorrentTagsRuntimeData::pg(pool))
@@ -178,6 +188,7 @@ pub fn build_runtime_search_schema_with_tag_mutations(
         tag_mutations,
         QueueMutationsRuntimeData::disabled(),
         TorrentDeleteMutationsRuntimeData::disabled(),
+        TorrentReprocessMutationsRuntimeData::disabled(),
     )
 }
 
@@ -186,6 +197,7 @@ pub fn build_runtime_search_schema_with_tag_mutations(
 /// Each enabled family must be constructed from its own separately authorized
 /// writer pool. All simpler builders attach fail-loud disabled implementations.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn build_runtime_search_schema_with_mutations(
     version: String,
     pool: bitmagnet_db::PgPool,
@@ -194,6 +206,7 @@ pub fn build_runtime_search_schema_with_mutations(
     tag_mutations: TorrentTagMutationsRuntimeData,
     queue_mutations: QueueMutationsRuntimeData,
     torrent_delete_mutations: TorrentDeleteMutationsRuntimeData,
+    torrent_reprocess_mutations: TorrentReprocessMutationsRuntimeData,
 ) -> Schema {
     async_graphql::Schema::build(Query, Mutation, EmptySubscription)
         .data(Version(version))
@@ -204,6 +217,7 @@ pub fn build_runtime_search_schema_with_mutations(
         .data(queue_mutations)
         .data(TorrentFilesRuntimeData::pg(pool.clone()))
         .data(torrent_delete_mutations)
+        .data(torrent_reprocess_mutations)
         .data(TorrentSourcesRuntimeData::pg(pool.clone()))
         .data(tag_mutations)
         .data(TorrentTagsRuntimeData::pg(pool))
