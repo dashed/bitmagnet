@@ -350,7 +350,10 @@ text: `job failed to process: <error>` for handler failures, `job exceeded its
 deadline error for expired jobs.
 
 Only explicitly supported payloads are ever locked: `ClassifierWorkflow` must
-be `default` and the three attach flags must be JSON `false`. The embedded core
+be `default`, the three attach flags must be JSON `false`, and the payload may
+have no top-level key other than `ClassifyMode`, `ClassifierWorkflow`,
+`ClassifierFlags`, and `InfoHashes` (Go's decoder also binds case-insensitive
+key matches such as `classifierWorkflow`, which serde ignores). The embedded core
 configuration defaults all three flags to `true`, so an omitted flag can never
 resolve to the supported value; the organic DHT payload (`InfoHashes` only) is
 therefore always left to Go. A claimed job that the kernel still cannot
