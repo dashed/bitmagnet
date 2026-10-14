@@ -19,12 +19,6 @@ use super::objects::{
 use super::scalars::{Hash20, Void};
 use super::Version;
 
-fn unserved<T>(surface: &str) -> async_graphql::Result<T> {
-    Err(async_graphql::Error::new(format!(
-        "{surface} is declared for SDL parity but is not served by this Rust GraphQL runtime"
-    )))
-}
-
 pub struct Query;
 
 #[Object]
@@ -224,9 +218,15 @@ impl TorrentMutation {
         Ok(None)
     }
 
-    async fn reprocess(&self, input: TorrentReprocessInput) -> async_graphql::Result<Option<Void>> {
-        let _ = &input;
-        unserved("torrent mutation")
+    async fn reprocess(
+        &self,
+        ctx: &Context<'_>,
+        input: TorrentReprocessInput,
+    ) -> async_graphql::Result<Option<Void>> {
+        let runtime =
+            ctx.data::<super::torrent_reprocess_mutations::TorrentReprocessMutationsRuntimeData>()?;
+        super::torrent_reprocess_mutations::resolve(ctx, runtime, input).await;
+        Ok(None)
     }
 
     async fn set_tags(
