@@ -10,11 +10,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use bitmagnet_tape::ActionEntry;
-use cel::{Program, Value};
+use cel::Program;
 use futures::future::LocalBoxFuture;
 use serde_yaml::Value as Yaml;
 
-use crate::env::Env;
+use crate::env::eval_bool;
 use crate::errors::FlowError;
 use crate::model::{ClassifierInput, ContentType};
 use crate::parsers::{parse_date, parse_video_content};
@@ -342,9 +342,8 @@ fn string_list(value: &Yaml, path: &[String], kind: &str) -> Result<Vec<String>,
 /// Go's `executionContext`, which likewise carries the injected `dependencies`
 /// (`dependencies.go`) alongside the CEL bindings.
 pub(crate) struct ExecCtx<'a> {
-    pub env: &'a Env,
-    pub torrent_val: &'a Value,
-    pub flags_val: &'a Value,
+    /// The CEL run scope binding `torrent` and `flags` ([`crate::env::Env::run_scope`]).
+    pub scope: &'a cel::Context<'a>,
     pub input: &'a ClassifierInput,
     pub workflows: &'a HashMap<String, Action>,
     /// Ordered trace of every attach action as it is entered. The hook lives at
@@ -488,10 +487,7 @@ fn eval_condition(
             Ok(false)
         }
         Condition::Not(c) => Ok(!eval_condition(c, ctx, result)?),
-        Condition::Expression(program) => {
-            ctx.env
-                .eval_bool(program, ctx.torrent_val, result, ctx.flags_val)
-        }
+        Condition::Expression(program) => eval_bool(ctx.scope, program, result),
     }
 }
 
