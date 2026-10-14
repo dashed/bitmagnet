@@ -399,9 +399,19 @@ replacements). In B the Rust worker settled every admitted job except the four
 with sourced explicit hints, which it abstained from and Go then processed.
 `run_after`, `ran_at`, write timestamps, generated IDs, and bloom-filter bytes
 are excluded (Go's backoff jitter and filter decrement start are random).
-Throughput is not at parity: the Rust worker classifies sequentially on one
-core (about 100 torrents per second in B, 1,209 s), while Go's goroutine
-fan-out drained A in 91 s.
+The first run measured B's Rust phase at 1,209 s (about 100 torrents per
+second) against 91 s for A. Profiling traced that to the classifier, not the
+database: cel-rust's `matches` recompiled the multi-kilobyte `keywords.*`
+regexes on every call, every CEL binding was deep-copied for every expression,
+and, once those were fixed, the admitted claim's per-flag payload comparisons
+pushed the planner off `queue_jobs_claim_idx` into a sequential scan and sort
+of every pending payload per claim. With those fixed the same harness gives
+B's Rust phase 42 s against A's 100 s in round 1 and 42 s against 42 s in
+round 2 (reprocessing), and the settled-job span over the 120k corpus is
+25-31 s for both workers in both rounds (20-26 ms per 100-torrent job), with
+B and C still byte-identical in both rounds. The Rust worker still classifies on one
+core; what remains of its CPU time is cel-rust value conversion (the torrent
+once per run, `result` once per expression).
 
 The differential found three persistence-kernel divergences that the
 canonicalizing comparators had hidden: empty `episodes` were stored as `{}`
