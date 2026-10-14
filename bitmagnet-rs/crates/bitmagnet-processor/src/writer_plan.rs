@@ -8,7 +8,7 @@
 //! delegating to that transaction kernel. No queue consumer or application
 //! runtime calls it yet; the ingest-shadow runtime remains comparison-only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use bitmagnet_queue::{
@@ -17,7 +17,7 @@ use bitmagnet_queue::{
 use futures::future::BoxFuture;
 use sqlx::PgPool;
 
-use crate::persist::{persist_write_set, validate_persistence_input};
+use crate::persist::{persist_write_set_with_episode_objects, validate_persistence_input};
 use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
 use crate::{
     load_writer_torrents, project_torrent_persistence, BlockingManager, BoxError,
@@ -120,6 +120,8 @@ pub struct WriterPlan {
     retry_info_hashes: Vec<String>,
     retry_job: Option<QueueJob>,
     failures: WriterFailures,
+    /// Info hashes whose empty episodes Go stores as `{}` rather than `NULL`.
+    empty_episode_objects: BTreeSet<String>,
 }
 
 impl WriterPlan {
@@ -254,6 +256,7 @@ trait WriterPlanPersister: Send + Sync {
         write_set: &'a WriteSet,
         persistence: &'a BTreeMap<String, TorrentContentPersistence>,
         content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
+        empty_episode_objects: &'a BTreeSet<String>,
     ) -> BoxFuture<'a, Result<(), PersistError>>;
 }
 
@@ -271,12 +274,14 @@ where
         write_set: &'a WriteSet,
         persistence: &'a BTreeMap<String, TorrentContentPersistence>,
         content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
+        empty_episode_objects: &'a BTreeSet<String>,
     ) -> BoxFuture<'a, Result<(), PersistError>> {
-        Box::pin(persist_write_set(
+        Box::pin(persist_write_set_with_episode_objects(
             self.pool,
             write_set,
             persistence,
             content_persistence,
+            empty_episode_objects,
             self.blocking_manager,
         ))
     }
@@ -330,6 +335,7 @@ where
             &plan.write_set,
             &plan.persistence,
             &plan.content_persistence,
+            &plan.empty_episode_objects,
         )
         .await
     {
@@ -400,6 +406,7 @@ pub fn compose_writer_plan(
         .materialize_borrowed_with_failures(params, loaded.iter().map(|torrent| &torrent.loaded))?;
     let write_set = materialized.write_set;
     let content_persistence = materialized.content_persistence;
+    let empty_episode_objects = materialized.empty_episode_objects;
     let persistence = project_persistence(&write_set, &indexed, &content_persistence)?;
     validate_persistence_input(&write_set, &persistence, &content_persistence)?;
     let failures = compose_writer_failures(params, &indexed, materialized.classifier_failures);
@@ -432,6 +439,7 @@ pub fn compose_writer_plan(
         retry_info_hashes,
         retry_job,
         failures,
+        empty_episode_objects,
     })
 }
 
@@ -708,7 +716,7 @@ pub enum WriterPlanError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fmt;
     use std::sync::{Arc, Mutex};
 
@@ -832,6 +840,7 @@ mod tests {
             retry_info_hashes,
             retry_job,
             failures,
+            empty_episode_objects: BTreeSet::new(),
         }
     }
 
@@ -923,6 +932,7 @@ mod tests {
             _write_set: &'a WriteSet,
             _persistence: &'a BTreeMap<String, TorrentContentPersistence>,
             _content_persistence: &'a BTreeMap<ContentPersistenceKey, ContentPersistence>,
+            _empty_episode_objects: &'a BTreeSet<String>,
         ) -> BoxFuture<'a, Result<(), PersistError>> {
             Box::pin(async move {
                 self.events.lock().expect("events mutex").push("persist");

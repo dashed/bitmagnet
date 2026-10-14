@@ -36,28 +36,60 @@ static EPISODES_RE: LazyLock<Regex> =
 /// A season maps to its episode set; an empty set means "whole season".
 /// `BTreeMap`/`BTreeSet` give the sorted iteration Go achieves via explicit
 /// `sort.Slice` in `SeasonEntries`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Go also distinguishes a nil map from an allocated empty one, and that
+/// difference reaches the database: GORM's JSON serializer stores nil as SQL
+/// `NULL` but an empty map as `{}`. `EpisodesMatchToEpisodes` allocates as soon
+/// as its regex matched, even when a backwards range then adds nothing
+/// (`S01E79 - 9…` is the episode range 79..=9). [`Self::is_nil`] carries that
+/// bit; equality deliberately ignores it, like every Go `len()` check does.
+#[derive(Debug, Clone, Default)]
 pub struct Episodes {
     seasons: BTreeMap<i64, BTreeSet<i64>>,
+    allocated: bool,
 }
 
+impl PartialEq for Episodes {
+    fn eq(&self, other: &Self) -> bool {
+        self.seasons == other.seasons
+    }
+}
+
+impl Eq for Episodes {}
+
 impl Episodes {
+    /// Go's nil `model.Episodes`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Go's allocated, empty `model.Episodes{}`.
+    pub fn allocated() -> Self {
+        Self {
+            seasons: BTreeMap::new(),
+            allocated: true,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.seasons.is_empty()
     }
 
+    /// True for Go's nil map; false once allocated, even while empty.
+    pub fn is_nil(&self) -> bool {
+        !self.allocated
+    }
+
     /// `AddSeason` — records a whole season (resets any episodes, matching Go's
     /// `e[season] = make(map[int]struct{})`).
     pub fn add_season(&mut self, season: i64) {
+        self.allocated = true;
         self.seasons.insert(season, BTreeSet::new());
     }
 
     /// `AddEpisode`.
     pub fn add_episode(&mut self, season: i64, episode: i64) {
+        self.allocated = true;
         self.seasons.entry(season).or_default().insert(episode);
     }
 }
@@ -156,10 +188,10 @@ fn parse_int(s: &str) -> i64 {
 /// as Go's `FindStringSubmatch` slice. The index choices are Go's — verbatim,
 /// including the off-by-one bugs.
 pub(crate) fn episodes_match_to_episodes(g: &[&str]) -> Episodes {
-    let mut episodes = Episodes::new();
     if g.len() < 12 {
-        return episodes;
+        return Episodes::new();
     }
+    let mut episodes = Episodes::allocated();
 
     if !g[1].is_empty() {
         // regular format
@@ -284,5 +316,24 @@ mod tests {
             .to_string(),
             "S01-03, S05E01-02,E04, S06-07, S09"
         );
+    }
+
+    #[test]
+    fn a_matched_but_empty_range_is_allocated_not_nil() {
+        // Go: a matched episode range 79..=9 allocates `Episodes{}` and then
+        // adds nothing. GORM stores `{}`, not NULL.
+        let mut groups = [""; 12];
+        groups[1] = "S01E79-9";
+        groups[2] = "01";
+        groups[5] = "79-9";
+        groups[6] = "79";
+        groups[7] = "9";
+        let backwards = episodes_match_to_episodes(&groups);
+        assert!(backwards.is_empty());
+        assert!(!backwards.is_nil());
+        assert_eq!(backwards.to_string(), "");
+        assert!(episodes_match_to_episodes(&groups[..11]).is_nil());
+        assert!(parse_episodes("no episodes here").is_nil());
+        assert_eq!(backwards, Episodes::new(), "equality ignores allocation");
     }
 }

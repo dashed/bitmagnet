@@ -11,6 +11,8 @@ description = "Phase-3 Lane P — processor orchestration + write-shadow for the
 bitmagnet-blocking = { path = "../bitmagnet-blocking" }
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 bitmagnet-common = { path = "../bitmagnet-common" }
+# Goose-head admission for the persisting process_torrent worker binary.
+bitmagnet-db = { path = "../bitmagnet-db" }
 bitmagnet-fts = { path = "../bitmagnet-fts" }
 bitmagnet-model = { path = "../bitmagnet-model" }
 bitmagnet-queue = { path = "../bitmagnet-queue" }
@@ -54,3 +56,7 @@ path = "src/bin/bitmagnet-tape-rerun.rs"
 [[bin]]
 name = "bitmagnet-process-torrent-batch"
 path = "src/bin/bitmagnet-process-torrent-batch.rs"
+
+[[bin]]
+name = "bitmagnet-process-torrent-worker"
+path = "src/bin/bitmagnet-process-torrent-worker.rs"

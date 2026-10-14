@@ -36,6 +36,7 @@ mod persist;
 mod runtime;
 mod shadow;
 mod supported_subset;
+mod worker;
 mod writer_compare;
 mod writer_load;
 mod writer_plan;
@@ -55,6 +56,10 @@ pub use runtime::{
 };
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
+};
+pub use worker::{
+    register_worker_metrics, ProcessTorrentWorker, ProcessTorrentWorkerConfig,
+    DEFAULT_ABSTAIN_COOLOFF, DEFAULT_CHECK_INTERVAL, DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED,
 };
 pub use writer_compare::{
     WriterCompareError, WriterComparison, WriterDriftField, WriterRowComparison,
@@ -185,6 +190,8 @@ pub(crate) struct MaterializedWriterOutput {
     pub write_set: WriteSet,
     pub content_persistence: BTreeMap<ContentPersistenceKey, ContentPersistence>,
     pub classifier_failures: Vec<ClassifierFailure>,
+    /// Torrents whose Go episodes map is allocated but empty (stored `{}`).
+    pub empty_episode_objects: BTreeSet<String>,
 }
 
 impl Materializer {
@@ -249,6 +256,7 @@ impl Materializer {
         let mut write_set = WriteSet::default();
         let mut content_persistence = BTreeMap::new();
         let mut classifier_failures = Vec::new();
+        let mut empty_episode_objects = BTreeSet::new();
         let mut seen = BTreeSet::new();
         for requested in &params.info_hashes {
             let info_hash = protocol_id_hex(requested)?;
@@ -276,6 +284,9 @@ impl Materializer {
                 &flags,
                 &torrent.classifier_input,
             ));
+            if result.episodes.is_empty() && !result.episodes.is_nil() {
+                empty_episode_objects.insert(info_hash.clone());
+            }
             let emit_content = if outcome.tag() == "classified" {
                 if let Some(content) = result.content.as_ref() {
                     register_content_persistence(&mut content_persistence, content)?
@@ -305,6 +316,7 @@ impl Materializer {
             write_set,
             content_persistence,
             classifier_failures,
+            empty_episode_objects,
         })
     }
 
@@ -478,13 +490,12 @@ fn register_content_persistence(
 }
 
 fn torrent_content_write(torrent: &LoadedTorrent, result: Classification) -> TorrentContentWrite {
-    // 🚨 The `torrent_contents.languages` COLUMN is alpha-2 code order, NOT
-    // `Languages.Slice()` (natsort by name). Those are two different render
-    // paths for the same set and they genuinely disagree: the Go write-set
-    // oracle fixture `language-0001-multi-french-german` pins `["de","fr"]`
-    // where Slice() gives `["fr","de"]` (French, German). Slice() is the
-    // DISPLAY order and belongs to the classifier's normalized result; the
-    // column is sorted here.
+    // The canonical comparison image keeps languages as a sorted code set
+    // (the Go write-set oracle fixture `language-0001-multi-french-german`
+    // pins `["de","fr"]`). The persisted `torrent_contents.languages` column
+    // is NOT this order: GORM serializes `Languages.Slice()` (natsort by
+    // name, `["fr","de"]`), which the persistence kernel re-derives. The
+    // live Go-vs-Rust worker differential caught the two being conflated.
     let mut languages = result.languages;
     languages.sort();
     languages.dedup();

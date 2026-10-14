@@ -122,7 +122,40 @@ pub async fn persist_write_set<B>(
 where
     B: BlockingManager + ?Sized,
 {
-    let prepared = PreparedWriteSet::new(write_set, persistence, content_persistence)?;
+    persist_write_set_with_episode_objects(
+        pool,
+        write_set,
+        persistence,
+        content_persistence,
+        &BTreeSet::new(),
+        blocking_manager,
+    )
+    .await
+}
+
+/// [`persist_write_set`] for a classifier result that also knows which empty
+/// episode maps Go had allocated: those rows store `{}` instead of `NULL`.
+pub(crate) async fn persist_write_set_with_episode_objects<B>(
+    pool: &PgPool,
+    write_set: &WriteSet,
+    persistence: &BTreeMap<String, TorrentContentPersistence>,
+    content_persistence: &BTreeMap<ContentPersistenceKey, ContentPersistence>,
+    empty_episode_objects: &BTreeSet<String>,
+    blocking_manager: &B,
+) -> Result<(), PersistError>
+where
+    B: BlockingManager + ?Sized,
+{
+    let mut prepared = PreparedWriteSet::new(write_set, persistence, content_persistence)?;
+    for (row, tc) in prepared
+        .torrent_contents
+        .iter_mut()
+        .zip(&write_set.torrent_contents)
+    {
+        if row.episodes.is_none() && empty_episode_objects.contains(&tc.info_hash) {
+            row.episodes = Some(Value::Object(Map::new()));
+        }
+    }
 
     if !write_set.delete_info_hashes.is_empty() {
         blocking_manager
@@ -495,7 +528,7 @@ struct PreparedTorrentContent {
     content_source: Option<String>,
     content_id: Option<String>,
     languages: Value,
-    episodes: Value,
+    episodes: Option<Value>,
     video_resolution: Option<String>,
     video_source: Option<String>,
     video_codec: Option<String>,
@@ -533,7 +566,10 @@ impl PreparedTorrentContent {
             content_type: tc.content_type.clone(),
             content_source: tc.content_source.clone(),
             content_id: tc.content_id.clone(),
-            languages: serde_json::to_value(&tc.languages)
+            // GORM's JSON serializer marshals `model.Languages`, whose
+            // MarshalJSON renders `Languages.Slice()`: natsort by language
+            // NAME, not the code order of the canonical comparison image.
+            languages: serde_json::to_value(bitmagnet_release::slice_order(&tc.languages))
                 .expect("serializing Vec<String> cannot fail"),
             episodes: episodes_json(&tc.episodes)?,
             video_resolution: tc.video_resolution.clone(),
@@ -779,7 +815,7 @@ async fn upsert_torrent_contents(
             .push_bind(&tc.content_source)
             .push_bind(&tc.content_id)
             .push_bind(sqlx::types::Json(&tc.languages))
-            .push_bind(sqlx::types::Json(&tc.episodes))
+            .push_bind(tc.episodes.as_ref().map(sqlx::types::Json))
             .push_bind(&tc.video_resolution)
             .push_bind(&tc.video_source)
             .push_bind(&tc.video_codec)
@@ -841,10 +877,14 @@ async fn insert_tags(
     Ok(())
 }
 
-fn episodes_json(value: &str) -> Result<Value, PersistError> {
+/// Convert the normalized episode string back to Go's `model.Episodes` JSONB.
+///
+/// No episodes is SQL `NULL`: the classifier leaves Go's map nil, and GORM's
+/// JSON serializer stores a value that marshals to `null` as `NULL`.
+fn episodes_json(value: &str) -> Result<Option<Value>, PersistError> {
     let mut seasons = Map::new();
     if value.is_empty() {
-        return Ok(Value::Object(seasons));
+        return Ok(None);
     }
 
     for season_part in value.split(", ") {
@@ -869,7 +909,7 @@ fn episodes_json(value: &str) -> Result<Value, PersistError> {
         }
     }
 
-    Ok(Value::Object(seasons))
+    Ok(Some(Value::Object(seasons)))
 }
 
 fn parse_range(raw: &str, image: &str) -> Result<std::ops::RangeInclusive<u16>, PersistError> {
@@ -1111,18 +1151,18 @@ mod tests {
 
     #[test]
     fn episodes_string_converts_to_go_json_shape() {
-        assert_eq!(episodes_json("").unwrap(), json!({}));
-        assert_eq!(episodes_json("S01").unwrap(), json!({"1": {}}));
+        assert_eq!(episodes_json("").unwrap(), None);
+        assert_eq!(episodes_json("S01").unwrap(), Some(json!({"1": {}})));
         assert_eq!(
             episodes_json("S01-03").unwrap(),
-            json!({"1": {}, "2": {}, "3": {}})
+            Some(json!({"1": {}, "2": {}, "3": {}}))
         );
         assert_eq!(
             episodes_json("S01E01-03,E05, S02E07").unwrap(),
-            json!({
+            Some(json!({
                 "1": {"1": {}, "2": {}, "3": {}, "5": {}},
                 "2": {"7": {}}
-            })
+            }))
         );
     }
 
