@@ -155,7 +155,8 @@ struct TorrentDeleteMutationArgs {
 /// writes `torrent_contents`, `torrent_tags` and partial-failure retry
 /// `queue_jobs` rows. Only the attachment-free core-workflow subset is served;
 /// it classifies with the embedded core classifier, not a merged
-/// `classifier.yml`, so the Go deployment must also run the core config.
+/// `classifier.yml`, so the Go deployment must also run the core config: the
+/// runtime refuses to start unless the expected live Go digest matches it.
 #[derive(Debug, ClapArgs)]
 struct TorrentReprocessMutationArgs {
     /// Enable the served torrent-reprocess runtime.
@@ -182,6 +183,16 @@ struct TorrentReprocessMutationArgs {
         value_parser = parse_positive_u32
     )]
     torrent_reprocess_mutation_postgres_max_connections: u32,
+
+    /// Digest logged by the live Go processor (`classifier runner
+    /// initialized`), required exactly when enabled. The runtime classifies
+    /// with the embedded core classifier, so it refuses to start unless Go
+    /// runs that same effective configuration.
+    #[arg(
+        long,
+        env = "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_EXPECTED_CLASSIFIER_CONFIG_DIGEST"
+    )]
+    torrent_reprocess_expected_classifier_config_digest: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1011,22 +1022,46 @@ async fn admit_mutation_writer_authority(
 fn torrent_reprocess_mutation_db_config(
     args: &TorrentReprocessMutationArgs,
 ) -> anyhow::Result<Option<bitmagnet_db::DbConfig>> {
+    let expected_digest = args
+        .torrent_reprocess_expected_classifier_config_digest
+        .as_deref()
+        .map(str::trim)
+        .filter(|digest| !digest.is_empty());
     match (
         args.torrent_reprocess_mutations_enabled,
         args.torrent_reprocess_mutation_postgres_dsn.as_ref(),
     ) {
-        (false, None) => Ok(None),
+        (false, None) => {
+            anyhow::ensure!(
+                expected_digest.is_none(),
+                "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_EXPECTED_CLASSIFIER_CONFIG_DIGEST is forbidden while torrent-reprocess mutations are disabled"
+            );
+            Ok(None)
+        }
         (false, Some(_)) => anyhow::bail!(
             "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN is forbidden while torrent-reprocess mutations are disabled"
         ),
         (true, None) => anyhow::bail!(
             "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN is required while torrent-reprocess mutations are enabled"
         ),
-        (true, Some(dsn)) => Ok(Some(bitmagnet_db::DbConfig {
-            dsn: dsn.expose().to_owned(),
-            max_connections: args.torrent_reprocess_mutation_postgres_max_connections,
-            ..bitmagnet_db::DbConfig::default()
-        })),
+        (true, Some(dsn)) => {
+            let Some(expected) = expected_digest else {
+                anyhow::bail!(
+                    "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_EXPECTED_CLASSIFIER_CONFIG_DIGEST is required while torrent-reprocess mutations are enabled"
+                );
+            };
+            let actual = bitmagnet_classifier::core_config_digest()
+                .context("digest the embedded core classifier configuration")?;
+            anyhow::ensure!(
+                expected == actual,
+                "classifier configuration mismatch: expected live Go digest {expected}, Rust embedded digest {actual}"
+            );
+            Ok(Some(bitmagnet_db::DbConfig {
+                dsn: dsn.expose().to_owned(),
+                max_connections: args.torrent_reprocess_mutation_postgres_max_connections,
+                ..bitmagnet_db::DbConfig::default()
+            }))
+        }
     }
 }
 
@@ -1282,7 +1317,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const ARGS_ENV_KEYS: [&str; 48] = [
+    const ARGS_ENV_KEYS: [&str; 49] = [
         "LISTEN_ADDR",
         "BITMAGNET_GRAPHQL_EXPECTED_GOOSE_VERSION",
         "BITMAGNET_GRAPHQL_MUTATIONS_ENABLED",
@@ -1297,6 +1332,7 @@ mod tests {
         "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATIONS_ENABLED",
         "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_DSN",
         "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_MUTATION_POSTGRES_MAX_CONNECTIONS",
+        "BITMAGNET_GRAPHQL_TORRENT_REPROCESS_EXPECTED_CLASSIFIER_CONFIG_DIGEST",
         "HEALTH_PEER_GRAPHQL_URLS",
         "HEALTH_PEER_TIMEOUT",
         "SEARCH_FILE_SEARCH_ENABLED",
@@ -1449,6 +1485,10 @@ mod tests {
                 .torrent_reprocess_mutation_postgres_max_connections,
             2
         );
+        assert!(defaults
+            .torrent_reprocess_mutations
+            .torrent_reprocess_expected_classifier_config_digest
+            .is_none());
         assert!(defaults.health_peer_graphql_urls.is_empty());
         assert_eq!(
             defaults.health_peer_timeout,
@@ -1690,6 +1730,23 @@ mod tests {
 
         args.torrent_reprocess_mutations
             .torrent_reprocess_mutations_enabled = true;
+        let no_digest = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect_err("enabled torrent-reprocess writer requires the live Go digest");
+        assert!(no_digest
+            .to_string()
+            .contains("EXPECTED_CLASSIFIER_CONFIG_DIGEST is required"));
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_expected_classifier_config_digest = Some("sha256:0".to_owned());
+        let mismatch = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect_err("a different Go classifier configuration is refused");
+        assert!(mismatch
+            .to_string()
+            .contains("classifier configuration mismatch"));
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_expected_classifier_config_digest = Some(format!(
+            " {} ",
+            bitmagnet_classifier::core_config_digest().expect("core digest")
+        ));
         let config = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
             .expect("enabled config")
             .expect("torrent-reprocess writer config");
@@ -1698,6 +1755,14 @@ mod tests {
             config.dsn,
             "postgres://reprocess-writer:secret@localhost/bitmagnet"
         );
+
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutations_enabled = false;
+        args.torrent_reprocess_mutations
+            .torrent_reprocess_mutation_postgres_dsn = None;
+        let stray = torrent_reprocess_mutation_db_config(&args.torrent_reprocess_mutations)
+            .expect_err("disabled torrent-reprocess writer forbids a digest");
+        assert!(stray.to_string().contains("is forbidden"));
     }
 
     #[test]
