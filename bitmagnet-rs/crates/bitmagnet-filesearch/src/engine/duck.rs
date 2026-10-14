@@ -400,10 +400,12 @@ mod tests {
     use super::*;
     use crate::generation::GenerationManager;
     use crate::query::{Filters, Sort, SortDir, SortField};
+    use crate::sql::{LayerPaths, LayerSet};
     use bitmagnet_model::BlobFile;
     use bitmagnet_parquet::export::{publish_empty_delta, Sinks};
     use bitmagnet_parquet::fact::SortMode;
     use bitmagnet_parquet::generation::{Kind, Layout};
+    use std::path::Path;
     use std::time::{Duration, Instant};
 
     /// Build a real base generation (+ empty delta) on disk and return a manager.
@@ -725,5 +727,216 @@ mod tests {
             .find(|b| b.value.as_deref() == Some("mkv"))
             .unwrap();
         assert_eq!(mkv.count, 3); // big.mkv + ep.mkv + finale.mkv; small.mkv excluded
+    }
+
+    /// Write one layer's fact + rollup (+ tombstones) with DuckDB itself.
+    /// `files` are (info_hash, path, size); every file is an mkv.
+    fn write_layer(dir: &Path, files: &[(&str, &str, u64)], tombstones: Option<&[&str]>) {
+        std::fs::create_dir_all(dir).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let rows: Vec<String> = files
+            .iter()
+            .enumerate()
+            .map(|(i, (ih, path, size))| format!("('{ih}', {i}, '{path}', 'mkv', {size})"))
+            .collect();
+        let values = if rows.is_empty() {
+            "SELECT NULL::VARCHAR, NULL::UINTEGER, NULL::VARCHAR, NULL::VARCHAR, NULL::UBIGINT WHERE false".to_owned()
+        } else {
+            format!("VALUES {}", rows.join(", "))
+        };
+        let d = dir.display();
+        conn.execute_batch(&format!(
+            "CREATE TABLE f AS SELECT col0::VARCHAR AS info_hash, col1::UINTEGER AS file_index, \
+               col2::VARCHAR AS path, col3::VARCHAR AS extension, col4::UBIGINT AS size, \
+               false AS is_padding FROM ({values}) v(col0, col1, col2, col3, col4); \
+             COPY f TO '{d}/fact.parquet' (FORMAT parquet); \
+             COPY (SELECT info_hash, extension, count(*)::UBIGINT AS file_count, \
+                     sum(size)::UBIGINT AS total_size, max(size) AS max_size \
+                   FROM f GROUP BY ALL) TO '{d}/agg_torrent_ext.parquet' (FORMAT parquet);"
+        ))
+        .unwrap();
+        if let Some(hashes) = tombstones {
+            let t: Vec<String> = hashes.iter().map(|h| format!("('{h}')")).collect();
+            let select = if t.is_empty() {
+                "SELECT NULL::VARCHAR AS info_hash WHERE false".to_owned()
+            } else {
+                format!(
+                    "SELECT col0::VARCHAR AS info_hash FROM (VALUES {}) v(col0)",
+                    t.join(", ")
+                )
+            };
+            conn.execute_batch(&format!(
+                "COPY ({select}) TO '{d}/tombstones.parquet' (FORMAT parquet);"
+            ))
+            .unwrap();
+        }
+    }
+
+    fn layer_paths(dir: &Path, tombstones: bool) -> LayerPaths {
+        LayerPaths {
+            fact: dir.join("fact.parquet").display().to_string(),
+            agg_torrent_ext: dir.join("agg_torrent_ext.parquet").display().to_string(),
+            tombstones: tombstones.then(|| dir.join("tombstones.parquet").display().to_string()),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn duck_layered_supersession_keeps_only_the_newest_layer_per_torrent() {
+        let root = std::env::temp_dir().join(format!("bmfs-duck-{}-layers", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // base, three segments, and a delta read through a `current` symlink
+        // (resolve() follows the link; a symlinked path must still map).
+        write_layer(
+            &root.join("base"),
+            &[
+                ("aa", "a/base.mkv", 10),
+                ("bb", "b/base.mkv", 20),
+                ("cc", "c/base.mkv", 30),
+            ],
+            None,
+        );
+        // seg1: aa re-crawled, dd and ee new.
+        write_layer(
+            &root.join("seg1"),
+            &[
+                ("aa", "a/seg1.mkv", 11),
+                ("dd", "d/seg1.mkv", 40),
+                ("ee", "e/seg1.mkv", 50),
+            ],
+            Some(&["aa", "dd", "ee"]),
+        );
+        // seg2: aa deleted, cc re-crawled.
+        write_layer(
+            &root.join("seg2"),
+            &[("cc", "c/seg2.mkv", 31)],
+            Some(&["aa", "cc"]),
+        );
+        // seg3: an empty seal, the usual state of a quiet hour.
+        write_layer(&root.join("seg3"), &[], Some(&[]));
+        // delta: aa re-added, dd deleted.
+        write_layer(
+            &root.join("delta-v9"),
+            &[("aa", "a/delta.mkv", 12)],
+            Some(&["aa", "dd"]),
+        );
+        std::os::unix::fs::symlink(root.join("delta-v9"), root.join("current")).unwrap();
+
+        let gen = LoadedGeneration {
+            layers: LayerSet::new(vec![
+                layer_paths(&root.join("base"), false),
+                layer_paths(&root.join("seg1"), true),
+                layer_paths(&root.join("seg2"), true),
+                layer_paths(&root.join("seg3"), true),
+                layer_paths(&root.join("current"), true),
+            ]),
+            base_version: "v1".into(),
+            manifest_version: 3,
+            segment_count: 3,
+            delta_version: "v9".into(),
+            delta_watermark: 0,
+        };
+        let engine = DuckEngine::open(DuckConfig::default()).unwrap();
+        let dl = Deadline::starting_now(Duration::from_secs(30));
+        let all = Filters::default();
+
+        let mut rows: Vec<(String, String)> = engine
+            .search_files(&gen, &fq(all.clone(), false, 50), dl)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.info_hash, r.path))
+            .collect();
+        rows.sort();
+        let want = [
+            ("aa", "a/delta.mkv"),
+            ("bb", "b/base.mkv"),
+            ("cc", "c/seg2.mkv"),
+            ("ee", "e/seg1.mkv"),
+        ];
+        assert_eq!(
+            rows,
+            want.map(|(h, p)| (h.to_owned(), p.to_owned())).to_vec()
+        );
+
+        // The rollup path reconciles the same way.
+        let mut groups: Vec<(String, u64)> = engine
+            .collapse(&gen, &fq(all.clone(), true, 50), dl)
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.info_hash, g.matching_max_size))
+            .collect();
+        groups.sort();
+        assert_eq!(
+            groups,
+            vec![
+                ("aa".to_owned(), 12),
+                ("bb".to_owned(), 20),
+                ("cc".to_owned(), 31),
+                ("ee".to_owned(), 50),
+            ]
+        );
+        let (c, _) = engine
+            .count(
+                &gen,
+                &CountQuery {
+                    filters: all,
+                    collapse_to_torrent: false,
+                },
+                dl,
+            )
+            .unwrap();
+        assert_eq!(c, 4);
+
+        // An empty delta (right after a seal) leaves the segments in charge.
+        write_layer(&root.join("delta-v10"), &[], Some(&[]));
+        std::fs::remove_file(root.join("current")).unwrap();
+        std::os::unix::fs::symlink(root.join("delta-v10"), root.join("current")).unwrap();
+        let mut rows: Vec<String> = engine
+            .search_files(&gen, &fq(Filters::default(), false, 50), dl)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            ["b/base.mkv", "c/seg2.mkv", "d/seg1.mkv", "e/seg1.mkv"]
+        );
+    }
+
+    #[test]
+    fn duck_layered_query_fails_on_a_file_it_cannot_rank() {
+        // A path DuckDB hands back rewritten (it strips `file://`) must not map
+        // to no rank and quietly un-hide superseded rows.
+        let root = std::env::temp_dir().join(format!("bmfs-duck-{}-unmapped", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write_layer(&root.join("base"), &[("aa", "a/base.mkv", 10)], None);
+        write_layer(
+            &root.join("seg1"),
+            &[("aa", "a/seg1.mkv", 11)],
+            Some(&["aa"]),
+        );
+        write_layer(&root.join("delta"), &[], Some(&[]));
+        let mut seg = layer_paths(&root.join("seg1"), true);
+        seg.fact = format!("file://{}", seg.fact);
+        let gen = LoadedGeneration {
+            layers: LayerSet::new(vec![
+                layer_paths(&root.join("base"), false),
+                seg,
+                layer_paths(&root.join("delta"), true),
+            ]),
+            base_version: "v1".into(),
+            manifest_version: 1,
+            segment_count: 1,
+            delta_version: "v1".into(),
+            delta_watermark: 0,
+        };
+        let engine = DuckEngine::open(DuckConfig::default()).unwrap();
+        let dl = Deadline::starting_now(Duration::from_secs(30));
+        let err = engine
+            .search_files(&gen, &fq(Filters::default(), false, 50), dl)
+            .expect_err("an unmappable file must fail the query");
+        let err = format!("{err:?}");
+        assert!(err.contains("unmapped layer file"), "{err}");
     }
 }

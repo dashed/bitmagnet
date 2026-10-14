@@ -158,6 +158,21 @@ fn legacy_pair(layers: &LayerSet) -> Option<(&LayerPaths, &LayerPaths)> {
     }
 }
 
+/// The N-way reconcile as ONE anti-join: every layer's rows come from a single
+/// multi-file scan tagged with their layer rank, and a row is hidden when any
+/// NEWER layer tombstones its torrent. The plan has the same operators at any
+/// layer count.
+///
+/// The earlier form gave each layer its own `NOT EXISTS` against a chain of
+/// cumulative tombstone CTEs. DuckDB materialized the CTEs and planned every
+/// subquery as a DELIM join with its own DISTINCT, so a 19-layer query held
+/// ~38 hash joins and ~19 hash aggregates at once; their fixed per-operator
+/// buffers grew with the layer count until queries failed "failed to pin
+/// block" against the 3GB `memory_limit` from ~14 segments up.
+///
+/// The rank comes from the scan's `filename` matched against the same literal
+/// paths. A file that does not map would silently un-hide superseded rows, so
+/// it fails the query instead.
 fn layered_cte(
     name: &str,
     columns: &str,
@@ -168,54 +183,54 @@ fn layered_cte(
         layers.layers.len() >= 2,
         "LayerSet must contain at least base and delta"
     );
-    let newest_idx = layers.layers.len() - 1;
-
-    let mut ctes = Vec::new();
-    for idx in (1..=newest_idx).rev() {
-        let tombstones = layers.layers[idx]
-            .tombstones
-            .as_ref()
-            .expect("non-base layers must have tombstones");
-        let cte_name = format!("tomb_ge_{idx}");
-        let tomb_read = format!(
-            "SELECT info_hash FROM read_parquet({})",
-            quote_literal(tombstones)
-        );
-        if idx == newest_idx {
-            ctes.push(format!("{cte_name} AS ({tomb_read})"));
-        } else {
-            ctes.push(format!(
-                "{cte_name} AS ({tomb_read} UNION ALL SELECT * FROM tomb_ge_{})",
-                idx + 1
-            ));
-        }
-    }
-
-    let mut branches = Vec::new();
-    for (idx, layer) in layers.layers.iter().enumerate() {
-        let alias = layer_alias(idx, newest_idx);
-        let mut branch = format!(
-            "SELECT {columns} FROM read_parquet({}) {alias}",
-            quote_literal(path(layer))
-        );
-        if idx < newest_idx {
-            branch.push_str(&format!(
-                " WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_{} t WHERE t.info_hash = {alias}.info_hash)",
-                idx + 1
-            ));
-        }
-        branches.push(branch);
-    }
-    ctes.push(format!("{name} AS ({})", branches.join(" UNION ALL ")));
-    format!("WITH {}", ctes.join(", "))
+    let data: Vec<(usize, &str)> = layers.layers.iter().map(path).enumerate().collect();
+    let tombstones: Vec<(usize, &str)> = layers
+        .layers
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(rank, layer)| {
+            let path = layer
+                .tombstones
+                .as_deref()
+                .expect("non-base layers must have tombstones");
+            (rank, path)
+        })
+        .collect();
+    format!(
+        "WITH {name} AS (\
+           SELECT {columns} FROM (\
+             SELECT {columns}, {data_rank} AS layer \
+             FROM read_parquet({data_paths}, filename = true)) r \
+           ANTI JOIN (\
+             SELECT info_hash, {tomb_rank} AS layer \
+             FROM read_parquet({tomb_paths}, filename = true)) t \
+           ON t.info_hash = r.info_hash AND t.layer > r.layer)",
+        data_rank = layer_rank(&data),
+        data_paths = path_list(&data),
+        tomb_rank = layer_rank(&tombstones),
+        tomb_paths = path_list(&tombstones),
+    )
 }
 
-fn layer_alias(idx: usize, newest_idx: usize) -> String {
-    match idx {
-        0 => "b".to_owned(),
-        i if i == newest_idx => "d".to_owned(),
-        i => format!("s{i}"),
-    }
+/// A DuckDB list literal of server-controlled Parquet paths.
+fn path_list(files: &[(usize, &str)]) -> String {
+    let quoted: Vec<String> = files.iter().map(|(_, path)| quote_literal(path)).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+/// The layer rank of the scanned file, or an error for a file not in `files`.
+/// A `CASE` on `filename` rather than `list_position`: it is evaluated per
+/// row, and the list scan cost grew with the layer count.
+fn layer_rank(files: &[(usize, &str)]) -> String {
+    let arms: Vec<String> = files
+        .iter()
+        .map(|(rank, path)| format!("WHEN {} THEN {rank}", quote_literal(path)))
+        .collect();
+    format!(
+        "CASE filename {} ELSE error('filesearch: unmapped layer file ' || filename) END",
+        arms.join(" ")
+    )
 }
 
 /// Append the WHERE predicate for `filters`, pushing bound params. Returns the
@@ -665,51 +680,62 @@ mod tests {
     }
 
     #[test]
-    fn files_cte_with_two_segments_uses_cumulative_tombstone_chain() {
-        let cte = files_cte(&paths_with_two_segments());
-
-        let delta_tomb = cte.find("tomb_ge_3 AS (SELECT info_hash FROM read_parquet('/g/delta/v130/tombstones.parquet'))").unwrap();
-        let seg2_tomb = cte.find("tomb_ge_2 AS (SELECT info_hash FROM read_parquet('/g/seg/v120/tombstones.parquet') UNION ALL SELECT * FROM tomb_ge_3)").unwrap();
-        let seg1_tomb = cte.find("tomb_ge_1 AS (SELECT info_hash FROM read_parquet('/g/seg/v110/tombstones.parquet') UNION ALL SELECT * FROM tomb_ge_2)").unwrap();
-        assert!(delta_tomb < seg2_tomb && seg2_tomb < seg1_tomb);
-
-        assert!(cte.contains("FROM read_parquet('/g/base/v100/fact.parquet') b WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_1 t WHERE t.info_hash = b.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/seg/v110/fact.parquet') s1 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_2 t WHERE t.info_hash = s1.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/seg/v120/fact.parquet') s2 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_3 t WHERE t.info_hash = s2.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/delta/v130/fact.parquet') d)"));
-
-        for path in [
-            "/g/base/v100/fact.parquet",
-            "/g/seg/v110/fact.parquet",
-            "/g/seg/v120/fact.parquet",
-            "/g/delta/v130/fact.parquet",
-            "/g/seg/v110/tombstones.parquet",
-            "/g/seg/v120/tombstones.parquet",
-            "/g/delta/v130/tombstones.parquet",
-        ] {
-            assert_eq!(count(&cte, path), 1, "{path} should appear once");
-        }
+    fn files_cte_with_two_segments_is_one_ranked_anti_join() {
+        let data = "['/g/base/v100/fact.parquet', '/g/seg/v110/fact.parquet', '/g/seg/v120/fact.parquet', '/g/delta/v130/fact.parquet']";
+        let tombs = "['/g/seg/v110/tombstones.parquet', '/g/seg/v120/tombstones.parquet', '/g/delta/v130/tombstones.parquet']";
+        let data_rank = "CASE filename \
+            WHEN '/g/base/v100/fact.parquet' THEN 0 WHEN '/g/seg/v110/fact.parquet' THEN 1 \
+            WHEN '/g/seg/v120/fact.parquet' THEN 2 WHEN '/g/delta/v130/fact.parquet' THEN 3 \
+            ELSE error('filesearch: unmapped layer file ' || filename) END";
+        let tomb_rank = "CASE filename \
+            WHEN '/g/seg/v110/tombstones.parquet' THEN 1 WHEN '/g/seg/v120/tombstones.parquet' THEN 2 \
+            WHEN '/g/delta/v130/tombstones.parquet' THEN 3 \
+            ELSE error('filesearch: unmapped layer file ' || filename) END";
+        assert_eq!(
+            files_cte(&paths_with_two_segments()),
+            format!(
+                "WITH files AS (SELECT info_hash, file_index, path, extension, size, is_padding FROM (\
+                 SELECT info_hash, file_index, path, extension, size, is_padding, {data_rank} AS layer \
+                 FROM read_parquet({data}, filename = true)) r \
+                 ANTI JOIN (SELECT info_hash, {tomb_rank} AS layer \
+                 FROM read_parquet({tombs}, filename = true)) t \
+                 ON t.info_hash = r.info_hash AND t.layer > r.layer)"
+            )
+        );
     }
 
     #[test]
-    fn att_cte_with_two_segments_uses_layered_rollup_paths_once() {
+    fn att_cte_with_two_segments_reads_rollups_in_the_same_shape() {
         let cte = att_cte(&paths_with_two_segments());
-        assert!(cte.contains("tomb_ge_1 AS"));
-        assert!(cte.contains("FROM read_parquet('/g/base/v100/agg_torrent_ext.parquet') b WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_1 t WHERE t.info_hash = b.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/seg/v110/agg_torrent_ext.parquet') s1 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_2 t WHERE t.info_hash = s1.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/seg/v120/agg_torrent_ext.parquet') s2 WHERE NOT EXISTS (SELECT 1 FROM tomb_ge_3 t WHERE t.info_hash = s2.info_hash)"));
-        assert!(cte.contains("FROM read_parquet('/g/delta/v130/agg_torrent_ext.parquet') d)"));
-        for path in [
-            "/g/base/v100/agg_torrent_ext.parquet",
-            "/g/seg/v110/agg_torrent_ext.parquet",
-            "/g/seg/v120/agg_torrent_ext.parquet",
-            "/g/delta/v130/agg_torrent_ext.parquet",
-            "/g/seg/v110/tombstones.parquet",
-            "/g/seg/v120/tombstones.parquet",
-            "/g/delta/v130/tombstones.parquet",
-        ] {
-            assert_eq!(count(&cte, path), 1, "{path} should appear once");
+        assert!(cte.starts_with(
+            "WITH att AS (SELECT info_hash, extension, file_count, total_size, max_size FROM ("
+        ));
+        assert!(cte.contains("FROM read_parquet(['/g/base/v100/agg_torrent_ext.parquet', '/g/seg/v110/agg_torrent_ext.parquet', '/g/seg/v120/agg_torrent_ext.parquet', '/g/delta/v130/agg_torrent_ext.parquet'], filename = true)) r"));
+        assert!(cte.contains("FROM read_parquet(['/g/seg/v110/tombstones.parquet', '/g/seg/v120/tombstones.parquet', '/g/delta/v130/tombstones.parquet'], filename = true)) t"));
+        assert!(!cte.contains("fact.parquet"));
+    }
+
+    #[test]
+    fn layered_cte_has_one_scan_per_artifact_kind_at_any_depth() {
+        // The plan must not grow with the layer count: one data scan, one
+        // tombstone scan, one anti-join, no CTE chain or correlated subquery.
+        let mut layers = paths_with_two_segments().layers;
+        let delta = layers.pop().unwrap();
+        for v in 0..40 {
+            layers.push(LayerPaths {
+                fact: format!("/g/seg/v2{v:02}/fact.parquet"),
+                agg_torrent_ext: format!("/g/seg/v2{v:02}/agg_torrent_ext.parquet"),
+                tombstones: Some(format!("/g/seg/v2{v:02}/tombstones.parquet")),
+            });
         }
+        layers.push(delta);
+        let cte = files_cte(&LayerSet::new(layers));
+        assert_eq!(count(&cte, "read_parquet("), 2);
+        assert_eq!(count(&cte, "ANTI JOIN"), 1);
+        assert_eq!(count(&cte, "NOT EXISTS"), 0);
+        assert_eq!(count(&cte, " AS ("), 1, "only the outer files CTE");
+        assert_eq!(count(&cte, "/g/seg/v239/fact.parquet"), 2);
+        assert_eq!(count(&cte, "/g/seg/v239/tombstones.parquet"), 2);
     }
 
     #[test]
