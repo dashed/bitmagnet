@@ -10,7 +10,8 @@
 //! `local_search_enabled` and `apis_enabled` both explicitly off, which is what
 //! the web UI sends by default. Anything the Rust classifier cannot reproduce
 //! (TMDB or local content search, custom workflows from a merged
-//! `classifier.yml`) fails closed before any write.
+//! `classifier.yml`) or this writer may not do (deleting a banned torrent while
+//! persisting others) fails closed before any write.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -189,6 +190,17 @@ impl TorrentReprocessMutationsRuntime for PgTorrentReprocessMutationsRuntime {
         let classification_params = classification_params(&params)?;
 
         let plan = load_writer_plan(&self.pool, &self.materializer, &classification_params).await?;
+        // A deletion-only plan writes nothing, as in Go. A plan that also
+        // persists rows would block and delete torrents, which needs the
+        // blocking store this writer has no authority over; refuse it before
+        // the retry publication, its first write.
+        let write_set = plan.write_set();
+        if !write_set.delete_info_hashes.is_empty() && !write_set.torrent_contents.is_empty() {
+            return Err(TorrentReprocessMutationsError::Unsupported(format!(
+                "{} torrent(s) would be deleted, and this Rust runtime does not block or delete torrents",
+                write_set.delete_info_hashes.len()
+            )));
+        }
         let retry_job = if plan.retry_job().is_some() {
             Some(go_retry_job(&params, plan.retry_info_hashes())?)
         } else {
@@ -327,11 +339,13 @@ impl RetryPublisher for GoRetryPublisher<'_> {
     }
 }
 
-/// Torrent deletion is unreachable from GraphQL under the core flags.
+/// Torrent deletion is never persisted by this runtime.
 ///
-/// Only `delete_xxx` and `delete_content_types` produce a delete outcome, and
-/// neither can be set through `TorrentReprocessInput`. Refusing keeps the
-/// writer role free of bloom-filter large-object authority.
+/// `delete_xxx` and `delete_content_types` cannot be set through
+/// `TorrentReprocessInput`, but the core workflow's first rule deletes any
+/// torrent matching `keywords.banned` under every flag set. `reprocess`
+/// refuses such a plan before its first write; this blocker is the backstop
+/// that keeps the writer role free of bloom-filter large-object authority.
 struct RefusingBlockingManager;
 
 impl ProcessorBlockingManager for RefusingBlockingManager {

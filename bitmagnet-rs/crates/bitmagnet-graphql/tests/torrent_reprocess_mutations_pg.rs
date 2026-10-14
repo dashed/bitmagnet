@@ -190,6 +190,98 @@ async fn real_pg_torrent_reprocess_matches_go_with_isolated_writer() {
     eprintln!("torrent reprocess parity: {checked} cases match");
 }
 
+/// The core workflow's first rule deletes any torrent whose name or file paths
+/// match `keywords.banned`, whatever the flags. Go blocks and deletes it inside
+/// `Process`; this runtime has no blocking-store authority, so a plan that
+/// both deletes and persists must be refused before its first write — the
+/// partial-failure retry publication included.
+#[tokio::test]
+#[ignore = "requires the Go-verified disposable PostgreSQL torrent-reprocess database"]
+async fn real_pg_torrent_reprocess_refuses_banned_deletions_before_any_write() {
+    const BANNED: &str = "b00000000000000000000000000000000000000b";
+    let Some(admin_dsn) = test_dsn("BITMAGNET_GRAPHQL_TORRENT_REPROCESS_TEST_ADMIN_DATABASE_URL")
+    else {
+        eprintln!("torrent reprocess parity admin DSN is not set; skipping");
+        return;
+    };
+    let writer_dsn = test_dsn("BITMAGNET_GRAPHQL_TORRENT_REPROCESS_TEST_DATABASE_URL")
+        .expect("torrent reprocess parity writer DSN is required with the admin DSN");
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&admin_dsn)
+        .await
+        .expect("connect torrent reprocess parity admin");
+    assert_eq!(postgres_identity(&admin_pool).await.0, DATABASE);
+    let writer_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&writer_dsn)
+        .await
+        .expect("connect isolated torrent reprocess writer");
+    let schema = async_graphql::Schema::build(Query, Mutation, EmptySubscription)
+        .data(
+            TorrentReprocessMutationsRuntimeData::pg(writer_pool)
+                .expect("compile the core classifier"),
+        )
+        .finish();
+
+    sqlx::raw_sql(sqlx::AssertSqlSafe(read_corpus_file("seed.sql")))
+        .execute(&admin_pool)
+        .await
+        .expect("seed");
+    sqlx::query(
+        "INSERT INTO torrents (info_hash, name, size, private, files_status, created_at, \
+         updated_at) VALUES (decode($1, 'hex'), 'pthc sample clip.avi', 1000, false, \
+         'single', '2015-10-01 00:00:00+00', '2015-10-02 00:00:00+00')",
+    )
+    .bind(BANNED)
+    .execute(&admin_pool)
+    .await
+    .expect("seed a banned-keyword torrent");
+    let dump = read_corpus_file("dump.sql");
+    let seeded = dump_state(&admin_pool, &dump).await;
+
+    // A classified torrent, the banned one, and a missing hash: Go publishes
+    // a retry for the missing hash, blocks and deletes the banned torrent,
+    // and persists the classified one.
+    let request = Request::new(
+        "mutation TorrentReprocess($input: TorrentReprocessInput!) \
+         { torrent { reprocess(input: $input) } }",
+    )
+    .variables(Variables::from_json(json!({
+        "input": {
+            "infoHashes": [
+                "1000000000000000000000000000000000000001",
+                BANNED,
+                "e000000000000000000000000000000000000001",
+            ],
+            "apisDisabled": true,
+            "localSearchDisabled": true,
+        }
+    })));
+    let response = project_response(
+        serde_json::to_value(schema.execute(request).await).expect("response JSON"),
+    );
+    let message = response["errors"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.starts_with(REFUSAL_PREFIXES[0]),
+        "expected a refusal, got {response}"
+    );
+    assert_eq!(
+        response["data"],
+        json!({ "torrent": { "reprocess": null } })
+    );
+    let mut failures = Vec::new();
+    diff_json(
+        "state",
+        &seeded,
+        &dump_state(&admin_pool, &dump).await,
+        &mut failures,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Keep only what the Go oracle records: `data` and the whole error objects.
 fn project_response(response: Value) -> Value {
     json!({
