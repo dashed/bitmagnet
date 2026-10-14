@@ -21,8 +21,9 @@
 //! job that the Rust kernel still cannot reproduce — for example a sourced or
 //! enriched explicit hint, or an input over the loader's bounds — is abstained
 //! before any side effect, which leaves the row untouched for the Go worker.
-//! Only transient database errors and Go-equivalent processor outcomes consume
-//! one of the job's retries.
+//! So is a payload serde cannot decode: Go's decoder accepts inputs serde
+//! rejects. Only transient database errors and Go-equivalent processor
+//! outcomes consume one of the job's retries.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -160,9 +161,15 @@ impl ProcessTorrentWorker {
     }
 
     async fn process(&self, job: &DequeuedJob) -> JobVerdict {
+        // Go's decoder is more lenient than serde (a `0x` hash prefix, JSON
+        // null for a slice, case-insensitive keys), so a payload serde rejects
+        // may be one Go processes. Leave it to Go rather than spend a retry.
         let params: ProcessTorrentParams = match serde_json::from_str(&job.payload) {
             Ok(params) => params,
-            Err(error) => return go_handler_failure(&error),
+            Err(error) => {
+                tracing::info!(job_id = %job.id, %error, "abstaining from undecodable process_torrent payload");
+                return JobVerdict::Abstain(format!("payload: {error}"));
+            }
         };
         let pool = self.store.pool();
         let plan = match load_writer_plan(pool, &self.materializer, &params).await {

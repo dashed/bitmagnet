@@ -576,6 +576,51 @@ async fn abstained_jobs_are_left_untouched_for_go() {
 
 #[tokio::test]
 #[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn payloads_only_go_can_decode_are_abstained_not_failed() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_fixture_torrents(&pool).await;
+    let admitted = "\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":\
+        {\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}";
+    // Go's json.Unmarshal accepts both: protocol.ID trims one `0x` before
+    // decoding the hex, and a JSON null leaves the slice nil (an empty job Go
+    // settles as processed). serde rejects both, which must not consume a
+    // retry that Go would never have spent.
+    let payloads = [
+        format!("{{{admitted},\"InfoHashes\":[\"0x{HASH_A}\"]}}"),
+        format!("{{{admitted},\"InfoHashes\":null}}"),
+    ];
+    let mut before = BTreeMap::new();
+    for payload in &payloads {
+        let id = enqueue_raw(&pool, payload).await;
+        before.insert(id.clone(), job_row(&pool, &id).await);
+    }
+    let worker = worker(&pool, fast_config());
+    let mut abstained = BTreeSet::new();
+    for _ in &payloads {
+        match worker.run_once().await.unwrap() {
+            AdmittedConsumeOutcome::Abstained { job, .. } => {
+                abstained.insert(job.id);
+            }
+            other => panic!("expected an abstention, got {other:?}"),
+        }
+    }
+    assert_eq!(abstained, before.keys().cloned().collect::<BTreeSet<_>>());
+    for (id, row) in &before {
+        assert_eq!(&job_row(&pool, id).await, row, "job {id} was touched");
+    }
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+    ));
+    assert!(live_image(&pool)
+        .await
+        .iter()
+        .all(|row| !row.starts_with("tc ")));
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
 async fn deadline_and_timeout_failures_use_go_text() {
     let pool = connect().await;
     reset(&pool).await;

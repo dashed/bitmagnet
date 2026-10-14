@@ -358,9 +358,11 @@ reproduce (a sourced or enriched explicit hint, an input over the loader's
 bounds, any composition invariant) is abstained before any side effect: the
 claim transaction rolls back, the row keeps its status, retries, `run_after`,
 and error, and the worker excludes that ID from its own claims for a cool-off
-period. A payload that fails to decode, a database error while loading, a
-timeout, and every error once persistence has started settle through Go's
-retry lifecycle; every other loader or composer error abstains. A request of
+period. A payload serde cannot decode is abstained as well: Go's decoder
+accepts inputs serde rejects (one `0x` hash prefix, JSON `null` for
+`InfoHashes`), so only Go can settle it with Go's outcome. A database error
+while loading, a timeout, and every error once persistence has started settle
+through Go's retry lifecycle; every other loader or composer error abstains. A request of
 more than 100 info hashes (the loader bound, equal to Go's DHT batch and the
 default reprocess batch size) is therefore always left to Go.
 
@@ -414,7 +416,7 @@ no post-commit Tantivy dual-write (the search follower keys on
 `torrents.updated_at`, which the processor does not touch, so a Rust-written
 reclassification reaches the sidecar only at the next backfill or torrent
 update); a timeout cancels the Rust handler, while
-Go's handler goroutine keeps running after its job is settled; JSON-decode,
-database-driver, and panic error texts differ; a job with several classifier
+Go's handler goroutine keeps running after its job is settled;
+database-driver and panic error texts differ; a job with several classifier
 failures may publish its retry hashes in a different (valid) order, and
 therefore a different fingerprint, than a given Go run.
