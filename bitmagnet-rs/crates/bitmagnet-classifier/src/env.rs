@@ -15,7 +15,7 @@
 //! map by key, and has no compile-time type-checker that needs the null-map
 //! placeholder trick.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bitmagnet_release::regex_pattern_from_keywords;
@@ -44,27 +44,30 @@ pub(crate) struct Env {
 /// `keywords.*` patterns are large Unicode alternations, so recompiling them
 /// for every torrent dominated classification time. Patterns come from the
 /// compiled configuration, so the set is small; the bound only guards against a
-/// configuration that builds patterns from torrent data.
+/// configuration that builds patterns from torrent data. A list rather than a
+/// hash map: hashing a multi-kilobyte pattern on every call costs far more
+/// than comparing it against a handful of entries, where differing lengths
+/// short-circuit and a hit is one `memcmp`.
 #[derive(Default)]
-struct RegexCache(Mutex<HashMap<String, Regex>>);
+struct RegexCache(Mutex<Vec<(String, Regex)>>);
 
-const MAX_CACHED_REGEXES: usize = 256;
+const MAX_CACHED_REGEXES: usize = 64;
 
 impl RegexCache {
     fn get(&self, pattern: &str) -> Result<Regex, regex::Error> {
-        if let Some(regex) = self.lock().get(pattern) {
+        if let Some((_, regex)) = self.lock().iter().find(|(cached, _)| cached == pattern) {
             return Ok(regex.clone());
         }
         let regex = Regex::new(pattern)?;
         let mut cache = self.lock();
         if cache.len() < MAX_CACHED_REGEXES {
-            cache.insert(pattern.to_owned(), regex.clone());
+            cache.push((pattern.to_owned(), regex.clone()));
         }
         Ok(regex)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Regex>> {
-        // The map is only ever inserted into, so a poisoned lock is still valid.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, Regex)>> {
+        // The list is only ever appended to, so a poisoned lock is still valid.
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
