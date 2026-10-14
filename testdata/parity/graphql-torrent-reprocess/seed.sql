@@ -12,6 +12,7 @@
 --   7000..07  audiobook with a type-only explicit hint      -> hint applied
 --   8000..08  explicit hint naming content tmdb:42          -> Rust refuses (attach by ID)
 --   9000..09  pre-existing tag, re-tagged by nothing        -> tag kept
+--   a000..0a  backwards episode range `S01E79 - 9`          -> Go's allocated-empty `{}` episodes
 --   e000..0x  never seeded                                  -> missing
 TRUNCATE queue_jobs, torrent_tags, torrent_contents, torrent_hints, torrents_torrent_sources,
   content_collections_content, content_collections, content_attributes, content, torrents,
@@ -46,7 +47,10 @@ VALUES
    '2015-08-01 00:00:00+00', '2015-08-02 00:00:00+00'),
   (decode('9000000000000000000000000000000000000009', 'hex'),
    'Tagged.Thing.2010.mkv', 700000000, false, 'single', NULL,
-   '2015-09-01 00:00:00+00', '2015-09-02 00:00:00+00');
+   '2015-09-01 00:00:00+00', '2015-09-02 00:00:00+00'),
+  (decode('a00000000000000000000000000000000000000a', 'hex'),
+   '79. The Late Late Show With James Corden S01E79 - 9-21-15 Monday.flv', 399111392, false,
+   'single', NULL, '2015-10-01 00:00:00+00', '2015-10-02 00:00:00+00');
 
 INSERT INTO torrents_torrent_sources (source, info_hash, seeders, leechers, published_at,
                                       created_at, updated_at)
