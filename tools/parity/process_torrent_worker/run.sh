@@ -6,6 +6,9 @@
 #        abstained from (the canary hand-off)
 #   C  = seed, drained by the Rust worker and the Go queue server concurrently
 #
+# A second round (REPROCESS_ROUND=0 skips it) requeues every surviving torrent
+# on the drained copies and repeats A/B/C, covering the existing-content paths.
+#
 # The script dumps every copy's processor/queue image and diffs B and C
 # against A. It never touches anything except databases it creates itself.
 #
@@ -64,13 +67,13 @@ echo "go classifier digest: $GO_DIGEST" | tee "$OUT/digest.txt"
 
 start_go() {
   POSTGRES_DSN="$(dsn "$1")" LOG_LEVEL=info \
-    "$BITMAGNET_GO" worker run --keys=queue_server >"$OUT/go-$1.log" 2>&1 &
+    "$BITMAGNET_GO" worker run --keys=queue_server >>"$OUT/go-$1.log" 2>&1 &
   echo $!
 }
 start_rust() {
   BITMAGNET_POSTGRES_DSN="$(dsn "$1")" RUST_LOG=info \
     "$RUST_WORKER" --expected-classifier-config-digest "$GO_DIGEST" \
-    --check-interval-seconds 1 >"$OUT/rust-$1.log" 2>&1 &
+    --check-interval-seconds 1 >>"$OUT/rust-$1.log" 2>&1 &
   echo $!
 }
 stop() { kill -INT "$@" 2>/dev/null || true; wait "$@" 2>/dev/null || true; }
@@ -91,40 +94,59 @@ drain() {
   echo "$db settled with $now active jobs"
 }
 
-T0=$SECONDS
-pid="$(start_go ${PREFIX}_a)"; drain ${PREFIX}_a 0; stop "$pid"
-echo "A (Go alone): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
+# One round: drain A with Go alone, B with Rust then Go, C with both at once,
+# then dump and diff. $1 suffixes the evidence files (round 2 = "2").
+status=0
+run_round() {
+  local r=$1 T0 pid rpid gpid db
+  T0=$SECONDS
+  pid="$(start_go ${PREFIX}_a)"; drain ${PREFIX}_a 0; stop "$pid"
+  echo "round ${r:-1} A (Go alone): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
 
-T0=$SECONDS
-pid="$(start_rust ${PREFIX}_b)"; drain ${PREFIX}_b "$JOBS"; stop "$pid"
-ABSTAINED="$(active ${PREFIX}_b)"
-sql -d ${PREFIX}_b -tAc "SELECT id FROM queue_jobs WHERE status IN ('pending','retry') ORDER BY id" >"$OUT/b-left-for-go.txt"
-echo "B Rust phase: $((SECONDS - T0))s, left for Go: $ABSTAINED" | tee -a "$OUT/timing.txt"
-pid="$(start_go ${PREFIX}_b)"; drain ${PREFIX}_b 0; stop "$pid"
+  T0=$SECONDS
+  pid="$(start_rust ${PREFIX}_b)"; drain ${PREFIX}_b "$JOBS"; stop "$pid"
+  ABSTAINED="$(active ${PREFIX}_b)"
+  sql -d ${PREFIX}_b -tAc "SELECT id FROM queue_jobs WHERE status IN ('pending','retry') ORDER BY id" >"$OUT/b$r-left-for-go.txt"
+  echo "round ${r:-1} B Rust phase: $((SECONDS - T0))s, left for Go: $ABSTAINED" | tee -a "$OUT/timing.txt"
+  pid="$(start_go ${PREFIX}_b)"; drain ${PREFIX}_b 0; stop "$pid"
 
-T0=$SECONDS
-rpid="$(start_rust ${PREFIX}_c)"; gpid="$(start_go ${PREFIX}_c)"
-drain ${PREFIX}_c 0; stop "$rpid" "$gpid"
-echo "C (concurrent): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
+  T0=$SECONDS
+  rpid="$(start_rust ${PREFIX}_c)"; gpid="$(start_go ${PREFIX}_c)"
+  drain ${PREFIX}_c 0; stop "$rpid" "$gpid"
+  echo "round ${r:-1} C (concurrent): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
 
-for db in a b c; do
-  (cd "$ROOT" && go run ./tools/parity/process_torrent_worker dump -dsn "$(dsn ${PREFIX}_$db)") \
-    >"$OUT/$db.dump" 2>"$OUT/$db.counts"
-done
+  for db in a b c; do
+    (cd "$ROOT" && go run ./tools/parity/process_torrent_worker dump -dsn "$(dsn ${PREFIX}_$db)") \
+      >"$OUT/$db$r.dump" 2>"$OUT/$db$r.counts"
+  done
+
+  for db in b c; do
+    if diff -u "$OUT/a$r.dump" "$OUT/$db$r.dump" >"$OUT/a-vs-$db$r.diff"; then
+      echo "round ${r:-1} A vs ${db^^}: IDENTICAL ($(wc -l <"$OUT/a$r.dump") lines)"
+    else
+      echo "round ${r:-1} A vs ${db^^}: DIFFERENT ($(grep -c '^[-+][^-+]' "$OUT/a-vs-$db$r.diff") changed lines, see $OUT/a-vs-$db$r.diff)"
+      status=1
+    fi
+  done
+}
+
+run_round ""
 
 # Which worker settled each job in B and C (from the worker logs).
 grep -c '"process_torrent job processed"\|process_torrent job processed' "$OUT/rust-${PREFIX}_b.log" >"$OUT/b-rust-processed.txt" || true
 grep -c 'process_torrent job processed' "$OUT/rust-${PREFIX}_c.log" >"$OUT/c-rust-processed.txt" || true
 
-status=0
-for db in b c; do
-  if diff -u "$OUT/a.dump" "$OUT/$db.dump" >"$OUT/a-vs-$db.diff"; then
-    echo "A vs ${db^^}: IDENTICAL ($(wc -l <"$OUT/a.dump") lines)"
-  else
-    echo "A vs ${db^^}: DIFFERENT ($(grep -c '^[-+][^-+]' "$OUT/a-vs-$db.diff") changed lines, see $OUT/a-vs-$db.diff)"
-    status=1
-  fi
-done
+# Round 2 reprocesses the drained, already-classified copies (see `requeue`).
+# A, B and C are identical here when round 1 passed, so each starts from the
+# same image.
+if [[ "${REPROCESS_ROUND:-1}" == 1 ]]; then
+  for db in a b c; do
+    (cd "$ROOT" && go run ./tools/parity/process_torrent_worker requeue -dsn "$(dsn ${PREFIX}_$db)") \
+      2>&1 | tee -a "$OUT/requeue.log"
+  done
+  JOBS="$(active ${PREFIX}_a)"
+  run_round 2
+fi
 cat "$OUT/a.counts"
 echo "evidence: $OUT"
 exit $status

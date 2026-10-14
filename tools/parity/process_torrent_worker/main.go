@@ -78,7 +78,7 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: process_torrent_worker seed|dump [flags]")
+		return errors.New("usage: process_torrent_worker seed|requeue|dump [flags]")
 	}
 
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
@@ -102,6 +102,8 @@ func run() error {
 	switch os.Args[1] {
 	case "seed":
 		return seed(ctx, conn, *root, *replayLimit, *jobSize)
+	case "requeue":
+		return requeue(ctx, conn, *jobSize)
 	case "dump":
 		return dump(ctx, conn, os.Stdout)
 	default:
@@ -264,8 +266,21 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 	}
 
 	jobs := planJobs(all, jobSize)
+	if err := enqueueJobs(ctx, conn, jobs, ts.Add(-time.Hour)); err != nil {
+		return err
+	}
 
-	base := ts.Add(-time.Hour)
+	fmt.Fprintf(os.Stderr, "seeded %d torrents and %d jobs\n", len(all), len(jobs))
+
+	return nil
+}
+
+// enqueueJobs inserts one supported-subset job per hash list, built with Go's
+// own processor.NewQueueJob, in a strictly increasing run_after order so both
+// workers' claim order is the same total order.
+func enqueueJobs(ctx context.Context, conn *pgx.Conn, jobs [][]protocol.ID, base time.Time) error {
+	batch := &pgx.Batch{}
+
 	for i, hashes := range jobs {
 		job, err := processor.NewQueueJob(processor.MessageParams{
 			ClassifierWorkflow: "default",
@@ -279,8 +294,7 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 		if err != nil {
 			return err
 		}
-		// A strictly increasing run_after makes both workers' claim order the
-		// same total order.
+
 		batch.Queue(`INSERT INTO queue_jobs
 			(fingerprint, queue, status, payload, retries, max_retries, run_after,
 			 archival_duration, created_at, priority)
@@ -290,13 +304,86 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 			// Go's model.Duration value ("168h0m0s"); its scanner rejects the
 			// "7 days" rendering of a day-component interval.
 			time.Duration(job.ArchivalDuration).String())
+
+		if batch.Len() >= 1500 {
+			if err := conn.SendBatch(ctx, batch).Close(); err != nil {
+				return err
+			}
+
+			batch = &pgx.Batch{}
+		}
 	}
 
-	if err := flush(); err != nil {
+	if batch.Len() == 0 {
+		return nil
+	}
+
+	return conn.SendBatch(ctx, batch).Close()
+}
+
+// requeue turns a drained copy into a reprocess run over already-classified
+// torrents, the shape of a `torrent.reprocess` or batch-reprocess campaign:
+// every row now goes through the existing-content paths (ON CONFLICT updates,
+// stale-row deletes, rule-derived type preservation) that a first pass over
+// unclassified torrents never reaches. Type-only hints are dropped first, so
+// torrents with a stored file list can reclassify to a different type and
+// delete their stale row, while those without one keep the stored type.
+// Sourced-hint torrents keep their hints and stay in single-hash jobs.
+func requeue(ctx context.Context, conn *pgx.Conn, jobSize int) error {
+	if _, err := conn.Exec(ctx, `DELETE FROM torrent_hints WHERE content_source IS NULL`); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "seeded %d torrents and %d jobs\n", len(all), len(jobs))
+	rows, err := conn.Query(ctx, `SELECT t.info_hash, h.info_hash IS NOT NULL
+		FROM torrents t LEFT JOIN torrent_hints h USING (info_hash)
+		ORDER BY t.info_hash`)
+	if err != nil {
+		return err
+	}
+
+	var (
+		jobs [][]protocol.ID
+		rest []protocol.ID
+		n    int
+	)
+
+	for rows.Next() {
+		var (
+			raw     []byte
+			sourced bool
+		)
+
+		if err := rows.Scan(&raw, &sourced); err != nil {
+			rows.Close()
+			return err
+		}
+
+		n++
+
+		id := protocol.ID(raw)
+		if sourced {
+			jobs = append(jobs, []protocol.ID{id})
+		} else {
+			rest = append(rest, id)
+		}
+	}
+
+	rows.Close()
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for i := 0; i < len(rest); i += jobSize {
+		jobs = append(jobs, rest[i:min(i+jobSize, len(rest))])
+	}
+
+	ts, _ := time.Parse(time.RFC3339Nano, fixtureTime)
+	if err := enqueueJobs(ctx, conn, jobs, ts); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "requeued %d torrents in %d jobs\n", n, len(jobs))
 
 	return nil
 }
@@ -353,7 +440,10 @@ func planJobs(all []seeded, jobSize int) [][]protocol.ID {
 // retry jitter (run_after/ran_at).
 func dump(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
 	queries := []struct{ label, sql string }{
-		{"torrent_contents", `SELECT (to_jsonb(t) - 'created_at' - 'updated_at')::text
+		// to_jsonb renders SQL NULL and JSON null alike; flag the former.
+		{"torrent_contents", `SELECT (to_jsonb(t) - 'created_at' - 'updated_at'
+				|| jsonb_build_object('episodes_is_sql_null', t.episodes IS NULL,
+					'languages_is_sql_null', t.languages IS NULL))::text
 			FROM torrent_contents t ORDER BY id`},
 		{"torrent_tags", `SELECT encode(info_hash, 'hex') || ' ' || name
 			FROM torrent_tags ORDER BY 1`},
@@ -365,7 +455,8 @@ func dump(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
 			FROM torrent_hints h ORDER BY info_hash`},
 		{"queue_jobs", `SELECT concat_ws(' | ', fingerprint, queue, status::text, payload::text,
 				retries::text, max_retries::text, coalesce(error, '<null>'), priority::text,
-				(ran_at IS NOT NULL)::text, (deadline IS NULL)::text)
+				(ran_at IS NOT NULL)::text, coalesce(deadline::text, '<null>'),
+				archival_duration::text)
 			FROM queue_jobs ORDER BY fingerprint, status, retries`},
 	}
 
