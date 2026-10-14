@@ -335,3 +335,86 @@ itself. In particular, Go compiles `content_type_list: [unknown]` as enum value
 zero while the current Rust classifier drops `unknown` from that list. Any
 future core/default or Rust overlay work must align that behavior and extend
 the cross-language parity corpus before its digest can be accepted in a soak.
+
+## Milestone 6: persisting `process_torrent` worker
+
+`ProcessTorrentWorker` and the non-deployed `bitmagnet-process-torrent-worker`
+binary are the first runtime that calls `persist_writer_plan`. Each iteration
+claims one job through `QueueStore::consume_admitted_process_torrent`, composes
+the plan with `load_writer_plan`, persists it (retry publication, blocker,
+transaction kernel), and settles the row while still holding the claim lock.
+Go's handler defaults are kept: concurrency one, a ten-minute job timeout, a
+30-second idle poll, and self-chaining after any claim. Stored errors use Go's
+text: `job failed to process: <error>` for handler failures, `job exceeded its
+<Go duration> timeout: context deadline exceeded` for timeouts, and the bare
+deadline error for expired jobs.
+
+Only explicitly supported payloads are ever locked: `ClassifierWorkflow` must
+be `default` and the three attach flags must be JSON `false`. The embedded core
+configuration defaults all three flags to `true`, so an omitted flag can never
+resolve to the supported value; the organic DHT payload (`InfoHashes` only) is
+therefore always left to Go. A claimed job that the kernel still cannot
+reproduce (a sourced or enriched explicit hint, an input over the loader's
+bounds, any composition invariant) is abstained before any side effect: the
+claim transaction rolls back, the row keeps its status, retries, `run_after`,
+and error, and the worker excludes that ID from its own claims for a cool-off
+period. A payload that fails to decode, a database error while loading, a
+timeout, and every error once persistence has started settle through Go's
+retry lifecycle; every other loader or composer error abstains. A request of
+more than 100 info hashes (the loader bound, equal to Go's DHT batch and the
+default reprocess batch size) is therefore always left to Go.
+
+The binary refuses to start unless `--expected-classifier-config-digest`
+matches the embedded configuration and the Goose head is at least 26. It needs
+no `SECURITY DEFINER` capability from migrations 29–34: the claim and
+settlement are the generic `queue_jobs` statements, and the writer needs the
+same table rights as the Go processor. It flushes the shared blocking manager
+on shutdown, as Go does when the application stops.
+
+Migration-backed gates (`tests/worker_pg.rs`) prove: a processed job leaves
+exactly the live image the direct `load_writer_plan` + `persist_writer_plan`
+path leaves; non-admitted payloads are never touched and Go's claim still
+takes them in its order; admitted claim order is Go's; Go's retry count,
+`calculate_backoff` envelope, terminal `failed` status, and error text; a
+partial failure publishes Go's replacement job before persisting; abstention
+leaves the row byte-identical and unlocked; an abstaining job at the head of
+the queue neither blocks the admitted job behind it nor causes a re-claim
+loop, and its exclusion expires and is capped; and two Rust workers plus Go's
+exact claim never double-claim. `tools/parity/process_torrent_worker/run.sh`
+drains the same Go-built jobs with Go alone (A), with Rust then Go for its
+abstentions (B), and with both concurrently (C), and diffs the resulting
+images. At Goose 29 over the 330 synthetic classifier cases plus all 119,991
+real-name replay inputs (120,321 torrents, 1,224 seeded jobs including file
+lists, explicit hints, deletion-only and mixed deletions, partial failures,
+and all-missing jobs), B and C are byte-identical to A across all 241,982 dump
+lines: 120,300 `torrent_contents`, 120,310 surviving torrents, 11
+`deleted_torrents`, and all 1,346 `queue_jobs` (status, retries, error text,
+payload, and fingerprint, including the 122 Go-shaped partial-failure
+replacements). In B the Rust worker settled every admitted job except the four
+with sourced explicit hints, which it abstained from and Go then processed.
+`run_after`, `ran_at`, write timestamps, generated IDs, and bloom-filter bytes
+are excluded (Go's backoff jitter and filter decrement start are random).
+Throughput is not at parity: the Rust worker classifies sequentially on one
+core (about 100 torrents per second in B, 1,209 s), while Go's goroutine
+fan-out drained A in 91 s.
+
+The differential found three persistence-kernel divergences that the
+canonicalizing comparators had hidden: empty `episodes` were stored as `{}`
+where Go stores SQL `NULL` (every such Rust row, 1,981 in the first run); `languages`
+were stored in code order where Go stores `Languages.Slice()` (natsort by
+name) order; and, once the first was fixed, the one Go case that does store
+`{}` — an episodes regex match that allocates the map but adds nothing, such
+as the backwards range `S01E79 - 9` — was stored as `NULL` (1 of 20,310).
+`bitmagnet_release::Episodes` now tracks Go's nil-versus-allocated bit
+(equality still ignores it) and the writer plan carries it to persistence.
+The canonical comparison image is unchanged.
+
+Known differences from Go, all outside the admitted subset's write-set:
+no post-commit Tantivy dual-write (the search follower keys on
+`torrents.updated_at`, which the processor does not touch, so a Rust-written
+reclassification reaches the sidecar only at the next backfill or torrent
+update); a timeout cancels the Rust handler, while
+Go's handler goroutine keeps running after its job is settled; JSON-decode,
+database-driver, and panic error texts differ; a job with several classifier
+failures may publish its retry hashes in a different (valid) order, and
+therefore a different fingerprint, than a given Go run.
