@@ -47,26 +47,28 @@ pub(crate) struct Env {
 /// configuration that builds patterns from torrent data. A list rather than a
 /// hash map: hashing a multi-kilobyte pattern on every call costs far more
 /// than comparing it against a handful of entries, where differing lengths
-/// short-circuit and a hit is one `memcmp`.
+/// short-circuit and a hit is one `memcmp`. Entries are shared rather than
+/// cloned because `Regex::clone` starts an empty match-cache pool, which would
+/// rebuild the lazy DFA on every call.
 #[derive(Default)]
-struct RegexCache(Mutex<Vec<(String, Regex)>>);
+struct RegexCache(Mutex<Vec<(String, Arc<Regex>)>>);
 
 const MAX_CACHED_REGEXES: usize = 64;
 
 impl RegexCache {
-    fn get(&self, pattern: &str) -> Result<Regex, regex::Error> {
+    fn get(&self, pattern: &str) -> Result<Arc<Regex>, regex::Error> {
         if let Some((_, regex)) = self.lock().iter().find(|(cached, _)| cached == pattern) {
-            return Ok(regex.clone());
+            return Ok(Arc::clone(regex));
         }
-        let regex = Regex::new(pattern)?;
+        let regex = Arc::new(Regex::new(pattern)?);
         let mut cache = self.lock();
         if cache.len() < MAX_CACHED_REGEXES {
-            cache.push((pattern.to_owned(), regex.clone()));
+            cache.push((pattern.to_owned(), Arc::clone(&regex)));
         }
         Ok(regex)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, Regex)>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, Arc<Regex>)>> {
         // The list is only ever appended to, so a poisoned lock is still valid.
         self.0
             .lock()
