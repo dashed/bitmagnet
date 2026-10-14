@@ -13,10 +13,12 @@ bitmagnet-fts = { path = "../bitmagnet-fts" }
 bitmagnet-textmatch = { path = "../bitmagnet-textmatch" }
 bitmagnet-tape = { path = "../bitmagnet-tape" }
 # CEL engine (cel-rust). `structs` enables custom struct defs, `json` enables
-# Value<->JSON conversion, `regex` powers the built-in `matches()`. Version
-# pinned locally rather than in the workspace table to keep Lane C's dependency
-# edge off the shared manifest during the lane race.
-cel = { version = "0.14.0", features = ["json", "structs", "regex"] }
+# Value<->JSON conversion. The default `regex` feature is left off: its stdlib
+# `matches()` recompiles the pattern on every call and would shadow the caching
+# `matches` registered in `env.rs`. Version pinned locally rather than in the
+# workspace table to keep Lane C's dependency edge off the shared manifest
+# during the lane race.
+cel = { version = "0.14.0", default-features = false, features = ["json", "structs", "chrono"] }
 # YAML source loader for `classifier.core.yml`.
 serde_yaml = "0.9"
 serde = { workspace = true }
