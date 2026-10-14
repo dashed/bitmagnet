@@ -1,19 +1,22 @@
 //! The CEL environment: builds the constant namespace variables from a
 //! `Source` and evaluates compiled expression `Program`s against a
 //! `torrent`/`result`/`flags` binding, registering the three custom functions
-//! `classifier.core.yml` calls (`sum`, `join`, plus the built-in `matches`).
+//! `classifier.core.yml` calls (`sum`, `join`, and a compiled-regex-caching
+//! `matches`).
 //!
 //! Unlike cel-go (`cel_env.go`), the namespaces are bound as ordinary CEL
 //! **maps** rather than dotted-name constants — cel-rust resolves `a.b` on a
 //! map by key, and has no compile-time type-checker that needs the null-map
 //! placeholder trick.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 use bitmagnet_release::regex_pattern_from_keywords;
+use cel::common::types::CelString;
 use cel::extractors::This;
-use cel::{to_value, Context, Program, Value};
+use cel::{to_value, Context, ExecutionError, FunctionContext, Program, Value};
+use regex::Regex;
 
 use crate::cel_value::build_cel_classification;
 use crate::errors::FlowError;
@@ -25,6 +28,43 @@ use crate::source::{FlagValue, Source};
 /// `result`, and `flags`).
 pub(crate) struct Env {
     namespaces: Vec<(String, Value)>,
+    /// cel-rust's standard overload table. `Context::default()` rebuilds it
+    /// on every call, so it is built once and shared by every evaluation.
+    stdlib: Arc<cel::Env>,
+    regexes: Arc<RegexCache>,
+}
+
+/// Compiled `matches` patterns, keyed by pattern text.
+///
+/// cel-rust's stdlib `matches` compiles its pattern on every call, and the
+/// `keywords.*` patterns are large Unicode alternations, so recompiling them
+/// for every torrent dominated classification time. Patterns come from the
+/// compiled configuration, so the set is small; the bound only guards against a
+/// configuration that builds patterns from torrent data.
+#[derive(Default)]
+struct RegexCache(Mutex<HashMap<String, Regex>>);
+
+const MAX_CACHED_REGEXES: usize = 256;
+
+impl RegexCache {
+    fn get(&self, pattern: &str) -> Result<Regex, regex::Error> {
+        if let Some(regex) = self.lock().get(pattern) {
+            return Ok(regex.clone());
+        }
+        let regex = Regex::new(pattern)?;
+        let mut cache = self.lock();
+        if cache.len() < MAX_CACHED_REGEXES {
+            cache.insert(pattern.to_owned(), regex.clone());
+        }
+        Ok(regex)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Regex>> {
+        // The map is only ever inserted into, so a poisoned lock is still valid.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Env construction failure.
@@ -78,7 +118,11 @@ impl Env {
         namespaces.push(("mb".to_string(), Value::Int(1_000_000)));
         namespaces.push(("gb".to_string(), Value::Int(1_000_000_000)));
 
-        Ok(Env { namespaces })
+        Ok(Env {
+            namespaces,
+            stdlib: Arc::new(cel::Env::stdlib()),
+            regexes: Arc::default(),
+        })
     }
 
     /// Evaluate a compiled boolean CEL expression against the current binding.
@@ -89,8 +133,8 @@ impl Env {
         result: &Classification,
         flags: &Value,
     ) -> Result<bool, FlowError> {
-        let mut ctx = Context::default();
-        register_functions(&mut ctx);
+        let mut ctx = Context::with_env(Arc::clone(&self.stdlib));
+        register_functions(&mut ctx, &self.regexes);
         for (name, value) in &self.namespaces {
             ctx.add_variable_from_value(name.clone(), value.clone());
         }
@@ -147,8 +191,7 @@ pub(crate) fn flags_value(flags: &BTreeMap<String, FlagValue>) -> Value {
 }
 
 /// Register the custom member functions `classifier.core.yml` invokes.
-/// `matches` is already in cel-rust's stdlib (regex-backed).
-fn register_functions(ctx: &mut Context<'_>) {
+fn register_functions(ctx: &mut Context<'_>, regexes: &Arc<RegexCache>) {
     // `<list<int>>.sum()` — k8s.lists `sum` over the int overload (the only
     // summable type core.yml uses). Empty list -> 0 (`cel_lists.go`).
     ctx.add_function("sum", |This(list): This<Arc<Vec<Value>>>| -> i64 {
@@ -171,6 +214,33 @@ fn register_functions(ctx: &mut Context<'_>) {
                 })
                 .collect();
             Arc::new(parts.join(sep.as_str()))
+        },
+    );
+    // `<string>.matches(pattern)` — cel-rust's stdlib overload with the
+    // compiled regex cached. The crate's `regex` feature is off so that this
+    // registry function, rather than the stdlib overload, receives the call.
+    // Any other call shape falls through exactly as it did when only the
+    // stdlib member overload was declared.
+    let regexes = Arc::clone(regexes);
+    ctx.add_function(
+        "matches",
+        move |ftx: &FunctionContext<'_, '_>| -> Result<bool, ExecutionError> {
+            let (Some(target), [pattern]) = (ftx.this.as_deref(), ftx.args.as_slice()) else {
+                return Err(ExecutionError::undeclared_reference("matches"));
+            };
+            let (Some(target), Some(pattern)) = (
+                target.downcast_ref::<CelString>(),
+                pattern.downcast_ref::<CelString>(),
+            ) else {
+                return Err(ExecutionError::undeclared_reference("matches"));
+            };
+            match regexes.get(pattern.inner()) {
+                Ok(regex) => Ok(regex.is_match(target.inner())),
+                Err(err) => Err(ExecutionError::function_error(
+                    "matches",
+                    format!("'{}' not a valid regex:\n{err}", pattern.inner()),
+                )),
+            }
         },
     );
 }
