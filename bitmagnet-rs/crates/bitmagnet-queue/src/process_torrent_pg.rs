@@ -12,7 +12,9 @@
 //!   other row is never locked, so the Go worker keeps processing it in its own
 //!   order. The Rust classifier embeds the Go core configuration, where all
 //!   three flags default to `true`, so an omitted flag can never be resolved to
-//!   the supported value.
+//!   the supported value. The payload may carry no top-level key other than
+//!   `MessageParams`' four exact names: Go's decoder also binds keys that
+//!   match case-insensitively (`classifierWorkflow`), which serde ignores.
 //! - **Abstention.** A handler may decline a claimed job before it has caused
 //!   any side effect. The claim transaction then rolls back: the row keeps its
 //!   status, retry count, `run_after`, and error, and the lock is released for
@@ -46,6 +48,8 @@ SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload,
 FROM queue_jobs \
 WHERE queue = 'process_torrent' AND status IN ('pending','retry') \
   AND run_after <= clock_timestamp() \
+  AND payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' \
+      - 'InfoHashes' = '{}'::jsonb \
   AND payload->>'ClassifierWorkflow' = 'default' \
   AND payload->'ClassifierFlags'->'local_search_enabled' = 'false'::jsonb \
   AND payload->'ClassifierFlags'->'apis_enabled' = 'false'::jsonb \

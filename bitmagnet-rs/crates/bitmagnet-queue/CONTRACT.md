@@ -194,8 +194,10 @@ the bounded acquisition failure degrades only that scrape's queue family.
 `QueueStore::consume_admitted_process_torrent` is the claim used by the
 persisting Rust `process_torrent` worker. It is Go's generic claim, ordering,
 deadline, retry-count, backoff, and settlement path with a fixed, hardcoded
-admission predicate (explicit `default` workflow and all three attach flags
-JSON `false`) and a caller-supplied exclusion list. Rows outside the predicate
+admission predicate (explicit `default` workflow, all three attach flags
+JSON `false`, and no top-level payload key beyond `MessageParams`' four exact
+names, because Go's decoder also binds case-insensitive key matches) and a
+caller-supplied exclusion list. Rows outside the predicate
 are never locked, so the Go worker keeps processing them. A handler may return
 `JobVerdict::Abstain` before causing any side effect; the claim transaction
 then rolls back and the row is left byte-identical and unlocked. A panic is

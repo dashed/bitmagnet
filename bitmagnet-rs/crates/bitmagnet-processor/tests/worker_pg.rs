@@ -308,6 +308,16 @@ async fn non_admitted_payloads_are_never_claimed_and_stay_available_to_go() {
         format!(
             "{{\"ClassifierWorkflow\":\"custom\",\"ClassifierFlags\":{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"InfoHashes\":{hashes}}}"
         ),
+        // Go's json.Unmarshal also binds case-insensitive key matches, and
+        // jsonb orders the lower-case key last, so Go runs workflow `custom`
+        // and then merges `local_search_enabled: true` into the flags. serde
+        // ignores both keys and would classify with the supported subset.
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"classifierWorkflow\":\"custom\",\"ClassifierFlags\":{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"classifierFlags\":{{\"local_search_enabled\":true}},\"InfoHashes\":{hashes}}}"
+        ),
     ];
     let mut ids = Vec::new();
     for payload in &payloads {
