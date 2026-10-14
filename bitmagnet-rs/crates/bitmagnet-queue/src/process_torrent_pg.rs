@@ -41,6 +41,17 @@ use crate::{QueueJobStatus, QueuePgError, QueueStore};
 ///
 /// The queue name is hardcoded rather than bound so this statement can never be
 /// pointed at another queue's payload shape. `$1` is the exclusion list.
+///
+/// Admission is one jsonb containment rather than four `->` comparisons, with
+/// the top-level key allow-list nested under it in a `CASE`. That accepts
+/// exactly the payloads whose `ClassifierWorkflow` is the string `default`,
+/// whose `ClassifierFlags` object holds the three flags as JSON `false`, and
+/// which carry no other top-level key. Written as separate `AND`ed payload
+/// comparisons, the planner multiplies their default selectivities to about
+/// zero rows and then prefers a sequential scan that detoasts and sorts every
+/// pending payload on each claim (28 ms with 1,224 pending jobs). This shape
+/// keeps Go's `queue_jobs_claim_idx` order scan, which stops at the first
+/// admitted row (0.3 ms custom, 0.03 ms generic plan).
 const ADMITTED_PROCESS_TORRENT_CLAIM_SQL: &str = "\
 SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
        retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
@@ -48,12 +59,11 @@ SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload,
 FROM queue_jobs \
 WHERE queue = 'process_torrent' AND status IN ('pending','retry') \
   AND run_after <= clock_timestamp() \
-  AND payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' \
-      - 'InfoHashes' = '{}'::jsonb \
-  AND payload->>'ClassifierWorkflow' = 'default' \
-  AND payload->'ClassifierFlags'->'local_search_enabled' = 'false'::jsonb \
-  AND payload->'ClassifierFlags'->'apis_enabled' = 'false'::jsonb \
-  AND payload->'ClassifierFlags'->'tmdb_enabled' = 'false'::jsonb \
+  AND CASE WHEN payload @> '{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":\
+{\"local_search_enabled\":false,\"apis_enabled\":false,\"tmdb_enabled\":false}}'::jsonb \
+      THEN payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' \
+           - 'InfoHashes' = '{}'::jsonb \
+      ELSE false END \
   AND id <> ALL($1::text[]) \
 ORDER BY (status = 'retry'), priority, run_after \
 FOR UPDATE SKIP LOCKED \

@@ -318,6 +318,17 @@ async fn non_admitted_payloads_are_never_claimed_and_stay_available_to_go() {
         format!(
             "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"classifierFlags\":{{\"local_search_enabled\":true}},\"InfoHashes\":{hashes}}}"
         ),
+        // Admission is a jsonb containment: arrays wrapping the expected
+        // values must not match.
+        format!(
+            "{{\"ClassifierWorkflow\":[\"default\"],\"ClassifierFlags\":{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":[{{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}}],\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":[false],\"local_search_enabled\":false,\"tmdb_enabled\":false}},\"InfoHashes\":{hashes}}}"
+        ),
     ];
     let mut ids = Vec::new();
     for payload in &payloads {
