@@ -39,28 +39,34 @@ import (
 const fixtureTime = "2024-01-02T03:04:05.123456Z"
 
 type input struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Size        uint64 `json:"size"`
-	FilesStatus string `json:"filesStatus"`
-	FilesCount  *int   `json:"filesCount"`
-	Files       []struct {
-		Index uint   `json:"index"`
-		Path  string `json:"path"`
-		Size  uint   `json:"size"`
-	} `json:"files"`
-	Hint *struct {
-		ContentType   string `json:"contentType"`
-		ContentSource string `json:"contentSource"`
-		ContentID     string `json:"contentId"`
-	} `json:"hint"`
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Size        uint64      `json:"size"`
+	FilesStatus string      `json:"filesStatus"`
+	FilesCount  *int        `json:"filesCount"`
+	Files       []inputFile `json:"files"`
+	Hint        *inputHint  `json:"hint"`
+}
+
+type inputFile struct {
+	Index uint   `json:"index"`
+	Path  string `json:"path"`
+	Size  uint   `json:"size"`
+}
+
+type inputHint struct {
+	ContentType   string `json:"contentType"`
+	ContentSource string `json:"contentSource"`
+	ContentID     string `json:"contentId"`
 }
 
 type golden struct {
-	ID       string `json:"id"`
-	Expected struct {
-		Outcome string `json:"outcome"`
-	} `json:"expected"`
+	ID       string         `json:"id"`
+	Expected goldenExpected `json:"expected"`
+}
+
+type goldenExpected struct {
+	Outcome string `json:"outcome"`
 }
 
 type seeded struct {
@@ -71,7 +77,7 @@ type seeded struct {
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -270,7 +276,7 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "seeded %d torrents and %d jobs\n", len(all), len(jobs))
+	_, _ = fmt.Fprintf(os.Stderr, "seeded %d torrents and %d jobs\n", len(all), len(jobs))
 
 	return nil
 }
@@ -383,7 +389,7 @@ func requeue(ctx context.Context, conn *pgx.Conn, jobSize int) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "requeued %d torrents in %d jobs\n", n, len(jobs))
+	_, _ = fmt.Fprintf(os.Stderr, "requeued %d torrents in %d jobs\n", n, len(jobs))
 
 	return nil
 }
@@ -396,7 +402,7 @@ func requeue(ctx context.Context, conn *pgx.Conn, jobSize int) error {
 // only missing hashes (all-failed: retry lifecycle to `failed`).
 func planJobs(all []seeded, jobSize int) [][]protocol.ID {
 	var (
-		jobs         [][]protocol.ID
+		sourced      []protocol.ID
 		deletionOnly []protocol.ID
 		rest         []protocol.ID
 	)
@@ -404,7 +410,7 @@ func planJobs(all []seeded, jobSize int) [][]protocol.ID {
 	for _, s := range all {
 		switch {
 		case s.sourced:
-			jobs = append(jobs, []protocol.ID{s.hash})
+			sourced = append(sourced, s.hash)
 		case s.deleted && len(deletionOnly) < 10:
 			deletionOnly = append(deletionOnly, s.hash)
 		default:
@@ -412,13 +418,19 @@ func planJobs(all []seeded, jobSize int) [][]protocol.ID {
 		}
 	}
 
+	// One slot is kept free for the appended missing hash, so no job exceeds
+	// jobSize (the Rust loader's 100-hash bound equals Go's DHT batch size).
+	step := jobSize - 1
+	jobs := make([][]protocol.ID, 0, len(sourced)+1+(len(rest)+step-1)/step+3)
+
+	for _, hash := range sourced {
+		jobs = append(jobs, []protocol.ID{hash})
+	}
+
 	if len(deletionOnly) > 0 {
 		jobs = append(jobs, deletionOnly)
 	}
 
-	// One slot is kept free for the appended missing hash, so no job exceeds
-	// jobSize (the Rust loader's 100-hash bound equals Go's DHT batch size).
-	step := jobSize - 1
 	for i := 0; i < len(rest); i += step {
 		chunk := append([]protocol.ID(nil), rest[i:min(i+step, len(rest))]...)
 		if (i/step)%10 == 0 {
@@ -489,7 +501,7 @@ func dump(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
 			return err
 		}
 
-		fmt.Fprintf(os.Stderr, "%s: %d rows\n", q.label, n)
+		_, _ = fmt.Fprintf(os.Stderr, "%s: %d rows\n", q.label, n)
 	}
 
 	return nil
