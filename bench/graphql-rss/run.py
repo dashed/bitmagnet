@@ -674,7 +674,7 @@ class DockerHarness:
                 "bitmagnet-rs/docker/Dockerfile.graphql",
                 "--tag",
                 self.graphql_image,
-                "bitmagnet-rs",
+                ".",
                 environment=self.graphql_build_environment,
                 timeout=self.args.build_timeout,
             )

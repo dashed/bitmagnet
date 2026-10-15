@@ -113,7 +113,7 @@ docker build \
   --build-arg SOURCE_TREE=<reviewed-runtime-root-tree> \
   -f bitmagnet-rs/docker/Dockerfile.graphql \
   -t <session-tag> \
-  bitmagnet-rs
+  .
 ```
 
 For admission-grade `gate` runs, the runner pulls the receipt-authorized GraphQL

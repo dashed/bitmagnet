@@ -2,11 +2,14 @@
 #
 # Multi-stage build for the PostgreSQL-backed GraphQL service. Reads are the
 # default; each served mutation family requires its own gate and writer.
+# The repository root must be the build context: torrent.reprocess links
+# bitmagnet-classifier, which embeds internal/classifier/classifier.core.yml at
+# compile time.
 #
 #   docker build -f bitmagnet-rs/docker/Dockerfile.graphql \
 #     --build-arg REVISION="$(git rev-parse HEAD)" \
 #     --build-arg SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
-#     -t bitmagnet-graphql bitmagnet-rs
+#     -t bitmagnet-graphql .
 #
 # Builder and runtime use Debian bookworm so the linked glibc matches. The
 # runtime is deliberately small and non-root; Kubernetes supplies every
@@ -32,15 +35,17 @@ RUN apt-get update \
 
 WORKDIR /build
 
-# Copy the complete Rust workspace; .dockerignore excludes target/VCS noise.
-COPY . .
+# The Rust workspace plus the one Go file the classifier embeds;
+# Dockerfile.graphql.dockerignore keeps VCS and target/ out of the context.
+COPY bitmagnet-rs ./bitmagnet-rs
+COPY internal/classifier/classifier.core.yml ./internal/classifier/classifier.core.yml
 
 # Preserve only the runtime artifact in the committed builder layer. This keeps
 # classic/VFS builders from snapshotting Cargo's multi-gigabyte target tree and
 # gives the cross-stage copy a small, stable source outside Cargo's build tree.
-RUN cargo build --locked --release -p bitmagnet-graphql \
-    && install -D -m 0755 target/release/bitmagnet-graphql /out/bitmagnet-graphql \
-    && rm -rf target
+RUN cargo build --manifest-path bitmagnet-rs/Cargo.toml --locked --release -p bitmagnet-graphql \
+    && install -D -m 0755 bitmagnet-rs/target/release/bitmagnet-graphql /out/bitmagnet-graphql \
+    && rm -rf bitmagnet-rs/target
 
 # ---- runtime ----------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
