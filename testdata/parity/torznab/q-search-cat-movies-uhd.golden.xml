@@ -1,0 +1,31 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Titan 2021 2160p UHD BluRay x265-ZONE</title>
+      <guid>3a009cef7ee9190d9d740cccb5a6037cea0d23c2</guid>
+      <pubDate>Thu, 23 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>8200000000</size>
+      <enclosure length="8200000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="infohash" value="3a009cef7ee9190d9d740cccb5a6037cea0d23c2"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="8200000000"/>
+      <torznab:attr name="publishdate" value="Thu, 23 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="900"/>
+      <torznab:attr name="leechers" value="50"/>
+      <torznab:attr name="peers" value="950"/>
+      <torznab:attr name="files" value="5"/>
+      <torznab:attr name="year" value="2021"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="2160p"/>
+      <torznab:attr name="team" value="ZONE"/>
+      <torznab:attr name="tmdb" value="104"/>
+      <torznab:attr name="imdb" value="1040404"/>
+    </item>
+  </channel>
+</rss>

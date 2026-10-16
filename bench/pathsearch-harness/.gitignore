@@ -1,0 +1,10 @@
+# Generated protobuf/grpc stubs (regenerated from proto/ on first run)
+/src/ps_harness/_generated/
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Local run outputs
+*.results.json
+/out/

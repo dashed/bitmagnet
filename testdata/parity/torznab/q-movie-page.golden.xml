@@ -1,0 +1,73 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response offset="3" xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Titan 2021 2160p UHD BluRay x265-ZONE</title>
+      <guid>3a009cef7ee9190d9d740cccb5a6037cea0d23c2</guid>
+      <pubDate>Thu, 23 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>8200000000</size>
+      <enclosure length="8200000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="infohash" value="3a009cef7ee9190d9d740cccb5a6037cea0d23c2"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="8200000000"/>
+      <torznab:attr name="publishdate" value="Thu, 23 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="900"/>
+      <torznab:attr name="leechers" value="50"/>
+      <torznab:attr name="peers" value="950"/>
+      <torznab:attr name="files" value="5"/>
+      <torznab:attr name="year" value="2021"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="2160p"/>
+      <torznab:attr name="team" value="ZONE"/>
+      <torznab:attr name="tmdb" value="104"/>
+      <torznab:attr name="imdb" value="1040404"/>
+    </item>
+    <item>
+      <title>Vertex 3D 2022 1080p BluRay Half-SBS x264-DEPTH</title>
+      <guid>ccd8334a0fce9e94a7035156546adaddc3050136</guid>
+      <pubDate>Wed, 22 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>3100000000</size>
+      <enclosure length="3100000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:ccd8334a0fce9e94a7035156546adaddc3050136&amp;dn=Vertex+3D+2022+1080p+BluRay+Half-SBS+x264-DEPTH&amp;xl=3100000000"/>
+      <torznab:attr name="infohash" value="ccd8334a0fce9e94a7035156546adaddc3050136"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:ccd8334a0fce9e94a7035156546adaddc3050136&amp;dn=Vertex+3D+2022+1080p+BluRay+Half-SBS+x264-DEPTH&amp;xl=3100000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="3100000000"/>
+      <torznab:attr name="publishdate" value="Wed, 22 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="70"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="peers" value="73"/>
+      <torznab:attr name="files" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="DEPTH"/>
+    </item>
+    <item>
+      <title>Quasar 2023 1080p WEB x264-AXIS</title>
+      <guid>f0958739887453f248b21c0fa92b6b30ebd9934c</guid>
+      <pubDate>Tue, 21 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1900000000</size>
+      <enclosure length="1900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="infohash" value="f0958739887453f248b21c0fa92b6b30ebd9934c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1900000000"/>
+      <torznab:attr name="publishdate" value="Tue, 21 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="300"/>
+      <torznab:attr name="leechers" value="8"/>
+      <torznab:attr name="peers" value="308"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2023"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="AXIS"/>
+      <torznab:attr name="tmdb" value="106"/>
+    </item>
+  </channel>
+</rss>

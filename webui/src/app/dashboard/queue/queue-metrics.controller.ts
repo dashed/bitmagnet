@@ -47,6 +47,7 @@ export class QueueMetricsController {
   private resultSubject = new BehaviorSubject<Result>(emptyResult);
   public result$ = this.resultSubject.asObservable();
   private loadingSubject = new BehaviorSubject(false);
+  public lastUpdatedAt?: Date;
 
   private refreshTimeout?: number;
 
@@ -193,6 +194,7 @@ export class QueueMetricsController {
         map((r) => {
           if (r) {
             this.loadingSubject.next(false);
+            this.lastUpdatedAt = new Date();
             this.rawResultSubject.next(r.data);
           }
         }),

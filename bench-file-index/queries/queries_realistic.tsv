@@ -1,0 +1,45 @@
+# PS-D2-L3 (B5) — realistic multi-word selectivity sweep (group<TAB>query)
+# ngram(min2,max3) treats the WHOLE query string as one char stream (no
+# whitespace split) → a multi-word query is just a LONGER substring → more
+# grams AND'd → smaller intersection. Groups quantify the selectivity gradient
+# from a single broad gram (synthetic worst case) to a realistic release-name
+# fragment. Per-group p50/p95/p99 reported for Count and (with --topdocs) the
+# production TopDocs page collector.
+
+# --- a1: single broad term (the synthetic worst case = PS-MB1 ascii3/4 floor)
+a1_broad	x264
+a1_broad	1080p
+a1_broad	720p
+a1_broad	bluray
+a1_broad	hevc
+a1_broad	x265
+
+# --- a2: two-word space-separated (as typed in a search box) -----------------
+a2_2word	1080p bluray
+a2_2word	x264 1080p
+a2_2word	x265 hdr
+a2_2word	web dl
+a2_2word	bluray x264
+a2_2word	720p web
+
+# --- a3: dotted realistic release-name fragments (how paths actually encode) -
+a3_dotted	1080p.bluray
+a3_dotted	x264-rarbg
+a3_dotted	s01e01
+a3_dotted	2160p.x265
+a3_dotted	web.dl.x264
+a3_dotted	bluray.1080p.x264
+
+# --- a4: long / highly-selective (3+ tokens) --------------------------------
+a4_long	2160p x265 hdr
+a4_long	1080p.bluray.x264
+a4_long	flac 24bit
+a4_long	s01e01.1080p.web
+a4_long	2160p.bluray.hevc.hdr
+
+# --- cjk2word: realistic CJK title fragment + qualifier ---------------------
+cjk2word	中文字幕
+cjk2word	高清 1080p
+cjk2word	电影 2160p
+cjk2word	蓝光原盘
+cjk2word	日本 動画

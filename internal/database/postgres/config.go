@@ -17,6 +17,10 @@ type Config struct {
 	SSLCertPath       string
 	SSLKeyPath        string
 	SSLRootCertPath   string
+	// PoolMaxConns caps the pgx connection pool. 0 = pgx default (max(4, NumCPU)), which silently
+	// gates parallelism (e.g. the blob-migration K-way backfill blocks on Acquire). Set it to
+	// >= peak concurrent DB users (backfill workers + crawler + API) and below server max_connections.
+	PoolMaxConns uint
 }
 
 func NewDefaultConfig() Config {
@@ -68,6 +72,7 @@ func dbValues(cfg *Config) map[string]string {
 	setIfNotEmpty(p, "sslcert", cfg.SSLCertPath)
 	setIfNotEmpty(p, "sslkey", cfg.SSLKeyPath)
 	setIfNotEmpty(p, "sslrootcert", cfg.SSLRootCertPath)
+	setIfPositive(p, "pool_max_conns", cfg.PoolMaxConns)
 
 	return p
 }

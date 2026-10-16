@@ -33,6 +33,7 @@ type Result = {
   workers: Worker[];
   error: Error | null;
   icon: string;
+  lastUpdatedAt?: Date;
 };
 
 const initialResult: Result = {
@@ -43,7 +44,7 @@ const initialResult: Result = {
   error: null,
 };
 
-const pollInterval = 10000;
+const pollInterval = 3000;
 
 export class HealthService {
   private apollo = inject(Apollo);
@@ -88,6 +89,7 @@ export class HealthService {
             })),
             icon: icons[r.data.health.status],
             error: null,
+            lastUpdatedAt: new Date(),
           }),
         ),
       )

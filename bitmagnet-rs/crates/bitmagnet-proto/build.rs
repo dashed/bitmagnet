@@ -1,0 +1,32 @@
+//! Compiles the workspace's `.proto` files into Rust with tonic + prost.
+//!
+//! The protos live at the workspace root (`bitmagnet-rs/proto/`), so they are
+//! reached relative to this crate's manifest directory. `search.proto` imports
+//! `bitmagnet/common.proto`, hence the `proto/` directory is the include root.
+
+use std::path::PathBuf;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
+    // crates/bitmagnet-proto -> bitmagnet-rs -> proto
+    let proto_root = manifest_dir.join("..").join("..").join("proto");
+    let common = proto_root.join("bitmagnet").join("common.proto");
+    let search = proto_root.join("bitmagnet").join("search.proto");
+    // L2b file-search service (DuckDB-on-Parquet sidecar). Shares the
+    // `bitmagnet.v1` package, so prost folds it into the same generated module.
+    let file_search = proto_root.join("bitmagnet").join("file_search.proto");
+    // L3 pathsearch candidate sidecar. Also shares `bitmagnet.v1`.
+    let path_search = proto_root.join("bitmagnet").join("path_search.proto");
+
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(
+            &[common, search, file_search, path_search],
+            std::slice::from_ref(&proto_root),
+        )?;
+
+    // Rebuild when any proto changes.
+    println!("cargo:rerun-if-changed={}", proto_root.display());
+    Ok(())
+}

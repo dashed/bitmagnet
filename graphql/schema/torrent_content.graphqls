@@ -64,6 +64,11 @@ input VideoSourceFacetInput {
   filter: [VideoSource]
 }
 
+input SizeRangeInput {
+  min: Int
+  max: Int
+}
+
 input TorrentContentFacetsInput {
   contentType: ContentTypeFacetInput
   torrentSource: TorrentSourceFacetInput
@@ -74,6 +79,8 @@ input TorrentContentFacetsInput {
   releaseYear: ReleaseYearFacetInput
   videoResolution: VideoResolutionFacetInput
   videoSource: VideoSourceFacetInput
+  sizeRange: SizeRangeInput
+  publishedAt: String
 }
 
 type ContentTypeAgg {
@@ -165,4 +172,29 @@ type TorrentContentSearchResult {
 input TorrentContentOrderByInput {
   field: TorrentContentOrderByField!
   descending: Boolean
+}
+
+"""
+TorrentContentCollapsePathsInput drives the collapse:path query: the L3-routed
+grouping of matching torrents by their distinct matched file path. It carries the
+raw path free-text only (no facets in v1).
+"""
+input TorrentContentCollapsePathsInput {
+  queryString: String!
+  limit: Int
+  offset: Int
+}
+
+"""
+TorrentContentPathGroup is one distinct matched file path and the info hashes of
+the candidate torrents that contain a file at that path. v1 is UNHYDRATED: it
+returns raw info hashes only; clients hydrate via the existing search-by-infoHashes.
+"""
+type TorrentContentPathGroup {
+  path: String!
+  infoHashes: [Hash20!]!
+}
+
+type TorrentContentCollapsePathsResult {
+  groups: [TorrentContentPathGroup!]!
 }

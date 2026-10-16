@@ -1,0 +1,17 @@
+[
+  {
+    "infoHash": "0123456789abcdef0123456789abcdef01234567",
+    "files": [
+      { "index": 2, "path": "z/no-extension", "extension": "bogus", "size": 8 },
+      { "index": 0, "path": "a/Movie.MKV", "extension": "bogus", "size": 30 },
+      { "index": 1, "path": "b/readme.txt", "extension": "bogus", "size": 20 }
+    ]
+  },
+  {
+    "infoHash": "1111111111111111111111111111111111111111",
+    "files": [
+      { "index": 5, "path": "c/archive.TAR.GZ", "extension": "wrong", "size": 20 },
+      { "index": 4, "path": "d/.hidden", "extension": "wrong", "size": 20 }
+    ]
+  }
+]

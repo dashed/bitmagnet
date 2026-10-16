@@ -1,0 +1,45 @@
+[package]
+name = "bitmagnet-parquet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "L2 export/refresh: torrents.files_data blobs -> sorted Parquet fact + rollups, with minute delta (tombstone supersession), compaction, and atomic generation swap."
+
+[features]
+# `duckdb-sort` compiles the embedded DuckDB used by `--sort external` — the
+# spilling global (extension, size) sort of the full ~880M-row base fact
+# (ARCH-C: the row-group-pruning latency lever). OFF by default so the
+# workspace build/test gate stays fast and C++-free; the production image
+# builds with it.
+default = []
+duckdb-sort = ["dep:duckdb"]
+
+[dependencies]
+# Domain types + blob decode (G1 extension-from-path) reused from the rewrite.
+bitmagnet-model = { path = "../bitmagnet-model" }
+# Keyset readers: base (stream_torrents_with_files) + delta (stream_changed_torrents).
+bitmagnet-db = { path = "../bitmagnet-db" }
+# init_tracing for the CLI binary.
+bitmagnet-common = { path = "../bitmagnet-common" }
+arrow.workspace = true
+parquet.workspace = true
+tokio = { workspace = true }
+sqlx.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+clap.workspace = true
+hex.workspace = true
+libc = "0.2"
+
+# `--sort external` only — gated by `duckdb-sort`.
+duckdb = { workspace = true, optional = true }
+
+[[bin]]
+name = "bitmagnet-parquet"
+path = "src/bin/bitmagnet-parquet.rs"
+
+[lints]
+workspace = true

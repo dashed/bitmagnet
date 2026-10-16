@@ -1,0 +1,26 @@
+# THROWAWAY bench tooling — NOT part of the bitmagnet-rs workspace.
+# Team: bitmagnet-bench / PSX-D1 (R5). Re-encodes torrent_files -> torrents.files_data
+# on the THROWAWAY bench restore using the EXACT production blob format
+# (bitmagnet_model::serialize_files), to close the L2 "blob -> Parquet on real
+# blobs" measurement gap. Rust-encoder fallback (no Go on HEL1): inner msgpack is
+# byte-identical to Go's; only the outer zstd frame differs (mutually decodable),
+# immaterial to any decoder (see docs/dev/psx-D1-blob-parquet-gap-spec.md §1.2).
+[package]
+name = "blob_encode_rs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "blob_encode_rs"
+path = "src/main.rs"
+
+[dependencies]
+bitmagnet-model = { path = "../../bitmagnet-rs/crates/bitmagnet-model" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls"] }
+futures = "0.3"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3

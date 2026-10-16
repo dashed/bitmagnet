@@ -34,13 +34,36 @@ func New(p Params) Result {
 			if err != nil {
 				return nil, err
 			}
-			logger := p.Logger.Named("migrator")
-			initGoose(logger)
-			return &migrator{
-				db:     db,
-				logger: logger,
-			}, nil
+			return newMigrator(db, p.Logger), nil
 		}),
+	}
+}
+
+func newMigrator(db *sql.DB, logger *zap.SugaredLogger) *migrator {
+	logger = logger.Named("migrator")
+	initGoose(logger)
+	return &migrator{
+		db:     db,
+		logger: logger,
+	}
+}
+
+// BoundedMigrator exposes only explicit migration targets. In particular, it
+// has no unbounded Up or single-step Down method.
+type BoundedMigrator interface {
+	UpTo(context.Context, int64) error
+	DownTo(context.Context, int64) error
+}
+
+// NewBoundedForSQLDB constructs a target-only migrator over the same embedded
+// Goose history used by the development CLI, without assembling the full
+// application Fx graph.
+func NewBoundedForSQLDB(db *sql.DB, logger *zap.SugaredLogger) BoundedMigrator {
+	logger = logger.Named("migrator")
+	initGoose(logger)
+	return &boundedMigrator{
+		db:     db,
+		logger: logger,
 	}
 }
 
@@ -66,6 +89,11 @@ type migrator struct {
 	logger *zap.SugaredLogger
 }
 
+type boundedMigrator struct {
+	db     *sql.DB
+	logger *zap.SugaredLogger
+}
+
 func (m *migrator) Up(ctx context.Context) error {
 	m.logger.Info("checking and applying migrations...")
 	return goose.UpContext(ctx, m.db, ".")
@@ -80,5 +108,13 @@ func (m *migrator) Down(ctx context.Context) error {
 }
 
 func (m *migrator) DownTo(ctx context.Context, version int64) error {
+	return goose.DownToContext(ctx, m.db, ".", version)
+}
+
+func (m *boundedMigrator) UpTo(ctx context.Context, version int64) error {
+	return goose.UpToContext(ctx, m.db, ".", version)
+}
+
+func (m *boundedMigrator) DownTo(ctx context.Context, version int64) error {
 	return goose.DownToContext(ctx, m.db, ".", version)
 }

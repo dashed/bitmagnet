@@ -41,7 +41,8 @@ type Result struct {
 
 	DhtCrawlerActive *concurrency.AtomicValue[bool] `name:"dht_crawler_active"`
 
-	PersistedTotal prometheus.Collector `group:"prometheus_collectors"`
+	PersistedTotal  prometheus.Collector `group:"prometheus_collectors"`
+	TorrentsDropped prometheus.Collector `group:"prometheus_collectors"`
 }
 
 func New(params Params) Result {
@@ -55,6 +56,13 @@ func New(params Params) Result {
 		Name:      "persisted_total",
 		Help:      "A counter of persisted database entities.",
 	}, []string{"entity"})
+
+	torrentsDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "bitmagnet",
+		Subsystem: "dht_crawler",
+		Name:      "torrents_dropped_total",
+		Help:      "A counter of torrents dropped before persistence, by reason.",
+	}, []string{"reason"})
 
 	return Result{
 		Worker: worker.NewWorker(
@@ -124,6 +132,7 @@ func New(params Params) Result {
 						soughtNodeID:    &concurrency.AtomicValue[protocol.ID]{},
 						stopped:         make(chan struct{}),
 						persistedTotal:  persistedTotal,
+						torrentsDropped: torrentsDropped,
 						logger:          params.Logger.Named("dht_crawler"),
 					}
 					c.soughtNodeID.Set(protocol.RandomNodeID())
@@ -143,6 +152,7 @@ func New(params Params) Result {
 			},
 		),
 		PersistedTotal:   persistedTotal,
+		TorrentsDropped:  torrentsDropped,
 		DhtCrawlerActive: active,
 	}
 }

@@ -56,6 +56,16 @@ func Concurrency(c int) Option {
 	}
 }
 
+// CheckInterval sets how often the handler polls for new jobs when idle. The default (30s) makes the
+// dispatcher effectively serial for fast-self-chaining handlers (it only re-checks immediately after
+// a job completes), so a low value is required to ramp the worker pool up to Concurrency. Applies to
+// this handler only.
+func CheckInterval(d time.Duration) Option {
+	return func(h *Handler) {
+		h.CheckInterval = d
+	}
+}
+
 // New creates new queue handlers for specific queues. This function is to be usued to create new Handlers for
 // non-periodic jobs (most jobs). Use [NewPeriodic] to initialize handlers for periodic jobs.
 func New(queue string, f Func, opts ...Option) (h Handler) {

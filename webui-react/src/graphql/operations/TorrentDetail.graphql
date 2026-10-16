@@ -1,0 +1,68 @@
+query TorrentDetail($infoHashes: [Hash20!]!, $limit: Int) {
+  torrentContent {
+    search(input: { infoHashes: $infoHashes, limit: $limit }) {
+      items {
+        infoHash
+        title
+        contentType
+        seeders
+        leechers
+        dhtSeenCount
+        dhtFirstSeenAt
+        dhtLastSeenAt
+        publishedAt
+        languages {
+          id
+          name
+        }
+        episodes {
+          label
+        }
+        torrent {
+          name
+          size
+          filesStatus
+          filesCount
+          fileType
+          magnetUri
+          sources {
+            key
+            name
+            seenCount
+            firstSeenAt
+            lastSeenAt
+          }
+        }
+        content {
+          title
+          originalTitle
+          releaseDate
+          releaseYear
+          overview
+          voteAverage
+          voteCount
+          originalLanguage {
+            id
+            name
+          }
+          attributes {
+            source
+            key
+            value
+          }
+          collections {
+            type
+            name
+          }
+          externalLinks {
+            metadataSource {
+              key
+              name
+            }
+            url
+          }
+        }
+      }
+    }
+  }
+}

@@ -82,6 +82,7 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		infoHashReadOnly,
 		gen.FieldType("seeders", "NullUint"),
 		gen.FieldType("leechers", "NullUint"),
+		gen.FieldType("seen_count", "uint"),
 		gen.FieldType("published_at", "sql.NullTime"),
 		gen.FieldRelate(
 			field.HasOne,
@@ -180,6 +181,9 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		),
 		infoHashType,
 		infoHashReadOnly,
+		gen.FieldType("info_hash_v1", "*protocol.ID"),
+		gen.FieldType("info_hash_v2", "*protocol.InfoHashV2"),
+		gen.FieldType("meta_version", "NullUint16"),
 		gen.FieldType("files_status", "FilesStatus"),
 		gen.FieldGORMTag("files_status", func(tag field.GormTag) field.GormTag {
 			tag.Remove("default")
@@ -193,6 +197,14 @@ func BuildGenerator(db *gorm.DB) *gen.Generator {
 		}),
 		gen.FieldType("size", "uint"),
 		gen.FieldIgnore("tsv"),
+		gen.FieldRename("file_extensions", "FileExts"),
+		gen.FieldType("file_extensions", "[]string"),
+		gen.FieldGORMTag("file_extensions", func(tag field.GormTag) field.GormTag {
+			tag.Set("serializer", "json")
+			return tag
+		}),
+		gen.FieldJSONTag("file_extensions", "fileExtensions"),
+		gen.FieldJSONTag("files_data", "-"),
 		createdAtReadOnly,
 	)
 	metadataSources := g.GenerateModel(

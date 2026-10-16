@@ -1,0 +1,70 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Nebula Nebula Nebula Nebula - Deep Space (Album) [FLAC]</title>
+      <guid>3f546de2c46e3da686648b41676a730fa01132fc</guid>
+      <pubDate>Sun, 12 Jan 2020 00:00:00 +0000</pubDate>
+      <category>music</category>
+      <size>620000000</size>
+      <enclosure length="620000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:3f546de2c46e3da686648b41676a730fa01132fc&amp;dn=Nebula+Nebula+Nebula+Nebula+-+Deep+Space+%28Album%29+%5BFLAC%5D&amp;xl=620000000"/>
+      <torznab:attr name="infohash" value="3f546de2c46e3da686648b41676a730fa01132fc"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:3f546de2c46e3da686648b41676a730fa01132fc&amp;dn=Nebula+Nebula+Nebula+Nebula+-+Deep+Space+%28Album%29+%5BFLAC%5D&amp;xl=620000000"/>
+      <torznab:attr name="category" value="3000"/>
+      <torznab:attr name="size" value="620000000"/>
+      <torznab:attr name="publishdate" value="Sun, 12 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="90"/>
+      <torznab:attr name="leechers" value="4"/>
+      <torznab:attr name="peers" value="94"/>
+      <torznab:attr name="files" value="12"/>
+    </item>
+    <item>
+      <title>Nebula Nebula Aurora 2019 720p WEB h264-LUME</title>
+      <guid>394ac0eff62c01d12ec9e30f3fbb23d33732e4e7</guid>
+      <pubDate>Sat, 25 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1400000000</size>
+      <enclosure length="1400000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:394ac0eff62c01d12ec9e30f3fbb23d33732e4e7&amp;dn=Nebula+Nebula+Aurora+2019+720p+WEB+h264-LUME&amp;xl=1400000000"/>
+      <torznab:attr name="infohash" value="394ac0eff62c01d12ec9e30f3fbb23d33732e4e7"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:394ac0eff62c01d12ec9e30f3fbb23d33732e4e7&amp;dn=Nebula+Nebula+Aurora+2019+720p+WEB+h264-LUME&amp;xl=1400000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1400000000"/>
+      <torznab:attr name="publishdate" value="Sat, 25 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="120"/>
+      <torznab:attr name="leechers" value="5"/>
+      <torznab:attr name="peers" value="125"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="video" value="H264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="LUME"/>
+    </item>
+    <item>
+      <title>Nebula S01E02 720p HDTV x264-FLEET</title>
+      <guid>59ecbf312f12bb268e28b0c866fb9222a75c8e58</guid>
+      <pubDate>Sat, 18 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>900000000</size>
+      <enclosure length="900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="infohash" value="59ecbf312f12bb268e28b0c866fb9222a75c8e58"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="900000000"/>
+      <torznab:attr name="publishdate" value="Sat, 18 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="250"/>
+      <torznab:attr name="leechers" value="12"/>
+      <torznab:attr name="peers" value="262"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2020"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="FLEET"/>
+      <torznab:attr name="tmdb" value="201"/>
+      <torznab:attr name="imdb" value="2010101"/>
+    </item>
+  </channel>
+</rss>

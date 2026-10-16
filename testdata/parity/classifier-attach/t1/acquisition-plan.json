@@ -1,0 +1,62 @@
+{
+  "schema": "bitmagnet.classifier-tape-acquisition-plan/v1",
+  "entries": [
+    {
+      "workflow": "tape_evidence_action_entries",
+      "flags": {
+        "local_search_enabled": false,
+        "apis_enabled": false,
+        "tmdb_enabled": false,
+        "delete_content_types": [],
+        "delete_xxx": false
+      },
+      "repeat": 2000,
+      "input": {
+        "id": "0000000000000000000000000000000000000001",
+        "name": "classifier tape evidence action entries",
+        "size": 0,
+        "filesStatus": "no_info",
+        "files": [],
+        "contents": []
+      }
+    },
+    {
+      "workflow": "tape_evidence_unmatched",
+      "flags": {
+        "local_search_enabled": false,
+        "apis_enabled": false,
+        "tmdb_enabled": false,
+        "delete_content_types": [],
+        "delete_xxx": false
+      },
+      "repeat": 500,
+      "input": {
+        "id": "0000000000000000000000000000000000000002",
+        "name": "classifier tape evidence unmatched",
+        "size": 0,
+        "filesStatus": "no_info",
+        "files": [],
+        "contents": []
+      }
+    },
+    {
+      "workflow": "tape_evidence_deleted",
+      "flags": {
+        "local_search_enabled": false,
+        "apis_enabled": false,
+        "tmdb_enabled": false,
+        "delete_content_types": [],
+        "delete_xxx": false
+      },
+      "repeat": 500,
+      "input": {
+        "id": "0000000000000000000000000000000000000003",
+        "name": "classifier tape evidence deleted",
+        "size": 0,
+        "filesStatus": "no_info",
+        "files": [],
+        "contents": []
+      }
+    }
+  ]
+}

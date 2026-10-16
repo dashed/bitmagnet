@@ -82,6 +82,35 @@
       </td>
     </ng-container>
 
+    <ng-container matColumnDef="dhtSeen">
+      <th mat-header-cell *matHeaderCellDef>{{ t("torrents.dht_seen") }}</th>
+      <td class="td-dht-seen" mat-cell *matCellDef="let i">
+        @if (item(i).dhtLastSeenAt; as dhtLastSeenAt) {
+          <abbr
+            [matTooltip]="
+              dhtSeenTooltip(
+                item(i),
+                t('torrents.dht_seen_count'),
+                t('torrents.dht_last_seen'),
+                t('torrents.dht_first_seen')
+              )
+            "
+            matTooltipClass="tooltip-dht-seen"
+          >
+            {{ dhtLastSeenAt | timeAgo }}
+          </abbr>
+          <span
+            class="dht-seen-count"
+            [matTooltip]="t('torrents.dht_seen_count')"
+          >
+            {{ item(i).dhtSeenCount | number }}
+          </span>
+        } @else {
+          <span class="unknown">?</span>
+        }
+      </td>
+    </ng-container>
+
     <ng-container matColumnDef="peers">
       <th mat-header-cell *matHeaderCellDef>
         <abbr

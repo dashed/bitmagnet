@@ -1,0 +1,34 @@
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  min-width: 320px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+
+.route-state {
+  display: grid;
+  gap: 16px;
+  justify-items: start;
+  margin: 0 auto;
+  max-width: 720px;
+  padding: 48px 20px;
+}
+
+.route-state h1 {
+  font-size: 24px;
+  line-height: 1.2;
+  margin: 0;
+}

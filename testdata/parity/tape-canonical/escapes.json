@@ -1,0 +1,82 @@
+{
+  "backspace": {
+    "input": "a\bb",
+    "encoded": "\"a\\bb\""
+  },
+  "both_separators": {
+    "input": "\u2028\u2029",
+    "encoded": "\"\\u2028\\u2029\""
+  },
+  "cjk": {
+    "input": "日本語",
+    "encoded": "\"日本語\""
+  },
+  "combining": {
+    "input": "é",
+    "encoded": "\"é\""
+  },
+  "control_01": {
+    "input": "a\u0001b",
+    "encoded": "\"a\\u0001b\""
+  },
+  "control_1f": {
+    "input": "a\u001fb",
+    "encoded": "\"a\\u001fb\""
+  },
+  "del_7f": {
+    "input": "ab",
+    "encoded": "\"ab\""
+  },
+  "emoji": {
+    "input": "🎬 clapper",
+    "encoded": "\"🎬 clapper\""
+  },
+  "empty": {
+    "input": "",
+    "encoded": "\"\""
+  },
+  "formfeed": {
+    "input": "a\fb",
+    "encoded": "\"a\\fb\""
+  },
+  "html_chars": {
+    "input": "a\u003cb\u003ec\u0026d",
+    "encoded": "\"a\u003cb\u003ec\u0026d\""
+  },
+  "line_separator": {
+    "input": "a\u2028b",
+    "encoded": "\"a\\u2028b\""
+  },
+  "mixed": {
+    "input": "Amélie\u003c\u003e\u0026\u2028\t🎬/\\\"",
+    "encoded": "\"Amélie\u003c\u003e\u0026\\u2028\\t🎬/\\\\\\\"\""
+  },
+  "nul": {
+    "input": "a\u0000b",
+    "encoded": "\"a\\u0000b\""
+  },
+  "only_quotes": {
+    "input": "\"\"",
+    "encoded": "\"\\\"\\\"\""
+  },
+  "paragraph_sep": {
+    "input": "a\u2029b",
+    "encoded": "\"a\\u2029b\""
+  },
+  "plain": {
+    "input": "Cinderella",
+    "encoded": "\"Cinderella\""
+  },
+  "quote_backslash": {
+    "input": "a\"b\\c",
+    "encoded": "\"a\\\"b\\\\c\""
+  },
+  "solidus": {
+    "input": "path/to/thing",
+    "encoded": "\"path/to/thing\""
+  },
+  "tab_newline_return": {
+    "input": "a\tb\nc\rd",
+    "encoded": "\"a\\tb\\nc\\rd\""
+  }
+}

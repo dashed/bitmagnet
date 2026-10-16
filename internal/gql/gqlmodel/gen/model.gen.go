@@ -27,6 +27,36 @@ type ContentTypeFacetInput struct {
 	Filter    graphql.Omittable[[]*model.ContentType] `json:"filter,omitempty"`
 }
 
+type FileFacetAgg struct {
+	Field   FileFacetField       `json:"field"`
+	Buckets []FileFacetBucketAgg `json:"buckets"`
+}
+
+// One aggregated facet value and its exact match count. totalSize is the summed
+// byte size of the matching files in the bucket. isEstimate mirrors the
+// torrentContent aggregation contract; L2 facet counts are exact so it is always
+// false in v1.
+type FileFacetBucketAgg struct {
+	Value      string `json:"value"`
+	Count      int    `json:"count"`
+	TotalSize  int    `json:"totalSize"`
+	IsEstimate bool   `json:"isEstimate"`
+}
+
+type FileSearchFacetsInput struct {
+	Query      graphql.Omittable[*string]  `json:"query,omitempty"`
+	Extensions graphql.Omittable[[]string] `json:"extensions,omitempty"`
+	MinSize    graphql.Omittable[*int]     `json:"minSize,omitempty"`
+	MaxSize    graphql.Omittable[*int]     `json:"maxSize,omitempty"`
+	// Which facet fields to aggregate. v1 supports only `extension`; unknown values
+	// are ignored. Omitted/empty requests the default set (extension).
+	Facets graphql.Omittable[[]FileFacetField] `json:"facets,omitempty"`
+}
+
+type FileSearchFacetsResult struct {
+	Facets []FileFacetAgg `json:"facets"`
+}
+
 type GenreAgg struct {
 	Value      string `json:"value"`
 	Label      string `json:"label"`
@@ -131,6 +161,11 @@ type ReleaseYearFacetInput struct {
 	Filter    graphql.Omittable[[]*model.Year] `json:"filter,omitempty"`
 }
 
+type SizeRangeInput struct {
+	Min graphql.Omittable[*int] `json:"min,omitempty"`
+	Max graphql.Omittable[*int] `json:"max,omitempty"`
+}
+
 type SuggestTagsQueryInput struct {
 	Prefix     graphql.Omittable[*string]  `json:"prefix,omitempty"`
 	Exclusions graphql.Omittable[[]string] `json:"exclusions,omitempty"`
@@ -158,6 +193,8 @@ type TorrentContentFacetsInput struct {
 	ReleaseYear     graphql.Omittable[*ReleaseYearFacetInput]     `json:"releaseYear,omitempty"`
 	VideoResolution graphql.Omittable[*VideoResolutionFacetInput] `json:"videoResolution,omitempty"`
 	VideoSource     graphql.Omittable[*VideoSourceFacetInput]     `json:"videoSource,omitempty"`
+	SizeRange       graphql.Omittable[*SizeRangeInput]            `json:"sizeRange,omitempty"`
+	PublishedAt     graphql.Omittable[*string]                    `json:"publishedAt,omitempty"`
 }
 
 type TorrentContentOrderByInput struct {
@@ -267,6 +304,45 @@ type WorkersListAllQueryResult struct {
 
 type WorkersQuery struct {
 	ListAll WorkersListAllQueryResult `json:"listAll"`
+}
+
+type FileFacetField string
+
+const (
+	FileFacetFieldExtension FileFacetField = "extension"
+)
+
+var AllFileFacetField = []FileFacetField{
+	FileFacetFieldExtension,
+}
+
+func (e FileFacetField) IsValid() bool {
+	switch e {
+	case FileFacetFieldExtension:
+		return true
+	}
+	return false
+}
+
+func (e FileFacetField) String() string {
+	return string(e)
+}
+
+func (e *FileFacetField) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = FileFacetField(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid FileFacetField", str)
+	}
+	return nil
+}
+
+func (e FileFacetField) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
 type HealthStatus string
