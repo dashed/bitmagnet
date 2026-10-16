@@ -1018,7 +1018,7 @@ async fn shutdown_lets_an_in_flight_job_settle_within_the_grace() {
         tokio::time::sleep(Duration::from_millis(200)).await;
         lock.rollback().await.expect("release torrent_contents");
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+    let ((), ()) = tokio::time::timeout(Duration::from_secs(20), async {
         tokio::join!(
             worker.run_until(async {
                 let _ = stopped.await;
@@ -1028,7 +1028,6 @@ async fn shutdown_lets_an_in_flight_job_settle_within_the_grace() {
     })
     .await
     .expect("the worker stops once its in-flight job settles");
-    result.expect("a drained shutdown is not an error");
 
     let row = job_row(&pool, &id).await;
     assert_eq!((row.status.as_str(), row.retries), ("processed", 0));
@@ -1065,7 +1064,7 @@ async fn shutdown_abandons_a_job_still_running_after_the_grace() {
         stop.send(()).expect("worker is running");
     };
     // The job timeout is ten minutes; only the grace can end this in time.
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let ((), ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(
             stopping.run_until(async {
                 let _ = stopped.await;
@@ -1075,7 +1074,6 @@ async fn shutdown_abandons_a_job_still_running_after_the_grace() {
     })
     .await
     .expect("shutdown is bounded by the grace, not the job timeout");
-    result.expect("abandoning a job at shutdown is not an error");
     drop(stopping);
     lock.rollback().await.expect("release torrent_contents");
 
@@ -1093,4 +1091,66 @@ async fn shutdown_abandons_a_job_still_running_after_the_grace() {
         ),
         "the abandoned job is claimable again: {reclaimed:?}"
     );
+}
+
+async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn database_errors_are_counted_and_the_worker_keeps_polling() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_fixture_torrents(&pool).await;
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &supported_params(&[HASH_A])).await;
+
+    // A worker pool the test can exhaust: while it holds both connections,
+    // every poll fails with PoolTimedOut, as when PostgreSQL is unreachable.
+    let worker_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_millis(100))
+        .connect(&std::env::var(TEST_DATABASE_URL).unwrap())
+        .await
+        .expect("connect worker pool");
+    let held = (
+        worker_pool.acquire().await.unwrap(),
+        worker_pool.acquire().await.unwrap(),
+    );
+    let registry = prometheus::Registry::new();
+    let metrics = bitmagnet_processor::register_worker_metrics(&registry).unwrap();
+    let worker = worker(&worker_pool, fast_config()).with_metrics(metrics.clone());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let recover = async {
+        eventually("two failed polls", || {
+            metrics.with_label_values(&["error"]).get() >= 2
+        })
+        .await;
+        drop(held);
+        eventually("the job to be processed", || {
+            metrics.with_label_values(&["processed"]).get() == 1
+        })
+        .await;
+        stop.send(()).expect("worker is still running");
+    };
+    let ((), ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            worker.run_until(async {
+                let _ = stopped.await;
+            }),
+            recover
+        )
+    })
+    .await
+    .expect("the worker outlives database errors and then processes the job");
+
+    let row = job_row(&pool, &id).await;
+    assert_eq!((row.status.as_str(), row.retries), ("processed", 0));
 }

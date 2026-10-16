@@ -118,15 +118,15 @@ async fn main() -> Result<()> {
         shutdown_grace_seconds = args.shutdown_grace_seconds,
         "starting persisting Rust process_torrent worker"
     );
-    let run = worker
+    worker
         .run_until(bitmagnet_common::serve::shutdown_signal())
         .await;
     // Go flushes the blocking buffer when the application stops; do the same
-    // before the pool closes, even when the consumer stopped on an error.
-    let flush = blocking_manager.flush().await;
-    run.context("Rust process_torrent consumer stopped")?;
-    flush.context("flushing blocked info hashes on shutdown")?;
-    Ok(())
+    // before the pool closes.
+    blocking_manager
+        .flush()
+        .await
+        .context("flushing blocked info hashes on shutdown")
 }
 
 fn validate_args(args: &Args) -> Result<()> {

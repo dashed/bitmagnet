@@ -376,6 +376,12 @@ settlement are the generic `queue_jobs` statements, and the writer needs the
 same table rights as the Go processor. It flushes the shared blocking manager
 on shutdown, as Go does when the application stops.
 
+A database error while claiming or settling (an unreachable server, an
+exhausted pool) never stops the worker. As in Go's `serverHandler`, it is
+logged as `error handling process_torrent job`, the claim transaction rolls
+back, and the worker polls again after one check interval. Each such attempt
+increments `bitmagnet_process_torrent_worker_jobs_total{outcome="error"}`.
+
 Shutdown is bounded. On `SIGTERM` the worker claims nothing new and gives an
 in-flight job `--shutdown-grace-seconds` (default 20) to settle. After that the
 job is dropped and its claim transaction rolls back, so the row keeps its
@@ -398,7 +404,8 @@ the queue neither blocks the admitted job behind it nor causes a re-claim
 loop, and its exclusion expires and is capped; and two Rust workers plus Go's
 exact claim never double-claim; and on shutdown an in-flight job settles if it
 finishes within the grace, or else is abandoned with its row byte-identical
-and claimable again. `tools/parity/process_torrent_worker/run.sh`
+and claimable again; and database errors are counted while the worker keeps
+polling, then processes the job once the database recovers. `tools/parity/process_torrent_worker/run.sh`
 drains the same Go-built jobs with Go alone (A), with Rust then Go for its
 abstentions (B), and with both concurrently (C), and diffs the resulting
 images. At Goose 29 over the 330 synthetic classifier cases plus all 119,991

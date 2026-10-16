@@ -24,6 +24,11 @@
 //! So is a payload serde cannot decode: Go's decoder accepts inputs serde
 //! rejects. Only transient database errors and Go-equivalent processor
 //! outcomes consume one of the job's retries.
+//!
+//! A database error while claiming or settling never stops the worker. Like
+//! Go's `serverHandler`, it logs `error handling job`, waits one check
+//! interval, and polls again; the claim transaction rolls back, so the row is
+//! claimed again once the database recovers.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -117,21 +122,29 @@ impl ProcessTorrentWorker {
     }
 
     /// Claim, run, and settle at most one admitted job.
+    ///
+    /// A database error is logged and counted before it is returned.
     pub async fn run_once(&self) -> Result<AdmittedConsumeOutcome, QueuePgError> {
         let excluded = self.excluded_ids();
         let outcome = self
             .store
             .consume_admitted_process_torrent(&excluded, |job| self.handle(job))
-            .await?;
-        self.observe(&outcome);
-        Ok(outcome)
+            .await;
+        match &outcome {
+            Ok(outcome) => self.observe(outcome),
+            Err(error) => {
+                tracing::error!(%error, "error handling process_torrent job");
+                self.count("error");
+            }
+        }
+        outcome
     }
 
     /// Poll until `shutdown` resolves.
     ///
-    /// The loop self-chains after a claim and sleeps `check_interval` only when
-    /// no admitted job was eligible, like Go's `serverHandler.start`. Database
-    /// errors are returned to the caller.
+    /// The loop self-chains after a claim and sleeps `check_interval` when no
+    /// admitted job was eligible or the attempt failed with a database error,
+    /// like Go's `serverHandler.start`. Errors never end the loop.
     ///
     /// A job in flight when `shutdown` resolves gets `shutdown_grace` to
     /// settle. After that it is dropped, which rolls back its claim
@@ -139,29 +152,29 @@ impl ProcessTorrentWorker {
     /// claimed again later. This is what Go does when its queue context is
     /// cancelled on stop; side effects already committed by the writer stay,
     /// and the next run of the job redoes them.
-    pub async fn run_until<S>(&self, shutdown: S) -> Result<(), QueuePgError>
+    pub async fn run_until<S>(&self, shutdown: S)
     where
         S: Future<Output = ()>,
     {
         tokio::pin!(shutdown);
         loop {
             if (&mut shutdown).now_or_never().is_some() {
-                return Ok(());
+                return;
             }
             let run = self.run_once();
             tokio::pin!(run);
             let outcome = tokio::select! {
                 biased;
-                outcome = &mut run => outcome?,
+                outcome = &mut run => outcome,
                 () = &mut shutdown => return self.drain(run).await,
             };
             if matches!(
                 outcome,
-                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+                Ok(AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)) | Err(_)
             ) {
                 tokio::select! {
                     biased;
-                    () = &mut shutdown => return Ok(()),
+                    () = &mut shutdown => return,
                     () = tokio::time::sleep(self.config.check_interval) => {}
                 }
             } else {
@@ -171,18 +184,21 @@ impl ProcessTorrentWorker {
     }
 
     /// Let the in-flight `run` settle within `shutdown_grace`, else drop it.
-    async fn drain<F>(&self, run: Pin<&mut F>) -> Result<(), QueuePgError>
+    async fn drain<F>(&self, run: Pin<&mut F>)
     where
         F: Future<Output = Result<AdmittedConsumeOutcome, QueuePgError>>,
     {
-        if let Ok(outcome) = tokio::time::timeout(self.config.shutdown_grace, run).await {
-            return outcome.map(drop);
+        // `run_once` has already logged and counted a database error.
+        if tokio::time::timeout(self.config.shutdown_grace, run)
+            .await
+            .is_ok()
+        {
+            return;
         }
         tracing::warn!(
             shutdown_grace = %go_duration(self.config.shutdown_grace),
             "abandoning the in-flight process_torrent job at shutdown; its claim rolls back and the row stays queued"
         );
-        Ok(())
     }
 
     async fn handle(&self, job: DequeuedJob) -> JobVerdict {
@@ -265,8 +281,12 @@ impl ProcessTorrentWorker {
                 "abstained"
             }
         };
+        self.count(label);
+    }
+
+    fn count(&self, outcome: &str) {
         if let Some(metrics) = &self.metrics {
-            metrics.with_label_values(&[label]).inc();
+            metrics.with_label_values(&[outcome]).inc();
         }
     }
 }
@@ -278,7 +298,7 @@ pub fn register_worker_metrics(
     let counter = IntCounterVec::new(
         prometheus::Opts::new(
             "bitmagnet_process_torrent_worker_jobs_total",
-            "process_torrent jobs claimed by the Rust worker, by outcome",
+            "process_torrent jobs claimed by the Rust worker, by outcome; `error` counts attempts that failed with a database error",
         ),
         &["outcome"],
     )?;
