@@ -14,7 +14,8 @@
 #
 # Required on PATH: psql, goose, go, cargo. Inputs (env):
 #   PG_ADMIN_DSN   libpq DSN of a disposable server (default: local socket)
-#   GOOSE_VERSION  schema head to migrate the seed to (default 29 = production)
+#   GOOSE_VERSION  schema head to migrate the seed to (default 35, the Rust
+#                  worker's minimum; production is at 29)
 #   REPLAY_LIMIT   real-name replay inputs to seed (default 20000)
 #   OUT            evidence directory (default: mktemp)
 #   BITMAGNET_GO   Go binary (default: go build into $OUT)
@@ -25,7 +26,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PG_HOST="${PG_HOST:-/tmp}"
 PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
-GOOSE_VERSION="${GOOSE_VERSION:-29}"
+GOOSE_VERSION="${GOOSE_VERSION:-35}"
 REPLAY_LIMIT="${REPLAY_LIMIT:-20000}"
 OUT="${OUT:-$(mktemp -d)}"
 mkdir -p "$OUT"

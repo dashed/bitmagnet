@@ -16,7 +16,8 @@ use bitmagnet_processor::{
 };
 use bitmagnet_queue::{
     backoff, process_torrent_job, AdmittedConsumeOutcome, ConsumeOutcome, JobVerdict,
-    ProcessTorrentParams, ProtocolId, QueueJobOptions, QueueStore, PROCESS_TORRENT,
+    ProcessTorrentParams, ProtocolId, QueueJobOptions, QueueStore,
+    ADMITTED_PROCESS_TORRENT_CLAIM_SQL, PROCESS_TORRENT,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -435,6 +436,97 @@ async fn admitted_claim_order_matches_go() {
         retry.retries, 1,
         "a retry-status job increments retries when run"
     );
+}
+
+const ADMITTED_CLAIM_INDEX: &str = "queue_jobs_admitted_process_torrent_claim_idx";
+
+async fn explain_admitted_claim(pool: &PgPool, generic: bool) -> String {
+    let mut tx = pool.begin().await.expect("begin plan transaction");
+    let plan: Vec<String> = if generic {
+        sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+            .execute(&mut *tx)
+            .await
+            .expect("force a generic plan");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PREPARE admitted_claim(text[]) AS {ADMITTED_PROCESS_TORRENT_CLAIM_SQL}"
+        )))
+        .execute(&mut *tx)
+        .await
+        .expect("prepare the admitted claim");
+        sqlx::query_scalar("EXPLAIN (COSTS OFF) EXECUTE admitted_claim('{}')")
+            .fetch_all(&mut *tx)
+            .await
+            .expect("explain the generic admitted claim")
+    } else {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {ADMITTED_PROCESS_TORRENT_CLAIM_SQL}"
+        )))
+        .bind(Vec::<String>::new())
+        .fetch_all(&mut *tx)
+        .await
+        .expect("explain the custom admitted claim")
+    };
+    tx.rollback().await.expect("roll back plan transaction");
+    plan.join("\n")
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn admitted_claim_reads_only_admitted_rows_behind_an_organic_backlog() {
+    let pool = connect().await;
+    reset(&pool).await;
+    // An organic backlog ahead of every admitted row in Go's claim order.
+    sqlx::query(
+        "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, max_retries, \
+         run_after, archival_duration, created_at, priority) \
+         SELECT md5(n::text), 'process_torrent', 'pending', \
+                jsonb_build_object('InfoHashes', jsonb_build_array(lpad(to_hex(n), 40, '0'))), \
+                0, 2, clock_timestamp() - interval '1 hour', interval '168:00:00', \
+                clock_timestamp(), 0 \
+         FROM generate_series(1, 20000) AS n",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed organic backlog");
+    let store = QueueStore::new(pool.clone());
+    let admitted = [
+        enqueue(&store, &supported_params(&[HASH_A])).await,
+        enqueue(&store, &supported_params(&[HASH_B])).await,
+    ];
+    for id in &admitted {
+        make_ready(&pool, id).await;
+    }
+    sqlx::query("ANALYZE queue_jobs")
+        .execute(&pool)
+        .await
+        .expect("analyze queue_jobs");
+
+    for generic in [false, true] {
+        let plan = explain_admitted_claim(&pool, generic).await;
+        assert!(
+            plan.contains(ADMITTED_CLAIM_INDEX),
+            "the {} admitted claim must scan {ADMITTED_CLAIM_INDEX}; the claim and \
+             migration 00035 predicates have drifted apart:\n{plan}",
+            if generic { "generic" } else { "custom" },
+        );
+    }
+    // The claim still takes the admitted rows, in Go's order, and leaves the
+    // organic backlog to Go.
+    let mut claimed = Vec::new();
+    while let AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) = store
+        .consume_admitted_process_torrent(&[], |_| async { JobVerdict::Complete })
+        .await
+        .unwrap()
+    {
+        claimed.push(job.id);
+    }
+    assert_eq!(claimed, admitted);
+    let organic_pending: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM queue_jobs WHERE status = 'pending'")
+            .fetch_one(&pool)
+            .await
+            .expect("count organic backlog");
+    assert_eq!(organic_pending, 20_000);
 }
 
 #[tokio::test]

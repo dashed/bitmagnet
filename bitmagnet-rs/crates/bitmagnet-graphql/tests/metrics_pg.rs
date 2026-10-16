@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 
-const EXPECTED_GOOSE_VERSION: i64 = 34;
+const EXPECTED_GOOSE_VERSION: i64 = 35;
 const READER_ROLE: &str = "bitmagnet_graphql_metrics_reader_ci";
 const TABLES: [&str; 3] = ["goose_db_version", "queue_jobs", "torrents_torrent_sources"];
 
@@ -45,7 +45,7 @@ async fn real_pg_metrics_match_go_without_mutation() {
     let before = table_fingerprints(&admin_pool).await;
     let head = admit_pg(&pool, EXPECTED_GOOSE_VERSION)
         .await
-        .expect("Goose 34 database is admitted");
+        .expect("Goose 35 database is admitted");
     assert_eq!(head.version, EXPECTED_GOOSE_VERSION);
 
     let schema = build_runtime_schema(

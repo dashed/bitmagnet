@@ -18,9 +18,11 @@ use bitmagnet_queue::{QueueStore, PROCESS_TORRENT};
 use clap::Parser;
 use sqlx::postgres::PgPoolOptions;
 
-/// Oldest Goose head whose schema the loader, writer kernel, and generic queue
-/// SQL were proven against (`00026_summary_compressed_bytes.sql`).
-const MIN_GOOSE_VERSION: i64 = 26;
+/// Oldest Goose head the worker runs against: the partial index that serves the
+/// admitted claim (`00035_queue_admitted_process_torrent_claim_index.sql`).
+/// Without it every poll reads the whole organic `process_torrent` backlog. The
+/// loader, writer kernel, and generic queue SQL need head 26.
+const MIN_GOOSE_VERSION: i64 = 35;
 
 #[derive(Debug, Parser)]
 #[command(name = "bitmagnet-process-torrent-worker")]

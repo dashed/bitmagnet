@@ -197,10 +197,16 @@ deadline, retry-count, backoff, and settlement path with a fixed, hardcoded
 admission predicate (explicit `default` workflow, all three attach flags
 JSON `false`, and no top-level payload key beyond `MessageParams`' four exact
 names, because Go's decoder also binds case-insensitive key matches; written as
-one jsonb containment with the key check nested in a `CASE`, so the planner
-keeps Go's `queue_jobs_claim_idx` order scan) and a caller-supplied exclusion
-list. Rows outside the predicate are never locked, so the Go worker keeps
-processing them. A handler may return
+one jsonb containment with the key check nested in a `CASE`) and a
+caller-supplied exclusion list. Migration 00035's partial
+`queue_jobs_admitted_process_torrent_claim_idx` repeats that predicate verbatim
+and keys Go's claim order, so a claim reads only admitted rows however deep the
+organic backlog is; on Go's `queue_jobs_claim_idx` an empty admitted set read
+the whole backlog on every poll. The planner uses the index only while the
+claim provably implies its predicate, so the two change together; the
+`worker_pg` gate `EXPLAIN`s the claim's custom and generic plans against a
+20,000-row organic backlog. Rows outside the predicate are never locked, so the
+Go worker keeps processing them. A handler may return
 `JobVerdict::Abstain` before causing any side effect; the claim transaction
 then rolls back and the row is left byte-identical and unlocked. A panic is
 always a failure, never an abstention.

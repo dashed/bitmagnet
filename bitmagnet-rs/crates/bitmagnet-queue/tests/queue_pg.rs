@@ -1,7 +1,7 @@
 //! Migration-backed PostgreSQL gate for the Lane Q runtime.
 //!
 //! This test truncates queue, torrent, and content tables. It requires the exact
-//! disposable Goose-34 database name `bitmagnet_processor_writer_load_test`
+//! disposable Goose-35 database name `bitmagnet_processor_writer_load_test`
 //! and explicit invocation with `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -117,7 +117,7 @@ fn assert_queue_database_code(error: QueuePgError, expected: &str) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-34 PostgreSQL"]
+#[ignore = "requires BITMAGNET_QUEUE_TEST_DATABASE_URL pointing at disposable goose-35 PostgreSQL"]
 async fn queue_runtime_matches_go_contract() {
     let database_url = std::env::var("BITMAGNET_QUEUE_TEST_DATABASE_URL")
         .expect("BITMAGNET_QUEUE_TEST_DATABASE_URL must be set for ignored gate");
@@ -2866,7 +2866,7 @@ async fn queue_runtime_matches_go_contract() {
         .ingest_shadow_status_snapshot()
         .await
         .expect("read fixed shadow status through existing bounded SELECT grants");
-    assert_eq!(status.goose_version, 34);
+    assert_eq!(status.goose_version, 35);
     assert_eq!(status.pending, 1);
     assert_eq!(status.retry, 0);
     assert_eq!(status.failed, 0);
@@ -2879,7 +2879,7 @@ async fn queue_runtime_matches_go_contract() {
         .encode(&families, &mut encoded)
         .expect("encode minimally granted shadow metrics");
     let metrics_text = String::from_utf8(encoded).expect("Prometheus text is UTF-8");
-    assert!(metrics_text.contains("bitmagnet_ingest_shadow_goose_version 34"));
+    assert!(metrics_text.contains("bitmagnet_ingest_shadow_goose_version 35"));
     assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"pending\"} 1"));
     assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"retry\"} 0"));
     assert!(metrics_text.contains("bitmagnet_ingest_shadow_scratch_jobs{status=\"failed\"} 0"));

@@ -22,7 +22,8 @@
 //!   lone Rust worker does not reclaim the same row in a tight loop.
 //!
 //! Admission selects a subset; it does not reorder it. Among admitted rows the
-//! claim order is Go's `(status = 'retry'), priority, run_after`.
+//! claim order is Go's `(status = 'retry'), priority, run_after`, served by a
+//! partial index that holds only admitted rows (migration 00035).
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -49,10 +50,19 @@ use crate::{QueueJobStatus, QueuePgError, QueueStore};
 /// which carry no other top-level key. Written as separate `AND`ed payload
 /// comparisons, the planner multiplies their default selectivities to about
 /// zero rows and then prefers a sequential scan that detoasts and sorts every
-/// pending payload on each claim (28 ms with 1,224 pending jobs). This shape
-/// keeps Go's `queue_jobs_claim_idx` order scan, which stops at the first
-/// admitted row (0.3 ms custom, 0.03 ms generic plan).
-const ADMITTED_PROCESS_TORRENT_CLAIM_SQL: &str = "\
+/// pending payload on each claim (28 ms with 1,224 pending jobs).
+///
+/// The `queue`, `status`, and admission conjuncts are, verbatim, the predicate
+/// of migration 00035's partial `queue_jobs_admitted_process_torrent_claim_idx`,
+/// keyed in this `ORDER BY`. The planner uses a partial index only when it can
+/// prove the query implies the index predicate, so the two must change
+/// together. Organic payloads are never in that index, so a claim reads only
+/// admitted rows however large the organic backlog is. On Go's
+/// `queue_jobs_claim_idx` it would step over every organic row ahead of the
+/// first admitted one, and read the whole backlog when none is admitted.
+///
+/// Public only so the migration-backed plan test can `EXPLAIN` it.
+pub const ADMITTED_PROCESS_TORRENT_CLAIM_SQL: &str = "\
 SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
        retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
        deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \

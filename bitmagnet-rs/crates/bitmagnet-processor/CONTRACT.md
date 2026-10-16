@@ -370,10 +370,15 @@ more than 100 info hashes (the loader bound, equal to Go's DHT batch and the
 default reprocess batch size) is therefore always left to Go.
 
 The binary refuses to start unless `--expected-classifier-config-digest`
-matches the embedded configuration and the Goose head is at least 26. It needs
-no `SECURITY DEFINER` capability from migrations 29–34: the claim and
-settlement are the generic `queue_jobs` statements, and the writer needs the
-same table rights as the Go processor. It flushes the shared blocking manager
+matches the embedded configuration and the Goose head is at least 35. The
+loader, writer, and generic queue SQL need only head 26; 35 adds
+`queue_jobs_admitted_process_torrent_claim_idx`, a partial index whose
+predicate is the claim's admission predicate, so a claim reads only admitted
+rows. Without it the claim steps over every organic row ahead of the first
+admitted one in Go's order, and reads the whole organic backlog on every poll
+when none is admitted. It needs no `SECURITY DEFINER` capability from
+migrations 29–34: the claim and settlement are the generic `queue_jobs`
+statements, and the writer needs the same table rights as the Go processor. It flushes the shared blocking manager
 on shutdown, as Go does when the application stops.
 
 A database error while claiming or settling (an unreachable server, an
@@ -396,7 +401,9 @@ its ten-minute timeout and be `SIGKILL`ed mid-write, without the flush.
 Migration-backed gates (`tests/worker_pg.rs`) prove: a processed job leaves
 exactly the live image the direct `load_writer_plan` + `persist_writer_plan`
 path leaves; non-admitted payloads are never touched and Go's claim still
-takes them in its order; admitted claim order is Go's; Go's retry count,
+takes them in its order; admitted claim order is Go's; the claim's custom
+and generic plans scan the admitted-only partial index behind a 20,000-row
+organic backlog; Go's retry count,
 `calculate_backoff` envelope, terminal `failed` status, and error text; a
 partial failure publishes Go's replacement job before persisting; abstention
 leaves the row byte-identical and unlocked; an abstaining job at the head of

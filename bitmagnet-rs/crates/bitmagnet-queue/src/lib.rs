@@ -50,7 +50,9 @@ pub use pg::{
     MirrorCursor, MirrorIneligibleReason, MirrorReport, QueuePgError, QueueStore,
     ShadowJobEnvelopeV1, PROCESS_TORRENT_SHADOW, SHADOW_JOB_ENVELOPE_VERSION,
 };
-pub use process_torrent_pg::{AdmittedConsumeOutcome, JobVerdict};
+pub use process_torrent_pg::{
+    AdmittedConsumeOutcome, JobVerdict, ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
+};
 pub use producer_pg::{
     insert_jobs_strict_with_executor, prepare_pg_queue_job_values, ActiveJobInsertReceipt,
     PgQueueJobValues, PreparedQueueJob,
