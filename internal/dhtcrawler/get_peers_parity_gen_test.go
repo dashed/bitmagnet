@@ -34,7 +34,7 @@ var updateDHTCrawlerGetPeersParity = flag.Bool(
 	"rewrite the Rust DHT crawler get-peers parity fixture",
 )
 
-const crawlerGetPeersFixtureSHA256 = "82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844"
+const crawlerGetPeersFixtureSHA256 = "876da2f05f4a76521ce389db2981f9854c97c03cbde7a322ed0b964e747c0b38"
 
 var crawlerGetPeersFixtureIDs = [...]string{
 	"production_source_factory_and_lifecycle_contract",
@@ -971,7 +971,7 @@ func crawlerGetPeersPrerequisiteDigests(t *testing.T) map[string]string {
 		"testdata/parity/dht/peer_sample_client.jsonl":           "8c432a1555587a0c3dff51af3191c689adb3a2eda8b6515975ee1470b4bdfe51",
 		"testdata/parity/dht/ktable_core.jsonl":                  "b49854c20df24afec5f9bf76c22b2bdd12ca0a629cd3f199a742d44adf99844e",
 		"testdata/parity/dht/ktable_temporal.jsonl":              "03178e62efbc40519ccc0496204a081469ef49cf6b1a2336cff39b474a745444",
-		"testdata/parity/dht/dht_crawler_info_hash_triage.jsonl": "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8",
+		"testdata/parity/dht/dht_crawler_info_hash_triage.jsonl": "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b",
 		"testdata/parity/dht/dht_crawler_discovered_nodes.jsonl": "ae6d867378a227284aa0cd93e9120d70afbec1c5e3b19a9f64e09edace4190e0",
 	}
 	crawlerGetPeersValidateDigests(t, want)

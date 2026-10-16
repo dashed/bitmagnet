@@ -12,9 +12,15 @@ use super::{AtomicBlockingStore, BlockingClock, BoxError, CommittedFilter};
 // SQLx 0.9 has no PostgreSQL large-object descriptor wrapper. Runtime queries
 // therefore use lo_get/lo_create/lo_put inside the same transaction. This is a
 // data-equivalence claim for fresh objects and strictly decoded exact-length
-// objects, not descriptor-call parity. The adapter deliberately adds neither
-// row/advisory locking nor a truncation behavior absent from Go; an oversized
-// existing object is rejected by the bounded strict decode before any write.
+// objects, not descriptor-call parity. The adapter adds no truncation behavior
+// absent from Go; an oversized existing object is rejected by the bounded
+// strict decode before any write.
+//
+// Before reading the filter, both this adapter and Go's manager take the same
+// transaction-scoped advisory lock (LOCK_FILTER_SQL), so concurrent flushes
+// from any process apply their hashes one after another instead of each
+// overwriting the filter it started from. An advisory lock needs no grant
+// beyond the writers' existing column privileges, unlike SELECT ... FOR UPDATE.
 
 const BLOCKED_TORRENTS_KEY: &str = "blocked_torrents";
 const CELL_COUNT: usize = 100_000_000;
@@ -26,6 +32,9 @@ const BOUNDED_READ_BYTES: usize = ENCODED_BYTES + 1;
 
 const BEGIN_TRANSACTION_SQL: &str = "BEGIN READ WRITE";
 const DELETE_TORRENTS_SQL: &str = "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])";
+/// Byte-identical to Go's `blockedTorrentsBloomFilterLockSQL`.
+const LOCK_FILTER_SQL: &str = "SELECT pg_catalog.pg_advisory_xact_lock(\
+    pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))";
 const SELECT_FILTER_OID_SQL: &str = "SELECT oid FROM public.bloom_filters WHERE key = $1::text";
 const READ_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_get($1::oid, 0::bigint, $2::integer)";
 const CREATE_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_create(0::oid)";
@@ -43,6 +52,8 @@ enum PostgresBlockingStoreError {
     Begin(#[source] sqlx::Error),
     #[error("failed to delete blocked torrents")]
     DeleteTorrents(#[source] sqlx::Error),
+    #[error("failed to lock bloom filter")]
+    LockFilter(#[source] sqlx::Error),
     #[error("failed to get bloom-filter object ID")]
     SelectObjectId(#[source] sqlx::Error),
     #[error("failed to read current bloom-filter large object")]
@@ -112,6 +123,11 @@ impl AtomicBlockingStore for PostgresAtomicBlockingStore {
                 .await
                 .map_err(PostgresBlockingStoreError::DeleteTorrents)?;
         }
+
+        sqlx::query(LOCK_FILTER_SQL)
+            .execute(&mut *transaction)
+            .await
+            .map_err(PostgresBlockingStoreError::LockFilter)?;
 
         let oid_row = sqlx::query(SELECT_FILTER_OID_SQL)
             .bind(BLOCKED_TORRENTS_KEY)
@@ -267,6 +283,11 @@ mod tests {
             "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])"
         );
         assert_eq!(
+            LOCK_FILTER_SQL,
+            "SELECT pg_catalog.pg_advisory_xact_lock(\
+             pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))"
+        );
+        assert_eq!(
             SELECT_FILTER_OID_SQL,
             "SELECT oid FROM public.bloom_filters WHERE key = $1::text"
         );
@@ -365,6 +386,7 @@ mod tests {
         let positions = [
             "BEGIN_TRANSACTION_SQL",
             "DELETE_TORRENTS_SQL",
+            "LOCK_FILTER_SQL",
             "SELECT_FILTER_OID_SQL",
             "READ_LARGE_OBJECT_SQL",
             "for hash in blocked",
@@ -384,6 +406,23 @@ mod tests {
         );
         assert!(constructor_source
             .contains("decrement_starts: Box::new(RandomDecrementStartSource::new())"));
+    }
+
+    #[test]
+    fn lock_statement_is_the_one_go_takes() {
+        let go = include_str!("../../../../internal/blocking/manager.go");
+        let go_sql = go
+            .split_once("const blockedTorrentsBloomFilterLockSQL = ")
+            .expect("Go declares the bloom-filter lock statement")
+            .1
+            .split("\n\n")
+            .next()
+            .unwrap()
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<String>();
+        assert_eq!(go_sql, LOCK_FILTER_SQL);
     }
 
     fn assert_send_sync<T: Send + Sync>() {}

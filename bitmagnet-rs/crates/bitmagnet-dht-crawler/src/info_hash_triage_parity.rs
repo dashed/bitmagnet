@@ -29,7 +29,7 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_info_hash_triage.jsonl"
 ));
-const FIXTURE_SHA256: &str = "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8";
+const FIXTURE_SHA256: &str = "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b";
 const FIXTURE_IDS: [&str; 7] = [
     "production_source_factory_and_lifecycle_contract",
     "dedup_filter_lookup_and_decision_matrix",
@@ -111,7 +111,7 @@ const GO_SOURCES: [(&str, &[u8], &str); 15] = [
     (
         "internal/blocking/manager.go",
         include_bytes!("../../../../internal/blocking/manager.go"),
-        "d32ef7b0fb1eeadaeb1134f49b1046911c27312d2383b402d5989c8bc830130f",
+        "6621254ca1a3878237bd77d276a3c4102fa150e65aecc8933e1d8f25b81931ce",
     ),
     (
         "internal/concurrency/batching_channel.go",

@@ -33,7 +33,7 @@ var updateDHTCrawlerPersistSourcesParity = flag.Bool(
 	"rewrite the DHT crawler persist-sources parity fixture",
 )
 
-const crawlerPersistSourcesFixtureSHA256 = "01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9"
+const crawlerPersistSourcesFixtureSHA256 = "95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c"
 
 var crawlerPersistSourcesFixtureIDs = [...]string{
 	"production_source_factory_batcher_lifecycle_model_sql_and_schema_contract",
@@ -700,7 +700,7 @@ func crawlerPersistSourcesSourceDigests(t *testing.T) map[string]string {
 func crawlerPersistSourcesPrerequisiteDigests(t *testing.T) map[string]string {
 	t.Helper()
 	want := map[string]string{
-		"testdata/parity/dht/dht_crawler_scrape.jsonl": "d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b",
+		"testdata/parity/dht/dht_crawler_scrape.jsonl": "3e4223123860ae420c3bd6ac0c8aaced27e9b4e0b68aad50053d63d12fa01845",
 		"testdata/parity/dht/scrape_bloom.jsonl":       "760f868a2cb53d8342e02c84b99ec0335fa20df52d5d2695b00d3f7e2d7ac287",
 	}
 	for path, expected := range want {

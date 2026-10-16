@@ -36,7 +36,7 @@ var updateDHTCrawlerPersistTorrentsOracle = flag.Bool(
 	"rewrite the DHT crawler persist-torrents oracle fixture",
 )
 
-const crawlerPersistTorrentsFixtureSHA256 = "40adced4a96a860354d8ba74c412566e2a72979261bd674994c4ef18d6680bc5"
+const crawlerPersistTorrentsFixtureSHA256 = "a96fcd1b55608ba45000507b9823fac780ecd0603f2f166ded612155dbb44a16"
 
 var crawlerPersistTorrentsFixtureIDs = [...]string{
 	"production_source_factory_batcher_lifecycle_lookup_dedup_transaction_and_fanout_contract",
@@ -1292,7 +1292,7 @@ func crawlerPersistTorrentsSourceDigests(t *testing.T) map[string]string {
 func crawlerPersistTorrentsPrerequisiteDigests(t *testing.T) map[string]string {
 	t.Helper()
 	want := map[string]string{
-		"testdata/parity/dht/dht_crawler_request_meta_info.jsonl":        "03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5",
+		"testdata/parity/dht/dht_crawler_request_meta_info.jsonl":        "44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb",
 		"internal/dhtcrawler/testdata/bittorrent-v2-hybrid-test.torrent": "8ba7575e64e9046cac74ca6523bff6445ff5c3e369d5d132607a793a1834e93f",
 		"testdata/parity/queue/fingerprints.jsonl":                       "5636896337cf3c27cda78eae4d4315f48bc4c447300beecfef55b35a5f831a8b",
 	}

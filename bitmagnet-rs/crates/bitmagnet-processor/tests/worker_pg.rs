@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitmagnet_blocking::BlockingManager as PersistentBlockingManager;
+use bitmagnet_model::InfoHash;
 use bitmagnet_processor::{
     load_writer_plan, persist_writer_plan, Materializer, ProcessTorrentWorker,
     ProcessTorrentWorkerConfig,
@@ -1153,4 +1154,76 @@ async fn database_errors_are_counted_and_the_worker_keeps_polling() {
 
     let row = job_row(&pool, &id).await;
     assert_eq!((row.status.as_str(), row.retries), ("processed", 0));
+}
+
+/// The statement both Go and Rust blocking managers take before reading the
+/// shared filter.
+const BLOOM_FILTER_LOCK_SQL: &str = "SELECT pg_catalog.pg_advisory_xact_lock(\
+    pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))";
+
+async fn wait_for_advisory_lock_waiters(pool: &PgPool, waiters: i64) {
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event = 'advisory'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read advisory lock waiters");
+        if waiting >= waiters {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{waiters} blocking flushes never waited for the bloom-filter lock");
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn concurrent_blocking_flushes_keep_every_writers_hashes() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let first: InfoHash = HASH_A.parse().unwrap();
+    let second: InfoHash = HASH_B.parse().unwrap();
+    // Persist a filter first, so both flushes read, extend, and rewrite it.
+    PersistentBlockingManager::new(pool.clone())
+        .block(&[HASH_MISSING.parse().unwrap()], true)
+        .await
+        .expect("seed the persisted filter");
+
+    // Hold the lock as another process's in-progress flush would. Both
+    // flushes must queue behind it, then apply their hashes one at a time
+    // rather than each rewriting the filter it read.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query(BLOOM_FILTER_LOCK_SQL)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let (one, two) = (
+        PersistentBlockingManager::new(pool.clone()),
+        PersistentBlockingManager::new(pool.clone()),
+    );
+    let release = async {
+        wait_for_advisory_lock_waiters(&pool, 2).await;
+        holder.commit().await.unwrap();
+    };
+    let (batch_one, batch_two) = ([first], [second]);
+    let (flushed_one, flushed_two, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            one.block(&batch_one, true),
+            two.block(&batch_two, true),
+            release
+        )
+    })
+    .await
+    .expect("both flushes finish once the lock is released");
+    flushed_one.expect("first flush");
+    flushed_two.expect("second flush");
+
+    let reloaded = PersistentBlockingManager::new(pool.clone());
+    assert_eq!(
+        reloaded.filter(&[first, second]).await.unwrap(),
+        Vec::<InfoHash>::new(),
+        "the persisted filter keeps both concurrent writers' hashes"
+    );
 }

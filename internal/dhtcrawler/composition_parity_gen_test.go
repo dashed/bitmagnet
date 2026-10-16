@@ -29,7 +29,7 @@ var updateDHTCrawlerCompositionParity = flag.Bool(
 	"rewrite the Rust DHT crawler composition source fixture",
 )
 
-const crawlerCompositionFixtureSHA256 = "fc1dfd4e28f0cd32aeef424af5f4b8aa65f18c0a663589e31daa174010bb0474"
+const crawlerCompositionFixtureSHA256 = "3797751961462303e5a2aa0efc3d936b8ee9d1c225e09e594de5dfa7b64644bb"
 
 const crawlerCompositionFixtureID = "production_construction_and_lifecycle_source_contract"
 
@@ -475,15 +475,15 @@ func crawlerCompositionSourceDigests(t *testing.T) map[string]string {
 func crawlerCompositionPrerequisiteDigests(t *testing.T) map[string]string {
 	t.Helper()
 	want := map[string]string{
-		"testdata/parity/dht/dht_crawler_info_hash_triage.jsonl":  "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8",
-		"testdata/parity/dht/dht_crawler_get_peers.jsonl":         "82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844",
-		"testdata/parity/dht/dht_crawler_scrape.jsonl":            "d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b",
-		"testdata/parity/dht/dht_crawler_request_meta_info.jsonl": "03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5",
-		"testdata/parity/dht/dht_crawler_persist_sources.jsonl":   "01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9",
-		"testdata/parity/dht/dht_crawler_persist_torrents.jsonl":  "40adced4a96a860354d8ba74c412566e2a72979261bd674994c4ef18d6680bc5",
+		"testdata/parity/dht/dht_crawler_info_hash_triage.jsonl":  "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b",
+		"testdata/parity/dht/dht_crawler_get_peers.jsonl":         "876da2f05f4a76521ce389db2981f9854c97c03cbde7a322ed0b964e747c0b38",
+		"testdata/parity/dht/dht_crawler_scrape.jsonl":            "3e4223123860ae420c3bd6ac0c8aaced27e9b4e0b68aad50053d63d12fa01845",
+		"testdata/parity/dht/dht_crawler_request_meta_info.jsonl": "44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb",
+		"testdata/parity/dht/dht_crawler_persist_sources.jsonl":   "95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c",
+		"testdata/parity/dht/dht_crawler_persist_torrents.jsonl":  "a96fcd1b55608ba45000507b9823fac780ecd0603f2f166ded612155dbb44a16",
 		"testdata/parity/dht/metainfo_requester.jsonl":            "990f4d503065ed08689df37881817386874f12cda2fdaeaeb56c05e12bbcc80e",
 		"testdata/parity/dht/keyed_limiter.jsonl":                 "53787bb82f1b4c51519a4e412848ead5d9e03a316bc8403a928004f2446bfac8",
-		"testdata/parity/dht/dht_info_hash_block_filter.jsonl":    "cc17edc11e5a21fe668d1067d2cf7413643bfdc8b81b0d5e97e5830afb1a51b4",
+		"testdata/parity/dht/dht_info_hash_block_filter.jsonl":    "d3c6c1727c59e7643f64c407837f429f69d32383e729115d0d4fac4677f6bde8",
 	}
 	for path, expected := range want {
 		contents, err := os.ReadFile(filepath.Join(crawlerCompositionRoot(t), path))

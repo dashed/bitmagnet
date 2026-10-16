@@ -8,7 +8,7 @@ use super::{fnv1_64, hash_indices, DecrementStartSource, StableBloomFilter, Stab
 
 const FIXTURE: &str =
     include_str!("../../../../testdata/parity/dht/dht_info_hash_block_filter.jsonl");
-const FIXTURE_SHA256: &str = "cc17edc11e5a21fe668d1067d2cf7413643bfdc8b81b0d5e97e5830afb1a51b4";
+const FIXTURE_SHA256: &str = "d3c6c1727c59e7643f64c407837f429f69d32383e729115d0d4fac4677f6bde8";
 const GO_MOD: &str = include_str!("../../../../go.mod");
 const GO_SUM: &str = include_str!("../../../../go.sum");
 const LOCAL_SOURCES: [(&str, &[u8]); 6] = [
@@ -489,7 +489,7 @@ fn expected_ast_digests() -> BTreeMap<String, String> {
             ),
             (
                 "blocking.manager.flush",
-                "7e961d417b2a7291f63ea6717a8842f48113d4fa10d7bae26eb6aedafafd0022",
+                "49ba912d948c048df8fa149414287156b145a57223ee20d8bdfd5fae1b2ddc94",
             ),
             (
                 "blocking.manager.shouldFlush",
@@ -561,7 +561,7 @@ fn expected_source_digests() -> BTreeMap<String, String> {
             ),
             (
                 "internal/blocking/manager.go",
-                "d32ef7b0fb1eeadaeb1134f49b1046911c27312d2383b402d5989c8bc830130f",
+                "6621254ca1a3878237bd77d276a3c4102fa150e65aecc8933e1d8f25b81931ce",
             ),
             (
                 "internal/bloom/stable.go",

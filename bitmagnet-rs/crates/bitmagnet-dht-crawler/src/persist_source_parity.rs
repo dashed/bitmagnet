@@ -25,7 +25,7 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_persist_sources.jsonl"
 ));
-const FIXTURE_SHA256: &str = "01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9";
+const FIXTURE_SHA256: &str = "95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c";
 
 const FIXTURE_IDS: [&str; 4] = [
     "production_source_factory_batcher_lifecycle_model_sql_and_schema_contract",
@@ -239,7 +239,7 @@ const PREREQUISITE_FIXTURES: [(&str, &[u8], &str); 2] = [
     (
         "testdata/parity/dht/dht_crawler_scrape.jsonl",
         include_bytes!("../../../../testdata/parity/dht/dht_crawler_scrape.jsonl"),
-        "d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b",
+        "3e4223123860ae420c3bd6ac0c8aaced27e9b4e0b68aad50053d63d12fa01845",
     ),
     (
         "testdata/parity/dht/scrape_bloom.jsonl",

@@ -81,20 +81,20 @@ Rust-consumer checkpoint is `7c49c4be0a5d8465d234b4c63d2ac5bf190572ca`.
 The scraped-source route checkpoint is
 `a76591e92430ceb65fc7eb62af4ffbbaa791dad7`. The frozen Go scrape-oracle
 checkpoint is `c6b365ab0a62000351baf76ec78cfca38506b5ee`, and its fixture SHA-256
-is `d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b`.
+is `3e4223123860ae420c3bd6ac0c8aaced27e9b4e0b68aad50053d63d12fa01845`.
 The owned scrape-worker checkpoint is
 `c9921be38a9d68a9812d4647bf1c33b74812ad5f`, and its strict Rust-consumer
 checkpoint is `6f45f7b6eeb29b0c3d41c327246d9a27df0f5ac5`.
 The frozen Go request-metainfo oracle checkpoint is
 `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`, and its fixture SHA-256 is
-`03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5`.
+`44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb`.
 The executable Go peer-wire requester oracle checkpoint is
 `7fa9c4ad6da0aa2188b185a0f02c2501b73facee`, and
 `testdata/parity/dht/metainfo_requester.jsonl` has SHA-256
 `990f4d503065ed08689df37881817386874f12cda2fdaeaeb56c05e12bbcc80e`.
 The frozen Go source-persistence oracle checkpoint is
 `445385c62be25e221dfb8b8f3efe9a25abd0b364`, and its fixture SHA-256 is
-`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
+`95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c`.
 Its recorded contract checkpoint is
 `ad4b62c4d699fb6cd601f69fe289d00c2574f2da`. The owned source-persistence
 worker checkpoint is `600e8e7e4eeff4c8427130c8bd1f1566834ad883`, and its strict
@@ -623,7 +623,7 @@ state rather than across an arbitrary concurrent snapshot.
 
 The strict consumer pins
 `testdata/parity/dht/dht_crawler_persist_sources.jsonl` at SHA-256
-`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`,
+`95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c`,
 requires exactly four LF-terminated rows in order, and recursively denies
 unknown fields across all twenty fixture schema shapes. Its execution
 partition is one `SOURCE_ONLY` row, two `RUNTIME_EXACT` rows, and one
@@ -1196,7 +1196,7 @@ retains the full ordered vector.
 
 The eight-line fixture is
 `testdata/parity/dht/dht_crawler_get_peers.jsonl`, with SHA-256
-`82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844`.
+`876da2f05f4a76521ce389db2981f9854c97c03cbde7a322ed0b964e747c0b38`.
 It fixes one source-only row, three exact runtime rows, three deliberate
 Rust-owned-shutdown-delta rows, and one Go-only lane-error row. Runtime rows
 execute the actual `runGetPeers` and `requestPeersForHash` through a manual
@@ -1311,7 +1311,7 @@ than a guarantee for every concurrently observed intermediate snapshot.
 Go oracle commit `6aece7ac7605507aaf5ccdcc9adf2497170b071d` generated
 `testdata/parity/dht/dht_crawler_info_hash_triage.jsonl`. The checked fixture's
 SHA-256 is
-`52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8`.
+`bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b`.
 It contains exactly seven ordered rows:
 
 1. `production_source_factory_and_lifecycle_contract` (`SOURCE_ONLY`);
@@ -1325,7 +1325,7 @@ It contains exactly seven ordered rows:
 The source row binds exact SHA-256 values for fifteen live Go files:
 
 - `internal/blocking/manager.go`:
-  `d32ef7b0fb1eeadaeb1134f49b1046911c27312d2383b402d5989c8bc830130f`;
+  `6621254ca1a3878237bd77d276a3c4102fa150e65aecc8933e1d8f25b81931ce`;
 - `internal/concurrency/batching_channel.go`:
   `72b3c9fd5fbc8ecbfb0ba2bc2ed5e6c1d45de01f03d3e015b2467f114ec70975`;
 - `internal/concurrency/buffered_concurrent_channel.go`:
@@ -1413,7 +1413,7 @@ whitespace checks. Those gates use no live PostgreSQL instance.
 
 Go oracle checkpoint `c6b365ab0a62000351baf76ec78cfca38506b5ee`
 generated `testdata/parity/dht/dht_crawler_scrape.jsonl` with SHA-256
-`d434306fd60678be95cabd53d59ea152f6a013bf2e486f4bb2456aa8da2c6d9b`.
+`3e4223123860ae420c3bd6ac0c8aaced27e9b4e0b68aad50053d63d12fa01845`.
 It contains exactly eight ordered rows:
 
 1. `production_source_factory_and_lifecycle_contract` (`SOURCE_ONLY`) pins the
@@ -1492,7 +1492,7 @@ the oracle checkpoint.
 Go oracle checkpoint `445385c62be25e221dfb8b8f3efe9a25abd0b364`
 generated `testdata/parity/dht/dht_crawler_persist_sources.jsonl` with
 SHA-256
-`01acacdc5ccc425bda88e87643328101499af3873f3a52c7eef2f46a92697bd9`.
+`95e404de9539d54f102eb71dbc6687c9c4c29fe6d3f973b5def43fbd60f1833c`.
 It contains exactly four ordered, recursively strict-ready rows:
 
 1. `production_source_factory_batcher_lifecycle_model_sql_and_schema_contract`
@@ -1591,7 +1591,7 @@ documented above. They do not retroactively execute Go `runPersistSources`.
 Go oracle checkpoint `2f1f7c7292b749b8ef8af3aae6bf1214d2d26651`
 generated `testdata/parity/dht/dht_crawler_request_meta_info.jsonl` with
 SHA-256
-`03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5`.
+`44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb`.
 It contains exactly eight ordered rows:
 
 1. `production_source_factory_and_lifecycle_contract` (`SOURCE_ONLY`) pins the

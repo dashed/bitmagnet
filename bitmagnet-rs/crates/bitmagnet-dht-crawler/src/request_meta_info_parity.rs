@@ -33,7 +33,7 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_request_meta_info.jsonl"
 ));
-const FIXTURE_SHA256: &str = "03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5";
+const FIXTURE_SHA256: &str = "44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb";
 
 const HYBRID_TORRENT: &[u8] = include_bytes!(
     "../../../../internal/protocol/metainfo/testdata/bittorrent-v2-hybrid-test.torrent"
@@ -214,7 +214,7 @@ const GO_SOURCES: [(&str, &[u8], &str); 16] = [
     (
         "internal/blocking/manager.go",
         include_bytes!("../../../../internal/blocking/manager.go"),
-        "d32ef7b0fb1eeadaeb1134f49b1046911c27312d2383b402d5989c8bc830130f",
+        "6621254ca1a3878237bd77d276a3c4102fa150e65aecc8933e1d8f25b81931ce",
     ),
     (
         "internal/concurrency/batching_channel.go",
@@ -302,17 +302,17 @@ const PREREQUISITE_FIXTURES: [(&str, &[u8], &str); 4] = [
     (
         "testdata/parity/dht/dht_crawler_get_peers.jsonl",
         include_bytes!("../../../../testdata/parity/dht/dht_crawler_get_peers.jsonl"),
-        "82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844",
+        "876da2f05f4a76521ce389db2981f9854c97c03cbde7a322ed0b964e747c0b38",
     ),
     (
         "testdata/parity/dht/dht_crawler_info_hash_triage.jsonl",
         include_bytes!("../../../../testdata/parity/dht/dht_crawler_info_hash_triage.jsonl"),
-        "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8",
+        "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b",
     ),
     (
         "testdata/parity/dht/dht_info_hash_block_filter.jsonl",
         include_bytes!("../../../../testdata/parity/dht/dht_info_hash_block_filter.jsonl"),
-        "cc17edc11e5a21fe668d1067d2cf7413643bfdc8b81b0d5e97e5830afb1a51b4",
+        "d3c6c1727c59e7643f64c407837f429f69d32383e729115d0d4fac4677f6bde8",
     ),
 ];
 

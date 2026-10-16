@@ -29,7 +29,7 @@ var updateDHTInfoHashBlockFilterParity = flag.Bool(
 	"rewrite the Rust DHT persistent info-hash block-filter parity fixture",
 )
 
-const dhtInfoHashBlockFilterFixtureSHA256 = "cc17edc11e5a21fe668d1067d2cf7413643bfdc8b81b0d5e97e5830afb1a51b4"
+const dhtInfoHashBlockFilterFixtureSHA256 = "d3c6c1727c59e7643f64c407837f429f69d32383e729115d0d4fac4677f6bde8"
 
 const (
 	dhtInfoHashBlockFilterModulePath     = "github.com/tylertreat/BoomFilters"
@@ -366,6 +366,8 @@ func assertDHTInfoHashBlockFilterSourceShapes(t *testing.T, root string) {
 		"internal/blocking/manager.go": {
 			`const blockedTorrentsBloomFilterKey = "blocked_torrents"`,
 			`DELETE FROM torrents WHERE info_hash = any($1)`,
+			`"pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))"`,
+			`_, err = tx.Exec(ctx, blockedTorrentsBloomFilterLockSQL)`,
 			`SELECT oid FROM bloom_filters WHERE key = $1`,
 			`m.buffer = make(map[protocol.ID]struct{})`,
 			`m.filter = bf`,

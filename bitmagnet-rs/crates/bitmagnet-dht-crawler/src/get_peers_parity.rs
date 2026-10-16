@@ -29,7 +29,7 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_get_peers.jsonl"
 ));
-const FIXTURE_SHA256: &str = "82b694fece9e46c05aefaab76bc05b78462bc04824bf6b83bb77eb544b7f0844";
+const FIXTURE_SHA256: &str = "876da2f05f4a76521ce389db2981f9854c97c03cbde7a322ed0b964e747c0b38";
 
 const FIXTURE_IDS: [&str; 8] = [
     "production_source_factory_and_lifecycle_contract",
@@ -286,7 +286,7 @@ const PREREQUISITE_FIXTURES: [(&str, &[u8], &str); 5] = [
             env!("CARGO_MANIFEST_DIR"),
             "/../../../testdata/parity/dht/dht_crawler_info_hash_triage.jsonl"
         )),
-        "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8",
+        "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b",
     ),
     (
         "testdata/parity/dht/ktable_core.jsonl",

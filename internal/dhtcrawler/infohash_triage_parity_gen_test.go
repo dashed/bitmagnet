@@ -43,7 +43,7 @@ var updateDHTCrawlerInfoHashTriageParity = flag.Bool(
 	"rewrite the Rust DHT crawler info-hash-triage parity fixture",
 )
 
-const crawlerInfoHashTriageFixtureSHA256 = "52eda840f872225cc34f8cf12edc2e4621e8a1fef569abf34a50f4a3bd9896f8"
+const crawlerInfoHashTriageFixtureSHA256 = "bcc5c944df25d8c5e4c9986f85711d73785c5e04cc8e16535c5eeb414e33274b"
 
 var crawlerInfoHashTriageExpectedNormalizedASTSHA256 = map[string]string{
 	"config.NewDefaultConfig":     "d044a4710817daf9a87dfab03ce22f138da3c6e1bf94d40bbbfd0fea70673f32",

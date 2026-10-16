@@ -12,7 +12,7 @@ const FIXTURE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../testdata/parity/dht/dht_crawler_persist_torrents.jsonl"
 ));
-const FIXTURE_SHA256: &str = "40adced4a96a860354d8ba74c412566e2a72979261bd674994c4ef18d6680bc5";
+const FIXTURE_SHA256: &str = "a96fcd1b55608ba45000507b9823fac780ecd0603f2f166ded612155dbb44a16";
 
 const FIXTURE_IDS: [&str; 6] = [
     "production_source_factory_batcher_lifecycle_lookup_dedup_transaction_and_fanout_contract",
@@ -829,7 +829,7 @@ const PREREQUISITES: [(&str, &[u8], &str); 3] = [
     (
         "testdata/parity/dht/dht_crawler_request_meta_info.jsonl",
         include_bytes!("../../../../testdata/parity/dht/dht_crawler_request_meta_info.jsonl"),
-        "03ce2ab0da2b0f9ba1173b8ba52481a903265ca6862f957b40490cf67a9e4ec5",
+        "44c0a8fd4a015596a5ac13f70386281d020d08f916c9f98a02a85a34f746dbbb",
     ),
     (
         "testdata/parity/queue/fingerprints.jsonl",
