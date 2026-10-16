@@ -281,7 +281,7 @@ impl Drop for DhtDiscoveryReceiver {
 
 fn increment_saturating(counter: &AtomicU64) {
     let _previous = counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(1))
         })
         .expect("a saturating counter update always supplies a replacement");

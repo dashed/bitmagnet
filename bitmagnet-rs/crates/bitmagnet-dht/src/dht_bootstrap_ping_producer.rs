@@ -410,7 +410,7 @@ fn canonicalize_address(address: SocketAddr) -> SocketAddr {
 
 fn increment_saturating(counter: &AtomicU64) {
     let _previous = counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(1))
         })
         .expect("a saturating counter update always supplies a replacement");
@@ -419,7 +419,7 @@ fn increment_saturating(counter: &AtomicU64) {
 fn increment_saturating_by(counter: &AtomicU64, amount: usize) {
     let amount = u64::try_from(amount).unwrap_or(u64::MAX);
     let _previous = counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(current.saturating_add(amount))
         })
         .expect("a saturating counter update always supplies a replacement");

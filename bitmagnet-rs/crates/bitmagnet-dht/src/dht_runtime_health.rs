@@ -196,7 +196,7 @@ fn elapsed_nanos(origin: tokio::time::Instant, instant: tokio::time::Instant) ->
 
 fn store_latest(counter: &AtomicU64, completed_nanos: u64) {
     let _previous = counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             Some(if current == UNRECORDED_NANOS {
                 completed_nanos
             } else {

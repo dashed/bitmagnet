@@ -763,20 +763,20 @@ fn saturating_shift_duration(value: Instant, duration: Duration, add: bool) -> I
 }
 
 fn increment_saturating(counter: &AtomicU64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(1))
     });
 }
 
 fn add_saturating(counter: &AtomicU64, amount: usize) {
     let amount = u64::try_from(amount).unwrap_or(u64::MAX);
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(amount))
     });
 }
 
 fn add_saturating_usize(counter: &AtomicUsize, amount: usize) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(amount))
     });
 }
