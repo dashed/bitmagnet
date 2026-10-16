@@ -47,6 +47,11 @@ struct Args {
     job_timeout_seconds: u64,
     #[arg(long, default_value_t = 600)]
     abstain_cooloff_seconds: u64,
+    /// How long an in-flight job may run after SIGTERM before it is abandoned
+    /// (0 abandons it at once). Keep it, plus the blocking-manager flush,
+    /// under the pod's `terminationGracePeriodSeconds`.
+    #[arg(long, default_value_t = 20)]
+    shutdown_grace_seconds: u64,
 }
 
 #[tokio::main]
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
         check_interval: Duration::from_secs(args.check_interval_seconds),
         job_timeout: Duration::from_secs(args.job_timeout_seconds),
         abstain_cooloff: Duration::from_secs(args.abstain_cooloff_seconds),
+        shutdown_grace: Duration::from_secs(args.shutdown_grace_seconds),
         ..ProcessTorrentWorkerConfig::default()
     };
     let worker = ProcessTorrentWorker::new(
@@ -109,6 +115,7 @@ async fn main() -> Result<()> {
         postgres_max_connections = args.postgres_max_connections,
         check_interval_seconds = args.check_interval_seconds,
         job_timeout_seconds = args.job_timeout_seconds,
+        shutdown_grace_seconds = args.shutdown_grace_seconds,
         "starting persisting Rust process_torrent worker"
     );
     let run = worker
@@ -159,6 +166,7 @@ mod tests {
             check_interval_seconds: 30,
             job_timeout_seconds: 600,
             abstain_cooloff_seconds: 600,
+            shutdown_grace_seconds: 20,
         }
     }
 

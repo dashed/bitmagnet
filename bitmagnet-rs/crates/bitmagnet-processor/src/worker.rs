@@ -26,6 +26,8 @@
 //! outcomes consume one of the job's retries.
 
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -49,6 +51,11 @@ pub const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_ABSTAIN_COOLOFF: Duration = Duration::from_secs(600);
 /// Upper bound on remembered abstentions; the oldest is forgotten first.
 pub const DEFAULT_MAX_EXCLUDED: usize = 1_024;
+/// How long an in-flight job may keep running after shutdown is requested.
+///
+/// Kubernetes sends `SIGKILL` 30 seconds after `SIGTERM` by default; this
+/// leaves room to flush the blocking manager before that.
+pub const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(20);
 
 const GO_HANDLER_ERROR_PREFIX: &str = "job failed to process: ";
 
@@ -59,6 +66,7 @@ pub struct ProcessTorrentWorkerConfig {
     pub job_timeout: Duration,
     pub abstain_cooloff: Duration,
     pub max_excluded: usize,
+    pub shutdown_grace: Duration,
 }
 
 impl Default for ProcessTorrentWorkerConfig {
@@ -68,6 +76,7 @@ impl Default for ProcessTorrentWorkerConfig {
             job_timeout: DEFAULT_JOB_TIMEOUT,
             abstain_cooloff: DEFAULT_ABSTAIN_COOLOFF,
             max_excluded: DEFAULT_MAX_EXCLUDED,
+            shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
         }
     }
 }
@@ -120,21 +129,32 @@ impl ProcessTorrentWorker {
 
     /// Poll until `shutdown` resolves.
     ///
-    /// A claimed job always runs to settlement (bounded by the job timeout), so
-    /// shutdown never leaves a job whose side effects committed without its
-    /// queue row being settled. The loop self-chains after a claim and sleeps
-    /// `check_interval` only when no admitted job was eligible, like Go's
-    /// `serverHandler.start`. Database errors are returned to the caller.
+    /// The loop self-chains after a claim and sleeps `check_interval` only when
+    /// no admitted job was eligible, like Go's `serverHandler.start`. Database
+    /// errors are returned to the caller.
+    ///
+    /// A job in flight when `shutdown` resolves gets `shutdown_grace` to
+    /// settle. After that it is dropped, which rolls back its claim
+    /// transaction: the row keeps its status, retries, and error, so it is
+    /// claimed again later. This is what Go does when its queue context is
+    /// cancelled on stop; side effects already committed by the writer stay,
+    /// and the next run of the job redoes them.
     pub async fn run_until<S>(&self, shutdown: S) -> Result<(), QueuePgError>
     where
-        S: std::future::Future<Output = ()>,
+        S: Future<Output = ()>,
     {
         tokio::pin!(shutdown);
         loop {
             if (&mut shutdown).now_or_never().is_some() {
                 return Ok(());
             }
-            let outcome = self.run_once().await?;
+            let run = self.run_once();
+            tokio::pin!(run);
+            let outcome = tokio::select! {
+                biased;
+                outcome = &mut run => outcome?,
+                () = &mut shutdown => return self.drain(run).await,
+            };
             if matches!(
                 outcome,
                 AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
@@ -148,6 +168,21 @@ impl ProcessTorrentWorker {
                 tokio::task::yield_now().await;
             }
         }
+    }
+
+    /// Let the in-flight `run` settle within `shutdown_grace`, else drop it.
+    async fn drain<F>(&self, run: Pin<&mut F>) -> Result<(), QueuePgError>
+    where
+        F: Future<Output = Result<AdmittedConsumeOutcome, QueuePgError>>,
+    {
+        if let Ok(outcome) = tokio::time::timeout(self.config.shutdown_grace, run).await {
+            return outcome.map(drop);
+        }
+        tracing::warn!(
+            shutdown_grace = %go_duration(self.config.shutdown_grace),
+            "abandoning the in-flight process_torrent job at shutdown; its claim rolls back and the row stays queued"
+        );
+        Ok(())
     }
 
     async fn handle(&self, job: DequeuedJob) -> JobVerdict {

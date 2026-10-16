@@ -376,6 +376,17 @@ settlement are the generic `queue_jobs` statements, and the writer needs the
 same table rights as the Go processor. It flushes the shared blocking manager
 on shutdown, as Go does when the application stops.
 
+Shutdown is bounded. On `SIGTERM` the worker claims nothing new and gives an
+in-flight job `--shutdown-grace-seconds` (default 20) to settle. After that the
+job is dropped and its claim transaction rolls back, so the row keeps its
+status, retries, and error and is claimed again later. Go behaves the same way:
+stopping the queue server cancels the handler's context, the settle update
+fails, and the claim rolls back. Side effects the writer already committed stay
+in place, and the next run of the job redoes them. The 20-second default plus
+the blocking-manager flush fits Kubernetes' default 30-second
+`terminationGracePeriodSeconds`. Without the bound, a job could run for up to
+its ten-minute timeout and be `SIGKILL`ed mid-write, without the flush.
+
 Migration-backed gates (`tests/worker_pg.rs`) prove: a processed job leaves
 exactly the live image the direct `load_writer_plan` + `persist_writer_plan`
 path leaves; non-admitted payloads are never touched and Go's claim still
@@ -385,7 +396,9 @@ partial failure publishes Go's replacement job before persisting; abstention
 leaves the row byte-identical and unlocked; an abstaining job at the head of
 the queue neither blocks the admitted job behind it nor causes a re-claim
 loop, and its exclusion expires and is capped; and two Rust workers plus Go's
-exact claim never double-claim. `tools/parity/process_torrent_worker/run.sh`
+exact claim never double-claim; and on shutdown an in-flight job settles if it
+finishes within the grace, or else is abandoned with its row byte-identical
+and claimable again. `tools/parity/process_torrent_worker/run.sh`
 drains the same Go-built jobs with Go alone (A), with Rust then Go for its
 abstentions (B), and with both concurrently (C), and diffs the resulting
 images. At Goose 29 over the 330 synthetic classifier cases plus all 119,991

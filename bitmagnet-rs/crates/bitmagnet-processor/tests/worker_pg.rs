@@ -966,3 +966,131 @@ async fn an_abstained_job_never_blocks_or_spins_and_its_exclusion_is_bounded() {
             .unwrap();
     assert_eq!(unchanged, ("pending".to_owned(), 0));
 }
+
+/// Hold `torrent_contents` exclusively, so the next job the worker claims
+/// stalls inside its handler until the returned transaction ends.
+async fn stall_handlers(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut lock = pool.begin().await.expect("begin lock holder");
+    sqlx::query("LOCK TABLE torrent_contents IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .expect("lock torrent_contents");
+    lock
+}
+
+async fn wait_until_a_handler_is_stalled(pool: &PgPool) {
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("read lock waiters");
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the worker never stalled on the held torrent_contents lock");
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn shutdown_lets_an_in_flight_job_settle_within_the_grace() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_fixture_torrents(&pool).await;
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &supported_params(&[HASH_A])).await;
+    let lock = stall_handlers(&pool).await;
+    let worker = worker(
+        &pool,
+        ProcessTorrentWorkerConfig {
+            shutdown_grace: Duration::from_secs(30),
+            ..fast_config()
+        },
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let release = async {
+        wait_until_a_handler_is_stalled(&pool).await;
+        stop.send(()).expect("worker is running");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        lock.rollback().await.expect("release torrent_contents");
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            worker.run_until(async {
+                let _ = stopped.await;
+            }),
+            release
+        )
+    })
+    .await
+    .expect("the worker stops once its in-flight job settles");
+    result.expect("a drained shutdown is not an error");
+
+    let row = job_row(&pool, &id).await;
+    assert_eq!((row.status.as_str(), row.retries), ("processed", 0));
+    assert!(
+        live_image(&pool)
+            .await
+            .iter()
+            .any(|row| row.starts_with("tc ")),
+        "the drained job persisted its contents"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn shutdown_abandons_a_job_still_running_after_the_grace() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_fixture_torrents(&pool).await;
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &supported_params(&[HASH_A])).await;
+    let before = job_row(&pool, &id).await;
+    let image_before = live_image(&pool).await;
+    let lock = stall_handlers(&pool).await;
+    let stopping = worker(
+        &pool,
+        ProcessTorrentWorkerConfig {
+            shutdown_grace: Duration::from_millis(200),
+            ..fast_config()
+        },
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let signal = async {
+        wait_until_a_handler_is_stalled(&pool).await;
+        stop.send(()).expect("worker is running");
+    };
+    // The job timeout is ten minutes; only the grace can end this in time.
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            stopping.run_until(async {
+                let _ = stopped.await;
+            }),
+            signal
+        )
+    })
+    .await
+    .expect("shutdown is bounded by the grace, not the job timeout");
+    result.expect("abandoning a job at shutdown is not an error");
+    drop(stopping);
+    lock.rollback().await.expect("release torrent_contents");
+
+    assert_eq!(
+        job_row(&pool, &id).await,
+        before,
+        "the abandoned claim rolled back, leaving the row for the next claim"
+    );
+    assert_eq!(live_image(&pool).await, image_before);
+    let reclaimed = worker(&pool, fast_config()).run_once().await.unwrap();
+    assert!(
+        matches!(
+            reclaimed,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { ref job }) if job.id == id
+        ),
+        "the abandoned job is claimable again: {reclaimed:?}"
+    );
+}
