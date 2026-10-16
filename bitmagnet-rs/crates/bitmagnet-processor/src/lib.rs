@@ -16,11 +16,13 @@
 //! `docs/dev/rust-rewrite/phase3-contracts.md` §5.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 
 use bitmagnet_classifier::{
     Classification, Classifier, ClassifierError, ClassifierInput, FlagValue, Flags, Outcome,
 };
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -176,8 +178,35 @@ impl WriteSet {
 }
 
 /// Pure write-set materializer backed by Lane C's compiled classifier.
+///
+/// Classification of one batch's torrents is independent per torrent, so it
+/// may run on a dedicated thread pool; folding the results into the write-set
+/// stays serial and in requested order, so the output (including which error
+/// wins) is identical for any parallelism.
 pub struct Materializer {
     classifier: Classifier,
+    /// `None` classifies serially on the calling thread. A dedicated pool
+    /// rather than rayon's global one, so the worker's CPU budget is explicit
+    /// and nothing else in the process competes for it.
+    classify_pool: Option<rayon::ThreadPool>,
+}
+
+// The classify pool shares one compiled classifier across its threads.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Classifier>();
+};
+
+/// One distinct requested hash, in first-request order.
+enum Slot<'a> {
+    Missing(String),
+    Loaded(String, &'a LoadedTorrent),
+}
+
+/// A [`Slot`] after classification; `loaded` is `None` for a missing torrent.
+struct Classified<'a> {
+    info_hash: &'a str,
+    loaded: Option<(&'a LoadedTorrent, Classification, Outcome)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,7 +229,29 @@ impl Materializer {
     pub fn from_core() -> Result<Self, MaterializeError> {
         Ok(Self {
             classifier: Classifier::from_core()?,
+            classify_pool: None,
         })
+    }
+
+    /// Classify each batch's torrents on `parallelism` dedicated threads.
+    ///
+    /// One keeps the serial path: no pool, each torrent classified on the
+    /// calling thread just before it is folded.
+    pub fn with_classify_parallelism(
+        mut self,
+        parallelism: NonZeroUsize,
+    ) -> Result<Self, MaterializeError> {
+        self.classify_pool = if parallelism.get() == 1 {
+            None
+        } else {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(parallelism.get())
+                    .thread_name(|index| format!("classify-{index}"))
+                    .build()?,
+            )
+        };
+        Ok(self)
     }
 
     /// Run the classifier and construct the same classification-derived rows
@@ -254,21 +305,58 @@ impl Materializer {
             }
         }
 
-        let mut write_set = WriteSet::default();
-        let mut content_persistence = BTreeMap::new();
-        let mut classifier_failures = Vec::new();
-        let mut empty_episode_objects = BTreeSet::new();
+        // A malformed requested hash is not returned until the fold reaches
+        // it, so an earlier torrent's fold error still wins, as it did when
+        // classification and folding were one loop.
+        let mut slots = Vec::with_capacity(params.info_hashes.len());
+        let mut invalid_request = None;
         let mut seen = BTreeSet::new();
         for requested in &params.info_hashes {
-            let info_hash = protocol_id_hex(requested)?;
+            let info_hash = match protocol_id_hex(requested) {
+                Ok(info_hash) => info_hash,
+                Err(error) => {
+                    invalid_request = Some(error);
+                    break;
+                }
+            };
             if !seen.insert(info_hash.clone()) {
                 continue;
             }
-            let Some(torrent) = loaded.remove(&info_hash) else {
-                write_set.failed_info_hashes.push(info_hash);
-                continue;
-            };
+            slots.push(match loaded.remove(&info_hash) {
+                Some(torrent) => Slot::Loaded(info_hash, torrent),
+                None => Slot::Missing(info_hash),
+            });
+        }
 
+        let classify = |slot| self.classify_slot(workflow, &flags, slot);
+        let mut output = match &self.classify_pool {
+            // Serial: classify each torrent just before folding it, so a fold
+            // error stops classification exactly where the one loop did.
+            None => fold_classified(slots.iter().map(classify)),
+            // `collect` on an indexed parallel iterator keeps slot order.
+            Some(pool) => {
+                let classified: Vec<_> = pool.install(|| slots.par_iter().map(classify).collect());
+                fold_classified(classified)
+            }
+        }?;
+        if let Some(error) = invalid_request {
+            return Err(error);
+        }
+        output.write_set.canonicalize();
+        Ok(output)
+    }
+
+    fn classify_slot<'s>(
+        &self,
+        workflow: &str,
+        flags: &Flags,
+        slot: &'s Slot<'s>,
+    ) -> Classified<'s> {
+        match slot {
+            Slot::Missing(info_hash) => Classified {
+                info_hash,
+                loaded: None,
+            },
             // `Classifier::run` became async with the B′-0 dependency seam, but
             // `materialize` is called from a synchronous path. The default
             // `NullContentResolver` performs no I/O, so the future completes on
@@ -280,45 +368,18 @@ impl Materializer {
             // `contentAttached` as a bare boolean and carries no content row, so
             // going through it would discard exactly what an attached torrent
             // needs. See `Classifier::classify`.
-            let (result, outcome) = futures::executor::block_on(self.classifier.classify(
-                workflow,
-                &flags,
-                &torrent.classifier_input,
-            ));
-            if result.episodes.is_empty() && !result.episodes.is_nil() {
-                empty_episode_objects.insert(info_hash.clone());
-            }
-            let emit_content = if outcome.tag() == "classified" {
-                if let Some(content) = result.content.as_ref() {
-                    register_content_persistence(&mut content_persistence, content)?
-                } else {
-                    true
-                }
-            } else {
-                true
-            };
-            if let Some(rendered_error) = append_classification_write(
-                &mut write_set,
-                torrent,
-                result,
-                outcome,
-                false,
-                emit_content,
-            )? {
-                classifier_failures.push(ClassifierFailure {
+            Slot::Loaded(info_hash, torrent) => {
+                let (result, outcome) = futures::executor::block_on(self.classifier.classify(
+                    workflow,
+                    flags,
+                    &torrent.classifier_input,
+                ));
+                Classified {
                     info_hash,
-                    rendered_error,
-                });
+                    loaded: Some((torrent, result, outcome)),
+                }
             }
         }
-
-        write_set.canonicalize();
-        Ok(MaterializedWriterOutput {
-            write_set,
-            content_persistence,
-            classifier_failures,
-            empty_episode_objects,
-        })
     }
 
     /// Materialize one classifier result that was produced by replaying an
@@ -342,6 +403,58 @@ impl Materializer {
         write_set.canonicalize();
         Ok(write_set)
     }
+}
+
+/// Fold classified slots into the write-set in requested order.
+///
+/// 🚨 Order-sensitive: content-persistence registration keeps the first image
+/// of each attached content and rejects a later conflicting one, and the
+/// classifier-failure order is the retry job's fingerprint order.
+fn fold_classified<'a>(
+    classified: impl IntoIterator<Item = Classified<'a>>,
+) -> Result<MaterializedWriterOutput, MaterializeError> {
+    let mut write_set = WriteSet::default();
+    let mut content_persistence = BTreeMap::new();
+    let mut classifier_failures = Vec::new();
+    let mut empty_episode_objects = BTreeSet::new();
+    for Classified { info_hash, loaded } in classified {
+        let Some((torrent, result, outcome)) = loaded else {
+            write_set.failed_info_hashes.push(info_hash.to_owned());
+            continue;
+        };
+        if result.episodes.is_empty() && !result.episodes.is_nil() {
+            empty_episode_objects.insert(info_hash.to_owned());
+        }
+        let emit_content = if outcome.tag() == "classified" {
+            if let Some(content) = result.content.as_ref() {
+                register_content_persistence(&mut content_persistence, content)?
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+        if let Some(rendered_error) = append_classification_write(
+            &mut write_set,
+            torrent,
+            result,
+            outcome,
+            false,
+            emit_content,
+        )? {
+            classifier_failures.push(ClassifierFailure {
+                info_hash: info_hash.to_owned(),
+                rendered_error,
+            });
+        }
+    }
+
+    Ok(MaterializedWriterOutput {
+        write_set,
+        content_persistence,
+        classifier_failures,
+        empty_episode_objects,
+    })
 }
 
 fn append_classification_write(
@@ -420,6 +533,8 @@ pub enum MaterializeError {
     },
     #[error("classifier returned an unknown outcome '{0}'")]
     UnknownOutcome(String),
+    #[error("building the classify thread pool: {0}")]
+    ClassifyPool(#[from] rayon::ThreadPoolBuildError),
 }
 
 fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, MaterializeError> {
@@ -579,13 +694,16 @@ fn validate_info_hash(value: &str) -> Result<(), MaterializeError> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
 
-    use bitmagnet_classifier::{Classification, ClassifierInput, Outcome};
+    use bitmagnet_classifier::{Classification, ClassifierInput, InputContent, InputHint, Outcome};
     use bitmagnet_model::{Content, ContentType};
+    use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
+    use serde_json::Value;
 
     use super::{
         append_classification_write, infer_id, register_content_persistence, validate_info_hash,
-        ContentWrite, LoadedTorrent, MaterializeError, WriteSet,
+        ContentWrite, LoadedTorrent, MaterializeError, Materializer, WriteSet,
     };
 
     fn loaded_torrent() -> LoadedTorrent {
@@ -607,6 +725,216 @@ mod tests {
             attach_hint_unsupported: false,
             source_backed_content_present: false,
         }
+    }
+
+    fn named_torrent(info_hash: &str, name: &str) -> LoadedTorrent {
+        let mut torrent = loaded_torrent();
+        info_hash.clone_into(&mut torrent.info_hash);
+        info_hash.clone_into(&mut torrent.classifier_input.id);
+        name.clone_into(&mut torrent.classifier_input.name);
+        torrent
+    }
+
+    fn movie(title: &str) -> Content {
+        Content {
+            content_type: ContentType::Movie,
+            source: "tmdb".into(),
+            id: "42".into(),
+            title: title.into(),
+            release_date: None,
+            release_year: Some(1999),
+            adult: None,
+            original_language: None,
+            original_title: None,
+            overview: None,
+            runtime: None,
+            popularity: None,
+            vote_average: None,
+            vote_count: None,
+            created_at: Some(1),
+            updated_at: Some(2),
+            tsv: Default::default(),
+            collections: Vec::new(),
+            attributes: Vec::new(),
+        }
+    }
+
+    /// A torrent whose hint pre-attaches the hydrated `tmdb:42` movie row.
+    fn pre_attached(info_hash: &str, title: &str) -> LoadedTorrent {
+        let mut torrent = named_torrent(info_hash, "Reusable 1999 1080p");
+        torrent.classifier_input.hint = Some(InputHint {
+            content_type: "movie".into(),
+            content_source: "tmdb".into(),
+            content_id: "42".into(),
+            ..InputHint::default()
+        });
+        torrent.classifier_input.contents = vec![InputContent {
+            content_type: "movie".into(),
+            content_source: "tmdb".into(),
+            content_id: "42".into(),
+            content: Some(movie(title)),
+        }];
+        torrent
+    }
+
+    fn params(info_hashes: &[&str]) -> ProcessTorrentParams {
+        ProcessTorrentParams {
+            classifier_workflow: "default".into(),
+            classifier_flags: Some(
+                ["apis_enabled", "local_search_enabled", "tmdb_enabled"]
+                    .into_iter()
+                    .map(|flag| (flag.to_owned(), Value::Bool(false)))
+                    .collect(),
+            ),
+            info_hashes: info_hashes
+                .iter()
+                .map(|hash| ProtocolId::from_hex(hash).expect("fixture hash"))
+                .collect(),
+            ..ProcessTorrentParams::default()
+        }
+    }
+
+    fn materializers() -> (Materializer, Materializer) {
+        let serial = Materializer::from_core().expect("compile core classifier");
+        let parallel = Materializer::from_core()
+            .expect("compile core classifier")
+            .with_classify_parallelism(NonZeroUsize::new(4).expect("nonzero"))
+            .expect("build classify pool");
+        assert!(serial.classify_pool.is_none() && parallel.classify_pool.is_some());
+        (serial, parallel)
+    }
+
+    #[test]
+    fn parallel_classification_materializes_exactly_the_serial_output() {
+        // The whole Go write-set corpus: classified rows, stale and preserved
+        // existing ids, and banned-keyword deletions.
+        let mut torrents: Vec<LoadedTorrent> =
+            include_str!("../tests/fixtures/write_set.golden.jsonl")
+                .lines()
+                .map(|line| {
+                    let fixture: Value = serde_json::from_str(line).expect("decode fixture");
+                    let input = &fixture["input"];
+                    let info_hash = input["infoHash"].as_str().expect("fixture hash").to_owned();
+                    let mut classifier_input: ClassifierInput =
+                        serde_json::from_value(input["classifier"].clone())
+                            .expect("classifier input");
+                    classifier_input.id.clone_from(&info_hash);
+                    LoadedTorrent {
+                        info_hash,
+                        classifier_input,
+                        existing_content_ids: serde_json::from_value(
+                            input["existingContentIds"].clone(),
+                        )
+                        .expect("existing ids"),
+                        attach_hint_unsupported: false,
+                        source_backed_content_present: false,
+                    }
+                })
+                .collect();
+        assert_eq!(torrents.len(), 330);
+        // Go's allocated-but-empty episodes map (backwards range).
+        let mut empty_range = named_torrent(
+            "2222222222222222222222222222222222222222",
+            "79. The Late Late Show With James Corden S01E79 - 9-21-15 Monday.flv",
+        );
+        empty_range.classifier_input.size = 399_111_392;
+        "single".clone_into(&mut empty_range.classifier_input.files_status);
+        empty_range.classifier_input.extension = Some("flv".into());
+        torrents.push(empty_range);
+        // The same attached content twice: registered once.
+        torrents.push(pre_attached(
+            "3333333333333333333333333333333333333333",
+            "Reusable",
+        ));
+        torrents.push(pre_attached(
+            "4444444444444444444444444444444444444444",
+            "Reusable",
+        ));
+
+        const MISSING: &str = "5555555555555555555555555555555555555555";
+        let hashes: Vec<String> = torrents.iter().map(|t| t.info_hash.clone()).collect();
+        let mut requested: Vec<&str> = Vec::new();
+        for (index, hash) in hashes.iter().rev().enumerate() {
+            requested.push(hash);
+            if index % 50 == 0 {
+                requested.push(MISSING);
+                requested.push(&hashes[index]);
+            }
+        }
+        let mut params = params(&requested);
+
+        let (serial, parallel) = materializers();
+        let expected = serial
+            .materialize_borrowed_with_failures(&params, &torrents)
+            .expect("serial materialization");
+        let write_set = &expected.write_set;
+        assert!(!write_set.torrent_contents.is_empty());
+        assert!(!write_set.delete_ids.is_empty());
+        assert_eq!(write_set.delete_info_hashes.len(), 20);
+        assert_eq!(write_set.contents.len(), 1);
+        assert_eq!(expected.content_persistence.len(), 1);
+        assert_eq!(write_set.failed_info_hashes, [MISSING]);
+        assert_eq!(
+            expected.empty_episode_objects.iter().collect::<Vec<_>>(),
+            ["2222222222222222222222222222222222222222"]
+        );
+        assert_eq!(
+            parallel
+                .materialize_borrowed_with_failures(&params, &torrents)
+                .expect("parallel materialization"),
+            expected
+        );
+
+        // The default workflow never reports a per-torrent failure with the
+        // attach flags off; an unknown workflow fails every torrent, so the
+        // classifier-failure list (the retry job's fingerprint order) must
+        // come out in first-request order.
+        params.classifier_workflow = "no_such_workflow".into();
+        let expected = serial
+            .materialize_borrowed_with_failures(&params, &torrents)
+            .expect("serial materialization");
+        let mut first_requested: Vec<&str> = Vec::new();
+        for hash in &requested {
+            if *hash != MISSING && !first_requested.contains(hash) {
+                first_requested.push(hash);
+            }
+        }
+        assert_eq!(
+            expected
+                .classifier_failures
+                .iter()
+                .map(|failure| failure.info_hash.as_str())
+                .collect::<Vec<_>>(),
+            first_requested
+        );
+        assert_eq!(
+            parallel
+                .materialize_borrowed_with_failures(&params, &torrents)
+                .expect("parallel materialization"),
+            expected
+        );
+    }
+
+    #[test]
+    fn parallel_classification_reports_the_serial_fold_error() {
+        const FIRST: &str = "6666666666666666666666666666666666666666";
+        const CONFLICTING: &str = "7777777777777777777777777777777777777777";
+        let torrents = [
+            pre_attached(FIRST, "Reusable"),
+            pre_attached(CONFLICTING, "Different"),
+        ];
+        let params = params(&[FIRST, CONFLICTING]);
+
+        let (serial, parallel) = materializers();
+        let errors = [&serial, &parallel].map(|materializer| {
+            match materializer.materialize_borrowed_with_failures(&params, &torrents) {
+                Err(error @ MaterializeError::ConflictingAttachedContent { .. }) => {
+                    error.to_string()
+                }
+                other => panic!("expected conflicting attached content, got {other:?}"),
+            }
+        });
+        assert_eq!(errors[0], errors[1]);
     }
 
     #[test]

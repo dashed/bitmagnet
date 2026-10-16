@@ -15,6 +15,11 @@
 //! - a timeout is stored as `job exceeded its <Go duration> timeout: context
 //!   deadline exceeded`.
 //!
+//! Jobs stay serial. Within a job the [`Materializer`] may classify the
+//! torrents on its own thread pool, as Go's classifier runs a batch's torrents
+//! concurrently; the write-set is still folded in requested order, so the
+//! plan is the same for any parallelism.
+//!
 //! Only payloads that explicitly request the `default` workflow with all three
 //! attach flags false are ever claimed (see
 //! [`bitmagnet_queue::QueueStore::consume_admitted_process_torrent`]). A claimed
@@ -86,7 +91,8 @@ impl Default for ProcessTorrentWorkerConfig {
     }
 }
 
-/// One serial persisting `process_torrent` consumer.
+/// One serial persisting `process_torrent` consumer; only classification
+/// within a job is parallel (see [`Materializer::with_classify_parallelism`]).
 pub struct ProcessTorrentWorker {
     store: QueueStore,
     materializer: Materializer,

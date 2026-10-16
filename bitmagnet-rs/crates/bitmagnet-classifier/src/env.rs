@@ -16,7 +16,7 @@
 //! placeholder trick.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use bitmagnet_release::regex_pattern_from_keywords;
 use cel::common::types::CelString;
@@ -50,29 +50,39 @@ pub(crate) struct Env {
 /// short-circuit and a hit is one `memcmp`. Entries are shared rather than
 /// cloned because `Regex::clone` starts an empty match-cache pool, which would
 /// rebuild the lazy DFA on every call.
+///
+/// Read-locked on a hit, because the processor classifies a job's torrents on
+/// several threads and nearly every call hits. A miss compiles outside the
+/// lock and looks again before inserting: threads that start together all miss
+/// the same pattern, and inserting each copy filled the bound with duplicates
+/// (13 entries for core.yml's 4 patterns on 4 threads), so with enough threads
+/// a pattern would never be cached and would recompile on every call.
 #[derive(Default)]
-struct RegexCache(Mutex<Vec<(String, Arc<Regex>)>>);
+struct RegexCache(RwLock<Vec<(String, Arc<Regex>)>>);
 
 const MAX_CACHED_REGEXES: usize = 64;
 
 impl RegexCache {
     fn get(&self, pattern: &str) -> Result<Arc<Regex>, regex::Error> {
-        if let Some((_, regex)) = self.lock().iter().find(|(cached, _)| cached == pattern) {
-            return Ok(Arc::clone(regex));
+        // The list is only ever appended to, so a poisoned lock is still valid.
+        let cached = |cache: &[(String, Arc<Regex>)]| {
+            cache
+                .iter()
+                .find(|(cached, _)| cached == pattern)
+                .map(|(_, regex)| Arc::clone(regex))
+        };
+        if let Some(regex) = cached(&self.0.read().unwrap_or_else(PoisonError::into_inner)) {
+            return Ok(regex);
         }
         let regex = Arc::new(Regex::new(pattern)?);
-        let mut cache = self.lock();
+        let mut cache = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(regex) = cached(&cache) {
+            return Ok(regex);
+        }
         if cache.len() < MAX_CACHED_REGEXES {
             cache.push((pattern.to_owned(), Arc::clone(&regex)));
         }
         Ok(regex)
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, Arc<Regex>)>> {
-        // The list is only ever appended to, so a poisoned lock is still valid.
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -342,6 +352,31 @@ mod tests {
             eval(&ctx, "s.matches(p)", "abc", "a"),
             Ok(Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn concurrent_misses_cache_one_shared_regex() {
+        let cache = RegexCache::default();
+        let start = std::sync::Barrier::new(8);
+        let regexes: Vec<Arc<Regex>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        cache
+                            .get(r"\b(?:\p{L}+ ){3}\d{4}\b")
+                            .expect("valid pattern")
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("worker"))
+                .collect()
+        });
+        let cached = cache.0.read().expect("unpoisoned");
+        assert_eq!(cached.len(), 1);
+        assert!(regexes.iter().all(|regex| Arc::ptr_eq(regex, &cached[0].1)));
     }
 
     #[test]

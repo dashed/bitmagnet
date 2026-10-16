@@ -349,6 +349,16 @@ text: `job failed to process: <error>` for handler failures, `job exceeded its
 <Go duration> timeout: context deadline exceeded` for timeouts, and the bare
 deadline error for expired jobs.
 
+Within a job, the torrents are classified on a dedicated pool of
+`--classify-parallelism` threads (default 4,
+`BITMAGNET_PROCESS_TORRENT_WORKER_CLASSIFY_PARALLELISM`; 1 is the serial
+path), as Go runs one goroutine per torrent. Results are folded into the
+write-set in requested order, so the plan, including which error wins and the
+classifier-failure (retry fingerprint) order, is identical for any
+parallelism. The default is explicit because `available_parallelism` sees the
+node's cores, not the pod's CPU request; size the pod's request to match it,
+since the worker shares HEL1 with PostgreSQL.
+
 Only explicitly supported payloads are ever locked: `ClassifierWorkflow` must
 be `default`, the three attach flags must be JSON `false`, and the payload may
 have no top-level key other than `ClassifyMode`, `ClassifierWorkflow`,
@@ -436,9 +446,12 @@ of every pending payload per claim. With those fixed the same harness gives
 B's Rust phase 42 s against A's 100 s in round 1 and 42 s against 42 s in
 round 2 (reprocessing), and the settled-job span over the 120k corpus is
 25-31 s for both workers in both rounds (20-26 ms per 100-torrent job), with
-B and C still byte-identical in both rounds. The Rust worker still classifies on one
-core; what remains of its CPU time is cel-rust value conversion (the torrent
-once per run, `result` once per expression).
+B and C still byte-identical in both rounds. What remains of classification
+CPU time is cel-rust value conversion (the torrent once per run, `result` once
+per expression). Spreading it over four threads cut classification of a
+100-torrent job from 9.9 ms to 2.8 ms on a 4-core workspace (20,000 replay
+torrents, identical output at 1-4 threads); the loader and persistence stay
+serial.
 
 The differential found three persistence-kernel divergences that the
 canonicalizing comparators had hidden: empty `episodes` were stored as `{}`

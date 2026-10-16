@@ -22,6 +22,8 @@ clap.workspace = true
 futures.workspace = true
 hex.workspace = true
 prometheus.workspace = true
+# Classifies one job's torrents on a dedicated pool (`Materializer`).
+rayon = "1.12"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

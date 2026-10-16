@@ -5,6 +5,7 @@
 //! order, so it can run beside the Go worker on the same queue: every other
 //! row, and every claimed row the Rust kernel cannot reproduce, is left to Go.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,8 @@ use sqlx::postgres::PgPoolOptions;
 /// Without it every poll reads the whole organic `process_torrent` backlog. The
 /// loader, writer kernel, and generic queue SQL need head 26.
 const MIN_GOOSE_VERSION: i64 = 35;
+
+const DEFAULT_CLASSIFY_PARALLELISM: usize = 4;
 
 #[derive(Debug, Parser)]
 #[command(name = "bitmagnet-process-torrent-worker")]
@@ -54,6 +57,16 @@ struct Args {
     /// under the pod's `terminationGracePeriodSeconds`.
     #[arg(long, default_value_t = 20)]
     shutdown_grace_seconds: u64,
+    /// Threads that classify one job's torrents. Jobs stay serial; only the
+    /// CPU-bound classification within a job is spread. Sized explicitly
+    /// because `available_parallelism` sees the node's cores, not the pod's
+    /// CPU request, and the worker shares its node with PostgreSQL.
+    #[arg(
+        long,
+        env = "BITMAGNET_PROCESS_TORRENT_WORKER_CLASSIFY_PARALLELISM",
+        default_value_t = DEFAULT_CLASSIFY_PARALLELISM
+    )]
+    classify_parallelism: usize,
 }
 
 #[tokio::main]
@@ -104,7 +117,10 @@ async fn main() -> Result<()> {
     };
     let worker = ProcessTorrentWorker::new(
         QueueStore::new(pool.clone()),
-        Materializer::from_core().context("compiling embedded classifier")?,
+        Materializer::from_core()
+            .context("compiling embedded classifier")?
+            .with_classify_parallelism(classify_parallelism(&args)?)
+            .context("starting the classify thread pool")?,
         Arc::new(blocking_manager.clone()),
         config,
     )
@@ -115,6 +131,7 @@ async fn main() -> Result<()> {
         goose_version = head.version,
         classifier_config_digest = %actual,
         postgres_max_connections = args.postgres_max_connections,
+        classify_parallelism = args.classify_parallelism,
         check_interval_seconds = args.check_interval_seconds,
         job_timeout_seconds = args.job_timeout_seconds,
         shutdown_grace_seconds = args.shutdown_grace_seconds,
@@ -142,6 +159,7 @@ fn validate_args(args: &Args) -> Result<()> {
             .is_some_and(|value| !value.trim().is_empty()),
         "process_torrent worker requires --expected-classifier-config-digest (or BITMAGNET_PROCESS_TORRENT_WORKER_EXPECTED_CLASSIFIER_CONFIG_DIGEST)"
     );
+    classify_parallelism(args)?;
     for (name, value) in [
         (
             "postgres-acquire-timeout-seconds",
@@ -153,6 +171,10 @@ fn validate_args(args: &Args) -> Result<()> {
         anyhow::ensure!(value > 0, "{name} must be positive");
     }
     Ok(())
+}
+
+fn classify_parallelism(args: &Args) -> Result<NonZeroUsize> {
+    NonZeroUsize::new(args.classify_parallelism).context("classify-parallelism must be positive")
 }
 
 #[cfg(test)]
@@ -169,12 +191,16 @@ mod tests {
             job_timeout_seconds: 600,
             abstain_cooloff_seconds: 600,
             shutdown_grace_seconds: 20,
+            classify_parallelism: 4,
         }
     }
 
     #[test]
     fn runtime_contract_requires_two_connections_a_digest_and_positive_durations() {
         assert!(validate_args(&args()).is_ok());
+        let mut serial = args();
+        serial.classify_parallelism = 1;
+        assert!(validate_args(&serial).is_ok());
 
         let mut invalid = args();
         invalid.postgres_max_connections = 1;
@@ -189,6 +215,7 @@ mod tests {
             |args: &mut Args| args.postgres_acquire_timeout_seconds = 0,
             |args: &mut Args| args.check_interval_seconds = 0,
             |args: &mut Args| args.job_timeout_seconds = 0,
+            |args: &mut Args| args.classify_parallelism = 0,
         ] {
             let mut invalid = args();
             mutate(&mut invalid);
