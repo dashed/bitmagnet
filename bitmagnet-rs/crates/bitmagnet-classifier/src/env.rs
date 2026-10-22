@@ -8,7 +8,9 @@
 //! deep copy, so bindings are layered by lifetime: the namespaces and
 //! functions live in one root context built with the classifier, each run binds
 //! `torrent` and `flags` once in a child scope ([`Env::run_scope`]), and only
-//! `result` is bound per evaluation.
+//! `result` is bound per evaluation — and, for an expression that only selects
+//! its fields, bound as a [`LazyResult`] that converts just those fields
+//! ([`eval_bool`]).
 //!
 //! Unlike cel-go (`cel_env.go`), the namespaces are bound as ordinary CEL
 //! **maps** rather than dotted-name constants — cel-rust resolves `a.b` on a
@@ -19,12 +21,15 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use bitmagnet_release::regex_pattern_from_keywords;
+use cel::common::ast::{EntryExpr, Expr, IdedEntryExpr};
 use cel::common::types::CelString;
 use cel::extractors::This;
-use cel::{to_value, Context, ExecutionError, FunctionContext, Program, Value};
+use cel::{
+    to_value, Context, ExecutionError, FunctionContext, IdedExpr, Program, ResolveResult, Value,
+};
 use regex::Regex;
 
-use crate::cel_value::build_cel_classification;
+use crate::cel_value::{cel_classification, LazyResult};
 use crate::errors::FlowError;
 use crate::model::{ContentType, FileType};
 use crate::result::Classification;
@@ -150,24 +155,113 @@ impl Env {
     }
 }
 
+/// The variable conditions read the current classification through.
+const RESULT: &str = "result";
+
+/// A compiled condition expression, and how it reads `result`.
+pub(crate) struct CelExpression {
+    program: Program,
+    result: ResultUse,
+}
+
+impl CelExpression {
+    pub(crate) fn compile(source: &str) -> Result<Self, cel::ParseErrors> {
+        let program = Program::compile(source)?;
+        let result = result_use(program.expression());
+        Ok(Self { program, result })
+    }
+}
+
+/// How an expression reads `result`, which decides how [`eval_bool`] binds it.
+///
+/// An expression reaches its variables only through identifiers, so its use is
+/// the strongest one any `result` identifier in it makes (the variants are
+/// ordered weakest first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ResultUse {
+    /// It never names `result`, so nothing is bound.
+    Unused,
+    /// It names `result` only to select a field (`result.x`, `has(result.x)`),
+    /// where all cel-rust asks of the value is its type and `get`/`contains`
+    /// for that field name, so a [`LazyResult`] stands in for the map.
+    Fields,
+    /// It uses the object itself, so it gets the map.
+    Whole,
+}
+
+fn result_use(expr: &IdedExpr) -> ResultUse {
+    let children: Vec<&IdedExpr> = match &expr.expr {
+        Expr::Ident(name) if name == RESULT => return ResultUse::Whole,
+        Expr::Select(select) if matches!(&select.operand.expr, Expr::Ident(name) if name == RESULT) => {
+            return ResultUse::Fields
+        }
+        Expr::Select(select) => vec![&select.operand],
+        Expr::Call(call) => call
+            .target
+            .as_deref()
+            .into_iter()
+            .chain(&call.args)
+            .collect(),
+        Expr::Comprehension(comprehension) => vec![
+            &comprehension.iter_range,
+            &comprehension.accu_init,
+            &comprehension.loop_cond,
+            &comprehension.loop_step,
+            &comprehension.result,
+        ],
+        Expr::List(list) => list.elements.iter().collect(),
+        Expr::Map(map) => entry_exprs(&map.entries),
+        Expr::Struct(strct) => entry_exprs(&strct.entries),
+        Expr::Ident(_) | Expr::Literal(_) | Expr::Unspecified => Vec::new(),
+    };
+    children
+        .into_iter()
+        .map(result_use)
+        .max()
+        .unwrap_or(ResultUse::Unused)
+}
+
+fn entry_exprs(entries: &[IdedEntryExpr]) -> Vec<&IdedExpr> {
+    entries
+        .iter()
+        .flat_map(|entry| match &entry.expr {
+            EntryExpr::StructField(field) => vec![&field.value],
+            EntryExpr::MapEntry(entry) => vec![&entry.key, &entry.value],
+        })
+        .collect()
+}
+
 /// Evaluate a compiled boolean CEL expression against a run scope from
 /// [`Env::run_scope`] and the current result.
 pub(crate) fn eval_bool(
     scope: &Context<'_>,
-    program: &Program,
-    result: &Classification,
+    expr: &CelExpression,
+    result: &Arc<Classification>,
 ) -> Result<bool, FlowError> {
-    let mut ctx = scope.new_inner_scope();
-    let result_val = to_value(build_cel_classification(result))
-        .map_err(|e| FlowError::Cel(format!("serialize result: {e}")))?;
-    ctx.add_variable_from_value("result", result_val);
-
-    match program.execute(&ctx) {
+    match execute(scope, expr, result) {
         Ok(Value::Bool(b)) => Ok(b),
         // Mirrors `condition_expression.go`'s "not bool" guard.
         Ok(_) => Err(FlowError::Cel("not bool".to_string())),
         Err(e) => Err(FlowError::Cel(e.to_string())),
     }
+}
+
+/// Run `expr` with `result` bound the way its [`ResultUse`] calls for.
+fn execute(
+    scope: &Context<'_>,
+    expr: &CelExpression,
+    result: &Arc<Classification>,
+) -> ResolveResult {
+    if expr.result == ResultUse::Unused {
+        return expr.program.execute(scope);
+    }
+    let mut ctx = scope.new_inner_scope();
+    if expr.result == ResultUse::Fields {
+        ctx.add_variable_as_val(RESULT, Box::new(LazyResult::new(Arc::clone(result))));
+    } else {
+        ctx.add_variable_from_value(RESULT, cel_classification(result));
+    }
+    expr.program.execute(&ctx)
 }
 
 fn push_ns<T: serde::Serialize>(
@@ -261,6 +355,9 @@ fn register_functions(ctx: &mut Context<'_>) {
         },
     );
 }
+
+#[cfg(test)]
+mod result_binding_tests;
 
 #[cfg(test)]
 mod tests {

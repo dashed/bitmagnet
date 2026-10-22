@@ -6,7 +6,7 @@
 //! (`titleEpisodesRegex`), which cancels the standalone-episode-parser index bug
 //! (contract note from Lane R). year/video3d live on R's `ContentAttributes`;
 //! the CEL `result` transformer is the layer that drops them (contract §0.2), so
-//! Lane C simply omits them from `CelClassification`, not here.
+//! Lane C simply omits them from `RESULT_FIELDS`, not here.
 
 use bitmagnet_release::{
     parse_video_content as r_parse_video_content, ContentType as RContentType,

@@ -1,18 +1,28 @@
-//! The serde-bound CEL `torrent` / `result` objects and the `NewTorrent`
-//! transformer that builds `torrent` from a `ClassifierInput`.
+//! The CEL `torrent` / `result` objects and the `NewTorrent` transformer that
+//! builds `torrent` from a `ClassifierInput`.
 //!
 //! These mirror the proto `bitmagnet.Torrent` / `bitmagnet.Classification`
-//! *shape* (proto camelCase field names, int enum discriminants) but are plain
-//! serde structs living inside Lane C, per frozen decision #5. cel-rust has no
+//! *shape* (proto camelCase field names, int enum discriminants) but live inside
+//! Lane C, per frozen decision #5: `torrent` is a plain serde struct, and
+//! `result` a table of field conversions ([`RESULT_FIELDS`]). cel-rust has no
 //! separate type-check phase, so — unlike cel-go — proto3 optional presence is
 //! irrelevant here: every field is emitted with its proto3 default when unset
 //! (`""` / `0` / `false`), which is exactly what cel-go field selection returns
 //! for an unset optional scalar (and `classifier.core.yml` never calls `has()`).
 //!
 //! 🚨 The proto `year` (field 4) and `video3d` (field 10) are deliberately
-//! ABSENT from [`CelClassification`] — the Go transformer never sets them
+//! ABSENT from [`RESULT_FIELDS`] — the Go transformer never sets them
 //! (contract §0.2). Reproducing the omission is a parity requirement.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+
+use bitmagnet_release::{VideoCodec, VideoResolution, VideoSource};
+use cel::common::traits::{Container, Indexer, Iterable, Sizer, Zeroer};
+use cel::common::types::{CelString, Type, MAP_TYPE};
+use cel::common::value::Val;
+use cel::{ExecutionError, Value};
 use serde::Serialize;
 
 use crate::model::{
@@ -60,32 +70,6 @@ pub(crate) struct CelTorrent {
     has_hint: bool,
     #[serde(rename = "hasHintedContentId")]
     has_hinted_content_id: bool,
-}
-
-/// The CEL `result` object — the proto `bitmagnet.Classification` minus `year`
-/// and `video3d` (see module note).
-#[derive(Serialize)]
-pub(crate) struct CelClassification {
-    #[serde(rename = "contentType")]
-    content_type: i32,
-    #[serde(rename = "hasAttachedContent")]
-    has_attached_content: bool,
-    #[serde(rename = "hasBaseTitle")]
-    has_base_title: bool,
-    languages: Vec<String>,
-    episodes: Vec<String>,
-    #[serde(rename = "videoResolution")]
-    video_resolution: String,
-    #[serde(rename = "videoSource")]
-    video_source: String,
-    #[serde(rename = "videoCodec")]
-    video_codec: String,
-    #[serde(rename = "releaseGroup")]
-    release_group: String,
-    #[serde(rename = "contentId")]
-    content_id: String,
-    #[serde(rename = "contentSource")]
-    content_source: String,
 }
 
 /// Whether the (already-lowercased-name) input carries a hinted content id
@@ -245,41 +229,197 @@ fn torrent_file_extensions(input: &ClassifierInput, status: Option<FilesStatus>)
     }
 }
 
-/// Port of `protobuf.NewClassification` — builds the CEL `result` object from
-/// the current classification (minus `year`/`video3d`).
-pub(crate) fn build_cel_classification(c: &Classification) -> CelClassification {
-    CelClassification {
-        content_type: c.content_type.map_or(0, ContentType::proto_i32),
-        has_attached_content: c.content_attached(),
-        has_base_title: c.base_title.is_some(),
-        // core.yml reads none of the fields below; emitted for shape parity.
-        languages: c.languages.clone(),
-        episodes: Vec::new(),
-        video_resolution: c
-            .video_resolution
-            .map(|r| r.as_str().to_string())
-            .unwrap_or_default(),
-        video_source: c
-            .video_source
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_default(),
-        video_codec: c
-            .video_codec
-            .map(|c| c.as_str().to_string())
-            .unwrap_or_default(),
-        release_group: c.release_group.clone().unwrap_or_default(),
-        // `protobuf.NewClassification` reads these off the attached content, so
-        // they are the attached row's primary-key parts, not blanks. Before the
-        // B′-0 seam there was no way to attach content and they were hardcoded
-        // to `""`; that stays the emitted value on the flags-off path (proto3's
-        // default for an unset optional string, which is what cel-go field
-        // selection returns), but it is now a *consequence* of nothing being
-        // attached rather than a stub.
-        content_id: c.content.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
-        content_source: c
-            .content
+/// How one `result` field is read off the current classification.
+type ResultField = fn(&Classification) -> Value;
+
+/// Port of `protobuf.NewClassification`: the fields of the CEL `result` object —
+/// the proto `bitmagnet.Classification` minus `year` and `video3d` (see module
+/// note) — each with how it is read off the current classification.
+///
+/// The one place a field is named and converted. [`cel_classification`]
+/// builds the whole object from it and [`LazyResult`] only the fields an
+/// expression selects, so the two cannot disagree.
+const RESULT_FIELDS: [(&str, ResultField); 11] = [
+    ("contentType", |c| {
+        Value::Int(c.content_type.map_or(0, ContentType::proto_i32).into())
+    }),
+    ("hasAttachedContent", |c| Value::Bool(c.content_attached())),
+    ("hasBaseTitle", |c| Value::Bool(c.base_title.is_some())),
+    // core.yml reads none of the fields below; emitted for shape parity.
+    ("languages", |c| c.languages.clone().into()),
+    ("episodes", |_| Value::List(Arc::default())),
+    ("videoResolution", |c| {
+        c.video_resolution
+            .map_or("", VideoResolution::as_str)
+            .into()
+    }),
+    ("videoSource", |c| {
+        c.video_source.map_or("", VideoSource::as_str).into()
+    }),
+    ("videoCodec", |c| {
+        c.video_codec.map_or("", VideoCodec::as_str).into()
+    }),
+    ("releaseGroup", |c| {
+        c.release_group.as_deref().unwrap_or_default().into()
+    }),
+    // `protobuf.NewClassification` reads these off the attached content, so
+    // they are the attached row's primary-key parts, not blanks. Before the
+    // B′-0 seam there was no way to attach content and they were hardcoded
+    // to `""`; that stays the emitted value on the flags-off path (proto3's
+    // default for an unset optional string, which is what cel-go field
+    // selection returns), but it is now a *consequence* of nothing being
+    // attached rather than a stub.
+    ("contentId", |c| {
+        c.content.as_ref().map_or("", |x| x.id.as_str()).into()
+    }),
+    ("contentSource", |c| {
+        c.content.as_ref().map_or("", |x| x.source.as_str()).into()
+    }),
+];
+
+/// The conversion for the `result` field named `name`, if there is one.
+fn result_field(name: &str) -> Option<ResultField> {
+    RESULT_FIELDS
+        .iter()
+        .find(|(field, _)| *field == name)
+        .map(|(_, value)| *value)
+}
+
+/// The CEL `result` object for the current classification, every field
+/// converted.
+pub(crate) fn cel_classification(c: &Classification) -> Value {
+    RESULT_FIELDS
+        .iter()
+        .map(|(field, value)| (*field, value(c)))
+        .collect::<HashMap<_, _>>()
+        .into()
+}
+
+/// The CEL `result` object, converting only the fields an expression selects.
+///
+/// Binding [`cel_classification`] converts and boxes every field for each
+/// condition, while `classifier.core.yml`'s conditions read one or two. This
+/// holds the classification instead, and answers `get` and `contains` for a
+/// field name from [`RESULT_FIELDS`]. Everything else — any other key, and
+/// every operation on the object as a whole — goes to the map
+/// [`cel_classification`] would have bound, built on first use, so it gives
+/// the same answer or error that map does.
+///
+/// 🚨 Bind it only for an expression that reads `result` through field
+/// selection alone (`crate::env` works that out when it compiles the
+/// expression). cel-rust converts a map-typed value to [`Value`] by
+/// downcasting it to its own map type and panics on any other, and its map's
+/// equality only recognises its own map, so a `result` that is returned,
+/// passed to a function, compared, or put into a list or map must be the real
+/// thing.
+#[derive(Debug)]
+pub(crate) struct LazyResult {
+    classification: Arc<Classification>,
+    eager: OnceLock<Box<dyn Val>>,
+}
+
+impl LazyResult {
+    pub(crate) fn new(classification: Arc<Classification>) -> Self {
+        Self {
+            classification,
+            eager: OnceLock::new(),
+        }
+    }
+
+    /// The map [`cel_classification`] binds.
+    fn eager(&self) -> &dyn Val {
+        self.eager
+            .get_or_init(|| {
+                // What `Context::add_variable_from_value` does with it.
+                cel_classification(&self.classification)
+                    .try_into()
+                    .expect("a map of ints, bools, strings and lists converts")
+            })
             .as_ref()
-            .map(|x| x.source.clone())
-            .unwrap_or_default(),
+    }
+
+    /// The field `key` names, when it is a string naming one.
+    fn field(&self, key: &dyn Val) -> Option<Result<Box<dyn Val>, ExecutionError>> {
+        let value = result_field(key.downcast_ref::<CelString>()?.inner())?;
+        Some(value(&self.classification).try_into())
+    }
+}
+
+impl Val for LazyResult {
+    fn get_type(&self) -> &Type {
+        &MAP_TYPE
+    }
+
+    fn as_container(&self) -> Option<&dyn Container> {
+        Some(self)
+    }
+
+    fn as_indexer(&self) -> Option<&dyn Indexer> {
+        Some(self)
+    }
+
+    fn into_indexer(self: Box<Self>) -> Option<Box<dyn Indexer>> {
+        Some(self)
+    }
+
+    fn as_iterable(&self) -> Option<&dyn Iterable> {
+        self.eager().as_iterable()
+    }
+
+    fn as_sizer(&self) -> Option<&dyn Sizer> {
+        self.eager().as_sizer()
+    }
+
+    fn as_zeroer(&self) -> Option<&dyn Zeroer> {
+        self.eager().as_zeroer()
+    }
+
+    fn equals(&self, other: &dyn Val) -> bool {
+        match other.downcast_ref::<Self>() {
+            Some(other) => self.eager().equals(other.eager()),
+            None => self.eager().equals(other),
+        }
+    }
+
+    fn clone_as_boxed(&self) -> Box<dyn Val> {
+        Box::new(Self::new(Arc::clone(&self.classification)))
+    }
+}
+
+impl Container for LazyResult {
+    fn contains(&self, key: &dyn Val) -> Result<bool, ExecutionError> {
+        match key.downcast_ref::<CelString>() {
+            Some(key) => Ok(result_field(key.inner()).is_some()),
+            None => self
+                .eager()
+                .as_container()
+                .ok_or(ExecutionError::NoSuchOverload)?
+                .contains(key),
+        }
+    }
+}
+
+impl Indexer for LazyResult {
+    fn get<'a>(&'a self, key: &dyn Val) -> Result<Cow<'a, dyn Val>, ExecutionError> {
+        match self.field(key) {
+            Some(value) => value.map(Cow::Owned),
+            None => self
+                .eager()
+                .as_indexer()
+                .ok_or(ExecutionError::NoSuchOverload)?
+                .get(key),
+        }
+    }
+
+    fn steal(self: Box<Self>, key: &dyn Val) -> Result<Box<dyn Val>, ExecutionError> {
+        match self.field(key) {
+            Some(value) => value,
+            None => self
+                .eager()
+                .clone_as_boxed()
+                .into_indexer()
+                .ok_or(ExecutionError::NoSuchOverload)?
+                .steal(key),
+        }
     }
 }

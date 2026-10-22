@@ -446,8 +446,8 @@ of every pending payload per claim. With those fixed the same harness gives
 B's Rust phase 42 s against A's 100 s in round 1 and 42 s against 42 s in
 round 2 (reprocessing), and the settled-job span over the 120k corpus is
 25-31 s for both workers in both rounds (20-26 ms per 100-torrent job), with
-B and C still byte-identical in both rounds. What remains of classification
-CPU time is cel-rust value conversion (the torrent once per run, `result` once
+B and C still byte-identical in both rounds. What remained of classification
+CPU time was cel-rust value conversion (the torrent once per run, `result` once
 per expression). Spreading it over four threads cut classification of a
 100-torrent job from 9.9 ms to 2.8 ms on a 4-core workspace (20,000 replay
 torrents, identical output at 1-4 threads); the loader and persistence stay
@@ -457,6 +457,19 @@ at four (two runs of each, both rounds; one four-thread round of 44 ms/job was
 a noisy outlier that its repeat did not show), and B and C stayed
 byte-identical to A in every run (241,982 lines in round 1, 243,179 in round
 2). Go's A phase took 90-100 s in round 1 against 33-34 s for B's Rust phase.
+The `result` conversion was then 45% of serial classification CPU: converting
+it twice per expression took the 119,991 replay inputs from 10.0 to 14.5 ms per
+100 torrents. A condition now converts only the `result` fields it selects,
+one that never names `result` binds nothing, and only a use of the whole object
+still gets the full map, so serial classification takes 5.1 ms per 100
+torrents, with byte-identical output. In the 120k differential, three runs of
+each interleaved with the previous build, the settled-job span at one thread
+went from 23.5-24.2 to 16.9-19.2 ms per job in round 1 (23.4-31.0 to 18.7-29.0
+in the noisier round 2); at four threads, where classification was already a
+small share of a job, the change is within noise (14.8-18.3 against 15.4-16.8
+in round 1, leaving out a uniform 46-48 ms/job slowdown that hit both builds'
+third runs back to back, and 15.4-17.3 against 14.8-16.4 in round 2). B and C
+were byte-identical to A in every run.
 
 The differential found three persistence-kernel divergences that the
 canonicalizing comparators had hidden: empty `episodes` were stored as `{}`

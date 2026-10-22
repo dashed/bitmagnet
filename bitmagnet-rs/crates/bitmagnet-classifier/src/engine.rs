@@ -8,13 +8,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bitmagnet_tape::ActionEntry;
-use cel::Program;
 use futures::future::LocalBoxFuture;
 use serde_yaml::Value as Yaml;
 
-use crate::env::eval_bool;
+use crate::env::{eval_bool, CelExpression};
 use crate::errors::FlowError;
 use crate::model::{ClassifierInput, ContentType};
 use crate::parsers::{parse_date, parse_video_content};
@@ -68,7 +68,7 @@ pub(crate) enum Condition {
     And(Vec<Condition>),
     Or(Vec<Condition>),
     Not(Box<Condition>),
-    Expression(Box<Program>),
+    Expression(Box<CelExpression>),
 }
 
 /// A source-compilation error.
@@ -256,11 +256,11 @@ fn compile_if_else(
 /// `and`/`or`/`not`.
 fn compile_condition(source: &Yaml, path: Vec<String>) -> Result<Condition, CompileError> {
     if let Some(expr) = source.as_str() {
-        let program = Program::compile(expr).map_err(|source| CompileError::Cel {
+        let expression = CelExpression::compile(expr).map_err(|source| CompileError::Cel {
             expr: expr.to_string(),
             source,
         })?;
-        return Ok(Condition::Expression(Box::new(program)));
+        return Ok(Condition::Expression(Box::new(expression)));
     }
     // The `{expression: "..."}` explicit form.
     if let Some((key, value)) = source.as_mapping().and_then(|m| {
@@ -278,11 +278,12 @@ fn compile_condition(source: &Yaml, path: Vec<String>) -> Result<Condition, Comp
                 let expr = value
                     .as_str()
                     .ok_or_else(|| err_at(&child, "expression value is not a string"))?;
-                let program = Program::compile(expr).map_err(|source| CompileError::Cel {
-                    expr: expr.to_string(),
-                    source,
-                })?;
-                Ok(Condition::Expression(Box::new(program)))
+                let expression =
+                    CelExpression::compile(expr).map_err(|source| CompileError::Cel {
+                        expr: expr.to_string(),
+                        source,
+                    })?;
+                Ok(Condition::Expression(Box::new(expression)))
             }
             other => Err(err_at(&child, format!("no condition matched '{other}'"))),
         };
@@ -414,7 +415,13 @@ pub(crate) fn run_action<'a>(
                 if_action,
                 else_action,
             } => {
-                if eval_condition(condition, ctx, &result)? {
+                // The condition's expressions share the classification rather
+                // than each binding a copy (see `eval_bool`). None of them holds
+                // on to it, so taking it back out does not copy it either.
+                let shared = Arc::new(result);
+                let verdict = eval_condition(condition, ctx, &shared);
+                let result = Arc::unwrap_or_clone(shared);
+                if verdict? {
                     if let Some(a) = if_action {
                         return run_action(a, ctx, result).await;
                     }
@@ -467,7 +474,7 @@ pub(crate) fn run_action<'a>(
 fn eval_condition(
     condition: &Condition,
     ctx: &ExecCtx<'_>,
-    result: &Classification,
+    result: &Arc<Classification>,
 ) -> Result<bool, FlowError> {
     match condition {
         Condition::And(conds) => {
@@ -487,7 +494,7 @@ fn eval_condition(
             Ok(false)
         }
         Condition::Not(c) => Ok(!eval_condition(c, ctx, result)?),
-        Condition::Expression(program) => eval_bool(ctx.scope, program, result),
+        Condition::Expression(expression) => eval_bool(ctx.scope, expression, result),
     }
 }
 
