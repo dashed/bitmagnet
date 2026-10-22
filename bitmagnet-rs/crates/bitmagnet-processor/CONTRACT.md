@@ -451,7 +451,12 @@ CPU time is cel-rust value conversion (the torrent once per run, `result` once
 per expression). Spreading it over four threads cut classification of a
 100-torrent job from 9.9 ms to 2.8 ms on a 4-core workspace (20,000 replay
 torrents, identical output at 1-4 threads); the loader and persistence stay
-serial.
+serial. In the 120k differential at Goose 35 on the same workspace, the Rust
+worker's settled-job span went from 21-24 ms per job at one thread to 14-15 ms
+at four (two runs of each, both rounds; one four-thread round of 44 ms/job was
+a noisy outlier that its repeat did not show), and B and C stayed
+byte-identical to A in every run (241,982 lines in round 1, 243,179 in round
+2). Go's A phase took 90-100 s in round 1 against 33-34 s for B's Rust phase.
 
 The differential found three persistence-kernel divergences that the
 canonicalizing comparators had hidden: empty `episodes` were stored as `{}`
