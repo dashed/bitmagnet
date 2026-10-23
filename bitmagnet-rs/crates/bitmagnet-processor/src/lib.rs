@@ -73,9 +73,9 @@ pub use writer_compare::{
 };
 pub use writer_load::{load_writer_torrents, WriterLoadError, WriterLoadedTorrent};
 pub use writer_plan::{
-    compose_writer_plan, load_writer_plan, persist_writer_plan, PersistWriterPlanError,
-    PersistWriterPlanReceipt, RetryPublishReceipt, RetryPublisher, WriterFailureCause,
-    WriterFailures, WriterPlan, WriterPlanError,
+    compose_writer_plan, load_writer_plan, persist_writer_plan, validate_supported_params,
+    PersistWriterPlanError, PersistWriterPlanReceipt, RetryPublishReceipt, RetryPublisher,
+    WriterFailureCause, WriterFailures, WriterPlan, WriterPlanError,
 };
 pub use writer_projection::{
     project_torrent_persistence, project_unattached_persistence, TorrentSnapshot,

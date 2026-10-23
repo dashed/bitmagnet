@@ -32,7 +32,11 @@
 //!
 //! Given a live materializer ([`Materializer::from_core_with_resolver`]), the
 //! worker also claims the explicit flags-on payload (all three attach flags
-//! true; [`ProcessTorrentAdmission::FlagsOffOrOn`]). Its composition then runs
+//! true; [`ProcessTorrentAdmission::FlagsOffOrOn`]). With
+//! [`ProcessTorrentWorkerConfig::organic_max_priority`] set it instead claims
+//! organic payloads up to that priority ([`ProcessTorrentAdmission::Organic`]):
+//! the DHT, importer, batch, CLI and retry shapes, whose omitted attach flags
+//! the classifier resolves to the core defaults. Its composition then runs
 //! on tokio's blocking pool, since classification awaits local search and
 //! TMDB. A TMDB call answered with a status other than 401 fails only its
 //! torrent, as in Go: the torrent goes into the retry job, or into the job's
@@ -43,6 +47,9 @@
 //! abstains the job before any side effect; the `live` module says why for
 //! each.
 //!
+//! Each abstention is counted with a `reason` label: `payload`, `hint`,
+//! `resolver`, `conflict`, or `unsupported`.
+//!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
 //! interval, and polls again; the claim transaction rolls back, so the row is
@@ -51,7 +58,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use bitmagnet_queue::{
@@ -66,6 +73,54 @@ use crate::{
     load_writer_plan, persist_writer_plan, BlockingManager, LoadError, MaterializeError,
     Materializer, WriterLoadError, WriterPlanError,
 };
+
+/// Why the worker left a claimed job to Go: the `reason` label of
+/// `outcome="abstained"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbstainReason {
+    /// The payload does not decode, or its workflow or flags are outside the
+    /// admission.
+    Payload,
+    /// A sourced or enriched explicit hint.
+    Hint,
+    /// A content resolver failure that Go's text cannot be rebuilt for.
+    Resolver,
+    /// Two torrents reuse one content key with different images.
+    Conflict,
+    /// Any other loader or composer limit.
+    Unsupported,
+}
+
+impl AbstainReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Payload => "payload",
+            Self::Hint => "hint",
+            Self::Resolver => "resolver",
+            Self::Conflict => "conflict",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    fn of(error: &WriterPlanError) -> Self {
+        match error {
+            WriterPlanError::ClassifierWorkflowUnsupported
+            | WriterPlanError::AttachFlagsNotExplicitlyDisabled
+            | WriterPlanError::AttachFlagsNotExplicitlyUniform
+            | WriterPlanError::OrganicWorkflowUnsupported
+            | WriterPlanError::OrganicFlagsUnsupported
+            | WriterPlanError::Materialize(MaterializeError::UnsupportedFlag { .. }) => {
+                Self::Payload
+            }
+            WriterPlanError::AttachHintUnsupported { .. } => Self::Hint,
+            WriterPlanError::Materialize(MaterializeError::ResolverFailed(_)) => Self::Resolver,
+            WriterPlanError::Load(WriterLoadError::ConflictingReusableContent { .. }) => {
+                Self::Conflict
+            }
+            _ => Self::Unsupported,
+        }
+    }
+}
 
 /// Go's `handler.JobTimeout(time.Second*60*10)` for `process_torrent`.
 pub const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(600);
@@ -91,6 +146,10 @@ pub struct ProcessTorrentWorkerConfig {
     pub abstain_cooloff: Duration,
     pub max_excluded: usize,
     pub shutdown_grace: Duration,
+    /// With a live materializer, claim organic payloads up to this priority
+    /// instead of the explicit flags-on ones
+    /// ([`ProcessTorrentAdmission::Organic`]). Ignored without one.
+    pub organic_max_priority: Option<i32>,
 }
 
 impl Default for ProcessTorrentWorkerConfig {
@@ -101,6 +160,7 @@ impl Default for ProcessTorrentWorkerConfig {
             abstain_cooloff: DEFAULT_ABSTAIN_COOLOFF,
             max_excluded: DEFAULT_MAX_EXCLUDED,
             shutdown_grace: DEFAULT_SHUTDOWN_GRACE,
+            organic_max_priority: None,
         }
     }
 }
@@ -134,21 +194,25 @@ impl ProcessTorrentWorker {
         }
     }
 
-    /// Count settled and abstained jobs by `outcome` label.
+    /// Count settled and abstained jobs by `outcome` label, and abstained ones
+    /// by `reason` too.
     #[must_use]
     pub fn with_metrics(mut self, metrics: IntCounterVec) -> Self {
         self.metrics = Some(metrics);
         self
     }
 
-    /// The payloads this worker claims: flags-on ones too only with a live
-    /// materializer.
+    /// The payloads this worker claims: flags-on or organic ones only with a
+    /// live materializer.
     #[must_use]
     pub fn admission(&self) -> ProcessTorrentAdmission {
-        if self.materializer.is_live() {
-            ProcessTorrentAdmission::FlagsOffOrOn
-        } else {
-            ProcessTorrentAdmission::FlagsOff
+        match (
+            self.materializer.is_live(),
+            self.config.organic_max_priority,
+        ) {
+            (false, _) => ProcessTorrentAdmission::FlagsOff,
+            (true, None) => ProcessTorrentAdmission::FlagsOffOrOn,
+            (true, Some(max_priority)) => ProcessTorrentAdmission::Organic { max_priority },
         }
     }
 
@@ -157,14 +221,16 @@ impl ProcessTorrentWorker {
     /// A database error is logged and counted before it is returned.
     pub async fn run_once(&self) -> Result<AdmittedConsumeOutcome, QueuePgError> {
         let excluded = self.excluded_ids();
+        let admission = self.admission();
+        let abstained = OnceLock::new();
         let outcome = self
             .store
-            .consume_admitted_process_torrent_with(self.admission(), &excluded, |job| {
-                self.handle(job)
+            .consume_admitted_process_torrent_with(admission, &excluded, |job| {
+                self.handle(job, admission, &abstained)
             })
             .await;
         match &outcome {
-            Ok(outcome) => self.observe(outcome),
+            Ok(outcome) => self.observe(outcome, abstained.get().copied()),
             Err(error) => {
                 tracing::error!(%error, "error handling process_torrent job");
                 self.count("error");
@@ -234,9 +300,19 @@ impl ProcessTorrentWorker {
         );
     }
 
-    async fn handle(&self, job: DequeuedJob) -> JobVerdict {
-        match tokio::time::timeout(self.config.job_timeout, self.process(&job)).await {
-            Ok(verdict) => verdict,
+    /// Run `job`; on an abstention, record its reason in `abstained`.
+    async fn handle(
+        &self,
+        job: DequeuedJob,
+        admission: ProcessTorrentAdmission,
+        abstained: &OnceLock<AbstainReason>,
+    ) -> JobVerdict {
+        match tokio::time::timeout(self.config.job_timeout, self.process(&job, admission)).await {
+            Ok(Ok(verdict)) => verdict,
+            Ok(Err((reason, text))) => {
+                let _ = abstained.set(reason);
+                JobVerdict::Abstain(text)
+            }
             Err(_) => JobVerdict::Fail(format!(
                 "job exceeded its {} timeout: context deadline exceeded",
                 go_duration(self.config.job_timeout)
@@ -244,7 +320,12 @@ impl ProcessTorrentWorker {
         }
     }
 
-    async fn process(&self, job: &DequeuedJob) -> JobVerdict {
+    /// The job's verdict, or why and how it is abstained.
+    async fn process(
+        &self,
+        job: &DequeuedJob,
+        admission: ProcessTorrentAdmission,
+    ) -> Result<JobVerdict, (AbstainReason, String)> {
         // Go's decoder is more lenient than serde (a `0x` hash prefix, JSON
         // null for a slice, case-insensitive keys), so a payload serde rejects
         // may be one Go processes. Leave it to Go rather than spend a retry.
@@ -252,18 +333,18 @@ impl ProcessTorrentWorker {
             Ok(params) => params,
             Err(error) => {
                 tracing::info!(job_id = %job.id, %error, "abstaining from undecodable process_torrent payload");
-                return JobVerdict::Abstain(format!("payload: {error}"));
+                return Err((AbstainReason::Payload, format!("payload: {error}")));
             }
         };
         let pool = self.store.pool();
         let plan = if self.materializer.is_live() {
-            load_live_writer_plan(pool, &self.materializer, &params).await
+            load_live_writer_plan(pool, &self.materializer, &params, admission).await
         } else {
             load_writer_plan(pool, &self.materializer, &params).await
         };
         let plan = match plan {
             Ok(plan) => plan,
-            Err(error) if is_transient_plan_error(&error) => return go_handler_failure(&error),
+            Err(error) if is_transient_plan_error(&error) => return Ok(go_handler_failure(&error)),
             Err(WriterPlanError::Materialize(MaterializeError::ResolverFailed(failure))) => {
                 tracing::warn!(
                     job_id = %job.id,
@@ -272,25 +353,33 @@ impl ProcessTorrentWorker {
                     error = %failure.error,
                     "abstaining from process_torrent job after a content resolver failure"
                 );
-                return JobVerdict::Abstain(format!("content resolver: {failure}"));
+                return Err((
+                    AbstainReason::Resolver,
+                    format!("content resolver: {failure}"),
+                ));
             }
             Err(error) => {
-                tracing::info!(job_id = %job.id, %error, "abstaining from unsupported process_torrent job");
-                return JobVerdict::Abstain(error.to_string());
+                let reason = AbstainReason::of(&error);
+                tracing::info!(job_id = %job.id, %error, reason = reason.label(), "abstaining from unsupported process_torrent job");
+                return Err((reason, error.to_string()));
             }
         };
-        match persist_writer_plan(pool, &plan, &self.store, self.blocking_manager.as_ref()).await {
-            Ok(receipt) => {
-                tracing::debug!(
-                    job_id = %job.id,
-                    persisted = receipt.persisted,
-                    retry = ?receipt.retry,
-                    "process_torrent job persisted"
-                );
-                JobVerdict::Complete
-            }
-            Err(error) => go_handler_failure(&error),
-        }
+        Ok(
+            match persist_writer_plan(pool, &plan, &self.store, self.blocking_manager.as_ref())
+                .await
+            {
+                Ok(receipt) => {
+                    tracing::debug!(
+                        job_id = %job.id,
+                        persisted = receipt.persisted,
+                        retry = ?receipt.retry,
+                        "process_torrent job persisted"
+                    );
+                    JobVerdict::Complete
+                }
+                Err(error) => go_handler_failure(&error),
+            },
+        )
     }
 
     fn excluded_ids(&self) -> Vec<String> {
@@ -305,7 +394,7 @@ impl ProcessTorrentWorker {
         excluded.iter().map(|(id, _)| id.clone()).collect()
     }
 
-    fn observe(&self, outcome: &AdmittedConsumeOutcome) {
+    fn observe(&self, outcome: &AdmittedConsumeOutcome, abstained: Option<AbstainReason>) {
         let label = match outcome {
             AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty) => return,
             AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) => {
@@ -326,15 +415,23 @@ impl ProcessTorrentWorker {
                 while excluded.len() > self.config.max_excluded {
                     excluded.pop_front();
                 }
-                "abstained"
+                drop(excluded);
+                // Only the handler abstains, and it always records why.
+                let reason = abstained.unwrap_or(AbstainReason::Unsupported);
+                self.count_reason("abstained", reason.label());
+                return;
             }
         };
         self.count(label);
     }
 
     fn count(&self, outcome: &str) {
+        self.count_reason(outcome, "");
+    }
+
+    fn count_reason(&self, outcome: &str, reason: &str) {
         if let Some(metrics) = &self.metrics {
-            metrics.with_label_values(&[outcome]).inc();
+            metrics.with_label_values(&[outcome, reason]).inc();
         }
     }
 }
@@ -346,9 +443,9 @@ pub fn register_worker_metrics(
     let counter = IntCounterVec::new(
         prometheus::Opts::new(
             "bitmagnet_process_torrent_worker_jobs_total",
-            "process_torrent jobs claimed by the Rust worker, by outcome; `error` counts attempts that failed with a database error",
+            "process_torrent jobs claimed by the Rust worker, by outcome, and abstained ones by reason (payload, hint, resolver, conflict, unsupported); `error` counts attempts that failed with a database error",
         ),
-        &["outcome"],
+        &["outcome", "reason"],
     )?;
     registry.register(Box::new(counter.clone()))?;
     Ok(counter)
@@ -453,6 +550,86 @@ mod tests {
                 info_hash: "aa".repeat(20)
             }
         ));
+    }
+
+    #[test]
+    fn abstentions_are_labelled_by_their_cause() {
+        let hash = "aa".repeat(20);
+        for (error, reason) in [
+            (
+                WriterPlanError::ClassifierWorkflowUnsupported,
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::AttachFlagsNotExplicitlyDisabled,
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::AttachFlagsNotExplicitlyUniform,
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::OrganicWorkflowUnsupported,
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::OrganicFlagsUnsupported,
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::Materialize(MaterializeError::UnsupportedFlag {
+                    name: "tmdb_enabled".to_owned(),
+                    value: serde_json::Value::from(1),
+                }),
+                AbstainReason::Payload,
+            ),
+            (
+                WriterPlanError::AttachHintUnsupported {
+                    info_hash: hash.clone(),
+                },
+                AbstainReason::Hint,
+            ),
+            (
+                WriterPlanError::Materialize(MaterializeError::ResolverFailed(
+                    crate::ResolverFailure {
+                        info_hash: hash.clone(),
+                        call: "tmdb_search_movie",
+                        error: "operation timed out".to_owned(),
+                    },
+                )),
+                AbstainReason::Resolver,
+            ),
+            (
+                WriterPlanError::Load(WriterLoadError::ConflictingReusableContent {
+                    key: "movie:tmdb:42".to_owned(),
+                }),
+                AbstainReason::Conflict,
+            ),
+            (
+                WriterPlanError::Load(WriterLoadError::RequestTooLarge {
+                    actual: 101,
+                    limit: 100,
+                }),
+                AbstainReason::Unsupported,
+            ),
+            (
+                WriterPlanError::ReusableContentNotFullyHydrated { info_hash: hash },
+                AbstainReason::Unsupported,
+            ),
+        ] {
+            assert_eq!(AbstainReason::of(&error), reason, "{error}");
+        }
+        assert_eq!(
+            [
+                AbstainReason::Payload,
+                AbstainReason::Hint,
+                AbstainReason::Resolver,
+                AbstainReason::Conflict,
+                AbstainReason::Unsupported,
+            ]
+            .map(AbstainReason::label),
+            ["payload", "hint", "resolver", "conflict", "unsupported"]
+        );
     }
 
     #[test]

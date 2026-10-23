@@ -16,6 +16,21 @@ pub(crate) fn has_explicit_attach_flags_on(params: &ProcessTorrentParams) -> boo
     has_explicit_attach_flags(params, true)
 }
 
+/// A workflow Go resolves to `default`: absent (decoded as empty) or explicit.
+pub(crate) fn has_organic_workflow(params: &ProcessTorrentParams) -> bool {
+    params.classifier_workflow.is_empty() || has_explicit_default_workflow(params)
+}
+
+/// No flag but the three attach flags, each a JSON boolean. An absent flag
+/// takes the core default, `true`.
+pub(crate) fn has_only_boolean_attach_flags(params: &ProcessTorrentParams) -> bool {
+    params.classifier_flags.as_ref().is_none_or(|flags| {
+        flags
+            .iter()
+            .all(|(name, value)| ATTACH_FLAGS.contains(&name.as_str()) && value.is_boolean())
+    })
+}
+
 fn has_explicit_attach_flags(params: &ProcessTorrentParams, value: bool) -> bool {
     let Some(flags) = params.classifier_flags.as_ref() else {
         return false;

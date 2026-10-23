@@ -13,7 +13,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use bitmagnet_queue::{
-    process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions, QueueStore,
+    process_torrent_job, ProcessTorrentAdmission, ProcessTorrentParams, ProtocolId, QueueJob,
+    QueueJobOptions, QueueStore,
 };
 use futures::future::BoxFuture;
 use sqlx::PgPool;
@@ -22,6 +23,7 @@ use crate::live::ResolveScope;
 use crate::persist::{persist_write_set_with_episode_objects, validate_persistence_input};
 use crate::supported_subset::{
     has_explicit_attach_flags_off, has_explicit_attach_flags_on, has_explicit_default_workflow,
+    has_only_boolean_attach_flags, has_organic_workflow,
 };
 use crate::{
     load_writer_torrents, project_torrent_persistence, resolved_workflow, BlockingManager,
@@ -389,14 +391,15 @@ pub async fn load_writer_plan(
     if materializer.is_live() {
         return Err(WriterPlanError::LiveCompositionOnRuntimeThread);
     }
-    validate_supported_params(params, false)?;
+    validate_supported_params(params, ProcessTorrentAdmission::FlagsOff)?;
     let loaded = load_writer_torrents(pool, params).await?;
     compose_writer_plan(materializer, params, &loaded)
 }
 
 /// [`load_writer_plan`] for a live materializer: the same read, then the
 /// composition on tokio's blocking pool, where the classifications may drive
-/// the resolver's futures.
+/// the resolver's futures. `admission` is the claim the job came from; a
+/// non-live materializer is held to [`ProcessTorrentAdmission::FlagsOff`].
 ///
 /// If this future is dropped (a job timeout or shutdown), the detached
 /// composition's remaining resolver calls fail at once; it is read-only, and
@@ -405,15 +408,17 @@ pub(crate) async fn load_live_writer_plan(
     pool: &PgPool,
     materializer: &Arc<Materializer>,
     params: &ProcessTorrentParams,
+    admission: ProcessTorrentAdmission,
 ) -> Result<WriterPlan, WriterPlanError> {
-    validate_supported_params(params, materializer.is_live())?;
+    let admission = served_admission(materializer, admission);
+    validate_supported_params(params, admission)?;
     let loaded = load_writer_torrents(pool, params).await?;
     let scope = Arc::new(ResolveScope::default());
     let _stop = StopOnDrop(Arc::clone(&scope));
     let materializer = Arc::clone(materializer);
     let params = params.clone();
     match tokio::task::spawn_blocking(move || {
-        compose_writer_plan_in(&materializer, &params, &loaded, &scope)
+        compose_writer_plan_in(&materializer, &params, &loaded, &scope, admission)
     })
     .await
     {
@@ -452,7 +457,13 @@ pub fn compose_writer_plan(
     params: &ProcessTorrentParams,
     loaded: &[WriterLoadedTorrent],
 ) -> Result<WriterPlan, WriterPlanError> {
-    compose_writer_plan_in(materializer, params, loaded, &Arc::default())
+    compose_writer_plan_in(
+        materializer,
+        params,
+        loaded,
+        &Arc::default(),
+        ProcessTorrentAdmission::FlagsOffOrOn,
+    )
 }
 
 fn compose_writer_plan_in(
@@ -460,8 +471,9 @@ fn compose_writer_plan_in(
     params: &ProcessTorrentParams,
     loaded: &[WriterLoadedTorrent],
     scope: &Arc<ResolveScope>,
+    admission: ProcessTorrentAdmission,
 ) -> Result<WriterPlan, WriterPlanError> {
-    validate_supported_params(params, materializer.is_live())?;
+    validate_supported_params(params, served_admission(materializer, admission))?;
     let indexed = index_loaded_torrents(loaded)?;
     reject_unrequested_loaded_torrents(params, &indexed)?;
     let materialized = materializer.materialize_scoped(
@@ -593,12 +605,51 @@ fn reject_unrequested_loaded_torrents(
     }
 }
 
-/// The explicit `default` workflow with all three attach flags JSON `false`,
-/// or, given a live resolver, all three JSON `true`.
-fn validate_supported_params(
+/// The admission a materializer can serve: only a live one resolves the
+/// flags-on and organic payloads.
+fn served_admission(
+    materializer: &Materializer,
+    admission: ProcessTorrentAdmission,
+) -> ProcessTorrentAdmission {
+    if materializer.is_live() {
+        admission
+    } else {
+        ProcessTorrentAdmission::FlagsOff
+    }
+}
+
+/// Whether decoded `params` are a payload `admission` claims.
+///
+/// - [`ProcessTorrentAdmission::FlagsOff`]: the explicit `default` workflow
+///   with all three attach flags JSON `false`.
+/// - [`ProcessTorrentAdmission::FlagsOffOrOn`]: that, or all three JSON
+///   `true`.
+/// - [`ProcessTorrentAdmission::Organic`]: a workflow that resolves to
+///   `default` (empty or `default`), and no flag but the attach flags, each
+///   a boolean; an absent one takes the core default. The claim's SQL is
+///   stricter (it bounds the hashes, and rejects a JSON `null`, which decodes
+///   like an absent key), so this is its backstop.
+///
+/// # Errors
+///
+/// The workflow or flags error for a payload the admission does not claim.
+pub fn validate_supported_params(
     params: &ProcessTorrentParams,
-    live: bool,
+    admission: ProcessTorrentAdmission,
 ) -> Result<(), WriterPlanError> {
+    let live = match admission {
+        ProcessTorrentAdmission::Organic { .. } => {
+            return if !has_organic_workflow(params) {
+                Err(WriterPlanError::OrganicWorkflowUnsupported)
+            } else if has_only_boolean_attach_flags(params) {
+                Ok(())
+            } else {
+                Err(WriterPlanError::OrganicFlagsUnsupported)
+            };
+        }
+        ProcessTorrentAdmission::FlagsOff => false,
+        ProcessTorrentAdmission::FlagsOffOrOn => true,
+    };
     if !has_explicit_default_workflow(params) {
         return Err(WriterPlanError::ClassifierWorkflowUnsupported);
     }
@@ -766,6 +817,12 @@ pub enum WriterPlanError {
         "writer plan requires local_search_enabled, apis_enabled, and tmdb_enabled to be explicitly all false or all true"
     )]
     AttachFlagsNotExplicitlyUniform,
+    #[error("organic admission requires ClassifierWorkflow to be empty or 'default'")]
+    OrganicWorkflowUnsupported,
+    #[error(
+        "organic admission requires ClassifierFlags to hold only local_search_enabled, apis_enabled, and tmdb_enabled, as booleans"
+    )]
+    OrganicFlagsUnsupported,
     #[error("a live-resolver writer plan must be composed off the runtime threads")]
     LiveCompositionOnRuntimeThread,
     #[error("the writer plan composition was cancelled before it ran")]
@@ -808,7 +865,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bitmagnet_classifier::ClassifierInput;
-    use bitmagnet_queue::{ProcessTorrentParams, ProtocolId, QueueJob, QueueJobStatus};
+    use bitmagnet_queue::{
+        ProcessTorrentAdmission, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobStatus,
+    };
     use futures::future::BoxFuture;
     use serde_json::Value;
     use sqlx::postgres::PgPoolOptions;
@@ -1484,14 +1543,19 @@ mod tests {
         let numeric_true = all(Value::from(1));
 
         for live in [false, true] {
+            let admission = if live {
+                ProcessTorrentAdmission::FlagsOffOrOn
+            } else {
+                ProcessTorrentAdmission::FlagsOff
+            };
             let accepted = |params: &ProcessTorrentParams| {
-                validate_supported_params(params, live).expect("supported subset");
+                validate_supported_params(params, admission).expect("supported subset");
             };
             accepted(&flags_off);
             for params in [&implicit_workflow, &other_workflow] {
                 assert!(
                     matches!(
-                        validate_supported_params(params, live),
+                        validate_supported_params(params, admission),
                         Err(WriterPlanError::ClassifierWorkflowUnsupported)
                     ),
                     "live={live}"
@@ -1511,18 +1575,81 @@ mod tests {
                 accepted(&flags_on_extra);
                 for params in rejected {
                     assert!(matches!(
-                        validate_supported_params(params, live),
+                        validate_supported_params(params, admission),
                         Err(WriterPlanError::AttachFlagsNotExplicitlyUniform)
                     ));
                 }
             } else {
                 for params in rejected.into_iter().chain([&flags_on, &flags_on_extra]) {
                     assert!(matches!(
-                        validate_supported_params(params, live),
+                        validate_supported_params(params, admission),
                         Err(WriterPlanError::AttachFlagsNotExplicitlyDisabled)
                     ));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn organic_params_resolve_to_default_and_carry_only_boolean_attach_flags() {
+        let organic = ProcessTorrentAdmission::Organic { max_priority: 0 };
+        let params = |workflow: &str, flags: Option<Value>| ProcessTorrentParams {
+            classifier_workflow: workflow.to_owned(),
+            classifier_flags: flags
+                .map(|flags| serde_json::from_value(flags).expect("fixture flags are an object")),
+            ..ProcessTorrentParams::default()
+        };
+        for accepted in [
+            // DHT, importer, and retry jobs, and an explicit empty workflow.
+            params("", None),
+            params("default", None),
+            params("", Some(serde_json::json!({}))),
+            // Batch and CLI shapes: any subset of the attach flags.
+            params(
+                "default",
+                Some(serde_json::json!({
+                    "local_search_enabled": true,
+                    "apis_enabled": false,
+                    "tmdb_enabled": true
+                })),
+            ),
+            params("", Some(serde_json::json!({"tmdb_enabled": false}))),
+            params(
+                "default",
+                Some(serde_json::json!({
+                    "local_search_enabled": false,
+                    "apis_enabled": false,
+                    "tmdb_enabled": false
+                })),
+            ),
+        ] {
+            validate_supported_params(&accepted, organic)
+                .unwrap_or_else(|error| panic!("{accepted:?}: {error}"));
+        }
+        for workflow in ["custom", "Default", " default"] {
+            assert!(matches!(
+                validate_supported_params(&params(workflow, None), organic),
+                Err(WriterPlanError::OrganicWorkflowUnsupported)
+            ));
+        }
+        for flags in [
+            // delete_xxx is a boolean too: only the key-set check rejects it.
+            serde_json::json!({"delete_xxx": true}),
+            serde_json::json!({"delete_xxx": false, "tmdb_enabled": true}),
+            serde_json::json!({"delete_content_types": ["movie"]}),
+            serde_json::json!({"other_flag": true}),
+            serde_json::json!({"TMDB_enabled": true}),
+            serde_json::json!({"tmdb_enabled": "true"}),
+            serde_json::json!({"tmdb_enabled": 1}),
+            serde_json::json!({"tmdb_enabled": null}),
+        ] {
+            assert!(
+                matches!(
+                    validate_supported_params(&params("default", Some(flags.clone())), organic),
+                    Err(WriterPlanError::OrganicFlagsUnsupported)
+                ),
+                "{flags}"
+            );
         }
     }
 

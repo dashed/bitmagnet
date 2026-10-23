@@ -53,6 +53,7 @@ pub use pg::{
 pub use process_torrent_pg::{
     AdmittedConsumeOutcome, JobVerdict, ProcessTorrentAdmission,
     ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL, ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
+    ORGANIC_PAYLOAD_PREDICATE, ORGANIC_PROCESS_TORRENT_CLAIM_SQL,
 };
 pub use producer_pg::{
     insert_jobs_strict_with_executor, prepare_pg_queue_job_values, ActiveJobInsertReceipt,

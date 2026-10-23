@@ -30,6 +30,12 @@
 //! `true` ([`ProcessTorrentAdmission::FlagsOffOrOn`]). It is a separate claim
 //! with its own partial index (migration 00036), so the flags-off worker's
 //! claim and plan stay exactly as they were.
+//!
+//! Such a worker may instead admit organic payloads up to a priority bound
+//! ([`ProcessTorrentAdmission::Organic`]): any `MessageParams` whose workflow
+//! resolves to `default` and whose attach flags, explicit or inherited from
+//! the core defaults, the live classifier resolves. It runs on Go's own
+//! `queue_jobs_claim_idx`, with the bound checked on the index tuples.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -119,7 +125,86 @@ ORDER BY (status = 'retry'), priority, run_after \
 FOR UPDATE SKIP LOCKED \
 LIMIT 1";
 
-/// Which explicit attach-flag payloads an admitted claim takes.
+/// The organic admission predicate over a `payload` column: Go's
+/// `MessageParams` exactly as its producers write it, with a workflow that
+/// resolves to `default` and only the three attach flags.
+///
+/// - **Keys.** Only `MessageParams`' four exact names. Go's decoder also binds
+///   case-insensitive matches (`classifierFlags`), which serde ignores.
+/// - **ClassifierWorkflow:** absent, `""` or `"default"`.
+/// - **ClassifyMode:** absent, `0` or `1`. It is compared as jsonb text,
+///   not with jsonb's numeric equality, which would also admit `1.0`, a
+///   value neither Go's `int` nor serde's `i32` decodes.
+/// - **InfoHashes:** an array of 1 to 100 (the loader's bound) lowercase
+///   40-digit hex strings, a strict subset of what both decoders accept.
+/// - **ClassifierFlags:** absent, or an object holding only
+///   `local_search_enabled`, `apis_enabled` and `tmdb_enabled`, each a JSON
+///   boolean. An absent flag takes the core default, `true`.
+/// - **Nulls.** A JSON `null` anywhere is rejected; no producer writes one,
+///   since `message.go` uses `omitempty`.
+///
+/// It is a `CASE`, not `AND`ed conditions. The `WHEN`s run in order, so
+/// `jsonb -` (an error on a scalar) and the array functions only see the
+/// type a previous `WHEN` established; PostgreSQL may reorder `AND`ed quals.
+/// And an absent key makes its `WHEN` NULL, which is not taken, where a
+/// negated `AND` operand would make the whole predicate NULL. `-` binds more
+/// tightly than `->`, so `->` operands of `-` are parenthesized.
+macro_rules! organic_payload_predicate {
+    () => {
+        "CASE \
+WHEN jsonb_typeof(payload) <> 'object' THEN false \
+WHEN payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' - 'InfoHashes' \
+<> '{}'::jsonb THEN false \
+WHEN payload->'ClassifierWorkflow' NOT IN ('\"\"'::jsonb, '\"default\"'::jsonb) THEN false \
+WHEN (payload->'ClassifyMode')::text NOT IN ('0', '1') THEN false \
+WHEN jsonb_typeof(payload->'InfoHashes') IS DISTINCT FROM 'array' THEN false \
+WHEN jsonb_array_length(payload->'InfoHashes') NOT BETWEEN 1 AND 100 THEN false \
+WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(payload->'InfoHashes') AS h(value) \
+WHERE jsonb_typeof(h.value) <> 'string' OR (h.value #>> '{}') !~ '^[0-9a-f]{40}$') THEN false \
+WHEN jsonb_typeof(payload->'ClassifierFlags') <> 'object' THEN false \
+WHEN (payload->'ClassifierFlags') - 'local_search_enabled' - 'apis_enabled' - 'tmdb_enabled' \
+<> '{}'::jsonb THEN false \
+WHEN EXISTS (SELECT 1 FROM jsonb_each(payload->'ClassifierFlags') AS f(key, value) \
+WHERE jsonb_typeof(f.value) <> 'boolean') THEN false \
+ELSE true END"
+    };
+}
+
+/// The organic admission predicate as a value, so a test can evaluate it over
+/// a table's `payload` column.
+pub const ORGANIC_PAYLOAD_PREDICATE: &str = organic_payload_predicate!();
+
+/// Go's claim over organic payloads ([`ORGANIC_PAYLOAD_PREDICATE`]) with
+/// `priority <= $2`. `$1` is the exclusion list.
+///
+/// The select list, `ORDER BY` and locking are those of
+/// [`ADMITTED_PROCESS_TORRENT_CLAIM_SQL`]. There is no partial index:
+/// PostgreSQL allows no subquery in an index predicate. The claim runs on
+/// Go's `queue_jobs_claim_idx`, whose key order is the `ORDER BY`. The bound
+/// is checked on its index tuples, so a higher-priority backlog is stepped
+/// over without a heap fetch; the payload predicate reads the heap only for
+/// rows within the bound.
+///
+/// Public only so the migration-backed plan test can `EXPLAIN` it.
+pub const ORGANIC_PROCESS_TORRENT_CLAIM_SQL: &str = concat!(
+    "\
+SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
+       retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
+       deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
+FROM queue_jobs \
+WHERE queue = 'process_torrent' AND status IN ('pending','retry') \
+  AND run_after <= clock_timestamp() \
+  AND priority <= $2 \
+  AND ",
+    organic_payload_predicate!(),
+    " \
+  AND id <> ALL($1::text[]) \
+ORDER BY (status = 'retry'), priority, run_after \
+FOR UPDATE SKIP LOCKED \
+LIMIT 1"
+);
+
+/// Which payloads an admitted claim takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessTorrentAdmission {
     /// Explicit `default` workflow with all three attach flags JSON `false`
@@ -128,6 +213,12 @@ pub enum ProcessTorrentAdmission {
     /// [`Self::FlagsOff`], or the same with all three flags JSON `true`
     /// ([`ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL`], migration 00036).
     FlagsOffOrOn,
+    /// Every organic payload ([`ORGANIC_PAYLOAD_PREDICATE`]) at a priority of
+    /// at most `max_priority` ([`ORGANIC_PROCESS_TORRENT_CLAIM_SQL`]).
+    ///
+    /// Not a superset of [`Self::FlagsOffOrOn`]: an explicit payload above
+    /// the bound stays with Go.
+    Organic { max_priority: i32 },
 }
 
 impl ProcessTorrentAdmission {
@@ -137,6 +228,7 @@ impl ProcessTorrentAdmission {
         match self {
             Self::FlagsOff => ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
             Self::FlagsOffOrOn => ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL,
+            Self::Organic { .. } => ORGANIC_PROCESS_TORRENT_CLAIM_SQL,
         }
     }
 }
@@ -200,10 +292,11 @@ impl QueueStore {
         Fut: Future<Output = JobVerdict>,
     {
         let mut tx = self.pool().begin().await?;
-        let row = sqlx::query(admission.claim_sql())
-            .bind(excluded_ids)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let mut claim = sqlx::query(admission.claim_sql()).bind(excluded_ids);
+        if let ProcessTorrentAdmission::Organic { max_priority } = admission {
+            claim = claim.bind(max_priority);
+        }
+        let row = claim.fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             tx.commit().await?;
             return Ok(AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty));
@@ -288,5 +381,56 @@ impl QueueStore {
         };
         tx.commit().await?;
         Ok(AdmittedConsumeOutcome::Settled(outcome))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The explicit claims repeat migrations 00035 and 00036's index
+    /// predicates, and the organic admission must never move them.
+    #[test]
+    fn the_explicit_claims_are_pinned_byte_for_byte() {
+        assert_eq!(
+            ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
+            r#"SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, retries::bigint AS retries, max_retries::bigint AS max_retries, priority, deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded FROM queue_jobs WHERE queue = 'process_torrent' AND status IN ('pending','retry') AND run_after <= clock_timestamp() AND CASE WHEN payload @> '{"ClassifierWorkflow":"default","ClassifierFlags":{"local_search_enabled":false,"apis_enabled":false,"tmdb_enabled":false}}'::jsonb THEN payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' - 'InfoHashes' = '{}'::jsonb ELSE false END AND id <> ALL($1::text[]) ORDER BY (status = 'retry'), priority, run_after FOR UPDATE SKIP LOCKED LIMIT 1"#
+        );
+        assert_eq!(
+            ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL,
+            r#"SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, retries::bigint AS retries, max_retries::bigint AS max_retries, priority, deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded FROM queue_jobs WHERE queue = 'process_torrent' AND status IN ('pending','retry') AND run_after <= clock_timestamp() AND CASE WHEN payload @> '{"ClassifierWorkflow":"default","ClassifierFlags":{"local_search_enabled":false,"apis_enabled":false,"tmdb_enabled":false}}'::jsonb OR payload @> '{"ClassifierWorkflow":"default","ClassifierFlags":{"local_search_enabled":true,"apis_enabled":true,"tmdb_enabled":true}}'::jsonb THEN payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' - 'InfoHashes' = '{}'::jsonb ELSE false END AND id <> ALL($1::text[]) ORDER BY (status = 'retry'), priority, run_after FOR UPDATE SKIP LOCKED LIMIT 1"#
+        );
+    }
+
+    #[test]
+    fn the_organic_claim_keeps_the_admitted_select_list_order_and_locking() {
+        let (head, _) = ADMITTED_PROCESS_TORRENT_CLAIM_SQL
+            .split_once(" AND CASE ")
+            .expect("the admitted claim's admission conjunct");
+        let (_, tail) = ADMITTED_PROCESS_TORRENT_CLAIM_SQL
+            .split_once(" AND id <> ALL(")
+            .expect("the admitted claim's exclusion conjunct");
+        assert_eq!(
+            ORGANIC_PROCESS_TORRENT_CLAIM_SQL,
+            format!(
+                "{head} AND priority <= $2 AND {ORGANIC_PAYLOAD_PREDICATE} AND id <> ALL({tail}"
+            )
+        );
+    }
+
+    #[test]
+    fn each_admission_has_its_own_claim() {
+        assert_eq!(
+            ProcessTorrentAdmission::FlagsOff.claim_sql(),
+            ADMITTED_PROCESS_TORRENT_CLAIM_SQL
+        );
+        assert_eq!(
+            ProcessTorrentAdmission::FlagsOffOrOn.claim_sql(),
+            ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL
+        );
+        assert_eq!(
+            ProcessTorrentAdmission::Organic { max_priority: 0 }.claim_sql(),
+            ORGANIC_PROCESS_TORRENT_CLAIM_SQL
+        );
     }
 }

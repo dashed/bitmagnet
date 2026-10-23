@@ -8,6 +8,9 @@
 //! With `--admit-flags-on` it also claims the explicit flags-on payload (all
 //! three attach flags true), classifying through PostgreSQL local search and
 //! the TMDB API, and abstains from any job whose resolver calls fail.
+//!
+//! With `--admit-organic` as well it instead claims organic payloads (the DHT,
+//! importer, batch, CLI and retry shapes) up to `--organic-max-priority`.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -114,6 +117,20 @@ struct Args {
     /// `--admit-flags-on`.
     #[arg(long, env = "BITMAGNET_TMDB_BASE_URL", default_value = DEFAULT_TMDB_BASE_URL)]
     tmdb_base_url: String,
+    /// Claim organic payloads (workflow empty or `default`, attach flags
+    /// omitted or booleans) up to `--organic-max-priority`, instead of only
+    /// the explicit flags-on ones. Requires `--admit-flags-on`.
+    #[arg(long, env = "BITMAGNET_PROCESS_TORRENT_WORKER_ADMIT_ORGANIC")]
+    admit_organic: bool,
+    /// Highest job priority claimed with `--admit-organic` (default 0: DHT
+    /// and retry jobs); refused without it. An explicit flags-on payload
+    /// above it stays with Go.
+    #[arg(
+        long,
+        env = "BITMAGNET_PROCESS_TORRENT_WORKER_ORGANIC_MAX_PRIORITY",
+        allow_negative_numbers = true
+    )]
+    organic_max_priority: Option<i32>,
 }
 
 #[tokio::main]
@@ -166,6 +183,7 @@ async fn main() -> Result<()> {
         job_timeout: Duration::from_secs(args.job_timeout_seconds),
         abstain_cooloff: Duration::from_secs(args.abstain_cooloff_seconds),
         shutdown_grace: Duration::from_secs(args.shutdown_grace_seconds),
+        organic_max_priority: organic_max_priority(&args),
         ..ProcessTorrentWorkerConfig::default()
     };
     let worker = ProcessTorrentWorker::new(
@@ -259,6 +277,22 @@ fn validate_args(args: &Args) -> Result<()> {
             "--tmdb-api-key (or BITMAGNET_TMDB_API_KEY) is refused without --admit-flags-on"
         );
     }
+    if args.admit_organic {
+        anyhow::ensure!(
+            args.admit_flags_on,
+            "--admit-organic (or BITMAGNET_PROCESS_TORRENT_WORKER_ADMIT_ORGANIC) requires --admit-flags-on"
+        );
+        anyhow::ensure!(
+            args.organic_max_priority
+                .is_none_or(|priority| priority >= 0),
+            "organic-max-priority must not be negative"
+        );
+    } else {
+        anyhow::ensure!(
+            args.organic_max_priority.is_none(),
+            "--organic-max-priority (or BITMAGNET_PROCESS_TORRENT_WORKER_ORGANIC_MAX_PRIORITY) is refused without --admit-organic"
+        );
+    }
     anyhow::ensure!(
         args.expected_classifier_config_digest
             .as_deref()
@@ -279,6 +313,12 @@ fn validate_args(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// The organic priority bound, 0 unless given, with `--admit-organic`.
+fn organic_max_priority(args: &Args) -> Option<i32> {
+    args.admit_organic
+        .then(|| args.organic_max_priority.unwrap_or(0))
+}
+
 fn classify_parallelism(args: &Args) -> Result<NonZeroUsize> {
     NonZeroUsize::new(args.classify_parallelism).context("classify-parallelism must be positive")
 }
@@ -287,7 +327,7 @@ fn classify_parallelism(args: &Args) -> Result<NonZeroUsize> {
 mod tests {
     use clap::Parser;
 
-    use super::{validate_args, Args, TmdbApiKey, DEFAULT_TMDB_BASE_URL};
+    use super::{organic_max_priority, validate_args, Args, TmdbApiKey, DEFAULT_TMDB_BASE_URL};
 
     fn args() -> Args {
         Args {
@@ -303,6 +343,8 @@ mod tests {
             admit_flags_on: false,
             tmdb_api_key: None,
             tmdb_base_url: DEFAULT_TMDB_BASE_URL.to_owned(),
+            admit_organic: false,
+            organic_max_priority: None,
         }
     }
 
@@ -396,6 +438,68 @@ mod tests {
     }
 
     #[test]
+    fn organic_admission_requires_flags_on_and_a_non_negative_bound() {
+        let organic = Args {
+            admit_organic: true,
+            ..flags_on()
+        };
+        assert!(validate_args(&organic).is_ok());
+        assert_eq!(organic_max_priority(&organic), Some(0));
+        for priority in [0, 4, 20] {
+            let bounded = Args {
+                organic_max_priority: Some(priority),
+                ..Args {
+                    admit_organic: true,
+                    ..flags_on()
+                }
+            };
+            assert!(validate_args(&bounded).is_ok());
+            assert_eq!(organic_max_priority(&bounded), Some(priority));
+        }
+        assert_eq!(organic_max_priority(&flags_on()), None);
+
+        type Mutation = fn(&mut Args);
+        let cases: [(Mutation, &str); 4] = [
+            (
+                |args: &mut Args| {
+                    args.admit_flags_on = false;
+                    args.tmdb_api_key = None;
+                },
+                "requires --admit-flags-on",
+            ),
+            (
+                |args: &mut Args| args.organic_max_priority = Some(-1),
+                "must not be negative",
+            ),
+            (
+                |args: &mut Args| {
+                    args.admit_organic = false;
+                    args.organic_max_priority = Some(0);
+                },
+                "refused without --admit-organic",
+            ),
+            (
+                |args: &mut Args| {
+                    args.admit_organic = false;
+                    args.admit_flags_on = false;
+                    args.tmdb_api_key = None;
+                    args.organic_max_priority = Some(10);
+                },
+                "refused without --admit-organic",
+            ),
+        ];
+        for (mutate, expected) in cases {
+            let mut invalid = Args {
+                admit_organic: true,
+                ..flags_on()
+            };
+            mutate(&mut invalid);
+            let error = validate_args(&invalid).expect_err(expected).to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn the_switch_is_a_default_off_flag_and_the_key_never_prints() {
         let base = [
             "worker",
@@ -406,6 +510,19 @@ mod tests {
         assert!(!parsed.admit_flags_on);
         assert!(parsed.tmdb_api_key.is_none());
         assert_eq!(parsed.tmdb_base_url, "https://api.themoviedb.org/3");
+        assert!(!parsed.admit_organic);
+        assert_eq!(parsed.organic_max_priority, None);
+
+        // A negative bound parses, so validation can refuse it by name.
+        let parsed = Args::try_parse_from(base.into_iter().chain([
+            "--admit-flags-on",
+            "--admit-organic",
+            "--organic-max-priority",
+            "-1",
+        ]))
+        .expect("parse a negative bound");
+        assert!(parsed.admit_organic);
+        assert_eq!(parsed.organic_max_priority, Some(-1));
 
         let parsed = Args::try_parse_from(base.into_iter().chain([
             "--admit-flags-on",

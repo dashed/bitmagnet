@@ -18,14 +18,14 @@ use bitmagnet_classifier::{ContentResolver, ContentResultItem, ResolveError};
 use bitmagnet_content_search::PgContentSearch;
 use bitmagnet_model::{Content, ContentType, InfoHash};
 use bitmagnet_processor::{
-    load_writer_plan, persist_writer_plan, Materializer, ProcessTorrentWorker,
-    ProcessTorrentWorkerConfig, WriterPlanError,
+    load_writer_plan, persist_writer_plan, validate_supported_params, Materializer,
+    ProcessTorrentWorker, ProcessTorrentWorkerConfig, WriterPlanError,
 };
 use bitmagnet_queue::{
     backoff, process_torrent_job, AdmittedConsumeOutcome, ConsumeOutcome, JobVerdict,
     ProcessTorrentAdmission, ProcessTorrentParams, ProtocolId, QueueJobOptions, QueueStore,
     ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL, ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
-    PROCESS_TORRENT,
+    ORGANIC_PAYLOAD_PREDICATE, ORGANIC_PROCESS_TORRENT_CLAIM_SQL, PROCESS_TORRENT,
 };
 use bitmagnet_resolver::LiveContentResolver;
 use bitmagnet_tmdb::{HttpResponse, RetryPolicy, TmdbClient, TmdbConfig, Transport};
@@ -137,15 +137,21 @@ async fn enqueue(store: &QueueStore, params: &ProcessTorrentParams) -> String {
 }
 
 async fn enqueue_raw(pool: &PgPool, payload: &str) -> String {
+    enqueue_raw_at(pool, payload, 0).await
+}
+
+/// [`enqueue_raw`] at `priority`.
+async fn enqueue_raw_at(pool: &PgPool, payload: &str, priority: i32) -> String {
     sqlx::query_scalar(
         "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, max_retries, \
          run_after, archival_duration, created_at, priority) \
          VALUES (md5($1), 'process_torrent', 'pending', $1::jsonb, 0, 2, \
                  clock_timestamp() - interval '1 second', interval '168:00:00', \
-                 clock_timestamp(), 0) \
+                 clock_timestamp(), $2) \
          RETURNING id",
     )
     .bind(payload)
+    .bind(priority)
     .fetch_one(pool)
     .await
     .expect("insert raw queue job")
@@ -1019,8 +1025,8 @@ async fn an_abstained_job_never_blocks_or_spins_and_its_exclusion_is_bounded() {
         worker.run_until(std::future::pending()),
     )
     .await;
-    assert_eq!(metrics.with_label_values(&["abstained"]).get(), 1);
-    assert_eq!(metrics.with_label_values(&["processed"]).get(), 1);
+    assert_eq!(metrics.with_label_values(&["abstained", "hint"]).get(), 1);
+    assert_eq!(metrics.with_label_values(&["processed", ""]).get(), 1);
 
     // Expiry: once the cool-off lapses the job is reconsidered (and, still
     // unsupported, abstained again) rather than excluded forever.
@@ -1240,12 +1246,12 @@ async fn database_errors_are_counted_and_the_worker_keeps_polling() {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let recover = async {
         eventually("two failed polls", || {
-            metrics.with_label_values(&["error"]).get() >= 2
+            metrics.with_label_values(&["error", ""]).get() >= 2
         })
         .await;
         drop(held);
         eventually("the job to be processed", || {
-            metrics.with_label_values(&["processed"]).get() == 1
+            metrics.with_label_values(&["processed", ""]).get() == 1
         })
         .await;
         stop.send(()).expect("worker is still running");
@@ -2384,6 +2390,16 @@ impl Transport for FakeTmdb {
 /// database's local search and the real TMDB client, talking to `tmdb` with
 /// Go's three transport retries (without the waits).
 fn tmdb_worker(pool: &PgPool, tmdb: &Arc<FakeTmdb>, parallelism: usize) -> ProcessTorrentWorker {
+    tmdb_worker_with(pool, tmdb, parallelism, fast_config())
+}
+
+/// [`tmdb_worker`] with its worker configuration.
+fn tmdb_worker_with(
+    pool: &PgPool,
+    tmdb: &Arc<FakeTmdb>,
+    parallelism: usize,
+    worker_config: ProcessTorrentWorkerConfig,
+) -> ProcessTorrentWorker {
     let config = TmdbConfig {
         base_url: "http://tmdb.invalid/3".to_owned(),
         rate_limit: Duration::ZERO,
@@ -2408,7 +2424,7 @@ fn tmdb_worker(pool: &PgPool, tmdb: &Arc<FakeTmdb>, parallelism: usize) -> Proce
         .with_classify_parallelism(NonZeroUsize::new(parallelism).expect("nonzero"))
         .expect("classify pool"),
         Arc::new(PersistentBlockingManager::new(pool.clone())),
-        fast_config(),
+        worker_config,
     )
 }
 
@@ -2705,4 +2721,1047 @@ async fn abstaining_tmdb_failures_leave_zero_writes_and_make_no_later_calls() {
             tmdb.asked()
         );
     }
+}
+
+// -- Organic admission (M4) ------------------------------------------------
+
+/// A worker configuration admitting organic payloads up to `max_priority`.
+fn organic_config(max_priority: i32) -> ProcessTorrentWorkerConfig {
+    ProcessTorrentWorkerConfig {
+        organic_max_priority: Some(max_priority),
+        ..fast_config()
+    }
+}
+
+/// The ids `admission` claims, in claim order, leaving every row as it was:
+/// each claimed job is abstained, then excluded from the next claim.
+async fn probe_claims(pool: &PgPool, admission: ProcessTorrentAdmission) -> Vec<String> {
+    let store = QueueStore::new(pool.clone());
+    let mut claimed: Vec<String> = Vec::new();
+    loop {
+        match store
+            .consume_admitted_process_torrent_with(admission, &claimed, |_| async {
+                JobVerdict::Abstain("probe".to_owned())
+            })
+            .await
+            .expect("probe claim")
+        {
+            AdmittedConsumeOutcome::Abstained { job, .. } => {
+                assert!(
+                    !claimed.contains(&job.id),
+                    "{admission:?} claimed the excluded job {}",
+                    job.id
+                );
+                claimed.push(job.id);
+            }
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty) => return claimed,
+            other => panic!("{admission:?}: unexpected probe outcome {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn organic_admission_claims_each_producer_shape_within_its_priority_bound() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let hashes = |n: u8| format!("[\"{}\"]", format!("{n:02x}").repeat(20));
+    // (payload, priority, organic), inserted in this order, which within a
+    // priority is Go's claim order.
+    let jobs = [
+        // The DHT crawler, and every processor retry: priority 0.
+        (format!("{{\"InfoHashes\":{}}}", hashes(1)), 0, true),
+        (
+            format!(
+                "{{\"ClassifierWorkflow\":\"default\",\"InfoHashes\":{}}}",
+                hashes(2)
+            ),
+            0,
+            true,
+        ),
+        (
+            format!(
+                "{{\"ClassifyMode\":1,\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"tmdb_enabled\":false}},\"InfoHashes\":{}}}",
+                hashes(3)
+            ),
+            0,
+            true,
+        ),
+        // The explicit subsets are organic shapes too.
+        (
+            format!(
+                "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_OFF},\"InfoHashes\":{}}}",
+                hashes(4)
+            ),
+            0,
+            true,
+        ),
+        // Batch children with the APIs off: priority 4.
+        (
+            format!(
+                "{{\"ClassifierFlags\":{{\"apis_enabled\":false}},\"InfoHashes\":{}}}",
+                hashes(5)
+            ),
+            4,
+            true,
+        ),
+        // Batch children: priority 10.
+        (
+            format!("{{\"ClassifyMode\":1,\"InfoHashes\":{}}}", hashes(6)),
+            10,
+            true,
+        ),
+        (
+            format!(
+                "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{}}}",
+                hashes(7)
+            ),
+            10,
+            true,
+        ),
+        // The importer: priority 20.
+        (format!("{{\"InfoHashes\":{}}}", hashes(8)), 20, true),
+        // Payloads only Go runs, within every bound.
+        (
+            format!(
+                "{{\"ClassifierWorkflow\":\"custom\",\"InfoHashes\":{}}}",
+                hashes(9)
+            ),
+            0,
+            false,
+        ),
+        (
+            format!(
+                "{{\"ClassifierFlags\":{{\"delete_xxx\":true}},\"InfoHashes\":{}}}",
+                hashes(10)
+            ),
+            0,
+            false,
+        ),
+        (
+            format!(
+                "{{\"ClassifierFlags\":{{\"tmdb_enabled\":null}},\"InfoHashes\":{}}}",
+                hashes(11)
+            ),
+            0,
+            false,
+        ),
+        (format!("{{\"infoHashes\":{}}}", hashes(12)), 0, false),
+        (
+            format!("{{\"InfoHashes\":[\"0x{}\"]}}", "0d".repeat(20)),
+            0,
+            false,
+        ),
+        (
+            format!("{{\"InfoHashes\":{},\"Extra\":1}}", hashes(14)),
+            0,
+            false,
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (payload, priority, _) in &jobs {
+        ids.push(enqueue_raw_at(&pool, payload, *priority).await);
+    }
+    let mut before = Vec::new();
+    for id in &ids {
+        before.push(job_row(&pool, id).await);
+    }
+
+    for max_priority in [0, 3, 4, 9, 10, 19, 20] {
+        let mut expected: Vec<(i32, String)> = jobs
+            .iter()
+            .zip(&ids)
+            .filter(|((_, priority, organic), _)| *organic && *priority <= max_priority)
+            .map(|((_, priority, _), id)| (*priority, id.clone()))
+            .collect();
+        expected.sort_by_key(|(priority, _)| *priority);
+        let expected: Vec<String> = expected.into_iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            probe_claims(&pool, ProcessTorrentAdmission::Organic { max_priority }).await,
+            expected,
+            "bound {max_priority}"
+        );
+    }
+    // Not a superset of flags-on: the explicit flags-on job above the bound
+    // stays with Go.
+    assert_eq!(
+        probe_claims(&pool, ProcessTorrentAdmission::FlagsOffOrOn).await,
+        vec![ids[3].clone(), ids[6].clone()]
+    );
+    for (id, before) in ids.iter().zip(&before) {
+        assert_eq!(&job_row(&pool, id).await, before, "job {id} was touched");
+    }
+
+    // The worker's admission follows its configuration, given a live
+    // materializer.
+    let tmdb = FakeTmdb::new(Vec::new());
+    assert_eq!(
+        tmdb_worker_with(&pool, &tmdb, 1, organic_config(4)).admission(),
+        ProcessTorrentAdmission::Organic { max_priority: 4 }
+    );
+    assert_eq!(
+        tmdb_worker(&pool, &tmdb, 1).admission(),
+        ProcessTorrentAdmission::FlagsOffOrOn
+    );
+    assert_eq!(
+        worker(&pool, organic_config(4)).admission(),
+        ProcessTorrentAdmission::FlagsOff
+    );
+}
+
+const DHT_PAYLOAD_SQL: &str =
+    "jsonb_build_object('InfoHashes', jsonb_build_array(lpad(to_hex(n), 40, '0')))";
+const BATCH_PAYLOAD_SQL: &str = "jsonb_build_object('ClassifierFlags', \
+     jsonb_build_object('apis_enabled', true), \
+     'InfoHashes', jsonb_build_array(lpad(to_hex(n), 40, '0')))";
+
+/// Insert `count` ready jobs at `priority`. `payload_sql` builds each payload
+/// from `n`; `tag` keeps the fingerprints of separate calls apart.
+async fn seed_ready_jobs(pool: &PgPool, tag: &str, count: i32, priority: i32, payload_sql: &str) {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, max_retries, \
+         run_after, archival_duration, created_at, priority) \
+         SELECT md5($1 || n::text), 'process_torrent', 'pending', {payload_sql}, \
+                0, 2, clock_timestamp() - interval '1 hour', interval '168:00:00', \
+                clock_timestamp(), $2 \
+         FROM generate_series(1, $3) AS n"
+    )))
+    .bind(tag)
+    .bind(priority)
+    .bind(count)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("seed {tag} jobs: {error}"));
+    sqlx::raw_sql("VACUUM ANALYZE queue_jobs")
+        .execute(pool)
+        .await
+        .expect("vacuum queue_jobs");
+}
+
+/// `EXPLAIN (<options>)` of the organic claim with `excluded` and
+/// `max_priority`: planned for those values, or prepared and generic.
+async fn explain_organic_claim(
+    pool: &PgPool,
+    options: &str,
+    excluded: &[String],
+    max_priority: i32,
+    generic: bool,
+) -> String {
+    let mut tx = pool.begin().await.expect("begin plan transaction");
+    let plan: Vec<String> = if generic {
+        sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
+            .execute(&mut *tx)
+            .await
+            .expect("force a generic plan");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PREPARE organic_claim(text[], integer) AS {ORGANIC_PROCESS_TORRENT_CLAIM_SQL}"
+        )))
+        .execute(&mut *tx)
+        .await
+        .expect("prepare the organic claim");
+        // EXPLAIN EXECUTE takes no bind parameters: spell the values out.
+        let excluded = excluded
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+        let plan = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN ({options}) EXECUTE organic_claim(ARRAY[{excluded}]::text[], {max_priority})"
+        )))
+        .fetch_all(&mut *tx)
+        .await
+        .expect("explain the generic organic claim");
+        // A prepared statement outlives the transaction.
+        sqlx::raw_sql("DEALLOCATE organic_claim")
+            .execute(&mut *tx)
+            .await
+            .expect("deallocate the organic claim");
+        plan
+    } else {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN ({options}) {ORGANIC_PROCESS_TORRENT_CLAIM_SQL}"
+        )))
+        .bind(excluded)
+        .bind(max_priority)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("explain the custom organic claim")
+    };
+    tx.rollback().await.expect("roll back plan transaction");
+    plan.join("\n")
+}
+
+/// The organic claim walks Go's `queue_jobs_claim_idx` in claim order and
+/// checks its bound on the index tuples.
+fn assert_organic_claim_plan(plan: &str, generic: bool) {
+    let kind = if generic { "generic" } else { "custom" };
+    assert!(
+        plan.contains("Index Scan using queue_jobs_claim_idx on queue_jobs"),
+        "the {kind} organic claim must scan Go's queue_jobs_claim_idx:\n{plan}"
+    );
+    let index_cond = plan
+        .lines()
+        .find(|line| line.trim_start().starts_with("Index Cond:"))
+        .unwrap_or_else(|| panic!("the {kind} organic claim has no Index Cond:\n{plan}"));
+    assert!(
+        index_cond.contains("priority <="),
+        "the {kind} organic claim must check its bound on the index tuples:\n{plan}"
+    );
+    for index in [ADMITTED_CLAIM_INDEX, ADMITTED_FLAGS_ON_CLAIM_INDEX] {
+        assert!(!plan.contains(index), "{plan}");
+    }
+    assert!(!plan.contains("Sort"), "{plan}");
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn organic_claim_steps_over_higher_bands_on_gos_claim_index() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let version: String = sqlx::query_scalar("SHOW server_version")
+        .fetch_one(&pool)
+        .await
+        .expect("server version");
+    let report = |case: &str, generic: bool, plan: &str| {
+        // Written past libtest's output capture, for the gate report.
+        let _ = writeln!(
+            std::io::stderr(),
+            "worker_pg: organic claim on PostgreSQL {version}, {case}, {} plan:\n{plan}\n",
+            if generic { "generic" } else { "custom" }
+        );
+    };
+    // A whole-database batch backlog above the bound.
+    seed_ready_jobs(&pool, "batch", 100_000, 10, BATCH_PAYLOAD_SQL).await;
+
+    // Worst case (a): nothing within the bound.
+    for generic in [false, true] {
+        let _warm = explain_organic_claim(&pool, "ANALYZE, BUFFERS", &[], 0, generic).await;
+        let plan = explain_organic_claim(&pool, "ANALYZE, BUFFERS", &[], 0, generic).await;
+        assert_organic_claim_plan(&plan, generic);
+        assert!(
+            plan.lines()
+                .next()
+                .is_some_and(|line| line.contains("rows=0")),
+            "{plan}"
+        );
+        report(
+            "(a) no row within the bound behind 100k at priority 10",
+            generic,
+            &plan,
+        );
+    }
+
+    // Worst case (b): 1,024 rows within the bound, every one excluded.
+    seed_ready_jobs(&pool, "excluded", 1_024, 0, DHT_PAYLOAD_SQL).await;
+    let excluded: Vec<String> = sqlx::query_scalar("SELECT id FROM queue_jobs WHERE priority = 0")
+        .fetch_all(&pool)
+        .await
+        .expect("read the excluded ids");
+    assert_eq!(excluded.len(), 1_024);
+    for generic in [false, true] {
+        let _warm = explain_organic_claim(&pool, "ANALYZE, BUFFERS", &excluded, 0, generic).await;
+        let plan = explain_organic_claim(&pool, "ANALYZE, BUFFERS", &excluded, 0, generic).await;
+        assert_organic_claim_plan(&plan, generic);
+        assert!(
+            plan.lines()
+                .next()
+                .is_some_and(|line| line.contains("rows=0")),
+            "{plan}"
+        );
+        report(
+            "(b) as (a) plus 1,024 excluded rows within the bound",
+            generic,
+            &plan,
+        );
+    }
+
+    // An organic DHT backlog within the bound.
+    seed_ready_jobs(&pool, "dht", 20_000, 0, DHT_PAYLOAD_SQL).await;
+    for generic in [false, true] {
+        let plan = explain_organic_claim(&pool, "COSTS OFF", &[], 0, generic).await;
+        assert_organic_claim_plan(&plan, generic);
+        report("20k DHT rows within the bound", generic, &plan);
+    }
+    let store = QueueStore::new(pool.clone());
+    let outcome = store
+        .consume_admitted_process_torrent_with(
+            ProcessTorrentAdmission::Organic { max_priority: 0 },
+            &excluded,
+            |_| async { JobVerdict::Abstain("probe".to_owned()) },
+        )
+        .await
+        .unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, .. } = outcome else {
+        panic!("expected a claim, got {outcome:?}");
+    };
+    assert_eq!(job.priority, 0);
+    assert!(!excluded.contains(&job.id));
+}
+
+/// An independent statement of the payloads organic admission claims, over
+/// the payload as PostgreSQL stores it (numbers normalized, duplicate keys
+/// dropped), which is also the text both decoders read.
+fn organic_reference(payload: &Value) -> bool {
+    const KEYS: [&str; 4] = [
+        "ClassifyMode",
+        "ClassifierWorkflow",
+        "ClassifierFlags",
+        "InfoHashes",
+    ];
+    const FLAGS: [&str; 3] = ["local_search_enabled", "apis_enabled", "tmdb_enabled"];
+    let is_hash = |hash: &Value| {
+        hash.as_str().is_some_and(|hash| {
+            hash.len() == 40
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    };
+    let Value::Object(fields) = payload else {
+        return false;
+    };
+    fields.keys().all(|key| KEYS.contains(&key.as_str()))
+        && fields
+            .get("ClassifyMode")
+            .is_none_or(|mode| mode.as_u64().is_some_and(|mode| mode <= 1))
+        && fields
+            .get("ClassifierWorkflow")
+            .is_none_or(|workflow| matches!(workflow.as_str(), Some("" | "default")))
+        && fields
+            .get("InfoHashes")
+            .and_then(Value::as_array)
+            .is_some_and(|hashes| (1..=100).contains(&hashes.len()) && hashes.iter().all(is_hash))
+        && fields.get("ClassifierFlags").is_none_or(|flags| {
+            flags.as_object().is_some_and(|flags| {
+                flags
+                    .iter()
+                    .all(|(name, value)| FLAGS.contains(&name.as_str()) && value.is_boolean())
+            })
+        })
+}
+
+/// Payloads around the organic shapes, as raw text: the producer shapes, each
+/// field missing, null, retyped or renamed, and the mode, workflow, hash and
+/// flag edges, some of which only raw text can write (`1e0`, duplicate keys).
+fn organic_payload_variants() -> Vec<String> {
+    use serde_json::json;
+    const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+    let hashes = |count: usize| -> Value {
+        (0..count)
+            .map(|n| Value::from(format!("{n:040x}")))
+            .collect()
+    };
+    let base = json!({
+        "ClassifyMode": 1,
+        "ClassifierWorkflow": "default",
+        "ClassifierFlags": {
+            "local_search_enabled": true,
+            "apis_enabled": false,
+            "tmdb_enabled": true
+        },
+        "InfoHashes": [HASH],
+    });
+    let with = |key: &str, value: Option<Value>| {
+        let mut payload = base.clone();
+        let fields = payload.as_object_mut().expect("base is an object");
+        match value {
+            Some(value) => fields.insert(key.to_owned(), value),
+            None => fields.remove(key),
+        };
+        payload.to_string()
+    };
+    let with_flag = |name: &str, value: Option<Value>| {
+        let mut flags = base["ClassifierFlags"].clone();
+        let fields = flags.as_object_mut().expect("base flags are an object");
+        match value {
+            Some(value) => fields.insert(name.to_owned(), value),
+            None => fields.remove(name),
+        };
+        with("ClassifierFlags", Some(flags))
+    };
+    let mut variants = vec![
+        // DHT and importer jobs, retries, and batch and CLI children.
+        json!({"InfoHashes": [HASH]}).to_string(),
+        json!({"ClassifierWorkflow": "default", "InfoHashes": [HASH]}).to_string(),
+        json!({
+            "ClassifyMode": 1,
+            "ClassifierWorkflow": "default",
+            "ClassifierFlags": {"tmdb_enabled": false},
+            "InfoHashes": hashes(3)
+        })
+        .to_string(),
+        json!({"ClassifierFlags": {"apis_enabled": false}, "InfoHashes": hashes(100)}).to_string(),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_OFF},\"InfoHashes\":[\"{HASH}\"]}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":[\"{HASH}\"]}}"
+        ),
+        base.to_string(),
+        // Not an object.
+        "null".to_owned(),
+        "true".to_owned(),
+        "1".to_owned(),
+        "\"InfoHashes\"".to_owned(),
+        "[]".to_owned(),
+        "{}".to_owned(),
+        format!("[{{\"InfoHashes\":[\"{HASH}\"]}}]"),
+    ];
+    // Each field missing, null or retyped, and Go's case-insensitive aliases
+    // beside it and instead of it.
+    let retyped = [
+        Value::Null,
+        json!(false),
+        json!(true),
+        json!(0),
+        json!(1),
+        json!(""),
+        json!("default"),
+        json!([]),
+        json!([HASH]),
+        json!({}),
+        json!({"tmdb_enabled": true}),
+    ];
+    for key in [
+        "ClassifyMode",
+        "ClassifierWorkflow",
+        "ClassifierFlags",
+        "InfoHashes",
+    ] {
+        variants.push(with(key, None));
+        variants.extend(retyped.iter().map(|value| with(key, Some(value.clone()))));
+        let lower_first = format!("{}{}", key[..1].to_lowercase(), &key[1..]);
+        for alias in [lower_first, key.to_uppercase()] {
+            let mut beside = base.clone();
+            beside[alias.as_str()] = base[key].clone();
+            variants.push(beside.to_string());
+            let mut instead = base.clone();
+            let value = instead
+                .as_object_mut()
+                .expect("base is an object")
+                .remove(key)
+                .expect("base field");
+            instead[alias.as_str()] = value;
+            variants.push(instead.to_string());
+        }
+    }
+    // Keys MessageParams does not have.
+    for key in ["Extra", "delete_xxx", "ClassifierFlag", "InfoHash", ""] {
+        let mut payload = base.clone();
+        payload[key] = json!(true);
+        variants.push(payload.to_string());
+    }
+    // ClassifyMode as written; jsonb normalizes the number (`1e0` is `1`).
+    for mode in [
+        "0",
+        "1",
+        "2",
+        "-1",
+        "-0",
+        "0.0",
+        "1.0",
+        "1e0",
+        "1E+0",
+        "10e-1",
+        "0.5",
+        "\"1\"",
+        "4294967297",
+    ] {
+        variants.push(format!(
+            "{{\"ClassifyMode\":{mode},\"InfoHashes\":[\"{HASH}\"]}}"
+        ));
+    }
+    for workflow in [
+        "",
+        "default",
+        "Default",
+        "DEFAULT",
+        " default",
+        "default ",
+        "default\n",
+        "custom",
+        "d\u{e9}fault",
+    ] {
+        variants.push(with("ClassifierWorkflow", Some(json!(workflow))));
+    }
+    // Duplicate keys: jsonb keeps the last.
+    for (first, last) in [("custom", "default"), ("default", "custom")] {
+        variants.push(format!(
+            "{{\"ClassifierWorkflow\":\"{first}\",\"ClassifierWorkflow\":\"{last}\",\"InfoHashes\":[\"{HASH}\"]}}"
+        ));
+    }
+    for (first, last) in [("1", "false"), ("false", "1")] {
+        variants.push(format!(
+            "{{\"ClassifierFlags\":{{\"tmdb_enabled\":{first},\"tmdb_enabled\":{last}}},\"InfoHashes\":[\"{HASH}\"]}}"
+        ));
+    }
+    // Hash counts around the loader's bound.
+    for count in [0, 1, 2, 99, 100, 101, 250] {
+        variants.push(with("InfoHashes", Some(hashes(count))));
+    }
+    // Hash elements, alone and after a good one.
+    let upper = HASH.to_uppercase();
+    for element in [
+        json!(HASH),
+        json!(upper),
+        json!(format!("{}{}", &upper[..20], &HASH[20..])),
+        json!(&HASH[..39]),
+        json!(format!("{HASH}8")),
+        json!(format!("0x{HASH}")),
+        json!(format!("0x{}", &HASH[2..])),
+        json!(format!(" {}", &HASH[1..])),
+        json!(format!("{HASH}\n")),
+        json!(format!("{}\n", &HASH[..39])),
+        json!(format!("g{}", &HASH[1..])),
+        json!("\u{e9}".repeat(40)),
+        json!(""),
+        json!(1),
+        Value::Null,
+        json!(true),
+        json!([HASH]),
+        json!({"hash": HASH}),
+    ] {
+        variants.push(with("InfoHashes", Some(json!([element]))));
+        variants.push(with("InfoHashes", Some(json!([HASH, element]))));
+    }
+    // A unicode-escaped hash, which jsonb stores decoded.
+    variants.push(format!("{{\"InfoHashes\":[\"\\u0030{}\"]}}", &HASH[1..]));
+    // Each flag missing or of every JSON type, and keys beside them.
+    for name in ["local_search_enabled", "apis_enabled", "tmdb_enabled"] {
+        variants.push(with_flag(name, None));
+        for value in [
+            json!(true),
+            json!(false),
+            Value::Null,
+            json!(0),
+            json!(1),
+            json!("true"),
+            json!("false"),
+            json!([true]),
+            json!({}),
+        ] {
+            variants.push(with_flag(name, Some(value)));
+        }
+    }
+    for (name, value) in [
+        ("delete_xxx", json!(true)),
+        ("delete_xxx", json!(false)),
+        ("delete_content_types", json!(["movie"])),
+        ("delete_content_types", json!([])),
+        ("unknown_flag", json!(true)),
+        ("TMDB_enabled", json!(true)),
+        ("Tmdb_Enabled", json!(false)),
+        ("", json!(true)),
+    ] {
+        variants.push(with_flag(name, Some(value)));
+    }
+    let mut seen = BTreeSet::new();
+    variants.retain(|payload| seen.insert(payload.clone()));
+    variants
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn organic_sql_admission_agrees_with_an_independent_reference() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let variants = organic_payload_variants();
+    let mut ids = Vec::new();
+    for payload in &variants {
+        ids.push(enqueue_raw(&pool, payload).await);
+    }
+    // The predicate over the stored column, beside the text the worker reads.
+    let evaluated: BTreeMap<String, (String, Option<bool>)> =
+        sqlx::query_as::<_, (String, String, Option<bool>)>(sqlx::AssertSqlSafe(format!(
+            "SELECT id, payload::text, {ORGANIC_PAYLOAD_PREDICATE} FROM queue_jobs"
+        )))
+        .fetch_all(&pool)
+        .await
+        .expect("evaluate the organic predicate")
+        .into_iter()
+        .map(|(id, stored, admitted)| (id, (stored, admitted)))
+        .collect();
+    let mut admitted = BTreeSet::new();
+    for (payload, id) in variants.iter().zip(&ids) {
+        let (stored, sql) = &evaluated[id];
+        let reference =
+            organic_reference(&serde_json::from_str(stored).expect("stored payload is JSON"));
+        assert_eq!(
+            *sql,
+            Some(reference),
+            "payload {payload} (stored as {stored})"
+        );
+        if reference {
+            admitted.insert(id.clone());
+            // Whatever the claim admits, the worker decodes and accepts.
+            let params: ProcessTorrentParams = serde_json::from_str(stored)
+                .unwrap_or_else(|error| panic!("{stored} does not decode: {error}"));
+            validate_supported_params(
+                &params,
+                ProcessTorrentAdmission::Organic { max_priority: 0 },
+            )
+            .unwrap_or_else(|error| panic!("{stored}: {error}"));
+            assert!((1..=100).contains(&params.info_hashes.len()), "{stored}");
+        }
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "worker_pg: organic reference agreement over {} payloads, {} admitted",
+        variants.len(),
+        admitted.len()
+    );
+    assert!(
+        admitted.len() >= 20 && variants.len() - admitted.len() >= 100,
+        "{} of {} admitted",
+        admitted.len(),
+        variants.len()
+    );
+    // The claim takes exactly those rows.
+    let claimed: BTreeSet<String> =
+        probe_claims(&pool, ProcessTorrentAdmission::Organic { max_priority: 0 })
+            .await
+            .into_iter()
+            .collect();
+    assert_eq!(claimed, admitted);
+}
+
+/// Answers for [`seed_tmdb_fixture`]'s torrent TMDB finds.
+fn found_answers() -> Vec<(&'static str, Answer)> {
+    vec![
+        ("query=Found", answer(200, None, FOUND_SEARCH)),
+        ("/movie/777", answer(200, None, FOUND_DETAILS)),
+    ]
+}
+
+/// Whether `image` holds a `torrent_contents` row for `info_hash` whose
+/// `content_id` is `content_id` (a JSON value, e.g. `"42"` or `null`).
+fn attached(image: &[String], info_hash: &str, content_id: &str) -> bool {
+    image.iter().any(|row| {
+        row.starts_with("tc ")
+            && row.contains(info_hash)
+            && row.contains(&format!("\"content_id\": {content_id}"))
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_organic_dht_job_runs_with_every_attach_flag_on() {
+    let pool = connect().await;
+    let hashes = [HASH_LOCAL, HASH_UNKNOWN, HASH_FOUND];
+    let mut runs = Vec::new();
+    for organic in [false, true] {
+        seed_tmdb_fixture(&pool).await;
+        let tmdb = FakeTmdb::new(found_answers());
+        let (id, worker) = if organic {
+            let payload = format!(
+                "{{\"InfoHashes\":[\"{HASH_LOCAL}\",\"{HASH_UNKNOWN}\",\"{HASH_FOUND}\"]}}"
+            );
+            (
+                enqueue_raw(&pool, &payload).await,
+                tmdb_worker_with(&pool, &tmdb, 1, organic_config(0)),
+            )
+        } else {
+            (
+                enqueue(&QueueStore::new(pool.clone()), &flags_on_params(&hashes)).await,
+                tmdb_worker(&pool, &tmdb, 1),
+            )
+        };
+        let outcome = worker.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "organic={organic}: {outcome:?}"
+        );
+        assert_eq!(queue_job_count(&pool).await, 1, "organic={organic}");
+        let mut asked = tmdb.asked();
+        asked.sort();
+        runs.push((live_image(&pool).await, asked));
+    }
+    // The core defaults turned local search and TMDB on.
+    let (image, asked) = &runs[1];
+    assert!(attached(image, HASH_LOCAL, "\"42\""), "{image:#?}");
+    assert!(attached(image, HASH_FOUND, "\"777\""), "{image:#?}");
+    assert!(
+        asked
+            .iter()
+            .any(|request| request.contains("query=Unknown")),
+        "{asked:?}"
+    );
+    assert_eq!(
+        runs[1], runs[0],
+        "an organic DHT job is not the explicit flags-on job"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn explicit_organic_flags_override_the_core_defaults() {
+    let pool = connect().await;
+
+    // TMDB off; local search left to its default, on.
+    seed_tmdb_fixture(&pool).await;
+    let tmdb = FakeTmdb::new(found_answers());
+    let id = enqueue_raw(
+        &pool,
+        &format!(
+            "{{\"ClassifierFlags\":{{\"tmdb_enabled\":false}},\"InfoHashes\":[\"{HASH_LOCAL}\",\"{HASH_FOUND}\"]}}"
+        ),
+    )
+    .await;
+    let worker = tmdb_worker_with(&pool, &tmdb, 1, organic_config(0));
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+    ));
+    assert_eq!(
+        tmdb.asked(),
+        Vec::<String>::new(),
+        "tmdb_enabled=false reached TMDB"
+    );
+    let image = live_image(&pool).await;
+    assert!(attached(&image, HASH_LOCAL, "\"42\""), "{image:#?}");
+    assert!(attached(&image, HASH_FOUND, "null"), "{image:#?}");
+
+    // Local search off; TMDB left to its default, on: the local movie is
+    // searched for on TMDB, which does not know it.
+    seed_tmdb_fixture(&pool).await;
+    let tmdb = FakeTmdb::new(Vec::new());
+    let id = enqueue_raw(
+        &pool,
+        &format!(
+            "{{\"ClassifierFlags\":{{\"local_search_enabled\":false}},\"InfoHashes\":[\"{HASH_LOCAL}\"]}}"
+        ),
+    )
+    .await;
+    let worker = tmdb_worker_with(&pool, &tmdb, 1, organic_config(0));
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+    ));
+    assert!(tmdb.count("query=Reusable") >= 1, "{:?}", tmdb.asked());
+    let image = live_image(&pool).await;
+    assert!(attached(&image, HASH_LOCAL, "null"), "{image:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn organic_retry_jobs_carry_the_resolved_workflow_and_the_mode_and_flags() {
+    let pool = connect().await;
+    let failing = format!("[\"{HASH_UNKNOWN}\",\"{HASH_LOCAL}\"]");
+    let dht_retry = serde_json::json!({
+        "ClassifierWorkflow": "default",
+        "InfoHashes": [HASH_UNKNOWN]
+    });
+    for (payload, priority, retry) in [
+        // A DHT job: the workflow resolved, the flags still omitted.
+        (
+            format!("{{\"InfoHashes\":{failing}}}"),
+            0,
+            dht_retry.clone(),
+        ),
+        // An explicit empty workflow, and flags Go's `omitempty` drops.
+        (
+            format!(
+                "{{\"ClassifierWorkflow\":\"\",\"ClassifierFlags\":{{}},\"InfoHashes\":{failing}}}"
+            ),
+            0,
+            dht_retry,
+        ),
+        // A rematch batch child: its mode and flags kept.
+        (
+            format!(
+                "{{\"ClassifyMode\":1,\"ClassifierFlags\":{{\"apis_enabled\":true}},\"InfoHashes\":{failing}}}"
+            ),
+            10,
+            serde_json::json!({
+                "ClassifyMode": 1,
+                "ClassifierWorkflow": "default",
+                "ClassifierFlags": {"apis_enabled": true},
+                "InfoHashes": [HASH_UNKNOWN]
+            }),
+        ),
+    ] {
+        seed_tmdb_fixture(&pool).await;
+        let tmdb = FakeTmdb::new(vec![("query=Unknown", answer(500, None, "{}"))]);
+        let id = enqueue_raw_at(&pool, &payload, priority).await;
+        let worker = tmdb_worker_with(&pool, &tmdb, 1, organic_config(10));
+        let outcome = worker.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "{payload}: {outcome:?}"
+        );
+        let (stored, status, retries, max_retries) = other_job(&pool, &id).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).unwrap(),
+            retry,
+            "{payload}"
+        );
+        assert_eq!(
+            (status.as_str(), retries, max_retries),
+            ("pending", 0, 2),
+            "{payload}"
+        );
+        // Go publishes it at the default priority, so it is an organic job
+        // within the tightest bound.
+        let (retry_id, retry_priority): (String, i32) =
+            sqlx::query_as("SELECT id, priority FROM queue_jobs WHERE id <> $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("the retry job");
+        assert_eq!(retry_priority, 0, "{payload}");
+        make_ready(&pool, &retry_id).await;
+        assert_eq!(
+            probe_claims(&pool, ProcessTorrentAdmission::Organic { max_priority: 0 }).await,
+            vec![retry_id],
+            "{payload}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_abstained_organic_job_is_excluded_and_counted_by_its_reason() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    sqlx::query(
+        "INSERT INTO torrent_hints \
+         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', NOW(), NOW())",
+    )
+    .bind(HASH_UNKNOWN)
+    .execute(&pool)
+    .await
+    .expect("seed sourced hint");
+    // Claim order: the hinted DHT job first, then one behind it.
+    let hinted = enqueue_raw(
+        &pool,
+        &format!("{{\"InfoHashes\":[\"{HASH_LOCAL}\",\"{HASH_UNKNOWN}\"]}}"),
+    )
+    .await;
+    let behind = enqueue_raw(&pool, &format!("{{\"InfoHashes\":[\"{HASH_FOUND}\"]}}")).await;
+    let before = job_row(&pool, &hinted).await;
+    let tmdb = FakeTmdb::new(found_answers());
+    let registry = prometheus::Registry::new();
+    let metrics = bitmagnet_processor::register_worker_metrics(&registry).unwrap();
+    let worker = tmdb_worker_with(
+        &pool,
+        &tmdb,
+        1,
+        ProcessTorrentWorkerConfig {
+            abstain_cooloff: Duration::from_secs(3_600),
+            ..organic_config(0)
+        },
+    )
+    .with_metrics(metrics.clone());
+
+    // Poll 1 abstains, poll 2 takes the job behind it, poll 3 is idle.
+    let outcome = worker.run_once().await.unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+        panic!("expected an abstention, got {outcome:?}");
+    };
+    assert_eq!(job.id, hinted);
+    assert_eq!(
+        reason,
+        WriterPlanError::AttachHintUnsupported {
+            info_hash: HASH_UNKNOWN.to_owned()
+        }
+        .to_string()
+    );
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == behind
+    ));
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+    ));
+    assert_eq!(metrics.with_label_values(&["abstained", "hint"]).get(), 1);
+    assert_eq!(
+        metrics.with_label_values(&["abstained", "payload"]).get(),
+        0
+    );
+    assert_eq!(metrics.with_label_values(&["processed", ""]).get(), 1);
+    // Only the job behind it reached TMDB.
+    assert!(
+        tmdb.asked().iter().all(
+            |request| !request.contains("query=Unknown") && !request.contains("query=Reusable")
+        ),
+        "{:?}",
+        tmdb.asked()
+    );
+    assert_eq!(tmdb.count("query=Found"), 1, "{:?}", tmdb.asked());
+    // The abstained row is untouched, and Go claims it.
+    assert_eq!(job_row(&pool, &hinted).await, before);
+    let go = QueueStore::new(pool.clone());
+    assert!(matches!(
+        go.consume_one(PROCESS_TORRENT, |_| async { Ok::<_, String>(()) })
+            .await
+            .unwrap(),
+        ConsumeOutcome::Processed { job } if job.id == hinted
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_type_only_hint_with_empty_languages_and_null_episodes_is_bare() {
+    let pool = connect().await;
+    // No hint, or a type-only hint with `languages` (SQL NULL when `None`).
+    let run = |hint: Option<Option<&'static str>>| {
+        let pool = pool.clone();
+        async move {
+            reset(&pool).await;
+            seed_fixture_torrents(&pool).await;
+            if let Some(languages) = hint {
+                sqlx::query(
+                    "INSERT INTO torrent_hints \
+                     (info_hash, content_type, languages, episodes, created_at, updated_at) \
+                     VALUES (decode($1, 'hex'), 'movie', $2::jsonb, NULL, NOW(), NOW())",
+                )
+                .bind(HASH_B)
+                .bind(languages)
+                .execute(&pool)
+                .await
+                .expect("seed type-only hint");
+            }
+            let id = enqueue(&QueueStore::new(pool.clone()), &supported_params(&[HASH_B])).await;
+            let outcome = worker(&pool, fast_config()).run_once().await.unwrap();
+            (id, outcome, live_image(&pool).await)
+        }
+    };
+    let (_, _, unhinted) = run(None).await;
+    // Every prod hint stores `languages = '[]'` and SQL NULL episodes.
+    let mut images = Vec::new();
+    for languages in [None, Some("[]")] {
+        let (id, outcome, image) = run(Some(languages)).await;
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "languages {languages:?}: {outcome:?}"
+        );
+        images.push(image);
+    }
+    assert_eq!(images[1], images[0]);
+    assert_ne!(images[0], unhinted, "the type-only hint was not used");
+    // A language is a hint attribute the writer cannot carry.
+    let (id, outcome, _) = run(Some(Some("[\"en\"]"))).await;
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Abstained { job, reason }
+                if job.id == id
+                    && *reason == WriterPlanError::AttachHintUnsupported {
+                        info_hash: HASH_B.to_owned()
+                    }
+                    .to_string()
+        ),
+        "{outcome:?}"
+    );
 }

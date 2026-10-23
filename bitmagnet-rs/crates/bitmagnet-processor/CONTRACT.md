@@ -366,7 +366,7 @@ have no top-level key other than `ClassifyMode`, `ClassifierWorkflow`,
 key matches such as `classifierWorkflow`, which serde ignores). The embedded core
 configuration defaults all three flags to `true`, so an omitted flag can never
 resolve to the supported value; the organic DHT payload (`InfoHashes` only) is
-therefore always left to Go. A claimed job that the kernel still cannot
+therefore left to Go, unless Milestone 9's `--admit-organic` is on. A claimed job that the kernel still cannot
 reproduce (a sourced or enriched explicit hint, an input over the loader's
 bounds, any composition invariant) is abstained before any side effect: the
 claim transaction rolls back, the row keeps its status, retries, `run_after`,
@@ -733,3 +733,116 @@ Known differences from Go, beyond Milestone 7's:
   - The harness's plain-HTTP fake TMDB runs HTTP/1.1 on both sides, so it does not exercise this.
 - **Failure order.** With two or more failed torrents in one job, Go's order is goroutine completion order and Rust's is input order (see above).
 - **Calls in flight.** With classification parallelism above one, calls already in flight when an abstaining error is recorded still complete; only calls that start afterwards are refused.
+
+## Milestone 9: organic admission (`--admit-organic`)
+
+`--admit-organic` (`BITMAGNET_PROCESS_TORRENT_WORKER_ADMIT_ORGANIC`, default
+off) lets a flags-on worker claim organic payloads: the shapes Go's producers
+write, whose omitted attach flags the classifier resolves to the core
+defaults. `--organic-max-priority`
+(`BITMAGNET_PROCESS_TORRENT_WORKER_ORGANIC_MAX_PRIORITY`, default 0) is the
+highest job priority it claims.
+- `--admit-organic` refuses to start without `--admit-flags-on`, so it inherits Milestone 7's resolver stack and Goose head 36. It adds no migration.
+- A negative bound is refused, and so is a bound without `--admit-organic`.
+- The start-up line logs `admission=Organic { max_priority: N }`.
+
+**Claim.** `ProcessTorrentAdmission::Organic { max_priority }` runs
+`ORGANIC_PROCESS_TORRENT_CLAIM_SQL`: Milestone 6's select list, `ORDER BY` and
+locking, with `priority <= $2` and `ORGANIC_PAYLOAD_PREDICATE` in place of the
+containment. The predicate admits `MessageParams` exactly as Go's producers
+write it:
+- only the four exact key names; Go's case-insensitive aliases are still rejected;
+- `ClassifierWorkflow` absent, `""` or `"default"`;
+- `ClassifyMode` absent, `0` or `1`, compared as jsonb text: numeric jsonb equality would also admit `1.0`, which neither Go's `int` nor serde's `i32` decodes;
+- `InfoHashes` an array of 1 to 100 (the loader's bound) lowercase 40-digit hex strings, a strict subset of what both decoders accept;
+- `ClassifierFlags` absent, or an object holding only the three attach flags, each a JSON boolean, so `delete_xxx` and `delete_content_types` are rejected;
+- no JSON `null` anywhere. No producer writes one (`message.go` uses `omitempty`); Go would read it as absent, so such a job is left to Go.
+
+The predicate is a `CASE` whose `WHEN`s run in order, so `jsonb -` (an error
+on a scalar) and the array functions only see the types an earlier `WHEN`
+established; PostgreSQL may reorder `AND`ed quals. A payload outside it is
+never claimed. `validate_supported_params(params, Organic)` re-checks the
+decoded params as a backstop: a workflow that resolves to `default`, and no
+flag but the attach flags, as booleans.
+
+**Flags.** Each attach flag is the payload's value, else the core default,
+`true`, and an empty or absent workflow is `default`. That is the classifier's
+existing per-flag merge, as in Go's `runner.go`, so there is no resolution
+code: a DHT `{"InfoHashes":[…]}` job classifies exactly as the explicit
+flags-on job does.
+
+**Index.** No partial index can carry the predicate (PostgreSQL allows no
+subquery in an index predicate), and none is needed. The claim walks Go's
+`queue_jobs_claim_idx` on `(queue, (status = 'retry'), priority, run_after)`,
+whose order is the claim's `ORDER BY`, with `priority <= $2` in its Index
+Cond. Rows above the bound are stepped over on the index tuples without a
+heap fetch; the predicate runs only on rows within the bound.
+`EXPLAIN (ANALYZE, BUFFERS)` at bound 0 on musl PostgreSQL 16.15, prod's
+major version:
+- **(a)** No row within the bound, behind 100,000 at priority 10: 605 shared buffers, 3.2 ms (custom plan) and 4.6 ms (generic). PostgreSQL 16 has no skip scan, so this reads every higher-band index tuple, about 6 buffers per 1,000 rows: roughly 2,700 buffers per idle poll, 30 s apart, behind a whole-database batch backlog of 450,000.
+- **(b)** As (a), plus 1,024 rows within the bound, all excluded: 649 buffers, 4.6 ms (custom) and 12.2 ms (generic, which compares each row with the exclusion list linearly).
+- PostgreSQL 18.6's skip scan reads 9 and 50 buffers (two index searches).
+
+**Bound.** Go's producers write these priorities:
+- the DHT crawler (`persist.go`): 0;
+- every processor retry (`processor.go`'s `NewQueueJob`): 0;
+- batch children (`planner.go`): 10, or 4 with `apis_enabled` false;
+- the importer (`importer.go`): 20.
+
+Bound 0 therefore takes the DHT and retry jobs, and steps over the importer
+and batch jobs, where the hinted torrents are. Raise it only after M3b, once
+the `hint` count below is clean. Organic admission is not a superset of
+`FlagsOffOrOn`: an explicit flags-on payload above the bound stays with Go.
+
+**Retries.** A retry job is rebuilt from Go's four fields (Milestone 8): the
+resolved workflow `default`, the job's `ClassifyMode`, and its flags as given
+(omitted when absent or empty), at the default priority 0. It is therefore an
+organic job within any bound.
+
+**Abstention reasons.** `bitmagnet_process_torrent_worker_jobs_total` has a
+`reason` label. It is empty except on `outcome="abstained"`, where it is one
+of:
+- `payload`: undecodable, or a workflow or flags outside the admission;
+- `hint`: a sourced or enriched explicit hint (M3);
+- `resolver`: an abstaining resolver failure;
+- `conflict`: `WriterLoadError::ConflictingReusableContent`;
+- `unsupported`: any other loader or composer limit.
+
+Under organic admission `payload` should stay at 0, because SQL rejects those
+shapes before any claim. A non-zero count means the SQL predicate and the
+validator disagree.
+
+**Operations.** The TMDB client latches its key validation and a 401 for the
+life of the process. After rotating the TMDB key, restart the Rust worker:
+until then every job that reaches TMDB abstains and is left to Go.
+
+Gates:
+- **Unit:**
+  - (`bitmagnet-queue`) The flags-off and flags-on claims are pinned byte for byte. The organic claim is the flags-off claim's select list, `ORDER BY` and locking around the bound and predicate. Each admission maps to its claim.
+  - (`src/writer_plan.rs`) Organic params accept an empty or `default` workflow and any boolean subset of the attach flags. They refuse other workflows; `delete_xxx`, `delete_content_types`, unknown and case-variant flags; and string, numeric and null flag values.
+  - (`src/worker.rs`) Each abstention maps to its reason label.
+  - (the binary) `--admit-organic` requires `--admit-flags-on`. A negative bound, and a bound without the switch, are refused. The defaults are off and 0.
+- **Migration-backed** (`tests/worker_pg.rs`, on the workspace's PostgreSQL 18.6 and on musl 16.15):
+  - Each producer shape, at its priority, is claimed in Go's order exactly within bounds 0, 3, 4, 9, 10, 19 and 20; the Go-only shapes never are. The flags-on claim still takes only the explicit subsets, the probes leave every row unchanged, and the worker's admission follows its configuration only with a live materializer.
+  - The predicate, evaluated over the stored column, agrees with an independent Rust reference on 181 payloads, 33 of them admitted. They cover every producer shape; each field missing, null, retyped, or under a case-variant name; `ClassifyMode` as `-0`, `1e0`, `1.0` and others; 0, 1, 2, 99, 100, 101 and 250 hashes; 39- and 41-character, `0x`, upper-case, newline-terminated and unicode-escaped hashes; each flag true, false, null, 0, 1, `"true"`, an array or an object; `delete_xxx`, `delete_content_types` and unknown flags; and duplicate keys. Every admitted payload decodes and passes the validator, and the claim takes exactly the admitted rows.
+  - The plan: an Index Scan on `queue_jobs_claim_idx` with the bound in its Index Cond, no sort, and neither 00035's nor 00036's index, as custom and generic plans, for (a), (b), and 20,000 DHT rows within the bound.
+  - An organic DHT job leaves the same image, and makes the same TMDB requests, as the explicit flags-on job.
+  - Explicit organic flags override the defaults: `tmdb_enabled: false` makes no TMDB request while local search still attaches, and `local_search_enabled: false` sends the local movie to TMDB.
+  - The retry jobs of a DHT job, of an explicit empty workflow with empty flags, and of a rematch batch child at priority 10 carry `default`, the mode and the flags, at priority 0, and bound 0 claims them.
+  - A hinted organic job abstains with reason `hint` (`payload` stays 0), stays excluded while the job behind it is processed, and Go then claims it untouched.
+  - A type-only hint with `languages = '[]'`, as every prod hint has, and SQL NULL episodes classifies as one with NULL `languages` does, and the hint is used. A non-empty `languages` abstains.
+- **Mutations:** 21, all killed. They are:
+  - an absent attach flag resolves to `false`;
+  - the core defaults override the payload's attach flags;
+  - the SQL admits a custom workflow, extra or case-variant keys, a non-boolean flag, `delete_xxx`, more than 100 hashes, or any hash element (six mutations);
+  - the bound is exclusive, or dropped;
+  - the validator skips the flag key set;
+  - organic admission starts without flags-on, or a non-live worker claims organic payloads;
+  - a retry keeps the named workflow, or loses `ClassifyMode`;
+  - the flags-off or the flags-on claim drifts by a byte;
+  - the worker ignores its exclusions under organic admission, or the claim drops them;
+  - the `CASE` flattened to `AND NOT`s, or to `IS NOT TRUE`s. The second keeps every verdict, because PostgreSQL happened to run each type guard first, so the agreement test passes. Only the plan test catches it: the `AND`ed selectivities move the generic plan to a bitmap scan and a sort.
+
+Known differences from Go, beyond Milestones 7 and 8:
+- **Nulls and numbers.** A payload with a JSON `null` field, or a `ClassifyMode` other than the integers 0 and 1, is left to Go.
+- **Hinted organic jobs (M3).** A DHT or retry job whose torrent has a sourced or enriched hint abstains, as in Milestone 7; the `hint` count measures how often.
