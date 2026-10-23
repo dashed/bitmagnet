@@ -52,7 +52,8 @@ fn go_write_set_oracle_matches_all_classifier_corpus_torrents() {
                     info_hash: fixture.input.info_hash,
                     classifier_input: fixture.input.classifier,
                     existing_content_ids: fixture.input.existing_content_ids,
-                    attach_hint_unsupported: false,
+                    hint_admission: bitmagnet_processor::load::HintAdmission::Supported,
+                    content_ambiguity: None,
                     source_backed_content_present: false,
                 }],
             )

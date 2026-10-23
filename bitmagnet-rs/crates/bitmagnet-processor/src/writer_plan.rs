@@ -20,6 +20,7 @@ use futures::future::BoxFuture;
 use sqlx::PgPool;
 
 use crate::live::ResolveScope;
+use crate::load::{ContentAmbiguity, HintAdmission};
 use crate::persist::{persist_write_set_with_episode_objects, validate_persistence_input};
 use crate::supported_subset::{
     has_explicit_attach_flags_off, has_explicit_attach_flags_on, has_explicit_default_workflow,
@@ -474,7 +475,7 @@ fn compose_writer_plan_in(
     admission: ProcessTorrentAdmission,
 ) -> Result<WriterPlan, WriterPlanError> {
     validate_supported_params(params, served_admission(materializer, admission))?;
-    let indexed = index_loaded_torrents(loaded)?;
+    let indexed = index_loaded_torrents(loaded, materializer.is_live())?;
     reject_unrequested_loaded_torrents(params, &indexed)?;
     let materialized = materializer.materialize_scoped(
         params,
@@ -662,15 +663,44 @@ pub fn validate_supported_params(
     }
 }
 
+/// Index the loaded torrents, refusing any the plan cannot reproduce: an
+/// explicit hint the loader refused, a sourced one without a `live` resolver,
+/// or associations Go picks among by row order.
 fn index_loaded_torrents(
     loaded: &[WriterLoadedTorrent],
+    live: bool,
 ) -> Result<BTreeMap<&str, &WriterLoadedTorrent>, WriterPlanError> {
     let mut indexed = BTreeMap::new();
     for torrent in loaded {
-        if torrent.loaded.attach_hint_unsupported {
-            return Err(WriterPlanError::AttachHintUnsupported {
-                info_hash: torrent.loaded.info_hash.clone(),
-            });
+        let info_hash = || torrent.loaded.info_hash.clone();
+        match torrent.loaded.hint_admission {
+            HintAdmission::Supported => {}
+            HintAdmission::NeedsLiveResolver if live => {}
+            HintAdmission::NeedsLiveResolver => {
+                return Err(WriterPlanError::AttachHintUnsupported {
+                    info_hash: info_hash(),
+                    detail: "sourced hint without a live resolver",
+                });
+            }
+            HintAdmission::Unsupported { detail } => {
+                return Err(WriterPlanError::AttachHintUnsupported {
+                    info_hash: info_hash(),
+                    detail,
+                });
+            }
+        }
+        match torrent.loaded.content_ambiguity {
+            None => {}
+            Some(ContentAmbiguity::Reuse) => {
+                return Err(WriterPlanError::AmbiguousContentReuse {
+                    info_hash: info_hash(),
+                });
+            }
+            Some(ContentAmbiguity::PreservedType) => {
+                return Err(WriterPlanError::AmbiguousPreservedContentType {
+                    info_hash: info_hash(),
+                });
+            }
         }
         validate_reusable_content_hydration(torrent)?;
         if torrent.loaded.info_hash != torrent.loaded.classifier_input.id {
@@ -827,8 +857,21 @@ pub enum WriterPlanError {
     LiveCompositionOnRuntimeThread,
     #[error("the writer plan composition was cancelled before it ran")]
     CompositionCancelled,
+    /// `detail` is for the abstain log; the text stays as the harness matches
+    /// it.
     #[error("writer plan cannot reproduce the complete Go hint/enrichment path for {info_hash}")]
-    AttachHintUnsupported { info_hash: String },
+    AttachHintUnsupported {
+        info_hash: String,
+        detail: &'static str,
+    },
+    #[error(
+        "writer plan cannot reproduce Go's reused association for {info_hash}: more than one is eligible, and Go takes the first in row order"
+    )]
+    AmbiguousContentReuse { info_hash: String },
+    #[error(
+        "writer plan cannot reproduce Go's preserved content type for {info_hash}: its source-less associations disagree, and Go takes the first in row order"
+    )]
+    AmbiguousPreservedContentType { info_hash: String },
     #[error("writer plan reusable content is not fully hydrated for {info_hash}")]
     ReusableContentNotFullyHydrated { info_hash: String },
     #[error("writer plan has reusable-content hydration without reuse for {info_hash}")]
@@ -858,6 +901,18 @@ pub enum WriterPlanError {
     FailureLedgerMismatch,
 }
 
+impl WriterPlanError {
+    /// What an abstain log names beyond the error text: the column or
+    /// condition behind an [`Self::AttachHintUnsupported`], empty otherwise.
+    #[must_use]
+    pub fn abstain_detail(&self) -> &'static str {
+        match self {
+            Self::AttachHintUnsupported { detail, .. } => detail,
+            _ => "",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -878,6 +933,7 @@ mod tests {
         validate_supported_params, PersistWriterPlanError, RetryPublishReceipt, RetryPublisher,
         WriterFailureCause, WriterFailures, WriterPlan, WriterPlanError, WriterPlanPersister,
     };
+    use crate::load::{ContentAmbiguity, HintAdmission};
     use crate::{
         BlockingManager, BoxError, ClassifierFailure, ContentPersistence, ContentPersistenceKey,
         LoadedTorrent, PersistError, TorrentContentPersistence, TorrentContentWrite,
@@ -905,7 +961,8 @@ mod tests {
                     contents: Vec::new(),
                 },
                 existing_content_ids: Vec::new(),
-                attach_hint_unsupported: false,
+                hint_admission: crate::load::HintAdmission::Supported,
+                content_ambiguity: None,
                 source_backed_content_present: false,
             },
             torrent_snapshot: TorrentSnapshot {
@@ -1250,7 +1307,7 @@ mod tests {
     #[test]
     fn retry_order_prefixes_duplicate_missing_then_loaded_failures_in_processing_order() {
         let loaded = [loaded(HASH_A), loaded(HASH_B)];
-        let indexed = index_loaded_torrents(&loaded).expect("index loaded retry fixtures");
+        let indexed = index_loaded_torrents(&loaded, false).expect("index loaded retry fixtures");
         let mut params = supported_params();
         params.info_hashes = [HASH_C, HASH_B, HASH_A, HASH_C, HASH_B]
             .into_iter()
@@ -1656,12 +1713,12 @@ mod tests {
     #[test]
     fn loaded_index_requires_unique_matching_keys() {
         let valid = loaded(HASH_A);
-        assert_eq!(index_loaded_torrents(&[valid]).unwrap().len(), 1);
+        assert_eq!(index_loaded_torrents(&[valid], false).unwrap().len(), 1);
 
         let duplicate_a = loaded(HASH_A);
         let duplicate_b = loaded(HASH_A);
         assert!(matches!(
-            index_loaded_torrents(&[duplicate_a, duplicate_b]),
+            index_loaded_torrents(&[duplicate_a, duplicate_b], false),
             Err(WriterPlanError::DuplicateLoadedTorrent { info_hash })
                 if info_hash == HASH_A
         ));
@@ -1669,7 +1726,7 @@ mod tests {
         let mut mismatched = loaded(HASH_A);
         mismatched.loaded.classifier_input.id = HASH_B.to_owned();
         assert!(matches!(
-            index_loaded_torrents(&[mismatched]),
+            index_loaded_torrents(&[mismatched], false),
             Err(WriterPlanError::LoadedInfoHashMismatch {
                 loaded_info_hash,
                 classifier_info_hash,
@@ -1677,17 +1734,53 @@ mod tests {
         ));
 
         let mut unsupported = loaded(HASH_A);
-        unsupported.loaded.attach_hint_unsupported = true;
+        unsupported.loaded.hint_admission = HintAdmission::Unsupported {
+            detail: "languages",
+        };
+        for live in [false, true] {
+            assert!(matches!(
+                index_loaded_torrents(std::slice::from_ref(&unsupported), live),
+                Err(WriterPlanError::AttachHintUnsupported { info_hash, detail: "languages" })
+                    if info_hash == HASH_A
+            ));
+        }
+
+        // A sourced hint needs the live resolver, and nothing else.
+        let mut sourced = loaded(HASH_A);
+        sourced.loaded.hint_admission = HintAdmission::NeedsLiveResolver;
         assert!(matches!(
-            index_loaded_torrents(&[unsupported]),
-            Err(WriterPlanError::AttachHintUnsupported { info_hash })
+            index_loaded_torrents(std::slice::from_ref(&sourced), false),
+            Err(WriterPlanError::AttachHintUnsupported { info_hash, .. })
                 if info_hash == HASH_A
+        ));
+        assert!(index_loaded_torrents(std::slice::from_ref(&sourced), true).is_ok());
+
+        let mut reuse = loaded(HASH_A);
+        reuse.loaded.content_ambiguity = Some(ContentAmbiguity::Reuse);
+        let mut preserved = loaded(HASH_A);
+        preserved.loaded.content_ambiguity = Some(ContentAmbiguity::PreservedType);
+        for live in [false, true] {
+            assert!(matches!(
+                index_loaded_torrents(std::slice::from_ref(&reuse), live),
+                Err(WriterPlanError::AmbiguousContentReuse { info_hash }) if info_hash == HASH_A
+            ));
+            assert!(matches!(
+                index_loaded_torrents(std::slice::from_ref(&preserved), live),
+                Err(WriterPlanError::AmbiguousPreservedContentType { info_hash })
+                    if info_hash == HASH_A
+            ));
+        }
+        // The hint is judged first, so its reason wins.
+        unsupported.loaded.content_ambiguity = Some(ContentAmbiguity::Reuse);
+        assert!(matches!(
+            index_loaded_torrents(std::slice::from_ref(&unsupported), true),
+            Err(WriterPlanError::AttachHintUnsupported { .. })
         ));
 
         let mut incomplete_reuse = loaded(HASH_A);
         incomplete_reuse.loaded.source_backed_content_present = true;
         assert!(matches!(
-            index_loaded_torrents(&[incomplete_reuse]),
+            index_loaded_torrents(&[incomplete_reuse], false),
             Err(WriterPlanError::ReusableContentNotFullyHydrated { info_hash })
                 if info_hash == HASH_A
         ));
@@ -1695,7 +1788,7 @@ mod tests {
         let mut stray_hydration = loaded(HASH_A);
         stray_hydration.reusable_content_fully_hydrated = true;
         assert!(matches!(
-            index_loaded_torrents(&[stray_hydration]),
+            index_loaded_torrents(&[stray_hydration], false),
             Err(WriterPlanError::UnexpectedReusableContentHydration { info_hash })
                 if info_hash == HASH_A
         ));
@@ -1739,7 +1832,7 @@ mod tests {
     #[test]
     fn persistence_projection_requires_an_exact_unique_supported_keyset() {
         let loaded = [loaded(HASH_A)];
-        let indexed = index_loaded_torrents(&loaded).expect("index valid source");
+        let indexed = index_loaded_torrents(&loaded, false).expect("index valid source");
         let write_set = WriteSet {
             torrent_contents: vec![row(HASH_A)],
             ..WriteSet::default()

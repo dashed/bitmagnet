@@ -339,7 +339,7 @@ fn classifications() -> Vec<(String, Classification)> {
         content_type: "tv_show".to_owned(),
         content_source: "tvdb".to_owned(),
         content_id: "81189".to_owned(),
-        episodes: Some("S01E02".to_owned()),
+        episodes: bitmagnet_release::parse_episodes("S01E02"),
         languages: vec!["de".to_owned()],
         video_resolution: Some(VideoResolution::V720p.as_str().to_owned()),
         video_source: Some(VideoSource::Tv.as_str().to_owned()),

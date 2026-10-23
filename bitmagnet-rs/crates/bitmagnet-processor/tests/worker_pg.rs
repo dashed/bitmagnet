@@ -662,15 +662,16 @@ async fn abstained_jobs_are_left_untouched_for_go() {
     let pool = connect().await;
     reset(&pool).await;
     seed_fixture_torrents(&pool).await;
-    // An enriched explicit hint is outside the Rust kernel's supported path.
+    // A sourced explicit hint needs a live resolver, which this worker lacks.
     sqlx::query(
-        "INSERT INTO torrent_hints (info_hash, content_type, release_group, created_at, updated_at) \
-         VALUES (decode($1, 'hex'), 'movie', 'ENRICHED', NOW(), NOW())",
+        "INSERT INTO torrent_hints \
+         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'imdb', 'tt0133093', NOW(), NOW())",
     )
     .bind(HASH_A)
     .execute(&pool)
     .await
-    .expect("seed enriched hint");
+    .expect("seed sourced hint");
     let store = QueueStore::new(pool.clone());
     let id = enqueue(&store, &supported_params(&[HASH_A])).await;
     sqlx::query("UPDATE queue_jobs SET status = 'retry', retries = 1 WHERE id = $1")
@@ -962,18 +963,19 @@ async fn an_abstained_job_never_blocks_or_spins_and_its_exclusion_is_bounded() {
     let pool = connect().await;
     reset(&pool).await;
     seed_fixture_torrents(&pool).await;
-    const HASH_ENRICHED_2: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
-    seed_torrent(&pool, HASH_ENRICHED_2, "Another Enriched.mkv", 1_000_000).await;
-    for hash in [HASH_A, HASH_ENRICHED_2] {
+    const HASH_SOURCED_2: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
+    seed_torrent(&pool, HASH_SOURCED_2, "Another Sourced.mkv", 1_000_000).await;
+    // Sourced hints, which this worker (without a live resolver) abstains on.
+    for hash in [HASH_A, HASH_SOURCED_2] {
         sqlx::query(
             "INSERT INTO torrent_hints \
-             (info_hash, content_type, release_group, created_at, updated_at) \
-             VALUES (decode($1, 'hex'), 'movie', 'ENRICHED', NOW(), NOW())",
+             (info_hash, content_type, content_source, content_id, created_at, updated_at) \
+             VALUES (decode($1, 'hex'), 'movie', 'imdb', 'tt0133093', NOW(), NOW())",
         )
         .bind(hash)
         .execute(&pool)
         .await
-        .expect("seed enriched hint");
+        .expect("seed sourced hint");
     }
     let store = QueueStore::new(pool.clone());
     // Claim order: the abstaining job first, then an admitted one behind it.
@@ -1055,7 +1057,7 @@ async fn an_abstained_job_never_blocks_or_spins_and_its_exclusion_is_bounded() {
     ));
 
     // Cap: with room for one exclusion, a second abstention evicts the first.
-    let second = enqueue(&store, &supported_params(&[HASH_ENRICHED_2])).await;
+    let second = enqueue(&store, &supported_params(&[HASH_SOURCED_2])).await;
     let capped = ProcessTorrentWorker::new(
         QueueStore::new(pool.clone()),
         Materializer::from_core().unwrap(),
@@ -2234,81 +2236,6 @@ async fn a_flags_on_job_abandoned_at_its_timeout_makes_no_further_resolver_calls
     assert_eq!(live_image(&pool).await, image_before);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
-async fn a_flags_on_job_with_a_sourced_hint_abstains_before_any_resolver_call() {
-    let pool = connect().await;
-    reset(&pool).await;
-    seed_local_movie(&pool).await;
-    seed_torrent(
-        &pool,
-        HASH_LOCAL,
-        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
-        2_000_000_000,
-    )
-    .await;
-    seed_torrent(
-        &pool,
-        HASH_UNKNOWN,
-        "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
-        1_000_000_000,
-    )
-    .await;
-    // Go would look this hint up by ID (local, then TMDB): M3, so Rust
-    // leaves the whole job to Go before classifying any of its torrents.
-    sqlx::query(
-        "INSERT INTO torrent_hints \
-         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
-         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', NOW(), NOW())",
-    )
-    .bind(HASH_UNKNOWN)
-    .execute(&pool)
-    .await
-    .expect("seed sourced hint");
-    let store = QueueStore::new(pool.clone());
-    let id = enqueue(&store, &flags_on_params(&[HASH_LOCAL, HASH_UNKNOWN])).await;
-    let before = job_row(&pool, &id).await;
-    let image_before = live_image(&pool).await;
-    let resolver = Arc::new(CountingResolver::default());
-    let worker = counting_worker(&pool, &resolver, fast_config());
-
-    let outcome = worker.run_once().await.unwrap();
-    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
-        panic!("expected an abstention, got {outcome:?}");
-    };
-    assert_eq!(job.id, id);
-    assert_eq!(
-        reason,
-        WriterPlanError::AttachHintUnsupported {
-            info_hash: HASH_UNKNOWN.to_owned()
-        }
-        .to_string()
-    );
-    assert_eq!(
-        resolver.calls.load(Ordering::SeqCst),
-        0,
-        "a hint-abstained job reached the resolver"
-    );
-    assert_eq!(
-        job_row(&pool, &id).await,
-        before,
-        "abstention changed the row"
-    );
-    assert_eq!(
-        live_image(&pool).await,
-        image_before,
-        "abstention wrote rows"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue_jobs")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        1,
-        "an abstention publishes no retry job"
-    );
-}
-
 // -- TMDB status failures fail only their torrent, as in Go ----------------
 
 const HASH_FOUND: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
@@ -2721,6 +2648,733 @@ async fn abstaining_tmdb_failures_leave_zero_writes_and_make_no_later_calls() {
             tmdb.asked()
         );
     }
+}
+
+// -- Sourced, enriched and ambiguous hints (M3b) ---------------------------
+
+/// TMDB's `/find` and details for the local movie's id, `tmdb:42`. The details
+/// differ from the local row, so a job holding both images conflicts.
+const FIND_42: &str = r#"{"movie_results":[{"id":42,"title":"Reusable Movie"}],"tv_results":[]}"#;
+const DETAILS_42: &str = r#"{"id":42,"title":"Reusable Movie","original_title":"Reusable Movie","original_language":"en","release_date":"1999-06-01","imdb_id":"tt0000042","genres":[]}"#;
+const FIND_777: &str = r#"{"movie_results":[{"id":777,"title":"Found Film"}],"tv_results":[]}"#;
+const UNSUPPORTED_HINT: &str =
+    "writer plan cannot reproduce the complete Go hint/enrichment path for";
+
+/// Insert `info_hash`'s explicit hint: `content_type`, then each
+/// `(column, SQL literal)` in `extra`.
+async fn seed_hint(pool: &PgPool, info_hash: &str, content_type: &str, extra: &[(&str, &str)]) {
+    let columns: String = extra
+        .iter()
+        .map(|(column, _)| format!(", {column}"))
+        .collect();
+    let values: String = extra
+        .iter()
+        .map(|(_, value)| format!(", {value}"))
+        .collect();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO torrent_hints (info_hash, content_type{columns}, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), $2{values}, NOW(), NOW())"
+    )))
+    .bind(info_hash)
+    .bind(content_type)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("seed hint for {info_hash}: {error}"));
+}
+
+/// A `movie/tmdb/<id>` content row titled `title`, with an `imdb` id
+/// attribute when `imdb` is given.
+async fn seed_movie(pool: &PgPool, id: &str, title: &str, imdb: Option<&str>) {
+    sqlx::query(
+        "INSERT INTO content (type, source, id, title, release_year, tsv, created_at, updated_at) \
+         VALUES ('movie', 'tmdb', $1, $2, 1999, ''::tsvector, \
+                 '2024-01-02 03:04:05+00', '2024-01-02 03:04:05+00')",
+    )
+    .bind(id)
+    .bind(title)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("seed movie {id}: {error}"));
+    if let Some(imdb) = imdb {
+        sqlx::query(
+            "INSERT INTO content_attributes \
+             (content_type, content_source, content_id, source, key, value, created_at, updated_at) \
+             VALUES ('movie', 'tmdb', $1, 'imdb', 'id', $2, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(imdb)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|error| panic!("seed movie {id}'s imdb id: {error}"));
+    }
+}
+
+/// An existing `torrent_contents` association, as an earlier run left it.
+async fn seed_association(
+    pool: &PgPool,
+    info_hash: &str,
+    content_type: &str,
+    source: Option<&str>,
+    id: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO torrent_contents \
+         (info_hash, content_type, content_source, content_id, languages, episodes, \
+          created_at, updated_at, tsv, published_at, size) \
+         VALUES (decode($1, 'hex'), $2, $3, $4, '[]'::jsonb, NULL, \
+                 NOW(), NOW(), ''::tsvector, NOW(), 1)",
+    )
+    .bind(info_hash)
+    .bind(content_type)
+    .bind(source)
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|error| panic!("seed association for {info_hash}: {error}"));
+}
+
+/// `info_hash`'s `torrent_contents` rows, as `(content_id, row)` JSON.
+async fn associations(pool: &PgPool, info_hash: &str) -> Vec<(Option<String>, Value)> {
+    sqlx::query(
+        "SELECT content_id, (to_jsonb(t) - 'created_at' - 'updated_at') AS row \
+         FROM torrent_contents t WHERE info_hash = decode($1, 'hex') ORDER BY id",
+    )
+    .bind(info_hash)
+    .fetch_all(pool)
+    .await
+    .expect("read associations")
+    .into_iter()
+    .map(|row| (row.get("content_id"), row.get("row")))
+    .collect()
+}
+
+/// Under the switch, a sourced hint is looked up locally whatever the flags,
+/// as Go's `attach_local_content_by_id` is ungated: by primary key for
+/// `tmdb`, and by an `imdb` attribute in identity order, so of two content
+/// rows carrying the id the first in `(type, source, id)` order wins. Without
+/// the switch the job is left to Go with the same text as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_sourced_hint_attaches_by_canonical_and_alternative_id() {
+    let pool = connect().await;
+    let hashes = [HASH_UNKNOWN, HASH_FOUND];
+    for flags_on in [false, true] {
+        seed_tmdb_fixture(&pool).await;
+        // Inserted after `tmdb:42`, which also carries `zuluvalue`, but
+        // first in identity order.
+        seed_movie(&pool, "41", "Twin Movie", Some("zuluvalue")).await;
+        seed_hint(
+            &pool,
+            HASH_UNKNOWN,
+            "movie",
+            &[("content_source", "'tmdb'"), ("content_id", "'42'")],
+        )
+        .await;
+        seed_hint(
+            &pool,
+            HASH_FOUND,
+            "movie",
+            &[("content_source", "'imdb'"), ("content_id", "'zuluvalue'")],
+        )
+        .await;
+        let tmdb = FakeTmdb::new(found_answers());
+        let params = if flags_on {
+            flags_on_params(&hashes)
+        } else {
+            supported_params(&hashes)
+        };
+        let id = enqueue(&QueueStore::new(pool.clone()), &params).await;
+        let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "flags_on={flags_on}: {outcome:?}"
+        );
+        let image = live_image(&pool).await;
+        assert!(attached(&image, HASH_UNKNOWN, "\"42\""), "{image:#?}");
+        assert!(attached(&image, HASH_FOUND, "\"41\""), "{image:#?}");
+        assert_eq!(image.iter().filter(|row| row.starts_with("tc ")).count(), 2);
+        // Attached by ID, so neither torrent was searched for.
+        assert!(
+            tmdb.asked().is_empty(),
+            "flags_on={flags_on}: {:?}",
+            tmdb.asked()
+        );
+    }
+
+    seed_tmdb_fixture(&pool).await;
+    seed_hint(
+        &pool,
+        HASH_UNKNOWN,
+        "movie",
+        &[("content_source", "'tmdb'"), ("content_id", "'42'")],
+    )
+    .await;
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &supported_params(&[HASH_UNKNOWN]),
+    )
+    .await;
+    let before = job_row(&pool, &id).await;
+    let image_before = live_image(&pool).await;
+    let outcome = worker(&pool, fast_config()).run_once().await.unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+        panic!("expected an abstention, got {outcome:?}");
+    };
+    assert_eq!(job.id, id);
+    assert_eq!(reason, format!("{UNSUPPORTED_HINT} {HASH_UNKNOWN}"));
+    assert_eq!(job_row(&pool, &id).await, before);
+    assert_eq!(live_image(&pool).await, image_before);
+}
+
+/// A sourced hint TMDB has to find: `/find`, the first `movie_results` entry,
+/// then its details, ahead of (and instead of) any title search.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_sourced_hint_finds_tmdb_content_by_its_external_id() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    seed_hint(
+        &pool,
+        HASH_UNKNOWN,
+        "movie",
+        &[("content_source", "'imdb'"), ("content_id", "'tt0000777'")],
+    )
+    .await;
+    let tmdb = FakeTmdb::new(vec![
+        ("/find/tt0000777", answer(200, None, FIND_777)),
+        ("/movie/777", answer(200, None, FOUND_DETAILS)),
+    ]);
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &flags_on_params(&[HASH_UNKNOWN]),
+    )
+    .await;
+    let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ),
+        "{outcome:?}"
+    );
+    let image = live_image(&pool).await;
+    assert!(attached(&image, HASH_UNKNOWN, "\"777\""), "{image:#?}");
+    assert!(
+        image
+            .iter()
+            .any(|row| row.starts_with("content ") && row.contains("\"id\": \"777\"")),
+        "{image:#?}"
+    );
+    assert_eq!(tmdb.count("/authentication"), 1, "{:?}", tmdb.asked());
+    assert_eq!(
+        tmdb.count("/find/tt0000777?external_source=imdb_id"),
+        1,
+        "{:?}",
+        tmdb.asked()
+    );
+    assert_eq!(tmdb.count("/movie/777"), 1, "{:?}", tmdb.asked());
+    assert_eq!(tmdb.asked().len(), 3, "{:?}", tmdb.asked());
+    assert_eq!(queue_job_count(&pool).await, 1);
+}
+
+/// `/find` failing with a 404 fails that torrent, as any non-2xx other than
+/// 401 does in Go, while a details 404 is Go's `ErrNotFound`: unmatched, and
+/// the classification goes on to search by title.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_find_404_fails_its_torrent_and_a_details_404_is_unmatched() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    seed_hint(
+        &pool,
+        HASH_UNKNOWN,
+        "movie",
+        &[("content_source", "'imdb'"), ("content_id", "'tt0000404'")],
+    )
+    .await;
+    let mut answers = vec![("/find/tt0000404", answer(404, None, "{}"))];
+    answers.extend(found_answers());
+    let tmdb = FakeTmdb::new(answers);
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &flags_on_params(&[HASH_UNKNOWN, HASH_FOUND]),
+    )
+    .await;
+    let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ),
+        "{outcome:?}"
+    );
+    let (payload, status, ..) = other_job(&pool, &id).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload).unwrap(),
+        flags_on_retry_payload(&[HASH_UNKNOWN])
+    );
+    assert_eq!(status, "pending");
+    let image = live_image(&pool).await;
+    assert!(attached(&image, HASH_FOUND, "\"777\""), "{image:#?}");
+    assert!(associations(&pool, HASH_UNKNOWN).await.is_empty());
+    assert_eq!(tmdb.count("/find/tt0000404"), 1, "{:?}", tmdb.asked());
+    assert_eq!(tmdb.count("query=Unknown"), 0, "{:?}", tmdb.asked());
+
+    seed_tmdb_fixture(&pool).await;
+    seed_hint(
+        &pool,
+        HASH_UNKNOWN,
+        "movie",
+        &[("content_source", "'imdb'"), ("content_id", "'tt0000777'")],
+    )
+    .await;
+    let tmdb = FakeTmdb::new(vec![
+        ("/find/tt0000777", answer(200, None, FIND_777)),
+        ("/movie/777", answer(404, None, "{}")),
+    ]);
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &flags_on_params(&[HASH_UNKNOWN]),
+    )
+    .await;
+    let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        queue_job_count(&pool).await,
+        1,
+        "an unmatched torrent is not retried"
+    );
+    let unmatched = associations(&pool, HASH_UNKNOWN).await;
+    assert_eq!(unmatched.len(), 1, "{unmatched:?}");
+    assert_eq!(unmatched[0].0, None, "{unmatched:?}");
+    assert_eq!(tmdb.count("/find/tt0000777"), 1, "{:?}", tmdb.asked());
+    assert_eq!(tmdb.count("/movie/777"), 1, "{:?}", tmdb.asked());
+    assert_eq!(tmdb.count("query=Unknown"), 1, "{:?}", tmdb.asked());
+}
+
+/// A source-less hint with an id is not a lookup: Go's `hasHintedContentId`
+/// needs a source. One with a source is, even on a flags-off job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn only_a_sourced_hint_reaches_the_resolver_on_a_flags_off_job() {
+    let pool = connect().await;
+    for (source, calls) in [("NULL", 0), ("'imdb'", 1)] {
+        reset(&pool).await;
+        seed_torrent(
+            &pool,
+            HASH_UNKNOWN,
+            "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
+            1_000_000_000,
+        )
+        .await;
+        seed_hint(
+            &pool,
+            HASH_UNKNOWN,
+            "movie",
+            &[("content_source", source), ("content_id", "'tt0133093'")],
+        )
+        .await;
+        let id = enqueue(
+            &QueueStore::new(pool.clone()),
+            &supported_params(&[HASH_UNKNOWN]),
+        )
+        .await;
+        let resolver = Arc::new(CountingResolver::default());
+        let outcome = counting_worker(&pool, &resolver, fast_config())
+            .run_once()
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "source {source}: {outcome:?}"
+        );
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            calls,
+            "source {source}"
+        );
+    }
+}
+
+/// A source-less enriched hint reuses the torrent's association: Go takes the
+/// association's type, source and id, and keeps every attribute the hint
+/// carries, which then outrank what the name parses to.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_enriched_hint_keeps_its_attributes_through_content_reuse() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    seed_torrent(
+        &pool,
+        HASH_LOCAL,
+        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
+        2_000_000_000,
+    )
+    .await;
+    seed_association(&pool, HASH_LOCAL, "movie", Some("tmdb"), Some("42")).await;
+    seed_hint(
+        &pool,
+        HASH_LOCAL,
+        "movie",
+        &[
+            ("languages", "'[\"fr\"]'::jsonb"),
+            ("episodes", "'{\"1\": {\"2\": {}}}'::jsonb"),
+            ("video_resolution", "'V2160p'"),
+            ("video_source", "'webdl'"),
+            ("video_codec", "'xvid'"),
+            ("release_group", "''"),
+        ],
+    )
+    .await;
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &supported_params(&[HASH_LOCAL]),
+    )
+    .await;
+    let outcome = worker(&pool, fast_config()).run_once().await.unwrap();
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ),
+        "{outcome:?}"
+    );
+    let rows = associations(&pool, HASH_LOCAL).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (content_id, row) = &rows[0];
+    assert_eq!(content_id.as_deref(), Some("42"));
+    for (column, value) in [
+        ("languages", serde_json::json!(["fr"])),
+        ("episodes", serde_json::json!({"1": {"2": {}}})),
+        ("video_resolution", serde_json::json!("V2160p")),
+        ("video_source", serde_json::json!("WEBDL")),
+        ("video_codec", serde_json::json!("XviD")),
+        ("release_group", serde_json::json!("")),
+    ] {
+        assert_eq!(row[column], value, "{column}: {row}");
+    }
+}
+
+/// Rematch reuses nothing: the classification searches again, attaches what
+/// it finds, and the stale association is deleted. The default mode reuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn rematch_searches_again_where_the_default_mode_reuses() {
+    let pool = connect().await;
+    for (classify_mode, kept) in [
+        (bitmagnet_queue::CLASSIFY_MODE_DEFAULT, "41"),
+        (bitmagnet_queue::CLASSIFY_MODE_REMATCH, "42"),
+    ] {
+        seed_tmdb_fixture(&pool).await;
+        seed_movie(&pool, "41", "Stale Movie", None).await;
+        seed_association(&pool, HASH_LOCAL, "movie", Some("tmdb"), Some("41")).await;
+        let tmdb = FakeTmdb::new(found_answers());
+        let params = ProcessTorrentParams {
+            classify_mode,
+            ..flags_on_params(&[HASH_LOCAL])
+        };
+        let id = enqueue(&QueueStore::new(pool.clone()), &params).await;
+        let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "mode {classify_mode}: {outcome:?}"
+        );
+        let rows = associations(&pool, HASH_LOCAL).await;
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_deref()).collect::<Vec<_>>(),
+            [Some(kept)],
+            "mode {classify_mode}"
+        );
+        assert!(tmdb.asked().is_empty(), "{:?}", tmdb.asked());
+    }
+}
+
+/// An empty episode map is not applied (`len > 0` in Go), so nothing is
+/// written for it; one season is.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_empty_episode_hint_writes_null_episodes() {
+    let pool = connect().await;
+    for (episodes, persisted) in [
+        ("'{}'::jsonb", None),
+        ("'{\"1\": {}}'::jsonb", Some("{\"1\": {}}")),
+    ] {
+        reset(&pool).await;
+        seed_fixture_torrents(&pool).await;
+        seed_hint(
+            &pool,
+            HASH_A,
+            "music",
+            &[("episodes", episodes), ("release_group", "''")],
+        )
+        .await;
+        let id = enqueue(&QueueStore::new(pool.clone()), &supported_params(&[HASH_A])).await;
+        let outcome = worker(&pool, fast_config()).run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "{episodes}: {outcome:?}"
+        );
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT episodes::text, release_group FROM torrent_contents \
+             WHERE info_hash = decode($1, 'hex')",
+        )
+        .bind(HASH_A)
+        .fetch_one(&pool)
+        .await
+        .expect("one association");
+        assert_eq!(
+            (row.0.as_deref(), row.1.as_deref()),
+            (persisted, Some("")),
+            "{episodes}"
+        );
+    }
+}
+
+/// Where Go's pick among the associations depends on row order, the job is
+/// left to Go and counted as `ambiguous`: two reusable associations, or, with
+/// no file list and no hint, source-less ones of two types.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn order_dependent_associations_abstain_as_ambiguous() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    seed_movie(&pool, "41", "Stale Movie", None).await;
+    seed_fixture_torrents(&pool).await;
+    for id in ["41", "42"] {
+        seed_association(&pool, HASH_A, "movie", Some("tmdb"), Some(id)).await;
+    }
+    sqlx::query("UPDATE torrents SET files_status = 'no_info' WHERE info_hash = decode($1, 'hex')")
+        .bind(HASH_B)
+        .execute(&pool)
+        .await
+        .expect("drop the file list");
+    for content_type in ["xxx", "comic"] {
+        seed_association(&pool, HASH_B, content_type, None, None).await;
+    }
+    let store = QueueStore::new(pool.clone());
+    let reuse = enqueue(&store, &supported_params(&[HASH_A])).await;
+    let preserved = enqueue(&store, &supported_params(&[HASH_B])).await;
+    let image_before = live_image(&pool).await;
+    let registry = prometheus::Registry::new();
+    let metrics = bitmagnet_processor::register_worker_metrics(&registry).unwrap();
+    let worker = worker(&pool, fast_config()).with_metrics(metrics.clone());
+    let mut reasons = BTreeMap::new();
+    for _ in 0..2 {
+        let outcome = worker.run_once().await.unwrap();
+        let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+            panic!("expected an abstention, got {outcome:?}");
+        };
+        reasons.insert(job.id, reason);
+    }
+    assert_eq!(
+        reasons,
+        BTreeMap::from([
+            (
+                reuse,
+                WriterPlanError::AmbiguousContentReuse {
+                    info_hash: HASH_A.to_owned()
+                }
+                .to_string()
+            ),
+            (
+                preserved,
+                WriterPlanError::AmbiguousPreservedContentType {
+                    info_hash: HASH_B.to_owned()
+                }
+                .to_string()
+            ),
+        ])
+    );
+    assert_eq!(
+        metrics.with_label_values(&["abstained", "ambiguous"]).get(),
+        2
+    );
+    assert_eq!(metrics.with_label_values(&["abstained", "hint"]).get(), 0);
+    assert_eq!(live_image(&pool).await, image_before);
+}
+
+/// A sourced hint TMDB finds as content the job also attaches from the local
+/// table: Go writes both images, Rust leaves the job to Go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_found_hint_conflicting_with_a_local_attach_abstains() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    seed_hint(
+        &pool,
+        HASH_UNKNOWN,
+        "movie",
+        &[("content_source", "'imdb'"), ("content_id", "'tt0000042'")],
+    )
+    .await;
+    let tmdb = FakeTmdb::new(vec![
+        ("/find/tt0000042", answer(200, None, FIND_42)),
+        ("/movie/42", answer(200, None, DETAILS_42)),
+    ]);
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &flags_on_params(&[HASH_LOCAL, HASH_UNKNOWN]),
+    )
+    .await;
+    let before = job_row(&pool, &id).await;
+    let image_before = live_image(&pool).await;
+    let outcome = tmdb_worker(&pool, &tmdb, 1).run_once().await.unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+        panic!("expected an abstention, got {outcome:?}");
+    };
+    assert_eq!(job.id, id);
+    assert!(
+        reason.contains("conflicting attached content images for movie:tmdb:42"),
+        "{reason}"
+    );
+    assert_eq!(job_row(&pool, &id).await, before);
+    assert_eq!(live_image(&pool).await, image_before);
+    assert_eq!(queue_job_count(&pool).await, 1);
+}
+
+/// Every row of Go's decode fixture, stored and loaded back through the
+/// processor's own query, decodes exactly as the fixture's text does.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn the_go_decode_fixture_round_trips_through_the_loader() {
+    use bitmagnet_processor::load::{effective_hint, load_torrents, HintAdmission, StoredHint};
+
+    let pool = connect().await;
+    reset(&pool).await;
+    let text = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../testdata/parity/torrent-hint-decode/torrent_hint_decode.jsonl"
+    ));
+    let text_of = |row: &Value, field: &str| row[field].as_str().map(str::to_owned);
+    let mut fixtures = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let fixture: Value = serde_json::from_str(line).expect("fixture line");
+        let row = &fixture["input"]["row"];
+        let info_hash = format!("{:040x}", index + 1);
+        seed_torrent(&pool, &info_hash, "Hint Fixture.mkv", 1_000_000).await;
+        if let Some(source) = row["contentSource"].as_str() {
+            sqlx::query(
+                "INSERT INTO metadata_sources (key, name, created_at, updated_at) \
+                 VALUES ($1, $1, NOW(), NOW()) ON CONFLICT (key) DO NOTHING",
+            )
+            .bind(source)
+            .execute(&pool)
+            .await
+            .expect("seed metadata source");
+        }
+        sqlx::query(
+            "INSERT INTO torrent_hints \
+             (info_hash, content_type, content_source, content_id, title, release_year, \
+              languages, episodes, video_resolution, video_source, video_codec, video_3d, \
+              video_modifier, release_group, created_at, updated_at) \
+             VALUES (decode($1, 'hex'), $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, \
+                     $9, $10, $11, $12, $13, $14, NOW(), NOW())",
+        )
+        .bind(&info_hash)
+        .bind(text_of(row, "contentType"))
+        .bind(text_of(row, "contentSource"))
+        .bind(text_of(row, "contentId"))
+        .bind(text_of(row, "title"))
+        .bind(
+            row["releaseYear"]
+                .as_i64()
+                .map(|year| i32::try_from(year).expect("year")),
+        )
+        .bind(text_of(row, "languages"))
+        .bind(text_of(row, "episodes"))
+        .bind(text_of(row, "videoResolution"))
+        .bind(text_of(row, "videoSource"))
+        .bind(text_of(row, "videoCodec"))
+        .bind(text_of(row, "video3d"))
+        .bind(text_of(row, "videoModifier"))
+        .bind(text_of(row, "releaseGroup"))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("{}: {error}", fixture["id"]));
+        let stored = StoredHint {
+            content_type: text_of(row, "contentType").expect("content type"),
+            content_source: text_of(row, "contentSource"),
+            content_id: text_of(row, "contentId"),
+            languages: text_of(row, "languages"),
+            episodes: text_of(row, "episodes"),
+            video_resolution: text_of(row, "videoResolution"),
+            video_source: text_of(row, "videoSource"),
+            video_codec: text_of(row, "videoCodec"),
+            video_3d: text_of(row, "video3d"),
+            video_modifier: text_of(row, "videoModifier"),
+            release_group: text_of(row, "releaseGroup"),
+        };
+        fixtures.push((
+            fixture["id"].as_str().expect("id").to_owned(),
+            info_hash,
+            stored,
+        ));
+    }
+    assert!(fixtures.len() >= 140, "{}", fixtures.len());
+
+    let (mut supported, mut sourced, mut refused) = (0, 0, 0);
+    for chunk in fixtures.chunks(50) {
+        let hashes: Vec<&str> = chunk.iter().map(|(_, hash, _)| hash.as_str()).collect();
+        let loaded = load_torrents(&pool, &supported_params(&hashes))
+            .await
+            .expect("load the fixture hints");
+        let loaded: BTreeMap<&str, _> = loaded
+            .iter()
+            .map(|torrent| (torrent.info_hash.as_str(), torrent))
+            .collect();
+        for (id, info_hash, stored) in chunk {
+            let torrent = loaded[info_hash.as_str()];
+            match stored.clone().decode() {
+                Err(detail) => {
+                    assert_eq!(
+                        torrent.hint_admission,
+                        HintAdmission::Unsupported { detail },
+                        "{id}"
+                    );
+                    refused += 1;
+                }
+                Ok(hint) => {
+                    let admission = if hint.content_source.is_some() {
+                        sourced += 1;
+                        HintAdmission::NeedsLiveResolver
+                    } else {
+                        supported += 1;
+                        HintAdmission::Supported
+                    };
+                    assert_eq!(torrent.hint_admission, admission, "{id}");
+                    assert_eq!(
+                        format!("{:?}", torrent.classifier_input.hint),
+                        format!("{:?}", effective_hint(Some(hint), &[], true, true)),
+                        "{id}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        supported > 0 && sourced > 0 && refused > 0,
+        "{supported} {sourced} {refused}"
+    );
 }
 
 // -- Organic admission (M4) ------------------------------------------------
@@ -3629,15 +4283,16 @@ async fn organic_retry_jobs_carry_the_resolved_workflow_and_the_mode_and_flags()
 async fn an_abstained_organic_job_is_excluded_and_counted_by_its_reason() {
     let pool = connect().await;
     seed_tmdb_fixture(&pool).await;
+    // A video source Go's scan rejects; Go fails the load, Rust leaves it to Go.
     sqlx::query(
         "INSERT INTO torrent_hints \
-         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
-         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', NOW(), NOW())",
+         (info_hash, content_type, video_source, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'blu-ray', NOW(), NOW())",
     )
     .bind(HASH_UNKNOWN)
     .execute(&pool)
     .await
-    .expect("seed sourced hint");
+    .expect("seed undecodable hint");
     // Claim order: the hinted DHT job first, then one behind it.
     let hinted = enqueue_raw(
         &pool,
@@ -3669,7 +4324,8 @@ async fn an_abstained_organic_job_is_excluded_and_counted_by_its_reason() {
     assert_eq!(
         reason,
         WriterPlanError::AttachHintUnsupported {
-            info_hash: HASH_UNKNOWN.to_owned()
+            info_hash: HASH_UNKNOWN.to_owned(),
+            detail: "video_source",
         }
         .to_string()
     );
@@ -3750,15 +4406,31 @@ async fn a_type_only_hint_with_empty_languages_and_null_episodes_is_bare() {
     }
     assert_eq!(images[1], images[0]);
     assert_ne!(images[0], unhinted, "the type-only hint was not used");
-    // A language is a hint attribute the writer cannot carry.
-    let (id, outcome, _) = run(Some(Some("[\"en\"]"))).await;
+    // A language Go writes is applied, as Go applies it.
+    let (id, outcome, image) = run(Some(Some("[\"en\"]"))).await;
+    assert!(
+        matches!(
+            &outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        image
+            .iter()
+            .any(|row| row.starts_with("tc ") && row.contains("\"languages\": [\"en\"]")),
+        "{image:#?}"
+    );
+    // One Go cannot scan is left to Go, which fails the load.
+    let (id, outcome, _) = run(Some(Some("[\"xx\"]"))).await;
     assert!(
         matches!(
             &outcome,
             AdmittedConsumeOutcome::Abstained { job, reason }
                 if job.id == id
                     && *reason == WriterPlanError::AttachHintUnsupported {
-                        info_hash: HASH_B.to_owned()
+                        info_hash: HASH_B.to_owned(),
+                        detail: "languages",
                     }
                     .to_string()
         ),

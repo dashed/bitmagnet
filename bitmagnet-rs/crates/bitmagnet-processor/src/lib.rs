@@ -93,17 +93,20 @@ pub struct LoadedTorrent {
     pub info_hash: String,
     pub classifier_input: ClassifierInput,
     pub existing_content_ids: Vec<String>,
-    /// Whether Go would apply a sourced or enriched explicit hint before
-    /// classification. Bare type-only explicit hints are supported; a hinted
-    /// content ID reaches `attach_local_content_by_id`, which needs a live
-    /// resolver the flags-off lane deliberately does not have.
-    pub attach_hint_unsupported: bool,
+    /// Whether the writer can reproduce Go's handling of the explicit hint. A
+    /// sourced hint reaches Go's pre-attach and `attach_local_content_by_id`,
+    /// which need the live resolver the flags-off lane deliberately does not
+    /// have.
+    pub hint_admission: load::HintAdmission,
+    /// Set when Go's choice among the existing associations depends on row
+    /// order, which leaves the job to Go.
+    pub content_ambiguity: Option<load::ContentAmbiguity>,
     /// Whether default-mode hint synthesis selected a reusable source-backed
     /// `torrent_contents` association.
     ///
-    /// This is separate from [`Self::attach_hint_unsupported`]: disconnected
-    /// writer planning can hydrate and admit the selected existing association,
-    /// while the production shadow runtime keeps its independent categorical
+    /// This is separate from [`Self::hint_admission`]: disconnected writer
+    /// planning can hydrate and admit the selected existing association, while
+    /// the production shadow runtime keeps its independent categorical
     /// `SourceBackedContentPresent` rejection and frozen ACL.
     pub source_backed_content_present: bool,
 }
@@ -796,7 +799,8 @@ mod tests {
                 contents: Vec::new(),
             },
             existing_content_ids: Vec::new(),
-            attach_hint_unsupported: false,
+            hint_admission: crate::load::HintAdmission::Supported,
+            content_ambiguity: None,
             source_backed_content_present: false,
         }
     }
@@ -900,7 +904,8 @@ mod tests {
                             input["existingContentIds"].clone(),
                         )
                         .expect("existing ids"),
-                        attach_hint_unsupported: false,
+                        hint_admission: crate::load::HintAdmission::Supported,
+                        content_ambiguity: None,
                         source_backed_content_present: false,
                     }
                 })

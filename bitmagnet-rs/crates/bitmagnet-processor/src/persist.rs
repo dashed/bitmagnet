@@ -881,7 +881,7 @@ async fn insert_tags(
 ///
 /// No episodes is SQL `NULL`: the classifier leaves Go's map nil, and GORM's
 /// JSON serializer stores a value that marshals to `null` as `NULL`.
-fn episodes_json(value: &str) -> Result<Option<Value>, PersistError> {
+pub(crate) fn episodes_json(value: &str) -> Result<Option<Value>, PersistError> {
     let mut seasons = Map::new();
     if value.is_empty() {
         return Ok(None);

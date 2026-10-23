@@ -483,7 +483,8 @@ mod tests {
                 contents: Vec::new(),
             },
             existing_content_ids: Vec::new(),
-            attach_hint_unsupported: false,
+            hint_admission: crate::load::HintAdmission::Supported,
+            content_ambiguity: None,
             source_backed_content_present: false,
         }
     }

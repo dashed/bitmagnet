@@ -5,12 +5,15 @@
 //! explicit hint, and `torrent_contents` supplies both stale IDs and the
 //! reusable effective hint used by Go's default mode.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use bitmagnet_classifier::{ClassifierInput, InputContent, InputFile, InputHint};
+use bitmagnet_classifier::{ClassifierInput, ContentType, InputContent, InputFile, InputHint};
 use bitmagnet_model::Content;
 use bitmagnet_model::{deserialize_files_bounded, BlobError};
 use bitmagnet_queue::{ProcessTorrentParams, CLASSIFY_MODE_REMATCH};
+use bitmagnet_release::{
+    Episodes, Video3D, VideoCodec, VideoModifier, VideoResolution, VideoSource,
+};
 use futures::TryStreamExt;
 use sqlx::{PgConnection, PgPool, Row};
 
@@ -78,17 +81,13 @@ pub(crate) async fn load_torrents_in(
 
     let hydrated = hydrate_contents(&mut *connection, &current).await?;
 
+    // `title` and `release_year` are not read: nothing in Go's classification
+    // does, which the torrent hint decode fixture proves.
     let hint_rows = sqlx::query(
         "SELECT encode(info_hash, 'hex') AS info_hash, content_type, \
-                content_source, content_id, \
-                content_source IS NULL AND content_id IS NULL \
-                  AND title IS NULL AND release_year IS NULL \
-                  AND coalesce(languages, '[]'::jsonb) = '[]'::jsonb \
-                  AND coalesce(episodes, '{}'::jsonb) = '{}'::jsonb \
-                  AND video_resolution IS NULL AND video_source IS NULL \
-                  AND video_codec IS NULL AND video_3d IS NULL \
-                  AND video_modifier IS NULL AND release_group IS NULL \
-                  AS bare_type_only \
+                content_source, content_id, languages::text AS languages, \
+                episodes::text AS episodes, video_resolution, video_source, \
+                video_codec, video_3d, video_modifier, release_group \
          FROM torrent_hints \
          WHERE info_hash = ANY($1::bytea[]) \
          ORDER BY info_hash",
@@ -96,17 +95,22 @@ pub(crate) async fn load_torrents_in(
     .bind(&requested)
     .fetch_all(&mut *connection)
     .await?;
-    let mut explicit_hints = BTreeMap::<String, CurrentHint>::new();
+    let mut explicit_hints = BTreeMap::<String, Result<CurrentHint, &'static str>>::new();
     for row in hint_rows {
-        explicit_hints.insert(
-            row.try_get("info_hash")?,
-            CurrentHint {
-                content_type: row.try_get("content_type")?,
-                content_source: row.try_get("content_source")?,
-                content_id: row.try_get("content_id")?,
-                bare_type_only: row.try_get("bare_type_only")?,
-            },
-        );
+        let stored = StoredHint {
+            content_type: row.try_get("content_type")?,
+            content_source: row.try_get("content_source")?,
+            content_id: row.try_get("content_id")?,
+            languages: row.try_get("languages")?,
+            episodes: row.try_get("episodes")?,
+            video_resolution: row.try_get("video_resolution")?,
+            video_source: row.try_get("video_source")?,
+            video_codec: row.try_get("video_codec")?,
+            video_3d: row.try_get("video_3d")?,
+            video_modifier: row.try_get("video_modifier")?,
+            release_group: row.try_get("release_group")?,
+        };
+        explicit_hints.insert(row.try_get("info_hash")?, stored.decode());
     }
 
     let mut rows = sqlx::query(
@@ -191,18 +195,26 @@ pub(crate) async fn load_torrents_in(
             .collect();
 
         let existing = current.remove(&info_hash).unwrap_or_default();
-        let explicit = explicit_hints.remove(&info_hash);
         let allow_content_reuse = params.classify_mode != CLASSIFY_MODE_REMATCH;
-        let attach_hint_unsupported = explicit
-            .as_ref()
-            .is_some_and(|hint| !hint.is_supported_type_only());
         let files_status: String = row.try_get("files_status")?;
-        let hint = effective_hint(
-            explicit,
+        let stored_file_list = has_stored_file_list(&files_status);
+        // An explicit hint that cannot be reproduced leaves the torrent to Go;
+        // the rest of its hydration is then never used.
+        let (explicit, hint_admission) = match explicit_hints.remove(&info_hash) {
+            None => (None, HintAdmission::Supported),
+            Some(Err(detail)) => (None, HintAdmission::Unsupported { detail }),
+            Some(Ok(hint)) => {
+                let admission = hint.admission();
+                (Some(hint), admission)
+            }
+        };
+        let content_ambiguity = content_ambiguity(
+            explicit.as_ref(),
             &existing,
             allow_content_reuse,
-            has_stored_file_list(&files_status),
+            stored_file_list,
         );
+        let hint = effective_hint(explicit, &existing, allow_content_reuse, stored_file_list);
         let source_backed_content_present = hint.as_ref().is_some_and(|hint| {
             !hint.content_source.is_empty()
                 && existing.iter().any(|content| {
@@ -233,7 +245,8 @@ pub(crate) async fn load_torrents_in(
                     .collect(),
             },
             existing_content_ids: existing.iter().map(|content| content.id.clone()).collect(),
-            attach_hint_unsupported,
+            hint_admission,
+            content_ambiguity,
             source_backed_content_present,
         });
     }
@@ -309,23 +322,326 @@ async fn hydrate_contents(
     Ok(hydrated)
 }
 
-/// A `torrent_hints` row as stored — Go's explicit hint, before the processor
+/// A `torrent_hints` row as PostgreSQL returns it, before Go's GORM scan.
+///
+/// The jsonb columns are their text rendering; `title` and `release_year` are
+/// absent because Go never reads them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredHint {
+    pub content_type: String,
+    pub content_source: Option<String>,
+    pub content_id: Option<String>,
+    pub languages: Option<String>,
+    pub episodes: Option<String>,
+    pub video_resolution: Option<String>,
+    pub video_source: Option<String>,
+    pub video_codec: Option<String>,
+    pub video_3d: Option<String>,
+    pub video_modifier: Option<String>,
+    pub release_group: Option<String>,
+}
+
+impl StoredHint {
+    /// The hint as Go's `model.TorrentHint` scan reads it, or the column the
+    /// writer cannot reproduce it from.
+    ///
+    /// Go fails the whole job's load on every value it rejects, so refusing
+    /// one leaves the job to Go, which fails it as before. A few values Go
+    /// accepts are refused too, because Rust would not write them back the way
+    /// Go does or does not need to read them at all. The
+    /// `testdata/parity/torrent-hint-decode` fixture, generated from Go's own
+    /// scan, pins both sets.
+    ///
+    /// # Errors
+    ///
+    /// The name of the first column whose value is refused.
+    pub fn decode(self) -> Result<CurrentHint, &'static str> {
+        // Go's go-enum scan folds case; only the canonical spelling is taken.
+        if ContentType::parse(&self.content_type).is_none() {
+            return Err("content_type");
+        }
+        match (self.content_source.as_deref(), self.content_id.as_deref()) {
+            // A non-NULL empty source is valid in Go (`hasHintedContentId`) and
+            // indistinguishable from no source in Rust.
+            (Some(""), _) => return Err("content_source"),
+            (Some(_), id) if !id.is_some_and(is_reproducible_content_id) => {
+                return Err("content_id");
+            }
+            _ => {}
+        }
+        let attributes = HintAttributes {
+            episodes: decode_episodes(self.episodes.as_deref())?,
+            languages: decode_languages(self.languages.as_deref())?,
+            video_resolution: decode_video(
+                self.video_resolution,
+                VideoResolution::ALL,
+                VideoResolution::as_str,
+                "video_resolution",
+            )?,
+            video_source: decode_video(
+                self.video_source,
+                VideoSource::ALL,
+                VideoSource::as_str,
+                "video_source",
+            )?,
+            video_codec: decode_video(
+                self.video_codec,
+                VideoCodec::ALL,
+                VideoCodec::as_str,
+                "video_codec",
+            )?,
+            video_3d: decode_video(self.video_3d, Video3D::ALL, Video3D::as_str, "video_3d")?,
+            video_modifier: decode_video(
+                self.video_modifier,
+                VideoModifier::ALL,
+                VideoModifier::as_str,
+                "video_modifier",
+            )?,
+            // Go applies a valid empty group too.
+            release_group: self.release_group,
+        };
+        Ok(CurrentHint {
+            content_type: self.content_type,
+            content_source: self.content_source,
+            content_id: self.content_id,
+            attributes,
+        })
+    }
+}
+
+/// A sourced hint's id must be safe to put in a TMDB path as it stands.
+///
+/// Go concatenates `"/find/" + id` raw, while Rust's client parses the URL, so
+/// an id with a separator, an escape or a leading dot (`..`) would not reach
+/// TMDB as the same request. Prod's ids are all `tt` + digits.
+fn is_reproducible_content_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// `languages` as Go's `Languages.UnmarshalJSON` reads it, limited to what
+/// Go's `MarshalJSON` writes: lowercase alpha-2 codes. Go also takes alpha-3
+/// codes, names and aliases in any case, and picks among ambiguous aliases by
+/// map order.
+fn decode_languages(text: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let Some(text) = text else {
+        return Ok(Vec::new());
+    };
+    let codes = serde_json::from_str::<Option<Vec<String>>>(text)
+        .map_err(|_| "languages")?
+        .unwrap_or_default();
+    if codes
+        .iter()
+        .any(|code| bitmagnet_release::parse_language(code).as_deref() != Some(code.as_str()))
+    {
+        return Err("languages");
+    }
+    // Go's set, rendered in `Languages.Slice()` order.
+    Ok(bitmagnet_release::slice_order(codes))
+}
+
+/// `episodes` as Go's JSON decode into `map[int]map[int]struct{}` reads it,
+/// limited to the shape Go's encoder writes: seasons with canonical decimal
+/// keys, each an object of episodes whose values are `{}`.
+///
+/// 🚨 `{"1": null}` decodes in Go to a nil episode map, which Go then persists
+/// as `{"1":null}`; Rust's set cannot carry that, so it is refused. So are
+/// `"01"`, `"+1"` and `"-1"` keys, numbers above `u16`, and episode values
+/// other than `{}`.
+fn decode_episodes(text: Option<&str>) -> Result<Episodes, &'static str> {
+    let Some(text) = text else {
+        return Ok(Episodes::new());
+    };
+    let Some(seasons) =
+        serde_json::from_str::<Option<BTreeMap<String, BTreeMap<String, serde_json::Value>>>>(text)
+            .map_err(|_| "episodes")?
+    else {
+        return Ok(Episodes::new());
+    };
+    let mut episodes = Episodes::allocated();
+    for (season, numbers) in seasons {
+        let season = canonical_number(&season).ok_or("episodes")?;
+        if numbers.is_empty() {
+            episodes.add_season(season);
+        }
+        for (episode, value) in numbers {
+            if !value.as_object().is_some_and(serde_json::Map::is_empty) {
+                return Err("episodes");
+            }
+            episodes.add_episode(season, canonical_number(&episode).ok_or("episodes")?);
+        }
+    }
+    Ok(episodes)
+}
+
+/// A JSON object key as Go's encoder writes an `int`: no sign, no leading zero.
+///
+/// Bounded to `u16`, because the writer persists episodes through their
+/// `S01E02` rendering and parses each number back as one; Go takes any `int`.
+fn canonical_number(key: &str) -> Option<i64> {
+    let canonical = key == "0"
+        || (!key.is_empty()
+            && !key.starts_with('0')
+            && key.bytes().all(|byte| byte.is_ascii_digit()));
+    canonical
+        .then(|| key.parse::<u16>().ok())
+        .flatten()
+        .map(i64::from)
+}
+
+/// A video attribute as Go's go-enum scan reads it: the canonical spelling,
+/// matched ignoring ASCII case. Go lowercases with Unicode rules, so it also
+/// takes a few non-ASCII spellings (`WOR\u{212A}PRINT`), which are refused.
+fn decode_video<T: Copy>(
+    value: Option<String>,
+    all: &[T],
+    as_str: fn(T) -> &'static str,
+    column: &'static str,
+) -> Result<Option<String>, &'static str> {
+    value
+        .map(|value| {
+            all.iter()
+                .map(|variant| as_str(*variant))
+                .find(|canonical| canonical.eq_ignore_ascii_case(&value))
+                .map(str::to_owned)
+                .ok_or(column)
+        })
+        .transpose()
+}
+
+/// A decoded `torrent_hints` row — Go's explicit hint, before the processor
 /// decides what the classifier actually sees.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CurrentHint {
     pub content_type: String,
     pub content_source: Option<String>,
     pub content_id: Option<String>,
-    /// True only when every Go classification-attribute column is empty.
-    /// This is the explicit-hint shape the read-only writer lane can consume
-    /// without silently dropping episode/language/video fields.
-    pub bare_type_only: bool,
+    pub attributes: HintAttributes,
+}
+
+/// What Go's `ContentAttributes.ApplyHint` copies from a hint, decoded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HintAttributes {
+    pub episodes: Episodes,
+    /// Alpha-2 codes in `Languages.Slice()` order.
+    pub languages: Vec<String>,
+    /// Canonical spellings.
+    pub video_resolution: Option<String>,
+    pub video_source: Option<String>,
+    pub video_codec: Option<String>,
+    pub video_3d: Option<String>,
+    pub video_modifier: Option<String>,
+    pub release_group: Option<String>,
 }
 
 impl CurrentHint {
-    fn is_supported_type_only(&self) -> bool {
-        self.bare_type_only && self.content_source.is_none() && self.content_id.is_none()
+    /// A sourced hint reaches Go's pre-attach or its by-ID lookups, which only
+    /// a live resolver can reproduce.
+    fn admission(&self) -> HintAdmission {
+        if self.content_source.is_some() {
+            HintAdmission::NeedsLiveResolver
+        } else {
+            HintAdmission::Supported
+        }
     }
+
+    /// The classifier input, or `None` for Go's nil hint (no content type).
+    fn into_input(self) -> Option<InputHint> {
+        if self.content_type.is_empty() {
+            return None;
+        }
+        let HintAttributes {
+            episodes,
+            languages,
+            video_resolution,
+            video_source,
+            video_codec,
+            video_3d,
+            video_modifier,
+            release_group,
+        } = self.attributes;
+        Some(InputHint {
+            content_type: self.content_type,
+            content_source: self.content_source.unwrap_or_default(),
+            content_id: self.content_id.unwrap_or_default(),
+            episodes,
+            languages,
+            video_resolution,
+            video_source,
+            video_codec,
+            video_3d,
+            video_modifier,
+            release_group,
+        })
+    }
+}
+
+/// How far the writer can reproduce Go's handling of a torrent's explicit hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintAdmission {
+    /// No explicit hint, or a source-less one any writer reproduces.
+    Supported,
+    /// A sourced hint, which needs a live resolver.
+    NeedsLiveResolver,
+    /// A hint the writer cannot reproduce; `detail` names the column.
+    Unsupported { detail: &'static str },
+}
+
+/// Where Go's choice among a torrent's existing associations depends on row
+/// order.
+///
+/// Go's processor takes the FIRST eligible association for content reuse
+/// (`processor.go:123-132`) and the FIRST source-less one for the preserved
+/// type (`preservedRuleDerivedContentType`), from a preload without
+/// `ORDER BY`. With two candidates that differ, Go's pick is not
+/// reproducible, so the job is left to Go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentAmbiguity {
+    /// More than one sourced association is eligible for reuse.
+    Reuse,
+    /// A torrent with no file list and no hint has source-less associations of
+    /// more than one type.
+    PreservedType,
+}
+
+/// The [`ContentAmbiguity`] of a torrent, if any, under the same rules as
+/// [`effective_hint`].
+pub fn content_ambiguity(
+    explicit: Option<&CurrentHint>,
+    existing: &[CurrentContent],
+    allow_content_reuse: bool,
+    has_stored_file_list: bool,
+) -> Option<ContentAmbiguity> {
+    // A sourced explicit hint is never overwritten, and is not nil.
+    if explicit.is_some_and(|hint| hint.content_source.is_some()) {
+        return None;
+    }
+    let explicit_type = explicit.map(|hint| hint.content_type.as_str());
+    let reusable = if allow_content_reuse {
+        existing
+            .iter()
+            .filter(|content| content.is_reuse_candidate(explicit_type))
+            .count()
+    } else {
+        0
+    };
+    if reusable > 1 {
+        return Some(ContentAmbiguity::Reuse);
+    }
+    if reusable == 0 && explicit.is_none() && !has_stored_file_list {
+        let preserved_types = existing
+            .iter()
+            .filter(|content| content.content_source.is_none())
+            .filter_map(|content| content.content_type.as_deref())
+            .collect::<BTreeSet<_>>();
+        if preserved_types.len() > 1 {
+            return Some(ContentAmbiguity::PreservedType);
+        }
+    }
+    None
 }
 
 /// A `torrent_contents` association, as much of it as the hint synthesis reads.
@@ -359,15 +675,23 @@ impl CurrentContent {
         }
     }
 
-    fn as_reusable_hint(&self) -> Option<InputHint> {
-        Some(InputHint {
-            content_type: self.content_type.clone()?,
-            content_source: self.content_source.clone()?,
-            content_id: self.content_id.clone().unwrap_or_default(),
-            // `torrent_contents` carries no episode/language/video attributes;
-            // those live on `torrent_hints`, which the explicit-hint path reads.
-            ..InputHint::default()
-        })
+    /// Go's reuse condition, given the explicit hint's type when there is one.
+    fn is_reuse_candidate(&self, explicit_type: Option<&str>) -> bool {
+        self.content_type.is_some()
+            && self.content_source.is_some()
+            && explicit_type
+                .is_none_or(|content_type| self.content_type.as_deref() == Some(content_type))
+    }
+
+    /// Go's reuse (`processor.go:129-131`): this association's type, source and
+    /// id overwrite the explicit hint's, and everything else the hint carries
+    /// stays.
+    fn reused_into(&self, explicit: Option<InputHint>) -> InputHint {
+        let mut hint = explicit.unwrap_or_default();
+        hint.content_type = self.content_type.clone().unwrap_or_default();
+        hint.content_source = self.content_source.clone().unwrap_or_default();
+        hint.content_id = self.content_id.clone().unwrap_or_default();
+        hint
     }
 }
 
@@ -384,35 +708,22 @@ pub fn effective_hint(
     allow_content_reuse: bool,
     has_stored_file_list: bool,
 ) -> Option<InputHint> {
-    let explicit = explicit.and_then(|hint| {
-        (!hint.content_type.is_empty()).then_some(InputHint {
-            content_type: hint.content_type,
-            content_source: hint.content_source.unwrap_or_default(),
-            content_id: hint.content_id.unwrap_or_default(),
-            // T9 widened InputHint with the rest of what Go's ApplyHint copies.
-            // The loader does not select those columns yet, so they stay unset
-            // here rather than being invented.
-            ..InputHint::default()
-        })
-    });
+    let explicit = explicit.and_then(CurrentHint::into_input);
     if explicit
         .as_ref()
         .is_some_and(|hint| !hint.content_source.is_empty())
     {
         return explicit;
     }
-    let resolved = if allow_content_reuse {
-        existing
-            .iter()
-            .filter(|content| {
-                explicit.as_ref().is_none_or(|hint| {
-                    content.content_type.as_deref() == Some(hint.content_type.as_str())
-                })
-            })
-            .find_map(CurrentContent::as_reusable_hint)
-            .or(explicit)
-    } else {
-        explicit
+    let explicit_type = explicit.as_ref().map(|hint| hint.content_type.clone());
+    // Go reuses the first candidate; `content_ambiguity` refuses a torrent
+    // with more than one, so which one this is cannot matter.
+    let reused = existing.iter().find(|content| {
+        allow_content_reuse && content.is_reuse_candidate(explicit_type.as_deref())
+    });
+    let resolved = match reused {
+        Some(content) => Some(content.reused_into(explicit)),
+        None => explicit,
     };
     if resolved.is_some() || has_stored_file_list {
         return resolved;
@@ -484,42 +795,82 @@ fn enforce_job_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_hint, has_stored_file_list, CurrentContent, CurrentHint};
+    use super::{
+        content_ambiguity, effective_hint, has_stored_file_list, ContentAmbiguity, CurrentContent,
+        CurrentHint, HintAdmission, HintAttributes, StoredHint,
+    };
+    use bitmagnet_classifier::{Classification, InputHint, NormalizedClassifierResult, Outcome};
     use bitmagnet_model::Content;
     use std::collections::BTreeMap;
 
+    fn tc(
+        id: &str,
+        content_type: Option<&str>,
+        source: Option<&str>,
+        content_id: Option<&str>,
+    ) -> CurrentContent {
+        CurrentContent {
+            id: id.into(),
+            content_type: content_type.map(Into::into),
+            content_source: source.map(Into::into),
+            content_id: content_id.map(Into::into),
+        }
+    }
+
+    fn hint(content_type: &str, source: Option<&str>, id: Option<&str>) -> CurrentHint {
+        CurrentHint {
+            content_type: content_type.into(),
+            content_source: source.map(Into::into),
+            content_id: id.map(Into::into),
+            attributes: HintAttributes::default(),
+        }
+    }
+
+    fn enriched(content_type: &str) -> CurrentHint {
+        CurrentHint {
+            attributes: HintAttributes {
+                episodes: bitmagnet_release::parse_episodes("S01E02"),
+                languages: vec!["en".into()],
+                video_resolution: Some("V1080p".into()),
+                release_group: Some(String::new()),
+                ..HintAttributes::default()
+            },
+            ..hint(content_type, None, None)
+        }
+    }
+
+    /// A stable rendering of an effective hint, for equality.
+    fn render(hint: Option<&InputHint>) -> String {
+        format!("{hint:?}")
+    }
+
     #[test]
-    fn reusable_hint_requires_type_and_source() {
-        let complete = CurrentContent {
-            id: "tc".into(),
-            content_type: Some("movie".into()),
-            content_source: Some("tmdb".into()),
-            content_id: Some("603".into()),
-        };
-        let hint = complete.as_reusable_hint().expect("complete hint");
-        assert_eq!(hint.content_type, "movie");
-        assert_eq!(hint.content_source, "tmdb");
-        assert_eq!(hint.content_id, "603");
+    fn reuse_takes_type_and_source_and_keeps_the_explicit_attributes() {
+        let complete = tc("tc", Some("movie"), Some("tmdb"), Some("603"));
+        assert!(complete.is_reuse_candidate(None));
+        assert!(complete.is_reuse_candidate(Some("movie")));
+        assert!(!complete.is_reuse_candidate(Some("tv_show")));
+        assert!(!tc("tc", Some("movie"), None, Some("603")).is_reuse_candidate(None));
+        assert!(!tc("tc", None, Some("tmdb"), Some("603")).is_reuse_candidate(None));
+        // A non-NULL empty source is valid in Go.
+        assert!(tc("tc", Some("movie"), Some(""), None).is_reuse_candidate(None));
 
-        let incomplete = CurrentContent {
-            content_source: None,
-            ..complete
-        };
-        assert!(incomplete.as_reusable_hint().is_none());
-
-        let empty_but_non_null = CurrentContent {
-            id: "tc-empty".into(),
-            content_type: Some("movie".into()),
-            content_source: Some(String::new()),
-            content_id: None,
-        };
+        let explicit = enriched("movie").into_input();
+        let reused = complete.reused_into(explicit.clone());
         assert_eq!(
-            empty_but_non_null
-                .as_reusable_hint()
-                .expect("non-null empty source is valid in Go")
-                .content_source,
-            ""
+            (
+                reused.content_type.as_str(),
+                reused.content_source.as_str(),
+                reused.content_id.as_str()
+            ),
+            ("movie", "tmdb", "603")
         );
+        let explicit = explicit.expect("an explicit hint");
+        assert_eq!(reused.episodes, explicit.episodes);
+        assert_eq!(reused.languages, explicit.languages);
+        assert_eq!(reused.video_resolution, explicit.video_resolution);
+        assert_eq!(reused.release_group, Some(String::new()));
+        assert!(complete.reused_into(None).episodes.is_empty());
     }
 
     #[test]
@@ -601,85 +952,447 @@ mod tests {
         assert!(association.to_input(&BTreeMap::new()).content.is_none());
     }
 
+    /// Go's processor (`processor.go:115-152`), transcribed loop for loop: the
+    /// reuse takes the FIRST eligible association in the order given, and
+    /// overwrites the explicit hint's type, source and id only.
+    fn go_effective_hint(
+        explicit: Option<&CurrentHint>,
+        existing: &[&CurrentContent],
+        rematch: bool,
+        has_stored_file_list: bool,
+    ) -> Option<InputHint> {
+        let mut hint = explicit.cloned().and_then(CurrentHint::into_input);
+        let mut found = false;
+        for content in existing {
+            let source_valid = hint
+                .as_ref()
+                .is_some_and(|hint| !hint.content_source.is_empty());
+            if !found
+                && !source_valid
+                && !rematch
+                && content.content_type.is_some()
+                && content.content_source.is_some()
+                && hint.as_ref().is_none_or(|hint| {
+                    content.content_type.as_deref() == Some(hint.content_type.as_str())
+                })
+            {
+                let mut reused = hint.unwrap_or_default();
+                reused.content_type = content.content_type.clone().unwrap();
+                reused.content_source = content.content_source.clone().unwrap();
+                reused.content_id = content.content_id.clone().unwrap_or_default();
+                hint = Some(reused);
+                found = true;
+            }
+        }
+        if !found && hint.is_none() && !has_stored_file_list {
+            hint = existing.iter().find_map(|content| {
+                (content.content_type.is_some() && content.content_source.is_none()).then(|| {
+                    InputHint {
+                        content_type: content.content_type.clone().unwrap(),
+                        ..InputHint::default()
+                    }
+                })
+            });
+        }
+        hint
+    }
+
+    fn permutations<'a>(items: &[&'a CurrentContent]) -> Vec<Vec<&'a CurrentContent>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut all = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let mut rest = items.to_vec();
+            rest.remove(index);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, item);
+                all.push(tail);
+            }
+        }
+        all
+    }
+
+    /// The precedence table: every explicit hint shape against every set of
+    /// associations, in both modes, with and without a file list.
+    ///
+    /// Where `content_ambiguity` is `None`, `effective_hint` must equal Go's
+    /// verdict under EVERY row order Go could see. Where it is `Some`, at least
+    /// two orders must give Go different verdicts, so the refusal is never
+    /// spurious.
     #[test]
-    fn effective_hint_matches_go_precedence() {
-        let existing = vec![CurrentContent {
-            id: "tc".into(),
-            content_type: Some("movie".into()),
-            content_source: Some("tmdb".into()),
-            content_id: Some("603".into()),
-        }];
-        let explicit_source = CurrentHint {
-            content_type: "movie".into(),
-            content_source: Some("imdb".into()),
-            content_id: Some("tt0133093".into()),
-            bare_type_only: false,
-        };
-        let hint = effective_hint(Some(explicit_source), &existing, true, true).unwrap();
-        assert_eq!(hint.content_source, "imdb");
+    fn effective_hint_is_go_under_every_row_order_unless_ambiguous() {
+        let explicit_hints = [
+            None,
+            Some(hint("movie", None, None)),
+            Some(enriched("movie")),
+            Some(hint("movie", None, Some("tt0133093"))),
+            Some(hint("movie", Some("imdb"), Some("tt0133093"))),
+            Some(enriched("tv_show")),
+        ];
+        let movie_603 = tc("a", Some("movie"), Some("tmdb"), Some("603"));
+        let movie_604 = tc("b", Some("movie"), Some("tmdb"), Some("604"));
+        let tv = tc("c", Some("tv_show"), Some("tvdb"), Some("81189"));
+        let xxx = tc("d", Some("xxx"), None, None);
+        let comic = tc("e", Some("comic"), None, None);
+        let xxx_again = tc("f", Some("xxx"), None, None);
+        let untyped = tc("g", None, Some("tmdb"), Some("1"));
+        let association_sets: Vec<Vec<&CurrentContent>> = vec![
+            vec![],
+            vec![&movie_603],
+            vec![&tv],
+            vec![&movie_603, &tv],
+            vec![&movie_603, &movie_604],
+            vec![&movie_603, &movie_604, &tv],
+            vec![&xxx],
+            vec![&xxx, &comic],
+            vec![&xxx, &xxx_again],
+            vec![&movie_603, &xxx, &comic],
+            vec![&untyped, &xxx],
+        ];
 
-        let type_only = CurrentHint {
-            content_type: "movie".into(),
-            content_source: None,
-            content_id: None,
-            bare_type_only: true,
-        };
-        let hint = effective_hint(Some(type_only), &existing, true, true).unwrap();
-        assert_eq!(hint.content_source, "tmdb");
-        assert_eq!(hint.content_id, "603");
-
-        let mismatched_type = CurrentHint {
-            content_type: "tv_show".into(),
-            content_source: None,
-            content_id: None,
-            bare_type_only: true,
-        };
-        let hint = effective_hint(Some(mismatched_type), &existing, true, true).unwrap();
-        assert_eq!(hint.content_type, "tv_show");
-        assert!(hint.content_source.is_empty());
+        let (mut agreed, mut ambiguous) = (0, 0);
+        for explicit in &explicit_hints {
+            for associations in &association_sets {
+                for rematch in [false, true] {
+                    for files in [true, false] {
+                        let owned = associations
+                            .iter()
+                            .map(|content| (*content).clone())
+                            .collect::<Vec<_>>();
+                        let ambiguity =
+                            content_ambiguity(explicit.as_ref(), &owned, !rematch, files);
+                        let go_verdicts = permutations(associations)
+                            .iter()
+                            .map(|order| {
+                                render(
+                                    go_effective_hint(explicit.as_ref(), order, rematch, files)
+                                        .as_ref(),
+                                )
+                            })
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let case = format!(
+                            "{explicit:?} {associations:?} rematch={rematch} files={files}"
+                        );
+                        match ambiguity {
+                            None => {
+                                assert_eq!(go_verdicts.len(), 1, "Go depends on row order: {case}");
+                                for order in permutations(associations) {
+                                    let owned = order
+                                        .iter()
+                                        .map(|content| (*content).clone())
+                                        .collect::<Vec<_>>();
+                                    let rust =
+                                        effective_hint(explicit.clone(), &owned, !rematch, files);
+                                    assert_eq!(
+                                        Some(&render(rust.as_ref())),
+                                        go_verdicts.first(),
+                                        "{case}"
+                                    );
+                                }
+                                agreed += 1;
+                            }
+                            Some(_) => {
+                                assert!(go_verdicts.len() > 1, "a spurious refusal: {case}");
+                                ambiguous += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(agreed + ambiguous, 6 * 11 * 4);
+        assert!(ambiguous > 0);
     }
 
     #[test]
-    fn only_bare_source_less_explicit_hints_are_supported() {
-        let bare = CurrentHint {
-            content_type: "xxx".into(),
-            content_source: None,
-            content_id: None,
-            bare_type_only: true,
-        };
-        assert!(bare.is_supported_type_only());
+    fn ambiguity_is_reported_by_kind() {
+        let movie_603 = tc("a", Some("movie"), Some("tmdb"), Some("603"));
+        let movie_604 = tc("b", Some("movie"), Some("tmdb"), Some("604"));
+        let xxx = tc("d", Some("xxx"), None, None);
+        let comic = tc("e", Some("comic"), None, None);
+        let two_movies = [movie_603.clone(), movie_604];
+        assert_eq!(
+            content_ambiguity(None, &two_movies, true, true),
+            Some(ContentAmbiguity::Reuse)
+        );
+        // Rematch reuses nothing, and a sourced hint is never overwritten.
+        assert_eq!(content_ambiguity(None, &two_movies, false, true), None);
+        let sourced = hint("movie", Some("imdb"), Some("tt1"));
+        assert_eq!(
+            content_ambiguity(Some(&sourced), &two_movies, true, true),
+            None
+        );
+        // A typed hint narrows the candidates to its type.
+        assert_eq!(
+            content_ambiguity(Some(&hint("tv_show", None, None)), &two_movies, true, true),
+            None
+        );
 
-        let enriched = CurrentHint {
-            bare_type_only: false,
-            ..bare.clone()
-        };
-        assert!(!enriched.is_supported_type_only());
+        let preserved = [xxx, comic];
+        assert_eq!(
+            content_ambiguity(None, &preserved, true, false),
+            Some(ContentAmbiguity::PreservedType)
+        );
+        // Not consulted with a file list, a hint, or a reuse.
+        assert_eq!(content_ambiguity(None, &preserved, true, true), None);
+        assert_eq!(
+            content_ambiguity(Some(&hint("movie", None, None)), &preserved, true, false),
+            None
+        );
+        let mut with_reuse = preserved.to_vec();
+        with_reuse.push(movie_603);
+        assert_eq!(content_ambiguity(None, &with_reuse, true, false), None);
+        assert_eq!(
+            content_ambiguity(None, &with_reuse, false, false),
+            Some(ContentAmbiguity::PreservedType)
+        );
+    }
 
-        let sourced = CurrentHint {
-            content_source: Some("tmdb".into()),
-            content_id: Some("42".into()),
-            // A defensive check: even an inconsistent SQL projection cannot
-            // mark a sourced hint as supported.
-            bare_type_only: true,
-            ..bare
+    #[test]
+    fn a_sourced_hint_needs_the_live_resolver_and_a_null_source_one_does_not() {
+        assert_eq!(
+            hint("movie", Some("imdb"), Some("tt1")).admission(),
+            HintAdmission::NeedsLiveResolver
+        );
+        assert_eq!(
+            hint("movie", None, Some("tt1")).admission(),
+            HintAdmission::Supported
+        );
+        assert_eq!(enriched("movie").admission(), HintAdmission::Supported);
+    }
+
+    fn stored(content_type: &str) -> StoredHint {
+        StoredHint {
+            content_type: content_type.into(),
+            ..StoredHint::default()
+        }
+    }
+
+    #[test]
+    fn decode_bounds_that_the_fixture_does_not_reach() {
+        let episodes = |text: &str| {
+            StoredHint {
+                episodes: Some(text.into()),
+                ..stored("tv_show")
+            }
+            .decode()
+            .map(|hint| hint.attributes.episodes.to_string())
         };
-        assert!(!sourced.is_supported_type_only());
+        // The writer persists episodes through their rendering, as u16.
+        assert_eq!(
+            episodes(r#"{"65535": {"65535": {}}}"#),
+            Ok("S65535E65535".into())
+        );
+        assert_eq!(episodes(r#"{"65536": {}}"#), Err("episodes"));
+        assert_eq!(episodes(r#"{"1": {"65536": {}}}"#), Err("episodes"));
+        assert_eq!(episodes(r#"{"": {}}"#), Err("episodes"));
+        // `[]` would decode as an empty struct in serde, not in Go.
+        assert_eq!(episodes(r#"{"1": {"2": []}}"#), Err("episodes"));
+
+        let id = |id: &str| {
+            StoredHint {
+                content_source: Some("imdb".into()),
+                content_id: Some(id.into()),
+                ..stored("movie")
+            }
+            .decode()
+            .map(|hint| hint.content_id)
+        };
+        assert_eq!(id("tt0133093"), Ok(Some("tt0133093".into())));
+        assert_eq!(id("1.2_3-4"), Ok(Some("1.2_3-4".into())));
+        for refused in [
+            "", ".", "..", "-1", "_x", "tt%2F", "tt/1", "tt 1", "tt\u{e9}",
+        ] {
+            assert_eq!(id(refused), Err("content_id"), "{refused}");
+        }
+        // The id of a source-less hint is never sent anywhere.
+        assert!(StoredHint {
+            content_id: Some("tt 1".into()),
+            ..stored("movie")
+        }
+        .decode()
+        .is_ok());
+    }
+
+    /// Go accepts these; Rust refuses them, so the job is left to Go.
+    const RUST_STRICTER_THAN_GO: &[&str] = &[
+        "type_upper",
+        "sourced_empty_source",
+        "sourced_empty_id",
+        "sourced_id_space",
+        "sourced_id_slash",
+        "sourced_id_dotdot",
+        "sourced_id_dot_lead",
+        "languages_upper",
+        "languages_alpha3",
+        "languages_name",
+        "episodes_season_i64_max",
+        "episodes_null_season",
+        "episodes_null_episode",
+        "episodes_leading_zero",
+        "episodes_negative",
+        "episodes_plus",
+        "episodes_episode_fields",
+        r#"video_source_"WOR\u212aPRINT""#,
+        r#"video_source_"WEBR\u0130P""#,
+    ];
+
+    #[derive(serde::Deserialize)]
+    struct DecodeFixture {
+        id: String,
+        input: DecodeInput,
+        expected: serde_json::Value,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct DecodeInput {
+        row: DecodeRow,
+    }
+
+    /// Go's row, less `title` and `releaseYear`, which the loader never reads.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DecodeRow {
+        content_type: String,
+        content_source: Option<String>,
+        content_id: Option<String>,
+        languages: Option<String>,
+        episodes: Option<String>,
+        video_resolution: Option<String>,
+        video_source: Option<String>,
+        video_codec: Option<String>,
+        #[serde(rename = "video3d")]
+        video_3d: Option<String>,
+        video_modifier: Option<String>,
+        release_group: Option<String>,
+    }
+
+    fn decode_fixtures() -> Vec<(String, StoredHint, serde_json::Value)> {
+        let text = include_str!(
+            "../../../../testdata/parity/torrent-hint-decode/torrent_hint_decode.jsonl"
+        );
+        text.lines()
+            .map(|line| {
+                let fixture: DecodeFixture = serde_json::from_str(line).expect("fixture line");
+                let row = fixture.input.row;
+                let stored = StoredHint {
+                    content_type: row.content_type,
+                    content_source: row.content_source,
+                    content_id: row.content_id,
+                    languages: row.languages,
+                    episodes: row.episodes,
+                    video_resolution: row.video_resolution,
+                    video_source: row.video_source,
+                    video_codec: row.video_codec,
+                    video_3d: row.video_3d,
+                    video_modifier: row.video_modifier,
+                    release_group: row.release_group,
+                };
+                (fixture.id, stored, fixture.expected)
+            })
+            .collect()
+    }
+
+    /// Go's GORM scan and `ApplyHint` over every fixture row
+    /// (`internal/parity/torrent_hint_decode_pg_gen_test.go`): where Go fails
+    /// the load, Rust refuses; where Go succeeds, Rust classifies and persists
+    /// exactly what Go does, or the case is on the reviewed list of refusals.
+    #[test]
+    fn decode_matches_go_scan_and_apply_hint() {
+        let fixtures = decode_fixtures();
+        assert!(fixtures.len() >= 140, "{}", fixtures.len());
+        let mut stricter = Vec::new();
+        for (id, stored, expected) in fixtures {
+            let go_failed = expected.get("loadError").is_some();
+            let decoded = stored.clone().decode();
+            if go_failed {
+                assert!(
+                    decoded.is_err(),
+                    "{id}: Go fails the load, Rust took {decoded:?}"
+                );
+                continue;
+            }
+            if RUST_STRICTER_THAN_GO.contains(&id.as_str()) {
+                assert!(
+                    decoded.is_err(),
+                    "{id}: listed as refused, Rust took {decoded:?}"
+                );
+                stricter.push(id);
+                continue;
+            }
+            let hint =
+                decoded.unwrap_or_else(|column| panic!("{id}: Go loads it, Rust refused {column}"));
+
+            assert_eq!(
+                serde_json::to_value(&hint.content_source).unwrap(),
+                expected
+                    .get("contentSource")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "{id}: content source"
+            );
+            assert_eq!(
+                serde_json::to_value(&hint.content_id).unwrap(),
+                expected
+                    .get("contentId")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "{id}: content id"
+            );
+            let admission = hint.admission();
+            let input = hint.into_input().expect("a typed hint");
+            assert_eq!(
+                !input.content_type.is_empty() && !input.content_source.is_empty(),
+                expected["hasHintedContentId"] == serde_json::Value::Bool(true),
+                "{id}: hasHintedContentId"
+            );
+            assert_eq!(
+                admission == HintAdmission::NeedsLiveResolver,
+                expected["hasHintedContentId"] == serde_json::Value::Bool(true),
+                "{id}: admission"
+            );
+
+            let mut applied = Classification::default();
+            applied.apply_hint(&input);
+            assert_eq!(
+                serde_json::to_value(NormalizedClassifierResult::from_result(
+                    &applied,
+                    &Outcome::Classified
+                ))
+                .unwrap(),
+                expected["applied"],
+                "{id}: applied"
+            );
+            // As the writer persists them: an allocated empty map is `{}`.
+            let persisted = if applied.episodes.is_empty() && !applied.episodes.is_nil() {
+                serde_json::json!({})
+            } else {
+                crate::persist::episodes_json(&applied.episodes.to_string())
+                    .expect("persistable episodes")
+                    .unwrap_or(serde_json::Value::Null)
+            };
+            let go_persisted: serde_json::Value = serde_json::from_str(
+                expected["appliedEpisodesJson"]
+                    .as_str()
+                    .expect("episodes json"),
+            )
+            .unwrap();
+            assert_eq!(persisted, go_persisted, "{id}: persisted episodes");
+        }
+        stricter.sort();
+        let mut listed = RUST_STRICTER_THAN_GO
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect::<Vec<_>>();
+        listed.sort();
+        assert_eq!(stricter, listed, "every listed refusal is a row Go accepts");
     }
 
     #[test]
     fn rematch_preserves_explicit_hint_but_skips_content_reuse() {
-        let existing = vec![CurrentContent {
-            id: "tc".into(),
-            content_type: Some("movie".into()),
-            content_source: Some("tmdb".into()),
-            content_id: Some("603".into()),
-        }];
-        let explicit = CurrentHint {
-            content_type: "tv_show".into(),
-            content_source: None,
-            content_id: None,
-            bare_type_only: true,
-        };
+        let existing = vec![tc("tc", Some("movie"), Some("tmdb"), Some("603"))];
+        let explicit = hint("tv_show", None, None);
 
         let hint = effective_hint(Some(explicit), &existing, false, true).expect("explicit hint");
         assert_eq!(hint.content_type, "tv_show");

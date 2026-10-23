@@ -256,9 +256,12 @@ pub struct InputHint {
     // corpus, whose hints carry a content type and nothing else.
     //
     // All optional and defaulted, so a fixture written before T9 still parses.
-    /// Canonical form, e.g. `"S07E10"`.
-    #[serde(default)]
-    pub episodes: Option<String>,
+    /// The hint's episodes, typed. A fixture or tape spells them in canonical
+    /// form (`"S07E10"`), parsed here as Go's tape decoder parses them
+    /// (`model.ParseEpisodes`); the processor's loader decodes the stored JSON
+    /// without that text round trip, which cannot carry every set.
+    #[serde(default, deserialize_with = "deserialize_canonical_episodes")]
+    pub episodes: bitmagnet_release::Episodes,
     /// Alpha-2 codes, in `model.Languages` set order.
     #[serde(default)]
     pub languages: Vec<String>,
@@ -274,6 +277,20 @@ pub struct InputHint {
     pub video_modifier: Option<String>,
     #[serde(rename = "releaseGroup", default)]
     pub release_group: Option<String>,
+}
+
+/// [`InputHint::episodes`] from its canonical text; absent or empty is none.
+fn deserialize_canonical_episodes<'de, D>(
+    deserializer: D,
+) -> Result<bitmagnet_release::Episodes, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text
+        .as_deref()
+        .map(bitmagnet_release::parse_episodes)
+        .unwrap_or_default())
 }
 
 /// An existing `torrent_contents` association — Go `model.TorrentContent`, as

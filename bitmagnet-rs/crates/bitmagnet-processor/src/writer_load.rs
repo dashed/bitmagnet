@@ -16,7 +16,7 @@ use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use futures::TryStreamExt;
 use sqlx::{PgConnection, PgPool, Row};
 
-use crate::load::{load_torrents_in, LoadError};
+use crate::load::{load_torrents_in, HintAdmission, LoadError};
 use crate::{ContentPersistenceKey, LoadedTorrent, TorrentSnapshot, TorrentSourceSnapshot};
 
 const MAX_REQUESTED_TORRENTS: usize = 100;
@@ -215,7 +215,10 @@ async fn hydrate_reusable_content_associations(
 fn selected_reusable_content(
     torrent: &LoadedTorrent,
 ) -> Result<Option<(ContentPersistenceKey, &Content)>, WriterLoadError> {
-    if !torrent.source_backed_content_present || torrent.attach_hint_unsupported {
+    if !torrent.source_backed_content_present
+        || matches!(torrent.hint_admission, HintAdmission::Unsupported { .. })
+        || torrent.content_ambiguity.is_some()
+    {
         return Ok(None);
     }
     let hint = torrent
@@ -728,7 +731,8 @@ mod tests {
                 contents: Vec::new(),
             },
             existing_content_ids: Vec::new(),
-            attach_hint_unsupported: false,
+            hint_admission: crate::load::HintAdmission::Supported,
+            content_ambiguity: None,
             source_backed_content_present: false,
         }
     }

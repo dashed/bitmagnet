@@ -74,7 +74,8 @@ fn writer_plan_composes_every_go_write_set_fixture_without_cloning_inputs() {
                 info_hash: fixture.input.info_hash,
                 classifier_input: classifier,
                 existing_content_ids: fixture.input.existing_content_ids,
-                attach_hint_unsupported: false,
+                hint_admission: bitmagnet_processor::load::HintAdmission::Supported,
+                content_ambiguity: None,
                 source_backed_content_present: false,
             },
             torrent_snapshot: TorrentSnapshot {

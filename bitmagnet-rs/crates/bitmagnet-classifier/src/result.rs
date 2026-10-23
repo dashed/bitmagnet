@@ -79,12 +79,10 @@ impl Classification {
             self.content_type = Some(content_type);
         }
 
-        if let Some(episodes) = hint.episodes.as_deref().filter(|e| !e.is_empty()) {
-            let parsed = bitmagnet_release::parse_episodes(episodes);
-            // Go tests `len(h.Episodes) > 0`, i.e. the parsed set, not the text.
-            if !parsed.is_empty() {
-                self.episodes = parsed;
-            }
+        // Go tests `len(h.Episodes) > 0`: an empty set, allocated or not, is
+        // not applied.
+        if !hint.episodes.is_empty() {
+            self.episodes = hint.episodes.clone();
         }
 
         if !hint.languages.is_empty() {
@@ -111,7 +109,8 @@ impl Classification {
             self.video_modifier = Some(value);
         }
 
-        if let Some(group) = hint.release_group.as_deref().filter(|g| !g.is_empty()) {
+        // Go applies any valid `NullString`, the empty group included.
+        if let Some(group) = hint.release_group.as_deref() {
             self.release_group = Some(group.to_owned());
         }
     }

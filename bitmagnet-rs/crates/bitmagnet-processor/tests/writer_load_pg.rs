@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use bitmagnet_processor::load::HintAdmission;
 use bitmagnet_processor::{
     load_writer_plan, load_writer_torrents, project_unattached_persistence, Materializer,
     TorrentContentWrite, WriterLoadError, WriterLoadedTorrent, WriterPlanError,
@@ -198,12 +199,15 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
             .map(|hint| hint.content_type.as_str()),
         Some("xxx")
     );
-    assert!(
-        !bare_hint[0].loaded.attach_hint_unsupported,
+    assert_eq!(
+        bare_hint[0].loaded.hint_admission,
+        HintAdmission::Supported,
         "a bare source-less type hint is an exact supported classifier input"
     );
     sqlx::query(
-        "UPDATE torrent_hints SET release_group='ENRICHED', updated_at=NOW() \
+        "UPDATE torrent_hints SET release_group='ENRICHED', video_source='bluray', \
+         languages='[\"fr\", \"en\"]'::jsonb, episodes='{\"1\": {\"2\": {}}}'::jsonb, \
+         title='Ignored', release_year=1901, updated_at=NOW() \
          WHERE info_hash=decode($1, 'hex')",
     )
     .bind(HASH_B)
@@ -213,10 +217,55 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
     let enriched_hint = load_writer_torrents(&pool, &supported_params(vec![id_b]))
         .await
         .expect("load enriched hint");
-    assert!(
-        enriched_hint[0].loaded.attach_hint_unsupported,
-        "an ignored Go hint attribute must remain outside the supported subset"
+    assert_eq!(
+        enriched_hint[0].loaded.hint_admission,
+        HintAdmission::Supported,
+        "a source-less hint's attributes are classifier input, as in Go"
     );
+    let enriched = enriched_hint[0]
+        .loaded
+        .classifier_input
+        .hint
+        .as_ref()
+        .expect("enriched hint");
+    assert_eq!(enriched.release_group.as_deref(), Some("ENRICHED"));
+    assert_eq!(
+        enriched.video_source.as_deref(),
+        Some("BluRay"),
+        "Go's enum scan folds ASCII case"
+    );
+    assert_eq!(enriched.languages, ["en", "fr"]);
+    assert_eq!(enriched.episodes.to_string(), "S01E02");
+    sqlx::query(
+        "UPDATE torrent_hints SET video_source='blu-ray', updated_at=NOW() \
+         WHERE info_hash=decode($1, 'hex')",
+    )
+    .bind(HASH_B)
+    .execute(&pool)
+    .await
+    .expect("store a video source Go cannot scan");
+    let undecodable_hint = load_writer_torrents(&pool, &supported_params(vec![id_b]))
+        .await
+        .expect("load undecodable hint");
+    assert_eq!(
+        undecodable_hint[0].loaded.hint_admission,
+        HintAdmission::Unsupported {
+            detail: "video_source"
+        },
+        "Go fails the load, so the job is left to Go"
+    );
+    let undecodable_error = load_writer_plan(
+        &pool,
+        &Materializer::from_core().expect("compile core classifier"),
+        &supported_params(vec![id_b]),
+    )
+    .await
+    .expect_err("an undecodable hint is refused");
+    assert!(matches!(
+        undecodable_error,
+        WriterPlanError::AttachHintUnsupported { ref info_hash, detail: "video_source" }
+            if info_hash == HASH_B
+    ));
     sqlx::query("DELETE FROM torrent_hints WHERE info_hash=decode($1, 'hex')")
         .bind(HASH_B)
         .execute(&pool)
@@ -332,7 +381,8 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
         .await
         .expect("hydrate reusable association for disconnected writer");
     assert!(reused[0].loaded.source_backed_content_present);
-    assert!(!reused[0].loaded.attach_hint_unsupported);
+    assert_eq!(reused[0].loaded.hint_admission, HintAdmission::Supported);
+    assert_eq!(reused[0].loaded.content_ambiguity, None);
     assert!(reused[0].reusable_content_fully_hydrated);
     let hydrated = reused[0].loaded.classifier_input.contents[0]
         .content
@@ -378,7 +428,10 @@ async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
         .expect_err("sourced explicit hints remain outside disconnected writer scope");
     assert!(matches!(
         sourced_hint_error,
-        WriterPlanError::AttachHintUnsupported { ref info_hash } if info_hash == HASH_B
+        WriterPlanError::AttachHintUnsupported {
+            ref info_hash,
+            detail: "sourced hint without a live resolver"
+        } if info_hash == HASH_B
     ));
     sqlx::query("DELETE FROM torrent_hints WHERE info_hash=decode($1, 'hex')")
         .bind(HASH_B)

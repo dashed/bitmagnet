@@ -863,14 +863,16 @@ async fn compare_group(
         .await
         .map_err(|error| GroupFailure::new(load_reason(&error), error))?;
 
-    // Explicit sourced/enriched hints stay categorically unsupported. A
-    // source-backed association is tracked separately and is admitted only in
-    // the enrichment-dependent bucket. Anything else blocking here means the
-    // live row moved since admission.
+    // Explicit sourced or undecodable hints, and associations Go picks among
+    // by row order, stay categorically unsupported. A source-backed association
+    // is tracked separately and is admitted only in the enrichment-dependent
+    // bucket. Anything else blocking here means the live row moved since
+    // admission.
     let mut records = Vec::new();
     let (loaded, blocked): (Vec<LoadedTorrent>, Vec<LoadedTorrent>) =
         loaded.into_iter().partition(|torrent| {
-            !torrent.attach_hint_unsupported
+            torrent.hint_admission == bitmagnet_processor::load::HintAdmission::Supported
+                && torrent.content_ambiguity.is_none()
                 && (!torrent.source_backed_content_present
                     || bucket_of(&torrent.info_hash) == Some(Bucket::EnrichmentDependent))
         });

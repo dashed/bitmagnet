@@ -23,8 +23,9 @@
 //! Only payloads that explicitly request the `default` workflow with all three
 //! attach flags false are ever claimed (see
 //! [`bitmagnet_queue::QueueStore::consume_admitted_process_torrent`]). A claimed
-//! job that the Rust kernel still cannot reproduce — for example a sourced or
-//! enriched explicit hint, or an input over the loader's bounds — is abstained
+//! job that the Rust kernel still cannot reproduce — for example a sourced
+//! explicit hint without a live resolver, a hint value Go would write back
+//! differently, or an input over the loader's bounds — is abstained
 //! before any side effect, which leaves the row untouched for the Go worker.
 //! So is a payload serde cannot decode: Go's decoder accepts inputs serde
 //! rejects. Only transient database errors and Go-equivalent processor
@@ -48,7 +49,7 @@
 //! each.
 //!
 //! Each abstention is counted with a `reason` label: `payload`, `hint`,
-//! `resolver`, `conflict`, or `unsupported`.
+//! `ambiguous`, `resolver`, `conflict`, or `unsupported`.
 //!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
@@ -81,8 +82,12 @@ enum AbstainReason {
     /// The payload does not decode, or its workflow or flags are outside the
     /// admission.
     Payload,
-    /// A sourced or enriched explicit hint.
+    /// An explicit hint the writer cannot reproduce, or a sourced one on a
+    /// worker without a live resolver.
     Hint,
+    /// Associations Go picks among by row order; unhinted torrents included,
+    /// so it is kept apart from `Hint`.
+    Ambiguous,
     /// A content resolver failure that Go's text cannot be rebuilt for.
     Resolver,
     /// Two torrents reuse one content key with different images.
@@ -96,6 +101,7 @@ impl AbstainReason {
         match self {
             Self::Payload => "payload",
             Self::Hint => "hint",
+            Self::Ambiguous => "ambiguous",
             Self::Resolver => "resolver",
             Self::Conflict => "conflict",
             Self::Unsupported => "unsupported",
@@ -113,6 +119,8 @@ impl AbstainReason {
                 Self::Payload
             }
             WriterPlanError::AttachHintUnsupported { .. } => Self::Hint,
+            WriterPlanError::AmbiguousContentReuse { .. }
+            | WriterPlanError::AmbiguousPreservedContentType { .. } => Self::Ambiguous,
             WriterPlanError::Materialize(MaterializeError::ResolverFailed(_)) => Self::Resolver,
             WriterPlanError::Load(WriterLoadError::ConflictingReusableContent { .. }) => {
                 Self::Conflict
@@ -360,7 +368,13 @@ impl ProcessTorrentWorker {
             }
             Err(error) => {
                 let reason = AbstainReason::of(&error);
-                tracing::info!(job_id = %job.id, %error, reason = reason.label(), "abstaining from unsupported process_torrent job");
+                tracing::info!(
+                    job_id = %job.id,
+                    %error,
+                    reason = reason.label(),
+                    detail = error.abstain_detail(),
+                    "abstaining from unsupported process_torrent job"
+                );
                 return Err((reason, error.to_string()));
             }
         };
@@ -443,7 +457,7 @@ pub fn register_worker_metrics(
     let counter = IntCounterVec::new(
         prometheus::Opts::new(
             "bitmagnet_process_torrent_worker_jobs_total",
-            "process_torrent jobs claimed by the Rust worker, by outcome, and abstained ones by reason (payload, hint, resolver, conflict, unsupported); `error` counts attempts that failed with a database error",
+            "process_torrent jobs claimed by the Rust worker, by outcome, and abstained ones by reason (payload, hint, ambiguous, resolver, conflict, unsupported); `error` counts attempts that failed with a database error",
         ),
         &["outcome", "reason"],
     )?;
@@ -547,7 +561,8 @@ mod tests {
         )));
         assert!(!is_transient_plan_error(
             &WriterPlanError::AttachHintUnsupported {
-                info_hash: "aa".repeat(20)
+                info_hash: "aa".repeat(20),
+                detail: "languages",
             }
         ));
     }
@@ -586,8 +601,21 @@ mod tests {
             (
                 WriterPlanError::AttachHintUnsupported {
                     info_hash: hash.clone(),
+                    detail: "episodes",
                 },
                 AbstainReason::Hint,
+            ),
+            (
+                WriterPlanError::AmbiguousContentReuse {
+                    info_hash: hash.clone(),
+                },
+                AbstainReason::Ambiguous,
+            ),
+            (
+                WriterPlanError::AmbiguousPreservedContentType {
+                    info_hash: hash.clone(),
+                },
+                AbstainReason::Ambiguous,
             ),
             (
                 WriterPlanError::Materialize(MaterializeError::ResolverFailed(
@@ -623,12 +651,20 @@ mod tests {
             [
                 AbstainReason::Payload,
                 AbstainReason::Hint,
+                AbstainReason::Ambiguous,
                 AbstainReason::Resolver,
                 AbstainReason::Conflict,
                 AbstainReason::Unsupported,
             ]
             .map(AbstainReason::label),
-            ["payload", "hint", "resolver", "conflict", "unsupported"]
+            [
+                "payload",
+                "hint",
+                "ambiguous",
+                "resolver",
+                "conflict",
+                "unsupported"
+            ]
         );
     }
 

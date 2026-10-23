@@ -585,7 +585,7 @@ Gates:
   - A flags-on job attaches seeded local content with its ordered associations.
   - An abstaining resolver failure abstains with zero writes and the row byte-identical.
   - A composition abandoned at its job timeout makes no further resolver calls once it is unblocked.
-  - A flags-on job with a sourced hint abstains with the attach-hint reason, with zero writes and zero resolver calls, because the hint check precedes classification.
+  - A flags-on job with a sourced hint attaches its content by ID, before any search (Milestone 10; until then it abstained with zero resolver calls).
   - A flags-off job processed by the switched worker leaves the same image as without the switch.
 - **Regression, switch off:**
   - The Milestone 6 120k differential at Goose 35 stays byte-identical: B and C equal A in both rounds (241,982 and 243,179 lines), and every Rust worker logged `admission=FlagsOff`.
@@ -595,7 +595,7 @@ Gates:
 Known differences from Go, beyond Milestone 6's:
 - **Resolver failure scope.** An abstaining resolver failure (see above) abstains the whole job. Go fails only the affected torrents, republishes them, and persists the rest. The Rust worker therefore needs Go's worker beside it to settle such jobs. While the failure persists (a revoked key, a TMDB outage that times out), every flags-on job is left to Go. Milestone 8 narrowed this class.
 - **401 fallback.** Go falls back to its default TMDB key after a 401 at key validation; Rust latches the 401 and abstains. A 401 on a later call is per torrent in Go (`TMDB request failed: 401 Unauthorized`, then latched); Rust abstains there too, and latches.
-- **Enriched hints (M3).** Sourced and enriched explicit hints still abstain, before any resolver call, as do attached-content images that conflict within a job.
+- **Hints (M3).** Since Milestone 10, sourced and enriched explicit hints are classified as Go classifies them, except for the values and association sets Milestone 10 lists. Attached-content images that conflict within a job still abstain.
 - **Tantivy.** There is still no Tantivy dual-write, so content attached by Rust reaches the search sidecar only at the next backfill or torrent update.
 
 ## Milestone 8: per-torrent TMDB status failures
@@ -678,7 +678,7 @@ The job still abstains, untouched, for:
 - an undecodable body;
 - a disabled client;
 - a local search error;
-- before any resolver call: an undecodable or unsupported payload, or a sourced hint.
+- before any resolver call: an undecodable or unsupported payload, a hint the writer refuses to decode, or row-order-dependent associations (Milestone 10).
 
 Failed torrents appear in the job's input order, both in the retry job and in
 the joined error. Go appends them under a mutex in goroutine completion order,
@@ -803,7 +803,8 @@ organic job within any bound.
 `reason` label. It is empty except on `outcome="abstained"`, where it is one
 of:
 - `payload`: undecodable, or a workflow or flags outside the admission;
-- `hint`: a sourced or enriched explicit hint (M3);
+- `hint`: an explicit hint the writer refuses to decode, or a sourced hint without a live resolver (Milestone 10);
+- `ambiguous`: Go's pick among the torrent's associations depends on row order (Milestone 10);
 - `resolver`: an abstaining resolver failure;
 - `conflict`: `WriterLoadError::ConflictingReusableContent`;
 - `unsupported`: any other loader or composer limit.
@@ -829,8 +830,8 @@ Gates:
   - An organic DHT job leaves the same image, and makes the same TMDB requests, as the explicit flags-on job.
   - Explicit organic flags override the defaults: `tmdb_enabled: false` makes no TMDB request while local search still attaches, and `local_search_enabled: false` sends the local movie to TMDB.
   - The retry jobs of a DHT job, of an explicit empty workflow with empty flags, and of a rematch batch child at priority 10 carry `default`, the mode and the flags, at priority 0, and bound 0 claims them.
-  - A hinted organic job abstains with reason `hint` (`payload` stays 0), stays excluded while the job behind it is processed, and Go then claims it untouched.
-  - A type-only hint with `languages = '[]'`, as every prod hint has, and SQL NULL episodes classifies as one with NULL `languages` does, and the hint is used. A non-empty `languages` abstains.
+  - An organic job whose hint the writer refuses (an unscannable `video_source`) abstains with reason `hint` (`payload` stays 0), stays excluded while the job behind it is processed, and Go then claims it untouched.
+  - A type-only hint with `languages = '[]'`, as every prod hint has, and SQL NULL episodes classifies as one with NULL `languages` does, and the hint is used. A language Go writes is applied (Milestone 10); one Go cannot scan abstains.
 - **Mutations:** 21, all killed. They are:
   - an absent attach flag resolves to `false`;
   - the core defaults override the payload's attach flags;
@@ -845,4 +846,128 @@ Gates:
 
 Known differences from Go, beyond Milestones 7 and 8:
 - **Nulls and numbers.** A payload with a JSON `null` field, or a `ClassifyMode` other than the integers 0 and 1, is left to Go.
-- **Hinted organic jobs (M3).** A DHT or retry job whose torrent has a sourced or enriched hint abstains, as in Milestone 7; the `hint` count measures how often.
+- **Hinted organic jobs (M3).** Since Milestone 10, a DHT or retry job whose torrent has a sourced or enriched hint is settled like any other; the `hint` and `ambiguous` counts measure the jobs Milestone 10 still leaves to Go.
+
+## Milestone 10: sourced and enriched hints
+
+The loader now decodes every `torrent_hints` column Go reads, and the writer
+classifies sourced and enriched explicit hints as Go does. Before, it read only
+bare type-only hints and every other hint abstained with reason `hint`.
+
+**Decode.** The hint query selects `content_type`, `content_source`,
+`content_id`, `languages::text`, `episodes::text`, the five `video_*` columns
+and `release_group`. `title` and `release_year` are not read: Go's GORM scan
+loads them, but neither `ApplyHint` nor the workflow reads them, as
+`TestHintTitleAndReleaseYearDoNotReachClassification` shows over the
+classifier corpus (330 inputs, three hint shapes, local search off and on, with
+equal results and equal search arguments). `StoredHint::decode` takes a row as
+Go's scan does, but over a deliberately narrower domain:
+- `content_type`: the canonical spelling only. Go's go-enum scan also takes `Movie`.
+- `content_source`: SQL NULL, or non-empty. Go treats `''` as a valid source.
+- `content_id` with a source: an ASCII letter or digit, then letters, digits, `.`, `_` or `-`. Go concatenates `"/find/" + id` raw, while Rust's client parses the URL, so a separator, an escape or a leading dot would not reach TMDB as the same request. Without a source the id is never read, so any id is accepted.
+- `languages`: SQL NULL, JSON `null` and `[]` are no languages. Otherwise only the lowercase alpha-2 codes Go's `MarshalJSON` writes, in `Languages.Slice()` order. Go also takes `EN`, `eng` and `english`.
+- `episodes`: SQL NULL, JSON `null` and `{}` are not applied (`len > 0` in Go). Otherwise seasons and episodes with canonical decimal keys up to 65535, each episode `{}`. Refused: `{"1":null}` (Go persists `{"1":null}`), episode values other than `{}` (Go persists `{}` for them), `"01"`, `"+1"`, `"-1"`, and numbers above `u16` (the writer persists episodes through their `S01E02` rendering).
+- `video_*`: a canonical spelling, matched ignoring ASCII case. Go folds Unicode case, so it also takes `WOR\u{212A}PRINT` (KELVIN SIGN) and `WEBR\u{130}P`.
+- `release_group`: any value. `''` is applied, as in Go.
+
+Every value Go's scan rejects is refused too. Go then fails the whole job's
+load, so refusing leaves the job to Go, which fails it as before. A refused
+hint is `HintAdmission::Unsupported { detail }`, where `detail` names the
+column. The job abstains with reason `hint`, the existing text, and the detail
+in the log. The prod check (read-only, 2026-10-23) found 0 of 3,874,615 hint
+rows outside the domain.
+
+**Fixture.** `internal/parity/torrent_hint_decode_pg_gen_test.go`
+(`integration` tag; `-update-torrent-hint-decode-parity` regenerates it) stores
+141 rows in a scratch schema with the `torrent_hints` DDL, loads each through
+`dao.TorrentHint`, applies it with `ApplyHint`, and writes
+`testdata/parity/torrent-hint-decode/torrent_hint_decode.jsonl`. Each line
+records the load error, or the normalized applied result, the persisted
+`episodes` JSON, the source and id, and `hasHintedContentId`. Seven rows have
+a twin that differs only in `title` and `release_year`, and the generator
+fails unless the twins decode identically. Regenerated on musl PostgreSQL
+16.15, the file is a fixpoint. Of the 141 rows, Go fails 29 and Rust refuses
+all 29; Rust refuses 19 more (the list above); the other 93 decode, apply and
+persist exactly as in Go.
+
+**Admission.** `HintAdmission` is `Supported` (no hint, or a source-less one),
+`NeedsLiveResolver` (a sourced hint), or `Unsupported`.
+`index_loaded_torrents` refuses `Unsupported`, and refuses `NeedsLiveResolver`
+unless the materializer is live, with the existing text and the detail
+`sourced hint without a live resolver`. So the worker without
+`--admit-flags-on`, the shadow runtime and the GraphQL reprocess path still
+leave sourced hints to Go. With the switch, a sourced hint is classified as Go
+classifies it: the pre-attach when its association's content is loaded, then
+`attach_local_content_by_id`, then `attach_tmdb_content_by_id` when
+`apis_enabled` and `tmdb_enabled` are on. `attach_local_content_by_id` is not
+gated by any flag, so a flags-off job under the switch now makes a real local
+lookup. Source-less enriched hints are `Supported` everywhere, including on
+the worker without the switch. The shadow runtime keeps its own bare-hint
+predicate and is unchanged.
+
+**Precedence.** `effective_hint` keeps Go's order: a sourced explicit hint is
+used as it is; otherwise the first eligible sourced association is reused
+(not in rematch); otherwise, with no hint and no stored file list, the first
+source-less association's type is preserved. Reuse now merges, as Go does
+(`processor.go:129-131`): the association's type, source and id overwrite the
+explicit hint's, and its episodes, languages, video attributes and release
+group stay.
+
+**Ambiguity.** Go preloads `torrent.Contents` without `ORDER BY` and takes the
+first eligible association for reuse, and the first source-less one for the
+preserved type. Where the choice matters, Rust leaves the job to Go:
+- `AmbiguousContentReuse`: more than one association is eligible for reuse;
+- `AmbiguousPreservedContentType`: no hint, no reuse candidate, no stored file list, and source-less associations of more than one type.
+
+Both abstain with a new reason, `ambiguous`, because they hit unhinted torrents
+too. Go writes one association per torrent and deletes the rest, so neither
+should occur in practice. On the harness's corpora (read-only, 2026-10-23:
+`main` seed, Go and Rust rounds, 120,957 torrents; `hint` seed, Go and Rust
+rounds, 4,004 torrents and 4,004 hints), both counts are 0, and so is the
+count of torrents with more than one association.
+
+Gates:
+- **Unit** (`src/load.rs`):
+  - The precedence table: six explicit hints (none, type-only, enriched, source-less with an id, sourced, another type) against eleven association sets, in default and rematch mode, with and without a file list: 264 cases. Where `content_ambiguity` is `None`, `effective_hint` equals a line-for-line transcription of Go's loop under every row order. Where it is `Some`, Go's own verdict differs between at least two orders, so no refusal is spurious.
+  - The decode fixture: every row Go fails, Rust refuses; every row on the reviewed list, Go accepts and Rust refuses; every other row matches Go's source, id, `hasHintedContentId`, applied result and persisted episodes, and is admitted as `NeedsLiveResolver` exactly when Go has a hinted content id.
+  - Bounds the fixture does not reach: 65535 and 65536, empty keys, `[]` episode values, and the id charset.
+  - Reuse keeps the explicit attributes; ambiguity by kind; admission by source.
+- **Unit** (`src/writer_plan.rs`, `src/worker.rs`): the admission and ambiguity matrix, live and not; each new error maps to its reason.
+- **Migration-backed** (`tests/writer_load_pg.rs`, `tests/worker_pg.rs`, on PostgreSQL 18.6 and musl 16.15):
+  - An enriched hint loads its attributes (ASCII case folded, languages in Go's order); an unscannable `video_source` is `Unsupported`; a sourced hint without a live resolver keeps the existing text.
+  - Under the switch, flags off and on: a `tmdb` hint attaches by primary key and an `imdb` hint by attribute, the first of two candidates in identity order winning, with no TMDB request. Without the switch the job abstains with the existing text.
+  - `/find` then details attach TMDB content, with one request each.
+  - A `/find` 404 fails its torrent into the retry job; a details 404 is unmatched, and the classification goes on to search.
+  - A source-less hint with an id makes no resolver call on a flags-off job; a sourced one makes one.
+  - An enriched hint keeps its attributes through content reuse, over what the name parses to.
+  - Rematch searches again and deletes the stale association; the default mode reuses it.
+  - `{}` episodes write SQL NULL; one season is written.
+  - Both ambiguities abstain as `ambiguous`, with zero writes.
+  - A sourced hint TMDB finds as content the job also attaches locally abstains on the conflicting images.
+  - Every fixture row, stored and loaded through the loader's own query, decodes as its text does.
+- **Go:** `go test ./...`, the integration tests on musl PostgreSQL 16.15, every flagged generator regenerated (byte-identical except `testdata/parity/searchquery/torznab_search.jsonl`, whose drift the base tree reproduces exactly), the new generator's fixpoint, and golangci-lint (0 issues; with the `integration` tag, 0 in the new files).
+- **Regression:** the Milestone 6 120k differential stays byte-identical: B and C equal A in both rounds (241,982 and 243,179 lines). The classifier replay and `prod_corpus_gate` pass, and so does the CI suite (`worker_pg` 45, `writer_load_pg` 1) on musl 16.15.
+- **Mutations:** 19. All 17 non-equivalent ones are killed:
+  - reuse drops the explicit hint's attributes, is allowed in rematch, or is allowed under a sourced explicit hint (three mutations);
+  - a sourced hint is admitted without a live resolver;
+  - an empty source is taken as no source;
+  - an empty release group is filtered;
+  - an unscannable video value becomes none;
+  - `{}` episodes are applied;
+  - `/find` reads the wrong result bucket;
+  - the alternative by-ID lookup loses its identity `ORDER BY`;
+  - either ambiguity is not refused (two mutations);
+  - registering conflicting attached content keeps the first;
+  - languages take any spelling Go parses;
+  - episode keys take a leading zero;
+  - the content id charset is dropped;
+  - an ambiguity is counted as `hint`.
+
+  Two are equivalent under the core workflow, and survive:
+  - `hasHintedContentId` from the id rather than the source. A source-less hint with an id then enters the by-ID branch, but both lookups return unmatched on the empty source without a call, and `find_match` hands back the classification unchanged.
+  - TMDB-by-ID typed from the hint before the classification. At that step the classification's type is the hint's: `ApplyHint` set it, and only an `unknown` type is detected.
+
+Known differences from Go, beyond Milestone 9's:
+- **Stricter decode.** The 19 fixture values that Go accepts and Rust refuses leave the job to Go. Prod has none.
+- **Ambiguous associations.** Jobs whose result would depend on Go's row order are left to Go.
+- **Conflicting images.** A job still abstains when TMDB resolves a sourced hint to content that another of its torrents attaches from the local table (`ConflictingAttachedContent`, reason `unsupported`). The job then holds two different images of one content row, and the writer does not reproduce how Go persists them.
