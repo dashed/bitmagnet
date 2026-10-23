@@ -39,6 +39,13 @@
 #          life of the process; the key-validation jobs together, and in
 #          Rust's process the stub fails /authentication.
 #   The fault and abstain stubs run without keep-alive (tmdb-stub -keepalive).
+#   rematch  A reprocess round over Go's drained main round 1 (main go1,
+#          from MAIN_RUN): flagson-requeue (flagson_rematch.go) queues its
+#          attached, unmatched and rule-derived torrents again, half in
+#          ClassifyMode rematch and half in the default mode (content reuse),
+#          drops some file lists and inserts better candidates. G-1 as for
+#          main, then flagson-rematch-coverage counts the phase's floors. G2
+#          (with RUST_WORKER): Rust alone vs Go run 1, as for main.
 #
 # Dumps are canonical (flagson_dump.go); dump.raw beside each is not, and its
 # comparison is reported for information. Then flagson-coverage counts every
@@ -48,7 +55,9 @@
 #   PG_HOST, PG_PORT, PG_USER  disposable server (as run.sh)
 #   GOOSE_VERSION  schema head (default: the highest migration in the tree)
 #   REPLAY_LIMIT   real-name replay inputs in the main corpus (default 120000)
-#   PHASES         corpora to run (default "main hint fault abstain")
+#   PHASES         corpora to run (default "main hint fault abstain rematch")
+#   MAIN_RUN       the main phase's evidence the rematch phase starts from
+#                  (default $OUT/main); ${PREFIX}_main_go1 must still hold it
 #   OUT            evidence directory (default: mktemp)
 #   BITMAGNET_GO   Go binary (default: go build into $OUT)
 #   RUST_WORKER    Rust worker binary; without it only the Go-side gates run
@@ -64,7 +73,7 @@ PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 GOOSE_VERSION="${GOOSE_VERSION:-$(ls "$ROOT/migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.sql$/\1/p' | sort -n | tail -1)}"
 REPLAY_LIMIT="${REPLAY_LIMIT:-120000}"
-PHASES="${PHASES:-main hint fault abstain}"
+PHASES="${PHASES:-main hint fault abstain rematch}"
 OUT="${OUT:-$(mktemp -d)}"
 TMDB_KEY="${TMDB_KEY:-flagson-harness-dummy-key-0001}"
 # Fixed, because Go's job error text quotes the request URL (host and port
@@ -74,6 +83,7 @@ PREFIX=bm_ptw_flagson
 HELD=2099-01-01
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+MAIN_RUN="${MAIN_RUN:-$OUT/main}"
 
 if [[ "$TMDB_KEY" == 9c6689fa83ae6814fbfb200d70bba3a8 ]]; then
   echo "TMDB_KEY must not be Go's default key" >&2; exit 2
@@ -230,6 +240,23 @@ seed_corpus() {
   fi
 }
 
+# The rematch phase's seed: a copy of Go's drained main round 1 that
+# flagson-requeue queues again. The copy must be MAIN_RUN's round 1: the
+# database's dump must still equal MAIN_RUN/go1/dump. The phase answers TMDB
+# from the main seed's fixtures.
+seed_rematch() {
+  local db=${PREFIX}_rematch_seed seed="$OUT/rematch/seed" f
+  mkdir -p "$seed"
+  "$PTW" flagson-dump -dsn "$(dsn ${PREFIX}_main_go1)" -seed-jobs "$MAIN_RUN/seed/jobs.jsonl" \
+    >"$OUT/rematch/main-go1.dump" 2>/dev/null
+  if ! cmp -s "$OUT/rematch/main-go1.dump" "$MAIN_RUN/go1/dump"; then
+    echo "rematch: ${PREFIX}_main_go1 no longer holds $MAIN_RUN/go1's round 1" >&2; exit 1
+  fi
+  clone ${PREFIX}_main_go1 "$db" >/dev/null
+  for f in responses.jsonl faults.jsonl plan.jsonl notes.jsonl; do ln -sfn "$MAIN_RUN/seed/$f" "$seed/$f"; done
+  "$PTW" flagson-requeue -dsn "$(dsn "$db")" -out "$seed" 2>&1 | tee "$OUT/rematch/seed.log"
+}
+
 # Go alone over a clone of the corpus seed; $3 = tape to record the tape.
 go_alone() { # corpus name [tape]
   local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid fp auth T0=$SECONDS
@@ -353,7 +380,7 @@ GO_DIGEST="$(cd "$OUT" && POSTGRES_DSN="$(dsn ${PREFIX}_digest)" "$BITMAGNET_GO"
 echo "go classifier digest: $GO_DIGEST (goose $GOOSE_VERSION)" | tee "$OUT/digest.txt"
 
 for corpus in $PHASES; do
-  seed_corpus "$corpus"
+  if [[ $corpus == rematch ]]; then seed_rematch; else seed_corpus "$corpus"; fi
   case $corpus in
     main|hint)
       go_alone "$corpus" go1 tape
@@ -401,6 +428,22 @@ print(sum(1 for l in open(sys.argv[1]) if not json.loads(l).get("hold")))' "$OUT
           echo "abstain G3 attribution: FAIL (see $OUT/abstain/rust/attribution.txt)" | tee -a "$OUT/gates.txt"
           status=1
         fi
+      fi
+      ;;
+    rematch)
+      go_alone rematch go1
+      go_alone rematch go2
+      compare "rematch G-1 go1 vs go2" "$OUT/rematch/go1" "$OUT/rematch/go2"
+      if "$PTW" flagson-rematch-coverage -dsn "$(dsn ${PREFIX}_rematch_go1)" -seed "$OUT/rematch/seed" \
+          | tee "$OUT/rematch/coverage.txt"; then
+        echo "rematch coverage: every floor met" | tee -a "$OUT/gates.txt"
+      else
+        echo "rematch coverage: floors NOT met (see $OUT/rematch/coverage.txt)" | tee -a "$OUT/gates.txt"
+        status=1
+      fi
+      if [[ -n "$RUST_WORKER" ]]; then
+        rust_alone rematch rust
+        compare "rematch G2 go1 vs rust" "$OUT/rematch/go1" "$OUT/rematch/rust"
       fi
       ;;
   esac

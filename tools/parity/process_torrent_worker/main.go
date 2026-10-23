@@ -86,7 +86,7 @@ func run() error {
 	if len(os.Args) < 2 {
 		return errors.New("usage: process_torrent_worker seed|requeue|dump|" +
 			"flagson-seed|flagson-requeue|flagson-dump|flagson-coverage|flagson-abstained|" +
-			"flagson-faultcheck|flagson-attribution|flagson-rawdiff|" +
+			"flagson-faultcheck|flagson-attribution|flagson-rawdiff|flagson-rematch-coverage|" +
 			"tmdb-stub|request-diff [flags]")
 	}
 
@@ -109,6 +109,8 @@ func run() error {
 		return runFlagsOnAttribution(os.Args[2:])
 	case "flagson-rawdiff":
 		return runFlagsOnRawDiff(os.Args[2:])
+	case "flagson-rematch-coverage":
+		return runFlagsOnRematchCoverage(os.Args[2:])
 	case "tmdb-stub":
 		return runTMDBStub(os.Args[2:])
 	case "request-diff":

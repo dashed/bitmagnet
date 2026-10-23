@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -68,13 +67,16 @@ type plannedJob struct {
 	InfoHashes  []string `json:"infoHashes"`
 	Fault       string   `json:"fault,omitempty"` // the fault class (flagson_faults.go)
 	Hold        string   `json:"hold,omitempty"`  // parked until flags_on.sh releases it (holdAlone, holdAuth)
+	// ClassifyMode is the payload's mode (the rematch phase's rematch jobs).
+	ClassifyMode processor.ClassifyMode `json:"classifyMode,omitempty"`
 }
 
 type jobSpec struct {
-	slice   string
-	flagsOn bool
-	hashes  []protocol.ID
-	fault   string
+	slice        string
+	flagsOn      bool
+	classifyMode processor.ClassifyMode
+	hashes       []protocol.ID
+	fault        string
 }
 
 // enqueueFlagsOnJobs inserts the jobs with Go's own processor.NewQueueJob, in a
@@ -90,6 +92,7 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 		}
 
 		job, err := processor.NewQueueJob(processor.MessageParams{
+			ClassifyMode:       spec.classifyMode,
 			ClassifierWorkflow: "default",
 			ClassifierFlags:    flags,
 			InfoHashes:         spec.hashes,
@@ -112,12 +115,13 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 		}
 
 		planned = append(planned, plannedJob{
-			Index:       i,
-			Slice:       spec.slice,
-			FlagsOn:     spec.flagsOn,
-			Fingerprint: job.Fingerprint,
-			InfoHashes:  hashes,
-			Fault:       spec.fault,
+			Index:        i,
+			Slice:        spec.slice,
+			FlagsOn:      spec.flagsOn,
+			Fingerprint:  job.Fingerprint,
+			InfoHashes:   hashes,
+			Fault:        spec.fault,
+			ClassifyMode: spec.classifyMode,
 		})
 
 		if batch.Len() >= 1500 {
@@ -249,87 +253,6 @@ func writeJSONFile(path string, v any) error {
 	}
 
 	return os.WriteFile(path, append(data, '\n'), 0o644)
-}
-
-// runFlagsOnRequeue turns a drained flags-on copy into a second, reprocess
-// round, like `requeue` does for flags-off: type-only hints are dropped, then
-// every surviving torrent is queued again with a flags-on payload. Torrents with
-// an explicit content-ID hint keep it and stay in hint-only jobs. Attached
-// torrents now take the content-reuse path; unmatched ones search again.
-func runFlagsOnRequeue(args []string) error {
-	fs := flag.NewFlagSet("flagson-requeue", flag.ExitOnError)
-	dsn := fs.String("dsn", "", "disposable PostgreSQL DSN")
-	jobSize := fs.Int("job-size", 100, "info hashes per job")
-	out := fs.String("jobs-out", "", "where to write the round's jobs.jsonl")
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	ctx := context.Background()
-
-	conn, err := pgx.Connect(ctx, *dsn)
-	if err != nil {
-		return err
-	}
-	defer conn.Close(ctx)
-
-	if _, err := conn.Exec(ctx, `DELETE FROM torrent_hints WHERE content_source IS NULL`); err != nil {
-		return err
-	}
-
-	rows, err := conn.Query(ctx, `SELECT t.info_hash, h.info_hash IS NOT NULL
-		FROM torrents t LEFT JOIN torrent_hints h USING (info_hash)
-		ORDER BY t.info_hash`)
-	if err != nil {
-		return err
-	}
-
-	var main, hints []protocol.ID
-
-	for rows.Next() {
-		var (
-			raw     []byte
-			sourced bool
-		)
-
-		if err := rows.Scan(&raw, &sourced); err != nil {
-			rows.Close()
-			return err
-		}
-
-		if sourced {
-			hints = append(hints, protocol.ID(raw))
-		} else {
-			main = append(main, protocol.ID(raw))
-		}
-	}
-
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	specs := planFlagsOnJobs(main, hints, nil, *jobSize, 0, false)
-
-	ts, _ := time.Parse(time.RFC3339Nano, fixtureTime)
-
-	planned, err := enqueueFlagsOnJobs(ctx, conn, specs, ts)
-	if err != nil {
-		return err
-	}
-
-	if *out != "" {
-		if err := writeJSONLFile(*out, planned); err != nil {
-			return err
-		}
-	}
-
-	_, _ = fmt.Fprintf(os.Stderr, "requeued %d torrents (%d with content-ID hints) in %d jobs\n",
-		len(main)+len(hints), len(hints), len(planned))
-
-	return nil
 }
 
 func requireFlag(name, value string) error {
