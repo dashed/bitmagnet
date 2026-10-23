@@ -61,6 +61,12 @@ pub enum ResolveError {
     /// A TMDB API request failed.
     #[error("TMDB request failed: {0}")]
     Tmdb(String),
+    /// TMDB answered with a non-2xx HTTP status. It renders exactly as
+    /// [`Self::Tmdb`] would, as Go's `newError(res.Status())` and its
+    /// `ErrUnauthorized`/`ErrNotFound` sentinels do; the status is kept so a
+    /// caller can tell an answered request from one that never got an answer.
+    #[error("TMDB request failed: {status_line}")]
+    TmdbStatus { status: u16, status_line: String },
     /// A replaying resolver was asked for a call the tape does not hold. Kept
     /// distinct so a tape gap can never be silently misread as a miss.
     #[error("no recorded response for {0}")]

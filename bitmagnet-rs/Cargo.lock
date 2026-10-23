@@ -1141,6 +1141,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1300,6 +1301,7 @@ dependencies = [
  "bitmagnet-classifier",
  "bitmagnet-tape",
  "futures",
+ "hyper",
  "reqwest",
  "serde",
  "serde_json",

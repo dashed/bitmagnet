@@ -45,6 +45,8 @@ tracing.workspace = true
 [dev-dependencies]
 # `Url`, for the scripted TMDB transport behind the abstain-guard tests.
 reqwest.workspace = true
+# Captures the abstain guard's log lines, which the parity harness reads.
+tracing-subscriber.workspace = true
 
 [[bin]]
 name = "bitmagnet-ingest-shadow"

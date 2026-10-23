@@ -24,9 +24,9 @@ use crate::supported_subset::{
     has_explicit_attach_flags_off, has_explicit_attach_flags_on, has_explicit_default_workflow,
 };
 use crate::{
-    load_writer_torrents, project_torrent_persistence, BlockingManager, BoxError,
-    ContentPersistence, ContentPersistenceKey, MaterializeError, Materializer, PersistError,
-    TorrentContentPersistence, WriteSet, WriterLoadError, WriterLoadedTorrent,
+    load_writer_torrents, project_torrent_persistence, resolved_workflow, BlockingManager,
+    BoxError, ContentPersistence, ContentPersistenceKey, MaterializeError, Materializer,
+    PersistError, TorrentContentPersistence, WriteSet, WriterLoadError, WriterLoadedTorrent,
     WriterProjectionError,
 };
 
@@ -557,8 +557,15 @@ fn compose_retry_job(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut retry_params = params.clone();
-    retry_params.info_hashes = info_hashes;
+    // Go rebuilds the message from these four fields, with the workflow it
+    // resolved rather than the one the job named (`processor.go`'s
+    // `NewQueueJob(MessageParams{...})`).
+    let retry_params = ProcessTorrentParams {
+        classify_mode: params.classify_mode,
+        classifier_workflow: resolved_workflow(params).to_owned(),
+        classifier_flags: params.classifier_flags.clone(),
+        info_hashes,
+    };
     Ok(Some(process_torrent_job(
         &retry_params,
         QueueJobOptions::default(),
@@ -1145,6 +1152,39 @@ mod tests {
         assert_eq!(
             retry_job.fingerprint,
             "b9d935513d1349daf6bcddff79e3c79184ff818e2a564cdb1fb4956aca28dd31"
+        );
+    }
+
+    /// Go's retry message names the workflow the job RESOLVED, so a job that
+    /// named none is retried under the default by name.
+    #[test]
+    fn the_retry_job_names_the_resolved_workflow() {
+        let mut params = supported_params();
+        params.classifier_workflow = String::new();
+        params.classify_mode = 1;
+        let retry_job = compose_retry_job(&params, &[HASH_B.to_owned()], true)
+            .expect("compose")
+            .expect("a partial failure has a retry job");
+        assert_eq!(
+            retry_job.payload,
+            concat!(
+                "{\"ClassifyMode\":1,\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{",
+                "\"apis_enabled\":false,\"local_search_enabled\":false,",
+                "\"tmdb_enabled\":false},\"InfoHashes\":[",
+                "\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]}"
+            )
+        );
+
+        params.classifier_workflow = "custom".to_owned();
+        let retry_job = compose_retry_job(&params, &[HASH_B.to_owned()], true)
+            .expect("compose")
+            .expect("a partial failure has a retry job");
+        assert!(
+            retry_job
+                .payload
+                .contains("\"ClassifierWorkflow\":\"custom\""),
+            "{}",
+            retry_job.payload
         );
     }
 

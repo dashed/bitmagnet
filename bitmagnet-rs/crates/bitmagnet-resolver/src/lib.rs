@@ -44,7 +44,7 @@ use bitmagnet_classifier::resolver::tmdb;
 use bitmagnet_classifier::{ContentResolver, ContentResultItem, ResolveError};
 use bitmagnet_content_search::PgContentSearch;
 use bitmagnet_model::{Content, ContentType};
-use bitmagnet_tmdb::TmdbClient;
+use bitmagnet_tmdb::{ReqwestTransport, TmdbClient, Transport};
 
 /// The live resolver: PostgreSQL for the local seams, TMDB over HTTP for the
 /// rest.
@@ -56,15 +56,18 @@ use bitmagnet_tmdb::TmdbClient;
 /// unauthorized latch. Cloning the backends instead of sharing them would
 /// silently give each caller its own limiter and its own latch, which is the
 /// same bug twice.
-pub struct LiveContentResolver {
+///
+/// The TMDB client's transport is a parameter only so a test can put a
+/// scripted TMDB behind the real client; production uses the default.
+pub struct LiveContentResolver<T = ReqwestTransport> {
     local: Arc<PgContentSearch>,
-    tmdb: Arc<TmdbClient>,
+    tmdb: Arc<TmdbClient<T>>,
 }
 
-impl LiveContentResolver {
+impl<T> LiveContentResolver<T> {
     /// Compose a resolver over an existing local search and TMDB client.
     #[must_use]
-    pub fn new(local: Arc<PgContentSearch>, tmdb: Arc<TmdbClient>) -> Self {
+    pub fn new(local: Arc<PgContentSearch>, tmdb: Arc<TmdbClient<T>>) -> Self {
         Self { local, tmdb }
     }
 
@@ -77,13 +80,13 @@ impl LiveContentResolver {
     /// The TMDB half, for callers that need it directly — validating the API key
     /// at startup, say, which Go does outside the classifier.
     #[must_use]
-    pub fn tmdb(&self) -> &Arc<TmdbClient> {
+    pub fn tmdb(&self) -> &Arc<TmdbClient<T>> {
         &self.tmdb
     }
 }
 
 #[async_trait]
-impl ContentResolver for LiveContentResolver {
+impl<T: Transport + 'static> ContentResolver for LiveContentResolver<T> {
     async fn content_by_id(
         &self,
         content_type: ContentType,

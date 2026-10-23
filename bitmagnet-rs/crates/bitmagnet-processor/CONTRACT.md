@@ -553,12 +553,14 @@ completion itself. With the switch:
 live materializer (`LiveCompositionOnRuntimeThread`) instead. Results still
 fold in requested order, so the plan is identical for any parallelism.
 
-Resolver failures abstain the whole job before any side effect. Each
-classification's resolver calls run in a per-job scope. The first
-`ResolveError` is recorded with its info hash and call. That error is a local
-search error, a TMDB transport error, any TMDB status Go treats as an error
-(401, 429, 5xx, or a search or find 404), or a disabled client. Recording it
-stops the scope, so every later resolver call in the job fails without I/O. The
+Resolver failures whose Go text Rust cannot rebuild abstain the whole job
+before any side effect. (Milestone 8 hands every other answered TMDB status to
+the torrent that made the call, as Go does.) Each classification's resolver
+calls run in a per-job scope. The first abstaining `ResolveError` is recorded
+with its info hash and call. That error is a local search error, a TMDB
+transport error, a 401, a status whose reason phrase cannot be rebuilt, an
+undecodable body, or a disabled client. Recording it stops the scope, so every
+resolver call in the job that starts later fails without I/O. The
 composition then returns `MaterializeError::ResolverFailed` ahead of any other
 result. The worker logs `abstaining from process_torrent job after a content
 resolver failure` (job ID, info hash, call, error) and abstains: the claim
@@ -569,9 +571,9 @@ the scope, so an abandoned composition makes no further TMDB or search calls.
 
 Gates:
 - **Unit** (`src/live.rs`, `src/writer_plan.rs`, the binary):
-  - Every fault (search 401, key-validation 401, disabled client, timeout, 500, 429, search 404, find 404, local search error) fails the job, both serial and at four threads.
+  - Every abstaining fault (search 401, key-validation 401, disabled client, timeout, undecodable body, unrenderable reason phrase, local search error) abstains the job, both serial and at four threads. Milestone 8 lists the faults that fail only the torrent.
   - A details 404 succeeds as unmatched.
-  - One failing torrent abstains the job.
+  - One abstaining torrent abstains the job, whatever else failed.
   - A call outside a classification, or after the first failure, never reaches I/O.
   - Payload acceptance covers partly-true, omitted, string, numeric, and inherited flags, empty and custom workflows, and extra flags, in both modes.
   - The key is refused without the switch, required with it, and never printed.
@@ -581,7 +583,7 @@ Gates:
   - The flags-on claim takes both explicit subsets in Go's order, and nothing else.
   - Its custom and generic plans scan 00036's index behind a 20,000-row organic backlog.
   - A flags-on job attaches seeded local content with its ordered associations.
-  - A resolver failure abstains with zero writes and the row byte-identical.
+  - An abstaining resolver failure abstains with zero writes and the row byte-identical.
   - A composition abandoned at its job timeout makes no further resolver calls once it is unblocked.
   - A flags-on job with a sourced hint abstains with the attach-hint reason, with zero writes and zero resolver calls, because the hint check precedes classification.
   - A flags-off job processed by the switched worker leaves the same image as without the switch.
@@ -591,8 +593,143 @@ Gates:
 - **Differential:** M1a's harness (stub TMDB, seeded content) compares Go-alone with Rust-alone dumps that include the content tables.
 
 Known differences from Go, beyond Milestone 6's:
-- **Resolver failure scope.** A resolver failure abstains the whole job. Go fails only the affected torrents, republishes them, and persists the rest. The Rust worker therefore needs Go's worker beside it to settle such jobs. While the failure persists (a revoked key, a TMDB outage), every flags-on job is left to Go.
-- **401 fallback.** Go falls back to its default TMDB key after a 401; Rust latches the 401 and abstains.
-- **Retry workflow (M2).** A classifier failure republishes the job's params unchanged, while Go republishes with the resolved workflow name. Both are `default` for every admitted payload, so this only matters once organic payloads (empty workflow) are admitted.
+- **Resolver failure scope.** An abstaining resolver failure (see above) abstains the whole job. Go fails only the affected torrents, republishes them, and persists the rest. The Rust worker therefore needs Go's worker beside it to settle such jobs. While the failure persists (a revoked key, a TMDB outage that times out), every flags-on job is left to Go. Milestone 8 narrowed this class.
+- **401 fallback.** Go falls back to its default TMDB key after a 401 at key validation; Rust latches the 401 and abstains. A 401 on a later call is per torrent in Go (`TMDB request failed: 401 Unauthorized`, then latched); Rust abstains there too, and latches.
 - **Enriched hints (M3).** Sourced and enriched explicit hints still abstain, before any resolver call, as do attached-content images that conflict within a job.
 - **Tantivy.** There is still no Tantivy dual-write, so content attached by Rust reaches the search sidecar only at the next backfill or torrent update.
+
+## Milestone 8: per-torrent TMDB status failures
+
+With `--admit-flags-on`, a TMDB request answered with its own non-2xx status
+other than 401 now fails only the torrent whose classification made it, as in
+Go.
+The other torrents keep resolving, and the job settles through Milestone 6's
+classifier-failure path. Under Milestone 7 such a status abstained the whole
+job.
+
+Rust rebuilds Go's whole chain byte for byte:
+- **Requester** (`internal/tmdb/requester.go`): a non-2xx becomes `TMDB request failed: <res.Status()>`. 401 and 404 are sentinels with fixed text (`401 Unauthorized`, `404 Not Found`), whatever phrase the server sent. A details 404 is still unmatched; a search or find 404 is an error.
+- **Classifier:** search and find errors pass through unwrapped. `find_match` wraps them as `runtime error at Path <path>: <cause>`, which stops that torrent's workflow.
+- **Processor** (`processor.go`): the errors are `missing N info hashes` (when hashes are missing), then each failed torrent's error.
+  - When no torrent succeeded, the job fails with the errors joined by newlines, behind the handler's `job failed to process: ` prefix, and retries with Go's backoff up to its max retries.
+  - Otherwise Go publishes a retry job before persisting the rest. The retry job holds the missing hashes, then the failed torrents, and is inserted `ON CONFLICT DO NOTHING`.
+
+For example:
+`job failed to process: missing 1 info hashes\nruntime error at Path workflows.default.[5].if_else.if_action.find_match: TMDB request failed: 503 Slow Down`.
+
+**Status lines.** On HTTP/1.x, Go's `res.Status()` is the status line as the
+server sent it. hyper keeps a reason phrase (`hyper::ext::ReasonPhrase`) only
+when it differs from the canonical one. `HttpResponse::reason_phrase` carries
+that phrase, so `TmdbError::Http`'s `status_line` is exact: `599 status code
+599` from a Go server, `503 Slow Down`. hyper reports three different status
+lines as the same empty phrase:
+- a missing phrase (`HTTP/1.1 500`), which Go renders `500`;
+- an empty one (`HTTP/1.1 500 `), which Go renders `500 `;
+- one with obs-text bytes, which Go renders as sent.
+
+An empty or non-UTF-8 phrase is therefore `TmdbError::UnrenderableStatus`, and
+abstains.
+
+**Mechanism:**
+- `From<TmdbError>` maps 401, 404 and `Http` to `ResolveError::TmdbStatus { status, status_line }`, which renders exactly like `ResolveError::Tmdb`.
+- `TmdbClient`'s seam calls hand on a latched key-validation failure as `ResolveError::Tmdb` instead (see below).
+- `live::abstains` is false only for a `TmdbStatus` other than 401.
+- `AbstainingResolver` records only abstaining errors, and only they stop the scope. A per-torrent error reaches the engine unchanged.
+
+**Log events.** The parity harness attributes TMDB requests to the failure
+that stopped a job from these lines, all carrying `info_hash` and `call`:
+- `content resolver call started` (debug): a call that goes ahead, logged before its request;
+- `content resolver failure recorded; later calls are refused` (info): an abstaining failure, with `error`;
+- `content resolver call refused` (debug): a call made after the scope stopped, which makes no request.
+
+The decision to admit or refuse a call, and its log line, share the scope's
+lock with recording a failure. So at several threads no call is logged as
+started after the failure that stopped its scope, although calls that started
+earlier may still be in flight. A refused call is still kept as the failure
+when none was recorded (a scope the worker stopped at a timeout or shutdown),
+as in Milestone 7.
+
+**Retries.** resty v2.17.2, with `SetRetryCount(3)` and no retry conditions,
+retries only when `err != nil`: a transport error. That is four attempts with
+2–20 s of jittered backoff, each with a 10 s timeout. An answered status is
+one request. The Rust client's `execute_with_retry` matches, so a status
+failure is never retried within a job.
+
+**Key validation.** Both sides validate the key lazily, once per process, and
+latch the outcome. Go returns a failed validation's error for every later call
+of the process. Its text could be rebuilt, but the job abstains on it whatever
+its status: otherwise a transient 500 at start-up would fail every torrent,
+and burn every flags-on job's retries, until a restart. A latched 404 abstains
+too; it is not treated as unmatched. Once the initialiser has failed, no call
+reaches the network, so the seam knows that an error seen under a failed latch
+is the latched one.
+
+**Retry workflow.** `compose_retry_job` rebuilds the message from Go's four
+fields, with the workflow Go resolved (`resolved_workflow`: the job's
+workflow, or `default` when it is empty), as Go's
+`NewQueueJob(MessageParams{...})` does. That closes Milestone 7's "Retry
+workflow" difference.
+
+The job still abstains, untouched, for:
+- a 401;
+- a failed key validation, whatever its status;
+- a transport error or timeout, whose Go text embeds the URL and so the API key;
+- an unrenderable status;
+- an undecodable body;
+- a disabled client;
+- a local search error;
+- before any resolver call: an undecodable or unsupported payload, or a sourced hint.
+
+Failed torrents appear in the job's input order, both in the retry job and in
+the joined error. Go appends them under a mutex in goroutine completion order,
+so that order is not deterministic in Go and is not emulated.
+
+Gates:
+- **Unit** (`bitmagnet-tmdb`):
+  - The server's phrase survives: `599 status code 599`, Go's `413 Request Entity Too Large`, `503 Slow Down`.
+  - The sentinels keep their fixed text.
+  - A non-UTF-8 or empty phrase is unrenderable.
+  - Answered statuses keep their code through the seam.
+  - Over a real socket, the live transport keeps a non-canonical phrase, reports a canonical one as `None`, and reports `500`, `500 ` and an obs-text phrase as empty.
+  - The client renders a 599's own phrase, and a 404's sentinel whatever the server's phrase.
+  - A failed key validation crosses the seam as `ResolveError::Tmdb`: a 500, with one request across two calls, and a 404 on a details call. A validated client's same statuses stay answered ones.
+- **Unit** (`src/live.rs`, serial and at four threads):
+  - These fail only the torrent, with Go's text: 5xx, 429, a search or find 404, a non-canonical phrase.
+  - These abstain: 401s, a key validation answered 500, or 404 on a details call, a disabled client, a transport error, unrenderable phrases, an undecodable body, a local search error.
+  - A details 404 and an empty search resolve.
+  - One failing torrent fails alone while another resolves.
+  - An abstaining error abstains the job whatever else failed.
+  - The first recorded failure is the one kept.
+  - The guard logs a started call, the recorded failure, and a refused call, in that order, with their fields.
+- **Unit** (`src/writer_plan.rs`): the retry job names the resolved workflow.
+- **Migration-backed** (`tests/worker_pg.rs`; `LiveContentResolver` over a scripted TMDB transport):
+  - Partial failure, at one and at four threads: the failing torrent goes to the retry job, while seeded local content and TMDB-resolved content persist. Each request is counted.
+  - Missing hashes lead the retry job, ahead of a TMDB failure.
+  - All failed: the job stores Go's error text and fails at its max retries, with one search per run, no new job and no writes.
+  - A 401 (one attempt), a transport failure (four attempts) and a key validation answered 500 (no search at all) abstain with zero writes, the row unchanged, and no call after the failing one.
+- **Mutations:** 19, all killed. They are:
+  - every error abstains;
+  - the guard records per-torrent errors;
+  - a 401 per torrent;
+  - a transport error per torrent;
+  - the status code is lost at the seam;
+  - the client ignores the phrase;
+  - the transport drops the phrase;
+  - a non-UTF-8 phrase renders lossily;
+  - an empty phrase renders with a trailing space;
+  - the retry job clones the named workflow;
+  - `find_match` moves on after any error;
+  - missing hashes follow the classifier failures;
+  - a stopped scope still calls the resolver;
+  - a latched validation crosses as an answered status;
+  - each of the three log events is dropped (three mutations);
+  - a later failure overwrites the first;
+  - a refusal is not kept as the failure.
+
+Known differences from Go, beyond Milestone 7's:
+- **HTTP/2 status text.** The Rust transport speaks HTTP/1.1 only, because reqwest is built without `http2`. Go negotiates HTTP/2 with TLS servers such as api.themoviedb.org (resty sets `ForceAttemptHTTP2`), and on HTTP/2 `res.Status()` is the code plus Go's `http.StatusText`, not the server's phrase.
+  - For the common codes (500, 502, 503, 504, 429) the two texts agree.
+  - They differ when a server's HTTP/1.1 phrase differs from Go's table (413 or 422 on a current server), and when a code has no table entry (Go writes `599 `).
+  - The harness's plain-HTTP fake TMDB runs HTTP/1.1 on both sides, so it does not exercise this.
+- **Failure order.** With two or more failed torrents in one job, Go's order is goroutine completion order and Rust's is input order (see above).
+- **Calls in flight.** With classification parallelism above one, calls already in flight when an abstaining error is recorded still complete; only calls that start afterwards are refused.

@@ -6,8 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,6 +27,9 @@ use bitmagnet_queue::{
     ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL, ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
     PROCESS_TORRENT,
 };
+use bitmagnet_resolver::LiveContentResolver;
+use bitmagnet_tmdb::{HttpResponse, RetryPolicy, TmdbClient, TmdbConfig, Transport};
+use reqwest::Url;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -1355,15 +1359,15 @@ fn flags_on_params(info_hashes: &[&str]) -> ProcessTorrentParams {
     params
 }
 
-/// Local search against the database, TMDB answering every call with a
-/// server error, so a classification that reaches TMDB fails.
+/// Local search against the database, every TMDB call timing out, so a
+/// classification that reaches TMDB abstains the job.
 struct LocalSearchOnly {
     local: PgContentSearch,
 }
 
 impl LocalSearchOnly {
     fn tmdb<T>() -> Result<T, ResolveError> {
-        Err(ResolveError::Tmdb("503 Service Unavailable".to_owned()))
+        Err(ResolveError::Tmdb("operation timed out".to_owned()))
     }
 }
 
@@ -2004,7 +2008,7 @@ async fn a_flags_on_resolver_failure_abstains_with_zero_writes() {
     assert!(
         reason.contains("content resolver")
             && reason.contains(HASH_UNKNOWN)
-            && reason.contains("503 Service Unavailable"),
+            && reason.contains("operation timed out"),
         "{reason}"
     );
     assert_eq!(
@@ -2072,7 +2076,7 @@ async fn a_flags_on_worker_processes_flags_off_jobs_exactly_as_without_the_switc
 }
 
 /// Counts the calls that reach it and, when `stall_first`, holds the first
-/// one until released. Local search answers nothing and TMDB fails.
+/// one until released. Local search answers nothing and TMDB times out.
 #[derive(Default)]
 struct CountingResolver {
     calls: AtomicUsize,
@@ -2091,7 +2095,7 @@ impl CountingResolver {
 
     async fn tmdb<T>(&self) -> Result<T, ResolveError> {
         self.enter().await;
-        Err(ResolveError::Tmdb("503 Service Unavailable".to_owned()))
+        Err(ResolveError::Tmdb("operation timed out".to_owned()))
     }
 }
 
@@ -2297,4 +2301,408 @@ async fn a_flags_on_job_with_a_sourced_hint_abstains_before_any_resolver_call() 
         1,
         "an abstention publishes no retry job"
     );
+}
+
+// -- TMDB status failures fail only their torrent, as in Go ----------------
+
+const HASH_FOUND: &str = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5";
+/// Go's path for the `find_match` that searches by title.
+const BY_SEARCH: &str = "runtime error at Path workflows.default.[5].if_else.if_action.find_match";
+const FOUND_SEARCH: &str = r#"{"page":1,"results":[{"id":777,"title":"Found Film","original_title":"Found Film","release_date":"2010-05-01"}],"total_pages":1,"total_results":1}"#;
+const FOUND_DETAILS: &str = r#"{"id":777,"title":"Found Film","original_title":"Found Film","original_language":"en","release_date":"2010-05-01","imdb_id":"tt0000777","genres":[{"id":18,"name":"Drama"}]}"#;
+
+type Answer = Result<HttpResponse, String>;
+
+/// An HTTP answer; `reason_phrase` is a non-canonical one, as hyper reports it.
+fn answer(status: u16, reason_phrase: Option<&str>, body: &str) -> Answer {
+    Ok(HttpResponse {
+        status,
+        reason_phrase: reason_phrase.map(|phrase| phrase.as_bytes().to_vec()),
+        content_type: Some("application/json".to_owned()),
+        body: body.as_bytes().to_vec(),
+    })
+}
+
+/// TMDB behind the real `TmdbClient`. A request is answered by the first
+/// answer whose key occurs in its `path?query` (without the API key), and
+/// otherwise with an empty search page; every request is recorded, so a test
+/// can check the request multiset.
+#[derive(Default)]
+struct FakeTmdb {
+    answers: Vec<(&'static str, Answer)>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl FakeTmdb {
+    fn new(answers: Vec<(&'static str, Answer)>) -> Arc<Self> {
+        Arc::new(Self {
+            answers,
+            ..Self::default()
+        })
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().expect("asked lock").clone()
+    }
+
+    /// How many requests contained `key`.
+    fn count(&self, key: &str) -> usize {
+        self.asked()
+            .iter()
+            .filter(|request| request.contains(key))
+            .count()
+    }
+}
+
+#[async_trait]
+impl Transport for FakeTmdb {
+    async fn execute(&self, url: &Url) -> Result<HttpResponse, String> {
+        let query: Vec<String> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "api_key")
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let request = format!("{}?{}", url.path(), query.join("&"));
+        self.asked.lock().expect("asked lock").push(request.clone());
+        self.answers
+            .iter()
+            .find(|(key, _)| request.contains(key))
+            .map_or_else(
+                || {
+                    answer(
+                        200,
+                        None,
+                        r#"{"page":1,"results":[],"total_pages":0,"total_results":0}"#,
+                    )
+                },
+                |(_, answer)| answer.clone(),
+            )
+    }
+}
+
+/// A worker started with the flags-on switch over Go's resolver stack: the
+/// database's local search and the real TMDB client, talking to `tmdb` with
+/// Go's three transport retries (without the waits).
+fn tmdb_worker(pool: &PgPool, tmdb: &Arc<FakeTmdb>, parallelism: usize) -> ProcessTorrentWorker {
+    let config = TmdbConfig {
+        base_url: "http://tmdb.invalid/3".to_owned(),
+        rate_limit: Duration::ZERO,
+        retry: RetryPolicy {
+            count: 3,
+            wait: Duration::ZERO,
+            max_wait: Duration::ZERO,
+        },
+        ..TmdbConfig::new("test-key")
+    };
+    let resolver = LiveContentResolver::new(
+        Arc::new(PgContentSearch::with_associations(pool.clone())),
+        Arc::new(TmdbClient::with_transport(config, Arc::clone(tmdb))),
+    );
+    ProcessTorrentWorker::new(
+        QueueStore::new(pool.clone()),
+        Materializer::from_core_with_resolver(
+            Arc::new(resolver),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("compile embedded classifier")
+        .with_classify_parallelism(NonZeroUsize::new(parallelism).expect("nonzero"))
+        .expect("classify pool"),
+        Arc::new(PersistentBlockingManager::new(pool.clone())),
+        fast_config(),
+    )
+}
+
+/// The local movie and three torrents: one that attaches it, one TMDB has
+/// never heard of, and one TMDB finds.
+async fn seed_tmdb_fixture(pool: &PgPool) {
+    reset(pool).await;
+    seed_local_movie(pool).await;
+    seed_torrent(
+        pool,
+        HASH_LOCAL,
+        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
+        2_000_000_000,
+    )
+    .await;
+    seed_torrent(
+        pool,
+        HASH_UNKNOWN,
+        "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
+        1_000_000_000,
+    )
+    .await;
+    seed_torrent(
+        pool,
+        HASH_FOUND,
+        "Found Film 2010 1080p BluRay x264-GRP.mkv",
+        3_000_000_000,
+    )
+    .await;
+}
+
+/// The one queue job other than `id`, as `(payload, status, retries,
+/// max_retries)`; the payload is the stored JSON text.
+async fn other_job(pool: &PgPool, id: &str) -> (String, String, i32, i32) {
+    let row = sqlx::query(
+        "SELECT payload::text AS payload, status::text AS status, retries, max_retries \
+         FROM queue_jobs WHERE id <> $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("exactly one retry job");
+    (
+        row.get("payload"),
+        row.get("status"),
+        row.get("retries"),
+        row.get("max_retries"),
+    )
+}
+
+/// Go's retry message for `info_hashes`, as it stores it: the flags-on
+/// params with the resolved workflow.
+fn flags_on_retry_payload(info_hashes: &[&str]) -> Value {
+    let job = process_torrent_job(&flags_on_params(info_hashes), QueueJobOptions::default())
+        .expect("build retry job");
+    serde_json::from_str(&job.payload).expect("retry payload")
+}
+
+async fn queue_job_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM queue_jobs")
+        .fetch_one(pool)
+        .await
+        .expect("count queue jobs")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_tmdb_status_failure_fails_only_its_torrent_and_the_others_still_resolve() {
+    let pool = connect().await;
+    // Serial, and on Go's default pool width.
+    for parallelism in [1, 4] {
+        seed_tmdb_fixture(&pool).await;
+        let tmdb = FakeTmdb::new(vec![
+            ("query=Unknown", answer(500, None, "{}")),
+            ("query=Found", answer(200, None, FOUND_SEARCH)),
+            ("/movie/777", answer(200, None, FOUND_DETAILS)),
+        ]);
+        let store = QueueStore::new(pool.clone());
+        // The failing torrent comes first, so a serial composition reaches the
+        // others only after the failure.
+        let id = enqueue(
+            &store,
+            &flags_on_params(&[HASH_UNKNOWN, HASH_LOCAL, HASH_FOUND]),
+        )
+        .await;
+        let worker = tmdb_worker(&pool, &tmdb, parallelism);
+
+        // Go persists the rest, publishes the failed torrent, and returns nil.
+        let outcome = worker.run_once().await.unwrap();
+        assert!(
+            matches!(
+                &outcome,
+                AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+            ),
+            "parallelism {parallelism}: {outcome:?}"
+        );
+        let source = job_row(&pool, &id).await;
+        assert_eq!(
+            (source.status.as_str(), source.error.as_deref()),
+            ("processed", None)
+        );
+        let (payload, status, retries, max_retries) = other_job(&pool, &id).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&payload).unwrap(),
+            flags_on_retry_payload(&[HASH_UNKNOWN])
+        );
+        assert_eq!((status.as_str(), retries, max_retries), ("pending", 0, 2));
+
+        // Both other torrents resolved: one locally, one from TMDB.
+        let image = live_image(&pool).await;
+        let classified: Vec<&String> = image.iter().filter(|row| row.starts_with("tc ")).collect();
+        assert_eq!(classified.len(), 2, "{image:#?}");
+        assert!(!image
+            .iter()
+            .any(|row| row.starts_with("tc ") && row.contains(HASH_UNKNOWN)));
+        assert!(
+            classified
+                .iter()
+                .any(|row| row.contains(HASH_LOCAL) && row.contains("\"content_id\": \"42\"")),
+            "{classified:#?}"
+        );
+        assert!(
+            classified
+                .iter()
+                .any(|row| row.contains(HASH_FOUND) && row.contains("\"content_id\": \"777\"")),
+            "{classified:#?}"
+        );
+        assert!(
+            image
+                .iter()
+                .any(|row| row.starts_with("content ") && row.contains("\"id\": \"777\"")),
+            "{image:#?}"
+        );
+
+        // One request per call, none retried; the failing torrent stopped at
+        // its failed search.
+        assert_eq!(tmdb.count("/authentication"), 1, "{:?}", tmdb.asked());
+        assert_eq!(tmdb.count("query=Unknown"), 1, "{:?}", tmdb.asked());
+        assert_eq!(tmdb.count("query=Found"), 1, "{:?}", tmdb.asked());
+        assert_eq!(tmdb.count("/movie/777"), 1, "{:?}", tmdb.asked());
+        assert_eq!(tmdb.asked().len(), 4, "{:?}", tmdb.asked());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn missing_hashes_lead_the_retry_job_ahead_of_a_tmdb_failure() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    let tmdb = FakeTmdb::new(vec![("query=Unknown", answer(404, None, "{}"))]);
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(
+        &store,
+        &flags_on_params(&[HASH_UNKNOWN, HASH_LOCAL, HASH_MISSING]),
+    )
+    .await;
+    let worker = tmdb_worker(&pool, &tmdb, 1);
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+    ));
+    // Go's `failedHashes` starts with the missing hashes, then the torrents
+    // whose classification failed.
+    let (payload, ..) = other_job(&pool, &id).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload).unwrap(),
+        flags_on_retry_payload(&[HASH_MISSING, HASH_UNKNOWN])
+    );
+    let image = live_image(&pool).await;
+    assert_eq!(image.iter().filter(|row| row.starts_with("tc ")).count(), 1);
+    assert_eq!(tmdb.count("query=Unknown"), 1, "{:?}", tmdb.asked());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_all_failed_flags_on_job_stores_gos_error_and_fails_at_max_retries() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    // The server's own reason phrase reaches the stored error, as in Go.
+    let tmdb = FakeTmdb::new(vec![(
+        "query=Unknown",
+        answer(503, Some("Slow Down"), "{}"),
+    )]);
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &flags_on_params(&[HASH_MISSING, HASH_UNKNOWN])).await;
+    let image_before = live_image(&pool).await;
+    let worker = tmdb_worker(&pool, &tmdb, 1);
+    let expected_error = format!(
+        "job failed to process: missing 1 info hashes\n\
+         {BY_SEARCH}: TMDB request failed: 503 Slow Down"
+    );
+
+    // Pending run, then two retry runs; the second reaches max_retries (2).
+    for (run, (status, retries)) in [("retry", 0), ("retry", 1), ("failed", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        make_ready(&pool, &id).await;
+        let outcome = worker.run_once().await.unwrap();
+        match (status, &outcome) {
+            ("retry", AdmittedConsumeOutcome::Settled(ConsumeOutcome::RetryScheduled { .. })) => {}
+            ("failed", AdmittedConsumeOutcome::Settled(ConsumeOutcome::Failed { error, .. })) => {
+                assert_eq!(error, &expected_error)
+            }
+            _ => panic!("run {run}: expected {status}, got {outcome:?}"),
+        }
+        let row = job_row(&pool, &id).await;
+        assert_eq!(
+            (row.status.as_str(), row.retries, row.error.as_deref()),
+            (status, retries, Some(expected_error.as_str())),
+            "run {run}"
+        );
+        // One search per run, none retried.
+        assert_eq!(tmdb.count("query=Unknown"), run + 1, "{:?}", tmdb.asked());
+    }
+    assert_eq!(
+        queue_job_count(&pool).await,
+        1,
+        "an all-failed job publishes no retry job"
+    );
+    assert_eq!(
+        live_image(&pool).await,
+        image_before,
+        "an all-failed job wrote rows"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn abstaining_tmdb_failures_leave_zero_writes_and_make_no_later_calls() {
+    let pool = connect().await;
+    for (name, failing, failure, attempts, requests) in [
+        ("401", "query=Unknown", answer(401, None, "{}"), 1, 2),
+        // Go's three retries: four attempts, then the job abstains.
+        (
+            "transport",
+            "query=Unknown",
+            Err("operation timed out".to_owned()),
+            4,
+            5,
+        ),
+        // The latched validation fails the first search without a request.
+        (
+            "key validation 500",
+            "/authentication",
+            answer(500, None, "{}"),
+            1,
+            1,
+        ),
+    ] {
+        seed_tmdb_fixture(&pool).await;
+        let tmdb = FakeTmdb::new(vec![
+            (failing, failure),
+            ("query=Found", answer(200, None, FOUND_SEARCH)),
+            ("/movie/777", answer(200, None, FOUND_DETAILS)),
+        ]);
+        let store = QueueStore::new(pool.clone());
+        let id = enqueue(&store, &flags_on_params(&[HASH_UNKNOWN, HASH_FOUND])).await;
+        let before = job_row(&pool, &id).await;
+        let image_before = live_image(&pool).await;
+        let worker = tmdb_worker(&pool, &tmdb, 1);
+
+        let outcome = worker.run_once().await.unwrap();
+        let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+            panic!("{name}: expected an abstention, got {outcome:?}");
+        };
+        assert_eq!(job.id, id, "{name}");
+        assert!(
+            reason.contains(HASH_UNKNOWN) && reason.contains("tmdb_search_movie"),
+            "{name}: {reason}"
+        );
+        assert_eq!(
+            job_row(&pool, &id).await,
+            before,
+            "{name}: abstention changed the row"
+        );
+        assert_eq!(
+            live_image(&pool).await,
+            image_before,
+            "{name}: abstention wrote rows"
+        );
+        assert_eq!(
+            queue_job_count(&pool).await,
+            1,
+            "{name}: abstention published a job"
+        );
+        // The failed call's attempts, and nothing after it: the next torrent
+        // never reached TMDB.
+        assert_eq!(tmdb.count(failing), attempts, "{name}: {:?}", tmdb.asked());
+        assert_eq!(
+            tmdb.asked().len(),
+            requests,
+            "{name}: a call after the abstaining failure: {:?}",
+            tmdb.asked()
+        );
+    }
 }

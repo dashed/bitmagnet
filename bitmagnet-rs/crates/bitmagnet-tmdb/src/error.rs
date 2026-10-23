@@ -51,13 +51,19 @@ pub enum TmdbError {
 
     /// Any other non-2xx.
     ///
-    /// `status_line` is Go's `res.Status()`, e.g. `"500 Internal Server
-    /// Error"`. Its reason phrase comes from the canonical status table rather
-    /// than the server's own bytes — hyper does not surface those — so a server
-    /// sending a nonstandard phrase produces a different string here than in
-    /// Go. Nothing branches on the text.
+    /// `status_line` is Go's `res.Status()` on HTTP/1.x: the status code and
+    /// the reason phrase the server sent, e.g. `"500 Internal Server Error"`
+    /// or a Go server's `"599 status code 599"`. The text reaches a failed
+    /// job's stored error, so it is rebuilt byte for byte (see
+    /// [`Self::from_status_line`]).
     #[error("{status_line}")]
     Http { status: u16, status_line: String },
+
+    /// A non-2xx whose status line cannot be rebuilt as Go would render it: an
+    /// empty reason phrase, one that is not UTF-8, or an unknown status with no
+    /// phrase.
+    #[error("{status} with an unrenderable reason phrase")]
+    UnrenderableStatus { status: u16 },
 
     /// No usable HTTP response: connection refused, TLS failure, timeout,
     /// retries exhausted. Go's `err != nil` out of resty, and the only class of
@@ -87,7 +93,7 @@ impl TmdbError {
         match self {
             Self::Unauthorized => ERROR_KIND_UNAUTHORIZED,
             Self::NotFound => ERROR_KIND_NOT_FOUND,
-            Self::Http { .. } => ERROR_KIND_HTTP,
+            Self::Http { .. } | Self::UnrenderableStatus { .. } => ERROR_KIND_HTTP,
             // Go reaches `transport` for a nil/successful response with an
             // error, which is what a disabled client and a decode failure both
             // look like from the recorder's seat.
@@ -95,42 +101,82 @@ impl TmdbError {
         }
     }
 
+    /// [`Self::from_status_line`] for a status line with its canonical
+    /// reason phrase.
+    #[must_use]
+    pub fn from_status(status: u16) -> Option<Self> {
+        Self::from_status_line(status, None)
+    }
+
     /// Maps an HTTP status onto Go's `requester.Request` switch
     /// (`internal/tmdb/requester.go:29-38`), or `None` for a success.
     ///
     /// Go's success test is resty's `IsSuccess()`, i.e. 200..=299 — a 3xx that
-    /// survived redirect handling is an error, not a success.
+    /// survived redirect handling is an error, not a success. 401 and 404 are
+    /// Go's sentinels, whose text is fixed whatever phrase the server sent.
+    ///
+    /// `reason_phrase` is [`crate::HttpResponse::reason_phrase`]: the server's
+    /// phrase when it is not the canonical one.
     #[must_use]
-    pub fn from_status(status: u16) -> Option<Self> {
+    pub fn from_status_line(status: u16, reason_phrase: Option<&[u8]>) -> Option<Self> {
         match status {
             200..=299 => None,
             401 => Some(Self::Unauthorized),
             404 => Some(Self::NotFound),
-            _ => Some(Self::Http {
-                status,
-                status_line: status_line(status),
+            _ => Some(match status_line(status, reason_phrase) {
+                Some(status_line) => Self::Http {
+                    status,
+                    status_line,
+                },
+                None => Self::UnrenderableStatus { status },
             }),
         }
     }
 }
 
-/// Go's `res.Status()` — `"<code> <reason>"`.
-fn status_line(status: u16) -> String {
-    let reason = reqwest::StatusCode::from_u16(status)
-        .ok()
-        .and_then(|code| code.canonical_reason())
-        .unwrap_or("Unknown");
+/// Go's HTTP/1.x `res.Status()`: the code, a space, and the reason phrase as
+/// sent, which is the canonical one unless hyper kept a different phrase.
+fn status_line(status: u16, reason_phrase: Option<&[u8]>) -> Option<String> {
+    let reason = match reason_phrase {
+        // httparse reports `500`, `500 ` and a phrase with obs-text bytes all
+        // as an empty phrase. Go renders `"500"`, `"500 "` and the bytes as
+        // sent, so which one it was cannot be known.
+        Some([]) => return None,
+        Some(phrase) => std::str::from_utf8(phrase).ok()?,
+        None => reqwest::StatusCode::from_u16(status)
+            .ok()?
+            .canonical_reason()?,
+    };
 
-    format!("{status} {reason}")
+    Some(format!("{status} {reason}"))
 }
 
 /// The seam's error type. Every distinction above is preserved by the *return
 /// type* at the call site (a 404 details lookup becomes `Ok(None)`), so what
 /// reaches here is genuinely fatal to the classification — matching how the
 /// classifier's tape resolver reports the same failures.
+///
+/// An answered status keeps its code ([`ResolveError::TmdbStatus`]), so a
+/// caller can treat it apart from a request that got no usable answer; both
+/// render Go's message.
 impl From<TmdbError> for ResolveError {
     fn from(err: TmdbError) -> Self {
-        ResolveError::Tmdb(err.to_string())
+        let status = match &err {
+            TmdbError::Unauthorized => Some(401),
+            TmdbError::NotFound => Some(404),
+            TmdbError::Http { status, .. } => Some(*status),
+            TmdbError::UnrenderableStatus { .. }
+            | TmdbError::Transport(_)
+            | TmdbError::Decode(_)
+            | TmdbError::Disabled => None,
+        };
+        match status {
+            Some(status) => ResolveError::TmdbStatus {
+                status,
+                status_line: err.to_string(),
+            },
+            None => ResolveError::Tmdb(err.to_string()),
+        }
     }
 }
 
@@ -162,6 +208,98 @@ mod tests {
             TmdbError::from_status(429),
             Some(TmdbError::Http { status: 429, .. })
         ));
+    }
+
+    /// Go's `res.Status()` is the status line as sent, and it reaches a failed
+    /// job's stored error, so a non-canonical phrase must survive as is.
+    #[test]
+    fn status_lines_keep_the_servers_reason_phrase() {
+        for (status, phrase, expected) in [
+            // A Go server's text for a code without `StatusText`.
+            (599, &b"status code 599"[..], "599 status code 599"),
+            // Go's table, not hyper's: 413 is "Payload Too Large" there.
+            (
+                413,
+                b"Request Entity Too Large",
+                "413 Request Entity Too Large",
+            ),
+            (503, b"Slow Down", "503 Slow Down"),
+        ] {
+            assert_eq!(
+                TmdbError::from_status_line(status, Some(phrase)),
+                Some(TmdbError::Http {
+                    status,
+                    status_line: expected.to_owned(),
+                }),
+                "{status}"
+            );
+        }
+        // Go's sentinels have fixed text whatever the server said.
+        assert_eq!(
+            TmdbError::from_status_line(401, Some(b"Go Away")),
+            Some(TmdbError::Unauthorized)
+        );
+        assert_eq!(
+            TmdbError::from_status_line(404, Some(b"Nope")),
+            Some(TmdbError::NotFound)
+        );
+        // Text that cannot be Go's byte for byte is not passed off as it.
+        assert_eq!(
+            TmdbError::from_status_line(502, Some(b"Bad \xff Gateway")),
+            Some(TmdbError::UnrenderableStatus { status: 502 })
+        );
+        // Go's `"500"` or `"500 "`, or an obs-text phrase: hyper cannot say which.
+        assert_eq!(
+            TmdbError::from_status_line(500, Some(b"")),
+            Some(TmdbError::UnrenderableStatus { status: 500 })
+        );
+        assert_eq!(
+            TmdbError::from_status(599),
+            Some(TmdbError::UnrenderableStatus { status: 599 })
+        );
+    }
+
+    /// An answered status keeps its code through the seam, so the worker can
+    /// tell it from a request that got no usable answer; the message is Go's
+    /// either way.
+    #[test]
+    fn answered_statuses_keep_their_code_through_the_seam() {
+        for (err, status, message) in [
+            (
+                TmdbError::Http {
+                    status: 503,
+                    status_line: "503 Service Unavailable".to_owned(),
+                },
+                503,
+                "TMDB request failed: 503 Service Unavailable",
+            ),
+            (
+                TmdbError::Unauthorized,
+                401,
+                "TMDB request failed: 401 Unauthorized",
+            ),
+            (
+                TmdbError::NotFound,
+                404,
+                "TMDB request failed: 404 Not Found",
+            ),
+        ] {
+            let resolved = ResolveError::from(err);
+            assert_eq!(resolved.to_string(), message);
+            assert!(
+                matches!(resolved, ResolveError::TmdbStatus { status: s, .. } if s == status),
+                "{resolved:?}"
+            );
+        }
+        for err in [
+            TmdbError::Transport("operation timed out".to_owned()),
+            TmdbError::Decode("expected value".to_owned()),
+            TmdbError::Disabled,
+            TmdbError::UnrenderableStatus { status: 502 },
+        ] {
+            let resolved = ResolveError::from(err);
+            assert!(matches!(resolved, ResolveError::Tmdb(_)), "{resolved:?}");
+        }
     }
 
     /// The recorder's kinds are what a tape keys failures on; a wrong kind

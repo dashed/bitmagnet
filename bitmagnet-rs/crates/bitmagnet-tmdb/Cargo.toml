@@ -14,6 +14,10 @@ description = "B′ enrichment parity — live TMDB HTTP client (Go internal/tmd
 # `bitmagnet-classifier/src/resolver/tmdb.rs`'s module docs.
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
 reqwest = { workspace = true }
+# `hyper::ext::ReasonPhrase`: the status line's own reason phrase, which Go's
+# `res.Status()` carries into its error text. reqwest already builds hyper with
+# these features; naming them here only makes the type reachable.
+hyper = { version = "1.10", default-features = false, features = ["client", "http1"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

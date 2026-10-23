@@ -340,11 +340,7 @@ impl Materializer {
         torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
         scope: &Arc<live::ResolveScope>,
     ) -> Result<MaterializedWriterOutput, MaterializeError> {
-        let workflow = if params.classifier_workflow.is_empty() {
-            "default"
-        } else {
-            params.classifier_workflow.as_str()
-        };
+        let workflow = resolved_workflow(params);
         let flags = classifier_flags(params.classifier_flags.as_ref())?;
 
         let mut loaded = BTreeMap::new();
@@ -597,6 +593,22 @@ pub enum MaterializeError {
     ClassifyPool(#[from] rayon::ThreadPoolBuildError),
     #[error("content resolver failed, so the job is abstained before any side effect: {0}")]
     ResolverFailed(ResolverFailure),
+}
+
+/// Go's `classifier.workflow` default, which `processor.Process` uses for a
+/// job that names no workflow.
+pub(crate) const DEFAULT_CLASSIFIER_WORKFLOW: &str = "default";
+
+/// The workflow a job runs: Go's `workflowName` in `processor.Process`.
+///
+/// Rust's default is fixed at Go's default config value; a Go deployment that
+/// configures another `classifier.workflow` would resolve differently.
+pub(crate) fn resolved_workflow(params: &ProcessTorrentParams) -> &str {
+    if params.classifier_workflow.is_empty() {
+        DEFAULT_CLASSIFIER_WORKFLOW
+    } else {
+        params.classifier_workflow.as_str()
+    }
 }
 
 fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, MaterializeError> {

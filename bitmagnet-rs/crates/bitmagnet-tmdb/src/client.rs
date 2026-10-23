@@ -55,8 +55,14 @@
 //!   chain at its next await point. The observable difference is that Go's
 //!   `limiter.Wait` and `semaphore.Acquire` return a context error where here
 //!   the future simply never resumes.
-//! * **Reason phrases** in [`TmdbError::Http`] come from the canonical status
-//!   table, not the server's bytes (hyper discards those). No branch reads them.
+//! * **HTTP/1.1 only.** The workspace builds reqwest without `http2`, while
+//!   resty sets `ForceAttemptHTTP2` and so speaks HTTP/2 to a TLS server that
+//!   offers it. Requests are the same either way. The one visible difference
+//!   is [`TmdbError::Http`]'s text: here it is the status line the server sent
+//!   (Go's `res.Status()` on HTTP/1.x, exact), but over HTTP/2 Go renders the
+//!   code with its own `http.StatusText`. The two differ only where a server's
+//!   HTTP/1.1 phrase is not Go's (`413 Payload Too Large` against `413 Request
+//!   Entity Too Large`, say), or where Go's table has no entry (`599 `).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -229,6 +235,8 @@ impl<T: Transport> TmdbClient<T> {
     // Where they return `Option`, `None` is Go's `ErrNotFound` reaching a caller
     // that turns it into `ErrUnmatched` — the same split the classifier's tape
     // resolver makes, so a live run and a replayed one are interchangeable.
+    // All five go through `seam`, which hands on a failed key validation as
+    // `ResolveError::Tmdb`.
 
     /// `GET /find/{external_id}` — Go `tmdb.Client.FindByID`.
     ///
@@ -242,7 +250,7 @@ impl<T: Transport> TmdbClient<T> {
         &self,
         request: &FindByIdRequest,
     ) -> Result<FindByIdResponse, ResolveError> {
-        Ok(self.request(&requests::find_by_id(request)).await?)
+        Ok(self.seam(&requests::find_by_id(request)).await??)
     }
 
     /// `GET /movie/{id}` — Go `tmdb.Client.MovieDetails`. `Ok(None)` is
@@ -255,7 +263,7 @@ impl<T: Transport> TmdbClient<T> {
         &self,
         request: &MovieDetailsRequest,
     ) -> Result<Option<MovieDetailsResponse>, ResolveError> {
-        optional(self.request(&requests::movie_details(request)).await)
+        optional(self.seam(&requests::movie_details(request)).await?)
     }
 
     /// `GET /tv/{series_id}` — Go `tmdb.Client.TvDetails`. `Ok(None)` is
@@ -268,7 +276,7 @@ impl<T: Transport> TmdbClient<T> {
         &self,
         request: &TvDetailsRequest,
     ) -> Result<Option<TvDetailsResponse>, ResolveError> {
-        optional(self.request(&requests::tv_details(request)).await)
+        optional(self.seam(&requests::tv_details(request)).await?)
     }
 
     /// `GET /search/movie` — Go `tmdb.Client.SearchMovie`. Returns the raw
@@ -281,7 +289,7 @@ impl<T: Transport> TmdbClient<T> {
         &self,
         request: &SearchMovieRequest,
     ) -> Result<SearchMovieResponse, ResolveError> {
-        Ok(self.request(&requests::search_movie(request)).await?)
+        Ok(self.seam(&requests::search_movie(request)).await??)
     }
 
     /// `GET /search/tv` — Go `tmdb.Client.SearchTv`.
@@ -293,7 +301,28 @@ impl<T: Transport> TmdbClient<T> {
         &self,
         request: &SearchTvRequest,
     ) -> Result<SearchTvResponse, ResolveError> {
-        Ok(self.request(&requests::search_tv(request)).await?)
+        Ok(self.seam(&requests::search_tv(request)).await??)
+    }
+
+    /// [`Self::request`] for the seam calls, with a failed key validation
+    /// taken out first.
+    ///
+    /// The lazy initialiser latches its failure for the process, and Go returns
+    /// it for every later call, so a transient 500 at start-up would fail every
+    /// torrent until a restart. Whatever its status, it crosses as
+    /// [`ResolveError::Tmdb`], on which the worker abstains; a latched 404 is
+    /// not an absence either. Once the initialiser has failed no call reaches
+    /// the network, so an error seen under a failed latch is the latched one.
+    async fn seam<R: DeserializeOwned + Default>(
+        &self,
+        spec: &TmdbRequestSpec,
+    ) -> Result<Result<R, TmdbError>, ResolveError> {
+        match self.request(spec).await {
+            Err(err) if matches!(self.inner.init.get(), Some(Err(_))) => {
+                Err(ResolveError::Tmdb(err.to_string()))
+            }
+            result => Ok(result),
+        }
     }
 
     /// Go `client.ValidateAPIKey` — `GET /authentication`.
@@ -424,7 +453,7 @@ impl<T: Transport> TmdbClient<T> {
             .await
             .map_err(TmdbError::Transport)?;
 
-        match TmdbError::from_status(response.status) {
+        match TmdbError::from_status_line(response.status, response.reason_phrase.as_deref()) {
             Some(err) => Err(err),
             None => Ok(response),
         }
@@ -518,6 +547,8 @@ mod tests {
     #[derive(Clone)]
     enum Canned {
         Status(u16, &'static str),
+        /// A status line with a non-canonical reason phrase, and an empty body.
+        StatusLine(u16, &'static str),
         /// A transport failure — the only class resty retries.
         Failure,
     }
@@ -593,8 +624,15 @@ mod tests {
             match canned {
                 Canned::Status(status, body) => Ok(HttpResponse {
                     status,
+                    reason_phrase: None,
                     content_type: Some(JSON.to_owned()),
                     body: body.as_bytes().to_vec(),
+                }),
+                Canned::StatusLine(status, phrase) => Ok(HttpResponse {
+                    status,
+                    reason_phrase: Some(phrase.as_bytes().to_vec()),
+                    content_type: Some(JSON.to_owned()),
+                    body: Vec::new(),
                 }),
                 Canned::Failure => Err("connection refused".to_owned()),
             }
@@ -737,6 +775,35 @@ mod tests {
         );
     }
 
+    /// Go's error carries the status line the server sent, so a phrase from
+    /// outside the canonical table reaches the error unchanged.
+    #[tokio::test]
+    async fn an_error_status_keeps_the_servers_reason_phrase() {
+        let transport = ScriptedTransport::new(vec![
+            Canned::StatusLine(599, "status code 599"),
+            Canned::StatusLine(404, "Gone Fishing"),
+        ]);
+        let client = client(&transport);
+
+        assert_eq!(
+            client
+                .search_movie(&search("x"))
+                .await
+                .expect_err("599")
+                .to_string(),
+            "TMDB request failed: 599 status code 599"
+        );
+        // A 404 is Go's sentinel, whose text ignores the phrase.
+        assert_eq!(
+            client
+                .search_movie(&search("y"))
+                .await
+                .expect_err("404")
+                .to_string(),
+            "TMDB request failed: 404 Not Found"
+        );
+    }
+
     /// 🚨 The latch. Once TMDB has said 401, no further request may leave the
     /// process — a revoked key must not turn into a request storm.
     #[tokio::test]
@@ -786,6 +853,50 @@ mod tests {
         }
 
         assert_eq!(transport.paths(), vec!["/3/authentication"]);
+    }
+
+    /// A failed key validation crosses the seam as an unanswered failure,
+    /// whatever its status, because Go returns it for every call of the
+    /// process. A validated client's same statuses stay answered ones.
+    #[tokio::test]
+    async fn a_failed_key_validation_crosses_the_seam_unanswered() {
+        let transport = ScriptedTransport::with_auth(Canned::Status(500, ""), vec![]);
+        let latched = client(&transport);
+        for _ in 0..2 {
+            let err = latched
+                .search_movie(&search("Heat"))
+                .await
+                .expect_err("latched");
+            assert!(
+                matches!(&err, ResolveError::Tmdb(text) if text == "500 Internal Server Error"),
+                "{err:?}"
+            );
+        }
+        assert_eq!(transport.paths(), vec!["/3/authentication"]);
+
+        // A latched 404 is not an absence.
+        let transport = ScriptedTransport::with_auth(Canned::Status(404, ""), vec![]);
+        let err = client(&transport)
+            .movie_details(&movie(1))
+            .await
+            .expect_err("latched, not unmatched");
+        assert!(
+            matches!(&err, ResolveError::Tmdb(text) if text == "404 Not Found"),
+            "{err:?}"
+        );
+
+        let transport =
+            ScriptedTransport::new(vec![Canned::Status(500, ""), Canned::Status(404, "")]);
+        let validated = client(&transport);
+        let err = validated
+            .search_movie(&search("Heat"))
+            .await
+            .expect_err("answered 500");
+        assert!(
+            matches!(err, ResolveError::TmdbStatus { status: 500, .. }),
+            "{err:?}"
+        );
+        assert_eq!(validated.movie_details(&movie(1)).await.expect("404"), None);
     }
 
     /// A disabled client never reaches the network, and says so — Go's
@@ -902,6 +1013,7 @@ mod tests {
     fn a_non_json_body_is_gos_zero_value_not_an_error() {
         let html = HttpResponse {
             status: 200,
+            reason_phrase: None,
             content_type: Some("text/html".to_owned()),
             body: b"<html>nope</html>".to_vec(),
         };
@@ -912,6 +1024,7 @@ mod tests {
 
         let no_content = HttpResponse {
             status: 204,
+            reason_phrase: None,
             content_type: Some(JSON.to_owned()),
             body: Vec::new(),
         };
@@ -924,6 +1037,7 @@ mod tests {
         // returns one and resty propagates it.
         let broken = HttpResponse {
             status: 200,
+            reason_phrase: None,
             content_type: Some(JSON.to_owned()),
             body: b"{".to_vec(),
         };

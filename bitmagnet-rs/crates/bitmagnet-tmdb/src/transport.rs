@@ -43,6 +43,17 @@ use crate::error::TmdbError;
 #[derive(Debug, Clone, Default)]
 pub struct HttpResponse {
     pub status: u16,
+    /// The status line's reason phrase, when it is not the canonical one for
+    /// `status`; `None` means the server sent the canonical phrase.
+    ///
+    /// Carried because Go's `res.Status()` is the status line as the server
+    /// sent it (`"500 Internal Server Error"`, or `"599 status code 599"` from
+    /// a Go server), and that text ends up in the job's error. hyper keeps the
+    /// phrase only when it differs from the canonical one, so the two together
+    /// rebuild Go's string exactly. The exception is an empty phrase: hyper
+    /// reports one for a status line with no phrase, an empty phrase, and a
+    /// phrase with obs-text bytes alike, which Go renders differently.
+    pub reason_phrase: Option<Vec<u8>>,
     /// The `Content-Type` header, or `None` when the server sent none.
     ///
     /// Carried because resty decodes a body *only* for a JSON (or XML) content
@@ -111,6 +122,10 @@ impl Transport for ReqwestTransport {
             .map_err(|err| err.without_url().to_string())?;
 
         let status = response.status().as_u16();
+        let reason_phrase = response
+            .extensions()
+            .get::<hyper::ext::ReasonPhrase>()
+            .map(|phrase| phrase.as_bytes().to_vec());
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -123,6 +138,7 @@ impl Transport for ReqwestTransport {
 
         Ok(HttpResponse {
             status,
+            reason_phrase,
             content_type,
             body: body.to_vec(),
         })
@@ -265,6 +281,56 @@ mod tests {
                 third >= Duration::from_secs(4) && third < Duration::from_secs(8),
                 "attempt 2 drew {third:?}"
             );
+        }
+    }
+
+    /// hyper reports a status line's reason phrase only when it is not the
+    /// canonical one, and the live transport passes that on, so the client can
+    /// rebuild Go's `res.Status()` from a real response. Three status lines Go
+    /// renders differently all arrive as an empty phrase.
+    #[tokio::test]
+    async fn the_live_transport_keeps_a_non_canonical_reason_phrase() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (status_line, status, expected) in [
+            (
+                &b"HTTP/1.1 599 status code 599"[..],
+                599,
+                Some(&b"status code 599"[..]),
+            ),
+            (b"HTTP/1.1 503 Slow Down", 503, Some(&b"Slow Down"[..])),
+            (b"HTTP/1.1 500 Internal Server Error", 500, None),
+            (b"HTTP/1.1 500", 500, Some(&b""[..])),
+            (b"HTTP/1.1 500 ", 500, Some(&b""[..])),
+            (b"HTTP/1.1 502 Bad \xe4 Gateway", 502, Some(&b""[..])),
+        ] {
+            let shown = String::from_utf8_lossy(status_line);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.expect("read request");
+                socket
+                    .write_all(
+                        &[
+                            status_line,
+                            b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        ]
+                        .concat(),
+                    )
+                    .await
+                    .expect("write response");
+            });
+            let transport = ReqwestTransport::new(Duration::from_secs(5)).expect("transport");
+            let url = Url::parse(&format!("http://{address}/3/search/movie")).expect("url");
+            let response = transport.execute(&url).await.expect("answered");
+            server.await.expect("server");
+
+            assert_eq!(response.status, status, "{shown}");
+            assert_eq!(response.reason_phrase.as_deref(), expected, "{shown}");
         }
     }
 

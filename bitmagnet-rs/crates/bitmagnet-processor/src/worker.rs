@@ -34,7 +34,14 @@
 //! worker also claims the explicit flags-on payload (all three attach flags
 //! true; [`ProcessTorrentAdmission::FlagsOffOrOn`]). Its composition then runs
 //! on tokio's blocking pool, since classification awaits local search and
-//! TMDB, and any resolver error abstains the job before any side effect.
+//! TMDB. A TMDB call answered with a status other than 401 fails only its
+//! torrent, as in Go: the torrent goes into the retry job, or into the job's
+//! error when every torrent failed, and the others keep resolving. Any other
+//! resolver failure (a 401, a failed key validation, a transport error or
+//! timeout, a status whose reason phrase cannot be rebuilt, an undecodable
+//! body, a local search error)
+//! abstains the job before any side effect; the `live` module says why for
+//! each.
 //!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
