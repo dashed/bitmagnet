@@ -491,3 +491,108 @@ Go's handler goroutine keeps running after its job is settled;
 database-driver and panic error texts differ; a job with several classifier
 failures may publish its retry hashes in a different (valid) order, and
 therefore a different fingerprint, than a given Go run.
+
+## Milestone 7: flags-on admission (`--admit-flags-on`)
+
+`--admit-flags-on` (`BITMAGNET_PROCESS_TORRENT_WORKER_ADMIT_FLAGS_ON`, default
+off) lets the worker also settle explicit flags-on jobs. Without it the worker
+is Milestone 6 unchanged: the same claim statement and 00035 index, the
+`NullContentResolver`, no TMDB client, Goose head 35, and the composition on
+the runtime thread. `--tmdb-api-key` is refused without the switch, so a
+deployment cannot believe it enabled TMDB when it did not. The start-up line
+logs the admission (`FlagsOff` or `FlagsOffOrOn`) in both modes, and the TMDB
+base URL when the switch is on.
+
+With the switch the claim is
+`ProcessTorrentAdmission::FlagsOffOrOn`: Milestone 6's predicate, with a
+second accepted containment in which all three attach flags are JSON `true`.
+The workflow must still be explicitly `default`, and the key allow-list is
+unchanged. Mixed, omitted, non-boolean, or inherited flags are never claimed,
+so organic payloads stay with Go. Both subsets come out of one claim in Go's
+order. Migration 00036's `queue_jobs_admitted_flags_on_process_torrent_claim_idx`
+repeats that predicate verbatim, so the binary requires Goose head 36 with the
+switch. The composer re-checks the same subset (`validate_supported_params`):
+a live materializer accepts uniform explicit flags, and the flags-off
+materializer still accepts only explicit `false`.
+
+The classifier gets Go's resolver stack, `LiveContentResolver`:
+- **Local search:** `PgContentSearch::with_associations` on the worker's pool.
+- **TMDB:** `TmdbClient` with `--tmdb-api-key` (`BITMAGNET_TMDB_API_KEY`; required, and redacted in `Debug`) and `--tmdb-base-url` (`BITMAGNET_TMDB_BASE_URL`, default `https://api.themoviedb.org/3`).
+
+The client is the existing Rust port:
+- It validates the key lazily on first use and latches a 401.
+- It allows two requests in flight and 20 requests per second (burst 5).
+- It retries transport errors only.
+
+The pool must allow three connections: the claimed row, loading and persisting,
+and local search. Only two are in use within a job. The third covers a
+composition abandoned at its timeout: it keeps running read-only on the blocking
+pool, and its local search can hold a connection while the next job claims and
+loads.
+
+Local-search candidates are hydrated, as Go's are. Go's search preloads each
+candidate's attributes and collections, and `UpdateTsv` appends genre
+collection names and `id` attribute values at weight D in slice order. That
+order therefore decides the lexeme positions of the `torrent_contents.tsv` the
+processor writes. `with_associations` reads the candidates and their
+associations in one `REPEATABLE READ READ ONLY` transaction. It uses the
+writer loader's statements, now shared from `bitmagnet_content_search`:
+attributes by `(source, key)` and collections by the collection's
+`(type, source, id)`, both compared under the database collation, within the
+loader's 1,024-per-content ceilings. Go's loader has no `ORDER BY`; the
+harness's Go side is given this same order (M1a). `PgContentSearch::new`
+stays scalar-only for its other callers.
+
+The classifier engine is synchronous and drives the resolver's futures to
+completion itself. With the switch:
+- The composition runs on tokio's blocking pool (`load_live_writer_plan`).
+- Classification still spreads over `--classify-parallelism` threads.
+- Each classification's resolver futures run through `Handle::block_on` on the worker's runtime.
+
+`Handle::block_on` panics on a runtime thread, so `load_writer_plan` refuses a
+live materializer (`LiveCompositionOnRuntimeThread`) instead. Results still
+fold in requested order, so the plan is identical for any parallelism.
+
+Resolver failures abstain the whole job before any side effect. Each
+classification's resolver calls run in a per-job scope. The first
+`ResolveError` is recorded with its info hash and call. That error is a local
+search error, a TMDB transport error, any TMDB status Go treats as an error
+(401, 429, 5xx, or a search or find 404), or a disabled client. Recording it
+stops the scope, so every later resolver call in the job fails without I/O. The
+composition then returns `MaterializeError::ResolverFailed` ahead of any other
+result. The worker logs `abstaining from process_torrent job after a content
+resolver failure` (job ID, info hash, call, error) and abstains: the claim
+rolls back, the row is untouched, and the ID cools off. A TMDB details 404
+is not an error: as in Go, the torrent stays unmatched. The engine's own error
+texts are unchanged. Dropping the job future (timeout or shutdown) also stops
+the scope, so an abandoned composition makes no further TMDB or search calls.
+
+Gates:
+- **Unit** (`src/live.rs`, `src/writer_plan.rs`, the binary):
+  - Every fault (search 401, key-validation 401, disabled client, timeout, 500, 429, search 404, find 404, local search error) fails the job, both serial and at four threads.
+  - A details 404 succeeds as unmatched.
+  - One failing torrent abstains the job.
+  - A call outside a classification, or after the first failure, never reaches I/O.
+  - Payload acceptance covers partly-true, omitted, string, numeric, and inherited flags, empty and custom workflows, and extra flags, in both modes.
+  - The key is refused without the switch, required with it, and never printed.
+- **Migration-backed** (`tests/worker_pg.rs`):
+  - Hydration keeps the order of the database's own `ORDER BY` under its default collation, and the resulting tsv positions follow it.
+  - On an en_US-like (glibc) collation the gate also proves that order is not a bytewise re-sort (`a7` < `B8`, `éxtra` < `f-key` < `id`, `imdb` < `TVDB`). CI's musl `postgres:16-alpine` collates bytewise, so there the test reports that this half did not run.
+  - The flags-on claim takes both explicit subsets in Go's order, and nothing else.
+  - Its custom and generic plans scan 00036's index behind a 20,000-row organic backlog.
+  - A flags-on job attaches seeded local content with its ordered associations.
+  - A resolver failure abstains with zero writes and the row byte-identical.
+  - A composition abandoned at its job timeout makes no further resolver calls once it is unblocked.
+  - A flags-on job with a sourced hint abstains with the attach-hint reason, with zero writes and zero resolver calls, because the hint check precedes classification.
+  - A flags-off job processed by the switched worker leaves the same image as without the switch.
+- **Regression, switch off:**
+  - The Milestone 6 120k differential at Goose 35 stays byte-identical: B and C equal A in both rounds (241,982 and 243,179 lines), and every Rust worker logged `admission=FlagsOff`.
+  - The 119,991-input classifier replay, the 2,000-subject flags-on desync gate, and the cross-language tape rerun are unchanged.
+- **Differential:** M1a's harness (stub TMDB, seeded content) compares Go-alone with Rust-alone dumps that include the content tables.
+
+Known differences from Go, beyond Milestone 6's:
+- **Resolver failure scope.** A resolver failure abstains the whole job. Go fails only the affected torrents, republishes them, and persists the rest. The Rust worker therefore needs Go's worker beside it to settle such jobs. While the failure persists (a revoked key, a TMDB outage), every flags-on job is left to Go.
+- **401 fallback.** Go falls back to its default TMDB key after a 401; Rust latches the 401 and abstains.
+- **Retry workflow (M2).** A classifier failure republishes the job's params unchanged, while Go republishes with the resolved workflow name. Both are `default` for every admitted payload, so this only matters once organic payloads (empty workflow) are admitted.
+- **Enriched hints (M3).** Sourced and enriched explicit hints still abstain, before any resolver call, as do attached-content images that conflict within a job.
+- **Tantivy.** There is still no Tantivy dual-write, so content attached by Rust reaches the search sidecar only at the next backfill or torrent update.

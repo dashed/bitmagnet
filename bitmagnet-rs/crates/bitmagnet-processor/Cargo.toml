@@ -30,6 +30,10 @@ sha2 = "0.10"
 sqlx.workspace = true
 # T9: the shared `content` row select list + decoder.
 bitmagnet-content-search = { path = "../bitmagnet-content-search" }
+# The worker's flags-on mode: the live local-search + TMDB resolver it guards.
+async-trait.workspace = true
+bitmagnet-resolver = { path = "../bitmagnet-resolver" }
+bitmagnet-tmdb = { path = "../bitmagnet-tmdb" }
 # Reads the recorded tape the live local search is compared against.
 bitmagnet-tape = { path = "../bitmagnet-tape" }
 # Go `Languages.Slice()` ordering for the torrent_contents language list.
@@ -39,6 +43,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# `Url`, for the scripted TMDB transport behind the abstain-guard tests.
+reqwest.workspace = true
 
 [[bin]]
 name = "bitmagnet-ingest-shadow"

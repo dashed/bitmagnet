@@ -30,6 +30,12 @@
 //! rejects. Only transient database errors and Go-equivalent processor
 //! outcomes consume one of the job's retries.
 //!
+//! Given a live materializer ([`Materializer::from_core_with_resolver`]), the
+//! worker also claims the explicit flags-on payload (all three attach flags
+//! true; [`ProcessTorrentAdmission::FlagsOffOrOn`]). Its composition then runs
+//! on tokio's blocking pool, since classification awaits local search and
+//! TMDB, and any resolver error abstains the job before any side effect.
+//!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
 //! interval, and polls again; the claim transaction rolls back, so the row is
@@ -42,15 +48,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bitmagnet_queue::{
-    AdmittedConsumeOutcome, ConsumeOutcome, DequeuedJob, JobVerdict, ProcessTorrentParams,
-    QueuePgError, QueueStore,
+    AdmittedConsumeOutcome, ConsumeOutcome, DequeuedJob, JobVerdict, ProcessTorrentAdmission,
+    ProcessTorrentParams, QueuePgError, QueueStore,
 };
 use futures::FutureExt;
 use prometheus::IntCounterVec;
 
+use crate::writer_plan::load_live_writer_plan;
 use crate::{
-    load_writer_plan, persist_writer_plan, BlockingManager, LoadError, Materializer,
-    WriterLoadError, WriterPlanError,
+    load_writer_plan, persist_writer_plan, BlockingManager, LoadError, MaterializeError,
+    Materializer, WriterLoadError, WriterPlanError,
 };
 
 /// Go's `handler.JobTimeout(time.Second*60*10)` for `process_torrent`.
@@ -95,7 +102,7 @@ impl Default for ProcessTorrentWorkerConfig {
 /// within a job is parallel (see [`Materializer::with_classify_parallelism`]).
 pub struct ProcessTorrentWorker {
     store: QueueStore,
-    materializer: Materializer,
+    materializer: Arc<Materializer>,
     blocking_manager: Arc<dyn BlockingManager>,
     config: ProcessTorrentWorkerConfig,
     excluded: Mutex<VecDeque<(String, Instant)>>,
@@ -112,7 +119,7 @@ impl ProcessTorrentWorker {
     ) -> Self {
         Self {
             store,
-            materializer,
+            materializer: Arc::new(materializer),
             blocking_manager,
             config,
             excluded: Mutex::new(VecDeque::new()),
@@ -127,6 +134,17 @@ impl ProcessTorrentWorker {
         self
     }
 
+    /// The payloads this worker claims: flags-on ones too only with a live
+    /// materializer.
+    #[must_use]
+    pub fn admission(&self) -> ProcessTorrentAdmission {
+        if self.materializer.is_live() {
+            ProcessTorrentAdmission::FlagsOffOrOn
+        } else {
+            ProcessTorrentAdmission::FlagsOff
+        }
+    }
+
     /// Claim, run, and settle at most one admitted job.
     ///
     /// A database error is logged and counted before it is returned.
@@ -134,7 +152,9 @@ impl ProcessTorrentWorker {
         let excluded = self.excluded_ids();
         let outcome = self
             .store
-            .consume_admitted_process_torrent(&excluded, |job| self.handle(job))
+            .consume_admitted_process_torrent_with(self.admission(), &excluded, |job| {
+                self.handle(job)
+            })
             .await;
         match &outcome {
             Ok(outcome) => self.observe(outcome),
@@ -229,9 +249,24 @@ impl ProcessTorrentWorker {
             }
         };
         let pool = self.store.pool();
-        let plan = match load_writer_plan(pool, &self.materializer, &params).await {
+        let plan = if self.materializer.is_live() {
+            load_live_writer_plan(pool, &self.materializer, &params).await
+        } else {
+            load_writer_plan(pool, &self.materializer, &params).await
+        };
+        let plan = match plan {
             Ok(plan) => plan,
             Err(error) if is_transient_plan_error(&error) => return go_handler_failure(&error),
+            Err(WriterPlanError::Materialize(MaterializeError::ResolverFailed(failure))) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    info_hash = %failure.info_hash,
+                    call = failure.call,
+                    error = %failure.error,
+                    "abstaining from process_torrent job after a content resolver failure"
+                );
+                return JobVerdict::Abstain(format!("content resolver: {failure}"));
+            }
             Err(error) => {
                 tracing::info!(job_id = %job.id, %error, "abstaining from unsupported process_torrent job");
                 return JobVerdict::Abstain(error.to_string());

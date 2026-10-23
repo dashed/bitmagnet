@@ -69,7 +69,7 @@ func (h *harness) run(args ...string) error {
 
 func TestExactUpTargetUsesOnlyUpTo(t *testing.T) {
 	h := &harness{}
-	if err := h.run("bitmagnet-schema-migrator", "migrate", "up", "--version", "35"); err != nil {
+	if err := h.run("bitmagnet-schema-migrator", "migrate", "up", "--version", "36"); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := h.migrator.upTargets, []int64{UpVersion}; !equalTargets(got, want) {
@@ -100,12 +100,12 @@ func TestRejectsUnboundedAndWrongTargetsBeforeOpeningDatabase(t *testing.T) {
 	tests := [][]string{
 		{"bitmagnet-schema-migrator", "migrate", "up"},
 		{"bitmagnet-schema-migrator", "migrate", "down"},
-		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "34"},
+		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "35"},
 		{"bitmagnet-schema-migrator", "migrate", "down", "--version", "28"},
-		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "035"},
-		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "+35"},
+		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "036"},
+		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "+36"},
 		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "latest"},
-		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "35", "extra"},
+		{"bitmagnet-schema-migrator", "migrate", "up", "--version", "36", "extra"},
 	}
 	for _, args := range tests {
 		t.Run(strings.Join(args[1:], "_"), func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestRejectsUnboundedAndWrongTargetsBeforeOpeningDatabase(t *testing.T) {
 func TestMigrationErrorStillClosesSession(t *testing.T) {
 	h := &harness{}
 	h.migrator.err = errors.New("migration failed")
-	err := h.run("bitmagnet-schema-migrator", "migrate", "up", "--version", "35")
+	err := h.run("bitmagnet-schema-migrator", "migrate", "up", "--version", "36")
 	if !errors.Is(err, h.migrator.err) {
 		t.Fatalf("error = %v, want migration failure", err)
 	}

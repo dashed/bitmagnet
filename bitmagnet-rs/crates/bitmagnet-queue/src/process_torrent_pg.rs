@@ -24,6 +24,12 @@
 //! Admission selects a subset; it does not reorder it. Among admitted rows the
 //! claim order is Go's `(status = 'retry'), priority, run_after`, served by a
 //! partial index that holds only admitted rows (migration 00035).
+//!
+//! A worker whose classifier has a live content resolver may also admit the
+//! explicit flags-on payload: the same shape with all three attach flags JSON
+//! `true` ([`ProcessTorrentAdmission::FlagsOffOrOn`]). It is a separate claim
+//! with its own partial index (migration 00036), so the flags-off worker's
+//! claim and plan stay exactly as they were.
 
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -79,6 +85,62 @@ ORDER BY (status = 'retry'), priority, run_after \
 FOR UPDATE SKIP LOCKED \
 LIMIT 1";
 
+/// [`ADMITTED_PROCESS_TORRENT_CLAIM_SQL`], also admitting the explicit flags-on
+/// payload: `ClassifierWorkflow` the string `default` and the three attach flags
+/// all JSON `true`.
+///
+/// The two containments are `OR`ed inside the `CASE` condition, so the top-level
+/// key allow-list still applies to both and stays nested, for the selectivity
+/// reason above. One claim over both shapes keeps Go's claim order across them.
+///
+/// The `queue`, `status`, and admission conjuncts are, verbatim, the predicate
+/// of migration 00036's partial
+/// `queue_jobs_admitted_flags_on_process_torrent_claim_idx`, keyed in this
+/// `ORDER BY`; the two must change together. Used only by a worker started with
+/// the flags-on switch, which requires that migration.
+///
+/// Public only so the migration-backed plan test can `EXPLAIN` it.
+pub const ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL: &str = "\
+SELECT id, fingerprint, queue, status::text AS status, payload::text AS payload, \
+       retries::bigint AS retries, max_retries::bigint AS max_retries, priority, \
+       deadline IS NOT NULL AND deadline < clock_timestamp() AS deadline_exceeded \
+FROM queue_jobs \
+WHERE queue = 'process_torrent' AND status IN ('pending','retry') \
+  AND run_after <= clock_timestamp() \
+  AND CASE WHEN payload @> '{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":\
+{\"local_search_enabled\":false,\"apis_enabled\":false,\"tmdb_enabled\":false}}'::jsonb \
+        OR payload @> '{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":\
+{\"local_search_enabled\":true,\"apis_enabled\":true,\"tmdb_enabled\":true}}'::jsonb \
+      THEN payload - 'ClassifyMode' - 'ClassifierWorkflow' - 'ClassifierFlags' \
+           - 'InfoHashes' = '{}'::jsonb \
+      ELSE false END \
+  AND id <> ALL($1::text[]) \
+ORDER BY (status = 'retry'), priority, run_after \
+FOR UPDATE SKIP LOCKED \
+LIMIT 1";
+
+/// Which explicit attach-flag payloads an admitted claim takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessTorrentAdmission {
+    /// Explicit `default` workflow with all three attach flags JSON `false`
+    /// ([`ADMITTED_PROCESS_TORRENT_CLAIM_SQL`], migration 00035).
+    FlagsOff,
+    /// [`Self::FlagsOff`], or the same with all three flags JSON `true`
+    /// ([`ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL`], migration 00036).
+    FlagsOffOrOn,
+}
+
+impl ProcessTorrentAdmission {
+    /// The claim statement for this admission.
+    #[must_use]
+    pub const fn claim_sql(self) -> &'static str {
+        match self {
+            Self::FlagsOff => ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
+            Self::FlagsOffOrOn => ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL,
+        }
+    }
+}
+
 /// A handler's decision for one claimed job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobVerdict {
@@ -118,8 +180,27 @@ impl QueueStore {
         H: FnOnce(DequeuedJob) -> Fut,
         Fut: Future<Output = JobVerdict>,
     {
+        self.consume_admitted_process_torrent_with(
+            ProcessTorrentAdmission::FlagsOff,
+            excluded_ids,
+            handler,
+        )
+        .await
+    }
+
+    /// [`Self::consume_admitted_process_torrent`] with an explicit admission.
+    pub async fn consume_admitted_process_torrent_with<H, Fut>(
+        &self,
+        admission: ProcessTorrentAdmission,
+        excluded_ids: &[String],
+        handler: H,
+    ) -> Result<AdmittedConsumeOutcome, QueuePgError>
+    where
+        H: FnOnce(DequeuedJob) -> Fut,
+        Fut: Future<Output = JobVerdict>,
+    {
         let mut tx = self.pool().begin().await?;
-        let row = sqlx::query(ADMITTED_PROCESS_TORRENT_CLAIM_SQL)
+        let row = sqlx::query(admission.claim_sql())
             .bind(excluded_ids)
             .fetch_optional(&mut *tx)
             .await?;

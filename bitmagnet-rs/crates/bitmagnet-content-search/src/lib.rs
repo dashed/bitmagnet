@@ -10,8 +10,12 @@
 //! list (Go's `query.Limit(10)` + `OrderByQueryStringRankThenIdentity`), never a
 //! single winner — the tie-break belongs to `bitmagnet-textmatch`.
 
+mod associations;
 mod pg;
 
+pub use self::associations::{
+    CONTENT_ATTRIBUTES_SQL, CONTENT_COLLECTIONS_SQL, CONTENT_COLLECTION_LINKS_SQL,
+};
 pub use self::pg::PgContentSearch;
 
 use bitmagnet_model::{Content, ContentType, Date};
@@ -57,7 +61,8 @@ pub const CONTENT_COLUMNS: &str = "\
 /// * `collections` / `attributes` — the shadow role holds no SELECT grant on
 ///   `content_collections`, `content_collections_content` or
 ///   `content_attributes`. They stay empty rather than being faked, and a caller
-///   that needs them must say so and get the grants first.
+///   that needs them must say so and get the grants first
+///   ([`PgContentSearch::with_associations`]).
 ///
 /// 🚨 `created_at` IS hydrated, and is not cosmetic: Go's `persist.go` upserts an
 /// attached content row only when `Content.CreatedAt.IsZero()`, which is true

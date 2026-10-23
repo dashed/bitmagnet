@@ -8,6 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use bitmagnet_content_search::{
+    CONTENT_ATTRIBUTES_SQL, CONTENT_COLLECTIONS_SQL, CONTENT_COLLECTION_LINKS_SQL,
+};
 use bitmagnet_model::{Content, ContentAttribute, ContentCollection};
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use futures::TryStreamExt;
@@ -52,51 +55,10 @@ CROSS JOIN LATERAL ( \
 ORDER BY r.info_hash, s.source \
 LIMIT $3";
 
-// The writer-only association scans use the same sentinel pattern as source
-// snapshots: one row past each per-content and job-wide ceiling proves that an
-// apparently hydrated content image was not silently truncated.
-const CONTENT_ATTRIBUTES_SQL: &str = "\
-SELECT r.content_type, r.content_source, r.content_id, \
-       a.source AS attribute_source, a.key AS attribute_key, a.value \
-FROM UNNEST($1::text[], $2::text[], $3::text[]) \
-     AS r(content_type, content_source, content_id) \
-CROSS JOIN LATERAL ( \
-    SELECT source, key, value \
-    FROM content_attributes \
-    WHERE content_type = r.content_type \
-      AND content_source = r.content_source \
-      AND content_id = r.content_id \
-    LIMIT $4 \
-) AS a \
-ORDER BY r.content_type, r.content_source, r.content_id, a.source, a.key \
-LIMIT $5";
-
-const CONTENT_COLLECTION_LINKS_SQL: &str = "\
-SELECT r.content_type, r.content_source, r.content_id, \
-       l.content_collection_type, l.content_collection_source, \
-       l.content_collection_id \
-FROM UNNEST($1::text[], $2::text[], $3::text[]) \
-     AS r(content_type, content_source, content_id) \
-CROSS JOIN LATERAL ( \
-    SELECT content_collection_type, content_collection_source, \
-           content_collection_id \
-    FROM content_collections_content \
-    WHERE content_type = r.content_type \
-      AND content_source = r.content_source \
-      AND content_id = r.content_id \
-    LIMIT $4 \
-) AS l \
-ORDER BY r.content_type, r.content_source, r.content_id, \
-         l.content_collection_type, l.content_collection_source, \
-         l.content_collection_id \
-LIMIT $5";
-
-const CONTENT_COLLECTIONS_SQL: &str = "\
-SELECT type AS collection_type, source, id, name \
-FROM content_collections \
-WHERE (type, source, id) \
-      IN (SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])) \
-ORDER BY type, source, id";
+// The association scans (`bitmagnet_content_search`'s, shared with the
+// processor's local search) use the same sentinel pattern as source snapshots:
+// one row past each per-content and job-wide ceiling proves that an apparently
+// hydrated content image was not silently truncated.
 
 type CollectionKey = (String, String, String);
 

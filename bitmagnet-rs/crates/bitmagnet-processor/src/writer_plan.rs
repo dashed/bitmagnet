@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 use bitmagnet_queue::{
     process_torrent_job, ProcessTorrentParams, ProtocolId, QueueJob, QueueJobOptions, QueueStore,
@@ -17,8 +18,11 @@ use bitmagnet_queue::{
 use futures::future::BoxFuture;
 use sqlx::PgPool;
 
+use crate::live::ResolveScope;
 use crate::persist::{persist_write_set_with_episode_objects, validate_persistence_input};
-use crate::supported_subset::{has_explicit_attach_flags_off, has_explicit_default_workflow};
+use crate::supported_subset::{
+    has_explicit_attach_flags_off, has_explicit_attach_flags_on, has_explicit_default_workflow,
+};
 use crate::{
     load_writer_torrents, project_torrent_persistence, BlockingManager, BoxError,
     ContentPersistence, ContentPersistenceKey, MaterializeError, Materializer, PersistError,
@@ -373,14 +377,59 @@ pub enum PersistWriterPlanError {
 ///
 /// The database work is limited to [`load_writer_torrents`]' read-only,
 /// repeatable-read transaction. The returned plan is not persisted.
+///
+/// A live materializer (see [`Materializer::from_core_with_resolver`]) must
+/// compose off the runtime's threads, which this cannot do with a borrowed
+/// materializer, so it is refused.
 pub async fn load_writer_plan(
     pool: &PgPool,
     materializer: &Materializer,
     params: &ProcessTorrentParams,
 ) -> Result<WriterPlan, WriterPlanError> {
-    validate_supported_params(params)?;
+    if materializer.is_live() {
+        return Err(WriterPlanError::LiveCompositionOnRuntimeThread);
+    }
+    validate_supported_params(params, false)?;
     let loaded = load_writer_torrents(pool, params).await?;
     compose_writer_plan(materializer, params, &loaded)
+}
+
+/// [`load_writer_plan`] for a live materializer: the same read, then the
+/// composition on tokio's blocking pool, where the classifications may drive
+/// the resolver's futures.
+///
+/// If this future is dropped (a job timeout or shutdown), the detached
+/// composition's remaining resolver calls fail at once; it is read-only, and
+/// its plan is discarded.
+pub(crate) async fn load_live_writer_plan(
+    pool: &PgPool,
+    materializer: &Arc<Materializer>,
+    params: &ProcessTorrentParams,
+) -> Result<WriterPlan, WriterPlanError> {
+    validate_supported_params(params, materializer.is_live())?;
+    let loaded = load_writer_torrents(pool, params).await?;
+    let scope = Arc::new(ResolveScope::default());
+    let _stop = StopOnDrop(Arc::clone(&scope));
+    let materializer = Arc::clone(materializer);
+    let params = params.clone();
+    match tokio::task::spawn_blocking(move || {
+        compose_writer_plan_in(&materializer, &params, &loaded, &scope)
+    })
+    .await
+    {
+        Ok(plan) => plan,
+        // A panic is a failure, never an abstention, as on the runtime thread.
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(WriterPlanError::CompositionCancelled),
+    }
+}
+
+struct StopOnDrop(Arc<ResolveScope>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
 }
 
 /// Compose the classifier write-set and its volatile persistence projection.
@@ -394,16 +443,32 @@ pub async fn load_writer_plan(
 /// Direct callers must supply
 /// values already admitted by the bounded loader; this pure composer does not
 /// reconstruct compressed-size or source-scan evidence from in-memory values.
+///
+/// With a live materializer the explicit flags-on subset is accepted too, and
+/// this must run off the runtime's threads (see
+/// [`Materializer::from_core_with_resolver`]).
 pub fn compose_writer_plan(
     materializer: &Materializer,
     params: &ProcessTorrentParams,
     loaded: &[WriterLoadedTorrent],
 ) -> Result<WriterPlan, WriterPlanError> {
-    validate_supported_params(params)?;
+    compose_writer_plan_in(materializer, params, loaded, &Arc::default())
+}
+
+fn compose_writer_plan_in(
+    materializer: &Materializer,
+    params: &ProcessTorrentParams,
+    loaded: &[WriterLoadedTorrent],
+    scope: &Arc<ResolveScope>,
+) -> Result<WriterPlan, WriterPlanError> {
+    validate_supported_params(params, materializer.is_live())?;
     let indexed = index_loaded_torrents(loaded)?;
     reject_unrequested_loaded_torrents(params, &indexed)?;
-    let materialized = materializer
-        .materialize_borrowed_with_failures(params, loaded.iter().map(|torrent| &torrent.loaded))?;
+    let materialized = materializer.materialize_scoped(
+        params,
+        loaded.iter().map(|torrent| &torrent.loaded),
+        scope,
+    )?;
     let write_set = materialized.write_set;
     let content_persistence = materialized.content_persistence;
     let empty_episode_objects = materialized.empty_episode_objects;
@@ -521,12 +586,19 @@ fn reject_unrequested_loaded_torrents(
     }
 }
 
-fn validate_supported_params(params: &ProcessTorrentParams) -> Result<(), WriterPlanError> {
+/// The explicit `default` workflow with all three attach flags JSON `false`,
+/// or, given a live resolver, all three JSON `true`.
+fn validate_supported_params(
+    params: &ProcessTorrentParams,
+    live: bool,
+) -> Result<(), WriterPlanError> {
     if !has_explicit_default_workflow(params) {
         return Err(WriterPlanError::ClassifierWorkflowUnsupported);
     }
-    if has_explicit_attach_flags_off(params) {
+    if has_explicit_attach_flags_off(params) || (live && has_explicit_attach_flags_on(params)) {
         Ok(())
+    } else if live {
+        Err(WriterPlanError::AttachFlagsNotExplicitlyUniform)
     } else {
         Err(WriterPlanError::AttachFlagsNotExplicitlyDisabled)
     }
@@ -683,6 +755,14 @@ pub enum WriterPlanError {
         "writer plan requires local_search_enabled, apis_enabled, and tmdb_enabled to be explicitly false"
     )]
     AttachFlagsNotExplicitlyDisabled,
+    #[error(
+        "writer plan requires local_search_enabled, apis_enabled, and tmdb_enabled to be explicitly all false or all true"
+    )]
+    AttachFlagsNotExplicitlyUniform,
+    #[error("a live-resolver writer plan must be composed off the runtime threads")]
+    LiveCompositionOnRuntimeThread,
+    #[error("the writer plan composition was cancelled before it ran")]
+    CompositionCancelled,
     #[error("writer plan cannot reproduce the complete Go hint/enrichment path for {info_hash}")]
     AttachHintUnsupported { info_hash: String },
     #[error("writer plan reusable content is not fully hydrated for {info_hash}")]
@@ -1319,33 +1399,91 @@ mod tests {
     }
 
     #[test]
-    fn supported_params_require_explicit_default_and_attach_flags_off() {
-        validate_supported_params(&supported_params()).expect("explicit supported subset");
-
-        let mut implicit_workflow = supported_params();
-        implicit_workflow.classifier_workflow.clear();
-        assert!(matches!(
-            validate_supported_params(&implicit_workflow),
-            Err(WriterPlanError::ClassifierWorkflowUnsupported)
-        ));
-
-        let mut inherited_flags = supported_params();
-        inherited_flags.classifier_flags = None;
-        assert!(matches!(
-            validate_supported_params(&inherited_flags),
-            Err(WriterPlanError::AttachFlagsNotExplicitlyDisabled)
-        ));
-
-        let mut enabled_flag = supported_params();
-        enabled_flag
+    fn supported_params_require_explicit_default_and_uniform_attach_flags() {
+        fn with_flags(flags: &[(&str, Value)]) -> ProcessTorrentParams {
+            let mut params = supported_params();
+            params.classifier_flags = Some(
+                flags
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                    .collect(),
+            );
+            params
+        }
+        let all = |value: Value| {
+            with_flags(&[
+                ("local_search_enabled", value.clone()),
+                ("apis_enabled", value.clone()),
+                ("tmdb_enabled", value),
+            ])
+        };
+        let flags_off = supported_params();
+        let flags_on = all(Value::Bool(true));
+        let mut flags_on_extra = flags_on.clone();
+        flags_on_extra
             .classifier_flags
             .as_mut()
             .expect("fixture flags")
-            .insert("tmdb_enabled".to_owned(), Value::Bool(true));
-        assert!(matches!(
-            validate_supported_params(&enabled_flag),
-            Err(WriterPlanError::AttachFlagsNotExplicitlyDisabled)
-        ));
+            .insert("other_flag".to_owned(), Value::Bool(false));
+        let mut implicit_workflow = flags_on.clone();
+        implicit_workflow.classifier_workflow.clear();
+        let mut other_workflow = flags_on.clone();
+        "custom".clone_into(&mut other_workflow.classifier_workflow);
+        let mut inherited_flags = supported_params();
+        inherited_flags.classifier_flags = None;
+        let partly_true = with_flags(&[
+            ("local_search_enabled", Value::Bool(true)),
+            ("apis_enabled", Value::Bool(true)),
+            ("tmdb_enabled", Value::Bool(false)),
+        ]);
+        let partly_omitted = with_flags(&[
+            ("local_search_enabled", Value::Bool(true)),
+            ("apis_enabled", Value::Bool(true)),
+        ]);
+        let string_true = all(Value::String("true".to_owned()));
+        let numeric_true = all(Value::from(1));
+
+        for live in [false, true] {
+            let accepted = |params: &ProcessTorrentParams| {
+                validate_supported_params(params, live).expect("supported subset");
+            };
+            accepted(&flags_off);
+            for params in [&implicit_workflow, &other_workflow] {
+                assert!(
+                    matches!(
+                        validate_supported_params(params, live),
+                        Err(WriterPlanError::ClassifierWorkflowUnsupported)
+                    ),
+                    "live={live}"
+                );
+            }
+            let rejected = [
+                &inherited_flags,
+                &partly_true,
+                &partly_omitted,
+                &string_true,
+                &numeric_true,
+            ];
+            if live {
+                accepted(&flags_on);
+                // Other flags are the materializer's business (a non-bool one
+                // fails there), as with the flags off.
+                accepted(&flags_on_extra);
+                for params in rejected {
+                    assert!(matches!(
+                        validate_supported_params(params, live),
+                        Err(WriterPlanError::AttachFlagsNotExplicitlyUniform)
+                    ));
+                }
+            } else {
+                for params in rejected.into_iter().chain([&flags_on, &flags_on_extra]) {
+                    assert!(matches!(
+                        validate_supported_params(params, live),
+                        Err(WriterPlanError::AttachFlagsNotExplicitlyDisabled)
+                    ));
+                }
+            }
+        }
     }
 
     #[test]

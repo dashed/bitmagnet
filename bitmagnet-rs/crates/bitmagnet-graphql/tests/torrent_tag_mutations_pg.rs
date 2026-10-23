@@ -15,7 +15,7 @@ use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 
 const WRITER_ROLE: &str = "bitmagnet_graphql_tag_writer_ci";
-const EXPECTED_GOOSE_VERSION: i64 = 35;
+const EXPECTED_GOOSE_VERSION: i64 = 36;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

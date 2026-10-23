@@ -17,9 +17,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use bitmagnet_classifier::{
-    Classification, Classifier, ClassifierError, ClassifierInput, FlagValue, Flags, Outcome,
+    Classification, Classifier, ClassifierError, ClassifierInput, ContentResolver, FlagValue,
+    Flags, Outcome,
 };
 use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -28,6 +30,7 @@ use serde_json::Value;
 
 mod blocking_manager_adapter;
 mod compare;
+mod live;
 /// The read-only loader that hydrates a classifier input from the database.
 ///
 /// Public so a parity harness can reuse the REAL hint synthesis
@@ -48,6 +51,7 @@ pub use compare::{
     compare_write_set, CompareError, ComparisonVerdict, DriftField, ShadowComparison,
     TorrentComparison,
 };
+pub use live::ResolverFailure;
 pub use load::{load_torrents, LoadError};
 pub use persist::{
     persist_write_set, BlockingManager, BoxError, ContentPersistence, ContentPersistenceKey,
@@ -189,6 +193,9 @@ pub struct Materializer {
     /// rather than rayon's global one, so the worker's CPU budget is explicit
     /// and nothing else in the process competes for it.
     classify_pool: Option<rayon::ThreadPool>,
+    /// The runtime a live resolver's I/O runs on; `None` for the core
+    /// classifier's `NullContentResolver`, which never awaits anything.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 // The classify pool shares one compiled classifier across its threads.
@@ -230,7 +237,40 @@ impl Materializer {
         Ok(Self {
             classifier: Classifier::from_core()?,
             classify_pool: None,
+            runtime: None,
         })
+    }
+
+    /// Compile the embedded core classifier over a live content resolver, for
+    /// the explicit flags-on subset.
+    ///
+    /// Every resolver call goes through [`live`]'s guard: any resolver error
+    /// makes the materialization fail with
+    /// [`MaterializeError::ResolverFailed`] instead of producing a write-set.
+    ///
+    /// 🚨 Classification drives the resolver's futures with
+    /// `runtime.block_on`, which panics on one of the runtime's own threads.
+    /// Compose off them, from `spawn_blocking`, as the worker does; with a
+    /// classify pool the futures run on its threads. `runtime` must be a
+    /// multi-thread runtime, whose workers drive the I/O.
+    pub fn from_core_with_resolver(
+        resolver: Arc<dyn ContentResolver>,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<Self, MaterializeError> {
+        Ok(Self {
+            classifier: Classifier::from_core_with(Arc::new(live::AbstainingResolver::new(
+                resolver,
+            )))?,
+            classify_pool: None,
+            runtime: Some(runtime),
+        })
+    }
+
+    /// Whether this materializer has a live resolver, and so supports the
+    /// explicit flags-on subset.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.runtime.is_some()
     }
 
     /// Classify each batch's torrents on `parallelism` dedicated threads.
@@ -290,6 +330,16 @@ impl Materializer {
         params: &ProcessTorrentParams,
         torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
     ) -> Result<MaterializedWriterOutput, MaterializeError> {
+        self.materialize_scoped(params, torrents, &Arc::default())
+    }
+
+    /// Materialize, recording live resolver failures in `scope`.
+    fn materialize_scoped<'a>(
+        &self,
+        params: &ProcessTorrentParams,
+        torrents: impl IntoIterator<Item = &'a LoadedTorrent>,
+        scope: &Arc<live::ResolveScope>,
+    ) -> Result<MaterializedWriterOutput, MaterializeError> {
         let workflow = if params.classifier_workflow.is_empty() {
             "default"
         } else {
@@ -328,8 +378,8 @@ impl Materializer {
             });
         }
 
-        let classify = |slot| self.classify_slot(workflow, &flags, slot);
-        let mut output = match &self.classify_pool {
+        let classify = |slot| self.classify_slot(workflow, &flags, slot, scope);
+        let folded = match &self.classify_pool {
             // Serial: classify each torrent just before folding it, so a fold
             // error stops classification exactly where the one loop did.
             None => fold_classified(slots.iter().map(classify)),
@@ -338,7 +388,13 @@ impl Materializer {
                 let classified: Vec<_> = pool.install(|| slots.par_iter().map(classify).collect());
                 fold_classified(classified)
             }
-        }?;
+        };
+        // A resolver failure taints the outcomes it produced, so it decides
+        // before anything folded from them.
+        if let Some(failure) = scope.failure() {
+            return Err(MaterializeError::ResolverFailed(failure));
+        }
+        let mut output = folded?;
         if let Some(error) = invalid_request {
             return Err(error);
         }
@@ -351,6 +407,7 @@ impl Materializer {
         workflow: &str,
         flags: &Flags,
         slot: &'s Slot<'s>,
+        scope: &Arc<live::ResolveScope>,
     ) -> Classified<'s> {
         match slot {
             Slot::Missing(info_hash) => Classified {
@@ -358,22 +415,25 @@ impl Materializer {
                 loaded: None,
             },
             // `Classifier::run` became async with the B′-0 dependency seam, but
-            // `materialize` is called from a synchronous path. The default
+            // `materialize` is called from a synchronous path. The core
             // `NullContentResolver` performs no I/O, so the future completes on
             // its first poll and `block_on` neither parks nor needs a runtime.
-            // 🔜 When lane B′-4 wires a real resolver in, this call actually
-            // does I/O and `materialize` must itself become async — this
-            // `block_on` is the marker for that change, not a permanent bridge.
+            // A live resolver does real I/O, so its future is driven on the
+            // runtime that owns that I/O, from this (non-runtime) thread, with
+            // this classification's resolver scope set.
             // 🔑 `classify`, not `run`: the normalized object reports
             // `contentAttached` as a bare boolean and carries no content row, so
             // going through it would discard exactly what an attached torrent
             // needs. See `Classifier::classify`.
             Slot::Loaded(info_hash, torrent) => {
-                let (result, outcome) = futures::executor::block_on(self.classifier.classify(
-                    workflow,
-                    flags,
-                    &torrent.classifier_input,
-                ));
+                let classification =
+                    self.classifier
+                        .classify(workflow, flags, &torrent.classifier_input);
+                let (result, outcome) = match &self.runtime {
+                    None => futures::executor::block_on(classification),
+                    Some(runtime) => runtime
+                        .block_on(live::ResolveSlot::new(scope, info_hash).scope(classification)),
+                };
                 Classified {
                     info_hash,
                     loaded: Some((torrent, result, outcome)),
@@ -535,6 +595,8 @@ pub enum MaterializeError {
     UnknownOutcome(String),
     #[error("building the classify thread pool: {0}")]
     ClassifyPool(#[from] rayon::ThreadPoolBuildError),
+    #[error("content resolver failed, so the job is abstained before any side effect: {0}")]
+    ResolverFailed(ResolverFailure),
 }
 
 fn classifier_flags(raw: Option<&BTreeMap<String, Value>>) -> Result<Flags, MaterializeError> {

@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 
-const EXPECTED_GOOSE_VERSION: i64 = 35;
+const EXPECTED_GOOSE_VERSION: i64 = 36;
 const DATABASE: &str = "bitmagnet_graphql_torrent_reprocess_test";
 /// Every fail-closed refusal: unsupported flags, or a plan the kernel rejects
 /// before writing (for example an explicit hint naming a content ID).

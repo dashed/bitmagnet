@@ -26,9 +26,10 @@
 
 use bitmagnet_classifier::{ContentResultItem, ResolveError};
 use bitmagnet_model::{Content, ContentType};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio::sync::Semaphore;
 
+use crate::associations::hydrate_associations;
 use crate::{content_from_row, CONTENT_COLUMNS};
 
 /// Go `contentBySearchLimit`. Inlined into the SQL text, never bound — see
@@ -73,16 +74,39 @@ pub struct PgContentSearch {
     /// Go's `semaphore chan struct{}` of capacity 1. A cancelled caller simply
     /// drops the `acquire` future, which is Go's `case <-ctx.Done()` arm.
     slot: Semaphore,
+    /// Whether every returned row carries its `attributes` and `collections`.
+    associations: bool,
 }
 
 impl PgContentSearch {
     /// Wraps a pool. The pool may be shared; the concurrency bound above is
     /// per-[`PgContentSearch`], matching Go's one-semaphore-per-classifier.
+    ///
+    /// Returned rows are scalar-only, as [`content_from_row`] decodes them, so
+    /// a role without grants on the association tables can use it.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             slot: Semaphore::new(1),
+            associations: false,
+        }
+    }
+
+    /// [`Self::new`], but every returned row also carries its `attributes` and
+    /// `collections` in Go's order, as Go's `ContentDefaultPreload` and
+    /// `ContentDefaultHydrate` load them (see `crate::associations`).
+    ///
+    /// A processor that persists a local-search match needs them: they feed
+    /// the `tsv` it writes. The role needs SELECT on `content_attributes`,
+    /// `content_collections_content` and `content_collections`. Each lookup
+    /// then reads the row and its associations in one read-only
+    /// repeatable-read transaction on one connection, holding the permit.
+    #[must_use]
+    pub fn with_associations(pool: PgPool) -> Self {
+        Self {
+            associations: true,
+            ..Self::new(pool)
         }
     }
 
@@ -109,22 +133,30 @@ impl PgContentSearch {
         let sql = content_by_id_sql(canonical);
 
         let _permit = self.acquire().await;
+        let mut snapshot = self.begin_association_snapshot().await?;
 
         // Only compile-time constants are interpolated into `sql` (the shared
         // select list, the identity ordering, the literal limit); all three
         // values below are bound. See `content_by_id_sql`.
-        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        let query = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(content_type.as_str())
             .bind(source)
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(local_search_error)?;
+            .bind(id);
+        let row = match snapshot.as_mut() {
+            Some(tx) => query.fetch_optional(&mut **tx).await,
+            None => query.fetch_optional(&self.pool).await,
+        }
+        .map_err(local_search_error)?;
 
-        row.as_ref()
+        let mut content = row
+            .as_ref()
             .map(content_from_row)
             .transpose()
-            .map_err(local_search_error)
+            .map_err(local_search_error)?;
+        if let Some(tx) = snapshot {
+            finish_association_snapshot(tx, content.as_mut_slice()).await?;
+        }
+        Ok(content)
     }
 
     /// Go `LocalSearch.ContentBySearch`, **stopping before its tie-break**.
@@ -164,6 +196,7 @@ impl PgContentSearch {
         let sql = content_by_search_sql(!tsquery.is_empty(), range.is_some());
 
         let _permit = self.acquire().await;
+        let mut snapshot = self.begin_association_snapshot().await?;
 
         // Only compile-time constants are interpolated into `sql`: the shared
         // select list, the rank expression, the identity ordering and the
@@ -177,21 +210,48 @@ impl PgContentSearch {
             query = query.bind(start).bind(end);
         }
 
-        let rows = query
-            .fetch_all(&self.pool)
+        let rows = match snapshot.as_mut() {
+            Some(tx) => query.fetch_all(&mut **tx).await,
+            None => query.fetch_all(&self.pool).await,
+        }
+        .map_err(local_search_error)?;
+
+        let mut contents = Vec::with_capacity(rows.len());
+        let mut ranks = Vec::with_capacity(rows.len());
+        for row in &rows {
+            contents.push(content_from_row(row).map_err(local_search_error)?);
+            ranks.push(
+                row.try_get::<f64, _>(QUERY_STRING_RANK_ALIAS)
+                    .map_err(local_search_error)?,
+            );
+        }
+        if let Some(tx) = snapshot {
+            finish_association_snapshot(tx, &mut contents).await?;
+        }
+        Ok(contents
+            .into_iter()
+            .zip(ranks)
+            .map(|(content, query_string_rank)| ContentResultItem {
+                content,
+                query_string_rank,
+            })
+            .collect())
+    }
+
+    /// The read-only repeatable-read transaction a hydrating lookup runs in,
+    /// or `None` for a scalar-only one, which reads from the pool as before.
+    async fn begin_association_snapshot(
+        &self,
+    ) -> Result<Option<Transaction<'static, Postgres>>, ResolveError> {
+        if !self.associations {
+            return Ok(None);
+        }
+        let mut tx = self.pool.begin().await.map_err(local_search_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
             .await
             .map_err(local_search_error)?;
-
-        rows.iter()
-            .map(|row| {
-                Ok(ContentResultItem {
-                    content: content_from_row(row).map_err(local_search_error)?,
-                    query_string_rank: row
-                        .try_get(QUERY_STRING_RANK_ALIAS)
-                        .map_err(local_search_error)?,
-                })
-            })
-            .collect()
+        Ok(Some(tx))
     }
 
     /// Go's `localSearchSemaphore` gate. Held for the duration of the query and
@@ -202,6 +262,15 @@ impl PgContentSearch {
             .await
             .expect("local search semaphore is never closed")
     }
+}
+
+/// Hydrate `contents` inside the lookup's snapshot, then end it.
+async fn finish_association_snapshot(
+    mut tx: Transaction<'static, Postgres>,
+    contents: &mut [Content],
+) -> Result<(), ResolveError> {
+    hydrate_associations(&mut tx, contents).await?;
+    tx.commit().await.map_err(local_search_error)
 }
 
 /// Go's `contentSearchString`: the base title as a **phrase** query.

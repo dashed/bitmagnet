@@ -206,7 +206,17 @@ the whole backlog on every poll. The planner uses the index only while the
 claim provably implies its predicate, so the two change together; the
 `worker_pg` gate `EXPLAIN`s the claim's custom and generic plans against a
 20,000-row organic backlog. Rows outside the predicate are never locked, so the
-Go worker keeps processing them. A handler may return
+Go worker keeps processing them.
+
+`consume_admitted_process_torrent_with(ProcessTorrentAdmission::FlagsOffOrOn,
+…)` is the same claim with a wider admission: the containment is two OR'd
+containments, explicit flags-off and explicit flags-on (all three attach flags
+JSON `true`), still nested in the `CASE` with the same key allow-list, so both
+subsets are claimed in one Go order. The worker uses it only with
+`--admit-flags-on`. Migration 00036's partial
+`queue_jobs_admitted_flags_on_process_torrent_claim_idx` repeats that predicate
+verbatim, under the same rule; `FlagsOff` keeps the 00035 claim and index
+byte-identical. A handler may return
 `JobVerdict::Abstain` before causing any side effect; the claim transaction
 then rolls back and the row is left byte-identical and unlocked. A panic is
 always a failure, never an abstention.

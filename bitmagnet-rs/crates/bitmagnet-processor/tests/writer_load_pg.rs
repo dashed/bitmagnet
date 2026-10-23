@@ -72,7 +72,7 @@ fn supported_params(info_hashes: Vec<ProtocolId>) -> ProcessTorrentParams {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL pointing at disposable Goose-35 PostgreSQL"]
+#[ignore = "requires BITMAGNET_PROCESSOR_WRITER_LOAD_TEST_DATABASE_URL pointing at disposable Goose-36 PostgreSQL"]
 async fn raw_snapshots_share_the_loaded_keyset_and_preserve_database_values() {
     let pool = connect_disposable_database().await;
     sqlx::query(

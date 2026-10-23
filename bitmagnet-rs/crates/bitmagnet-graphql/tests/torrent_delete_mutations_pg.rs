@@ -12,7 +12,7 @@ use sqlx::postgres::{types::Oid, PgPoolOptions};
 
 const DATABASE_NAME: &str = "bitmagnet_graphql_torrent_delete_test";
 const WRITER_ROLE: &str = "bitmagnet_graphql_torrent_delete_writer_ci";
-const EXPECTED_GOOSE_VERSION: i64 = 35;
+const EXPECTED_GOOSE_VERSION: i64 = 36;
 const FILTER_BYTES: usize = 25_000_091;
 
 const HASH_A: &str = "00000000000000000000000000000000000000a1";

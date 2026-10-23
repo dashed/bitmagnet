@@ -1,7 +1,7 @@
 //! Live-PostgreSQL gate for the Lane P transaction kernel.
 //!
 //! Set `BITMAGNET_PROCESSOR_TEST_DATABASE_URL` to the exact disposable
-//! Goose-35 database named `bitmagnet_processor_writer_load_test`. The test
+//! Goose-36 database named `bitmagnet_processor_writer_load_test`. The test
 //! truncates processor-owned rows and refuses every other database name.
 
 use std::collections::BTreeMap;
@@ -209,7 +209,7 @@ fn assert_insufficient_privilege(error: sqlx::Error) {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-35 database"]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-36 database"]
 async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");
@@ -1009,7 +1009,7 @@ async fn transaction_order_upserts_tags_deletes_and_rolls_back() {
 }
 
 #[tokio::test]
-#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-35 database"]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at the exact disposable Goose-36 database"]
 async fn attached_content_upserts_additive_associations_and_rolls_back_atomically() {
     let Ok(database_url) = std::env::var("BITMAGNET_PROCESSOR_TEST_DATABASE_URL") else {
         eprintln!("skipping: BITMAGNET_PROCESSOR_TEST_DATABASE_URL is not set");

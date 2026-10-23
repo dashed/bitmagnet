@@ -5,19 +5,26 @@
 //! explicit invocation with `--ignored --test-threads=1`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bitmagnet_blocking::BlockingManager as PersistentBlockingManager;
-use bitmagnet_model::InfoHash;
+use bitmagnet_classifier::resolver::tmdb;
+use bitmagnet_classifier::{ContentResolver, ContentResultItem, ResolveError};
+use bitmagnet_content_search::PgContentSearch;
+use bitmagnet_model::{Content, ContentType, InfoHash};
 use bitmagnet_processor::{
     load_writer_plan, persist_writer_plan, Materializer, ProcessTorrentWorker,
-    ProcessTorrentWorkerConfig,
+    ProcessTorrentWorkerConfig, WriterPlanError,
 };
 use bitmagnet_queue::{
     backoff, process_torrent_job, AdmittedConsumeOutcome, ConsumeOutcome, JobVerdict,
-    ProcessTorrentParams, ProtocolId, QueueJobOptions, QueueStore,
-    ADMITTED_PROCESS_TORRENT_CLAIM_SQL, PROCESS_TORRENT,
+    ProcessTorrentAdmission, ProcessTorrentParams, ProtocolId, QueueJobOptions, QueueStore,
+    ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL, ADMITTED_PROCESS_TORRENT_CLAIM_SQL,
+    PROCESS_TORRENT,
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -439,8 +446,14 @@ async fn admitted_claim_order_matches_go() {
 }
 
 const ADMITTED_CLAIM_INDEX: &str = "queue_jobs_admitted_process_torrent_claim_idx";
+const ADMITTED_FLAGS_ON_CLAIM_INDEX: &str =
+    "queue_jobs_admitted_flags_on_process_torrent_claim_idx";
 
 async fn explain_admitted_claim(pool: &PgPool, generic: bool) -> String {
+    explain_claim(pool, ADMITTED_PROCESS_TORRENT_CLAIM_SQL, generic).await
+}
+
+async fn explain_claim(pool: &PgPool, claim_sql: &str, generic: bool) -> String {
     let mut tx = pool.begin().await.expect("begin plan transaction");
     let plan: Vec<String> = if generic {
         sqlx::query("SET LOCAL plan_cache_mode = force_generic_plan")
@@ -448,7 +461,7 @@ async fn explain_admitted_claim(pool: &PgPool, generic: bool) -> String {
             .await
             .expect("force a generic plan");
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "PREPARE admitted_claim(text[]) AS {ADMITTED_PROCESS_TORRENT_CLAIM_SQL}"
+            "PREPARE admitted_claim(text[]) AS {claim_sql}"
         )))
         .execute(&mut *tx)
         .await
@@ -459,7 +472,7 @@ async fn explain_admitted_claim(pool: &PgPool, generic: bool) -> String {
             .expect("explain the generic admitted claim")
     } else {
         sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "EXPLAIN (COSTS OFF) {ADMITTED_PROCESS_TORRENT_CLAIM_SQL}"
+            "EXPLAIN (COSTS OFF) {claim_sql}"
         )))
         .bind(Vec::<String>::new())
         .fetch_all(&mut *tx)
@@ -1317,5 +1330,971 @@ async fn concurrent_blocking_flushes_keep_every_writers_hashes() {
         reloaded.filter(&[first, second]).await.unwrap(),
         Vec::<InfoHash>::new(),
         "the persisted filter keeps both concurrent writers' hashes"
+    );
+}
+
+// --- The flags-on switch ---------------------------------------------------
+
+const FLAGS_ON: &str =
+    "{\"apis_enabled\":true,\"local_search_enabled\":true,\"tmdb_enabled\":true}";
+const FLAGS_OFF: &str =
+    "{\"apis_enabled\":false,\"local_search_enabled\":false,\"tmdb_enabled\":false}";
+const HASH_LOCAL: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+const HASH_UNKNOWN: &str = "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4";
+
+fn flags_on_params(info_hashes: &[&str]) -> ProcessTorrentParams {
+    let mut params = supported_params(info_hashes);
+    for flag in params
+        .classifier_flags
+        .as_mut()
+        .expect("flags")
+        .values_mut()
+    {
+        *flag = Value::Bool(true);
+    }
+    params
+}
+
+/// Local search against the database, TMDB answering every call with a
+/// server error, so a classification that reaches TMDB fails.
+struct LocalSearchOnly {
+    local: PgContentSearch,
+}
+
+impl LocalSearchOnly {
+    fn tmdb<T>() -> Result<T, ResolveError> {
+        Err(ResolveError::Tmdb("503 Service Unavailable".to_owned()))
+    }
+}
+
+#[async_trait]
+impl ContentResolver for LocalSearchOnly {
+    async fn content_by_id(
+        &self,
+        content_type: ContentType,
+        source: &str,
+        id: &str,
+    ) -> Result<Option<Content>, ResolveError> {
+        self.local.content_by_id(content_type, source, id).await
+    }
+
+    async fn content_by_search(
+        &self,
+        content_type: ContentType,
+        base_title: &str,
+        year: Option<u16>,
+    ) -> Result<Vec<ContentResultItem>, ResolveError> {
+        self.local
+            .content_by_search(content_type, base_title, year)
+            .await
+    }
+
+    async fn tmdb_find_by_external_id(
+        &self,
+        _request: &tmdb::FindByIdRequest,
+    ) -> Result<tmdb::FindByIdResponse, ResolveError> {
+        Self::tmdb()
+    }
+
+    async fn tmdb_movie_details(
+        &self,
+        _request: &tmdb::MovieDetailsRequest,
+    ) -> Result<Option<tmdb::MovieDetailsResponse>, ResolveError> {
+        Self::tmdb()
+    }
+
+    async fn tmdb_tv_details(
+        &self,
+        _request: &tmdb::TvDetailsRequest,
+    ) -> Result<Option<tmdb::TvDetailsResponse>, ResolveError> {
+        Self::tmdb()
+    }
+
+    async fn tmdb_search_movie(
+        &self,
+        _request: &tmdb::SearchMovieRequest,
+    ) -> Result<tmdb::SearchMovieResponse, ResolveError> {
+        Self::tmdb()
+    }
+
+    async fn tmdb_search_tv(
+        &self,
+        _request: &tmdb::SearchTvRequest,
+    ) -> Result<tmdb::SearchTvResponse, ResolveError> {
+        Self::tmdb()
+    }
+}
+
+/// A worker started with the flags-on switch, over [`LocalSearchOnly`].
+fn flags_on_worker(pool: &PgPool) -> ProcessTorrentWorker {
+    let resolver = LocalSearchOnly {
+        local: PgContentSearch::with_associations(pool.clone()),
+    };
+    ProcessTorrentWorker::new(
+        QueueStore::new(pool.clone()),
+        Materializer::from_core_with_resolver(
+            Arc::new(resolver),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("compile embedded classifier"),
+        Arc::new(PersistentBlockingManager::new(pool.clone())),
+        fast_config(),
+    )
+}
+
+/// One local movie, `tmdb:42` "Reusable Movie" (1999), with associations
+/// whose order under an en_US-like collation (glibc) differs from their
+/// bytewise order: attribute sources `imdb` < `TVDB` and keys
+/// `éxtra` < `f-key` < `id`; collection ids `10` < `9` < `a7` < `B8`. A
+/// bytewise collation (musl, as in CI's `postgres:16-alpine`) orders them as
+/// `COLLATE "C"` does.
+async fn seed_local_movie(pool: &PgPool) {
+    let mut content = Content {
+        content_type: ContentType::Movie,
+        source: "tmdb".into(),
+        id: "42".into(),
+        title: "Reusable Movie".into(),
+        release_date: None,
+        release_year: Some(1999),
+        adult: None,
+        original_language: None,
+        original_title: None,
+        overview: None,
+        runtime: None,
+        popularity: None,
+        vote_average: None,
+        vote_count: None,
+        created_at: None,
+        updated_at: None,
+        tsv: Default::default(),
+        collections: Vec::new(),
+        attributes: Vec::new(),
+    };
+    content.update_tsv();
+    sqlx::query(
+        "INSERT INTO content \
+         (type, source, id, title, release_date, release_year, tsv, created_at, updated_at) \
+         VALUES ('movie', 'tmdb', '42', 'Reusable Movie', '1999-06-01', 1999, $1::tsvector, \
+                 '2024-01-02 03:04:05+00', '2024-01-02 03:04:05+00')",
+    )
+    .bind(content.tsv.to_string())
+    .execute(pool)
+    .await
+    .expect("seed local movie");
+    // An upper-case source sorts between `imdb` and `tmdb` under the
+    // collation, but before both bytewise. Tests share the database and this
+    // table is never reset.
+    sqlx::query(
+        "INSERT INTO metadata_sources (key, name, created_at, updated_at) \
+         VALUES ('TVDB', 'Upper-case TVDB', NOW(), NOW()) \
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .expect("seed upper-case metadata source");
+    for (source, key, value) in [
+        ("TVDB", "id", "yankeevalue"),
+        ("imdb", "id", "zuluvalue"),
+        ("imdb", "f-key", "fvalue"),
+        ("imdb", "éxtra", "evalue"),
+    ] {
+        sqlx::query(
+            "INSERT INTO content_attributes \
+             (content_type, content_source, content_id, source, key, value, created_at, updated_at) \
+             VALUES ('movie', 'tmdb', '42', $1, $2, $3, NOW(), NOW())",
+        )
+        .bind(source)
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .expect("seed local movie attribute");
+    }
+    for (id, name) in [
+        ("B8", "Bravo"),
+        ("a7", "Alpha"),
+        ("9", "Nine"),
+        ("10", "Ten"),
+    ] {
+        sqlx::query(
+            "INSERT INTO content_collections (type, source, id, name, created_at, updated_at) \
+             VALUES ('genre', 'tmdb', $1, $2, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("seed local movie collection");
+        sqlx::query(
+            "INSERT INTO content_collections_content \
+             (content_type, content_source, content_id, content_collection_type, \
+              content_collection_source, content_collection_id) \
+             VALUES ('movie', 'tmdb', '42', 'genre', 'tmdb', $1)",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("seed local movie collection link");
+    }
+}
+
+/// The seeded movie's attribute `(source, key, value)`s by `(source, key)` and
+/// genre `(id, name)`s by collection key, as the database orders them: under
+/// its default collation, or bytewise (`COLLATE "C"`).
+async fn seeded_associations(
+    pool: &PgPool,
+    bytewise: bool,
+) -> (Vec<(String, String, String)>, Vec<(String, String)>) {
+    let (attributes_sql, collections_sql) = if bytewise {
+        (
+            "SELECT source, key, value FROM content_attributes \
+             WHERE content_type = 'movie' AND content_source = 'tmdb' AND content_id = '42' \
+             ORDER BY source COLLATE \"C\", key COLLATE \"C\"",
+            "SELECT c.id, c.name FROM content_collections_content l \
+             JOIN content_collections c ON (c.type, c.source, c.id) = \
+                  (l.content_collection_type, l.content_collection_source, l.content_collection_id) \
+             WHERE l.content_type = 'movie' AND l.content_source = 'tmdb' AND l.content_id = '42' \
+             ORDER BY l.content_collection_type COLLATE \"C\", \
+                      l.content_collection_source COLLATE \"C\", \
+                      l.content_collection_id COLLATE \"C\"",
+        )
+    } else {
+        (
+            "SELECT source, key, value FROM content_attributes \
+             WHERE content_type = 'movie' AND content_source = 'tmdb' AND content_id = '42' \
+             ORDER BY source, key",
+            "SELECT c.id, c.name FROM content_collections_content l \
+             JOIN content_collections c ON (c.type, c.source, c.id) = \
+                  (l.content_collection_type, l.content_collection_source, l.content_collection_id) \
+             WHERE l.content_type = 'movie' AND l.content_source = 'tmdb' AND l.content_id = '42' \
+             ORDER BY l.content_collection_type, l.content_collection_source, l.content_collection_id",
+        )
+    };
+    let attributes = sqlx::query_as(attributes_sql)
+        .fetch_all(pool)
+        .await
+        .expect("seeded attribute order");
+    let collections = sqlx::query_as(collections_sql)
+        .fetch_all(pool)
+        .await
+        .expect("seeded collection order");
+    (attributes, collections)
+}
+
+/// Assert that `tsv` carries `UpdateTsv`'s weight-D lexemes for the seeded
+/// movie in the order it appends them: the genre names in `collections`'
+/// order, then the `id` attribute values in `attributes`' order.
+fn assert_association_lexeme_order(
+    tsv: &str,
+    attributes: &[(String, String, String)],
+    collections: &[(String, String)],
+) {
+    let lexemes: Vec<String> = collections
+        .iter()
+        .map(|(_, name)| name.to_lowercase())
+        .chain(
+            attributes
+                .iter()
+                .filter(|(_, key, _)| key == "id")
+                .map(|(_, _, value)| value.clone()),
+        )
+        .collect();
+    let positions: Vec<u32> = lexemes
+        .iter()
+        .map(|lexeme| {
+            *lexeme_positions(tsv, lexeme)
+                .first()
+                .unwrap_or_else(|| panic!("{lexeme} missing from {tsv}"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "association lexemes {lexemes:?} are out of order at {positions:?} in {tsv}"
+    );
+}
+
+/// The lexeme positions of `lexeme` in a `tsvector`'s text form.
+fn lexeme_positions(tsv: &str, lexeme: &str) -> Vec<u32> {
+    let quoted = format!("'{lexeme}':");
+    let Some(start) = tsv.find(&quoted) else {
+        return Vec::new();
+    };
+    tsv[start + quoted.len()..]
+        .split(' ')
+        .next()
+        .expect("position list")
+        .split(',')
+        .map(|label| {
+            label
+                .trim_end_matches(char::is_alphabetic)
+                .parse()
+                .expect("lexeme position")
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn local_search_hydrates_associations_in_database_collation_order() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    // The contract: hydration keeps the order the database's default
+    // collation gives, and never re-sorts it.
+    let (attributes, collections) = seeded_associations(&pool, false).await;
+    // Whether this database can tell that order from a bytewise re-sort.
+    let (bytewise_attributes, bytewise_collections) = seeded_associations(&pool, true).await;
+    let attributes_discriminate = attributes != bytewise_attributes;
+    let collections_discriminate = collections != bytewise_collections;
+
+    let hydrating = PgContentSearch::with_associations(pool.clone());
+    let by_id = hydrating
+        .content_by_id(ContentType::Movie, "tmdb", "42")
+        .await
+        .expect("local by id")
+        .expect("seeded movie");
+    let by_alternative_id = hydrating
+        .content_by_id(ContentType::Movie, "imdb", "zuluvalue")
+        .await
+        .expect("local by alternative id")
+        .expect("seeded movie by imdb id");
+    let by_search = hydrating
+        .content_by_search(ContentType::Movie, "Reusable Movie", Some(1999))
+        .await
+        .expect("local search");
+    assert_eq!(by_search.len(), 1, "{by_search:?}");
+    for content in [&by_id, &by_alternative_id, &by_search[0].content] {
+        let hydrated_attributes: Vec<_> = content
+            .attributes
+            .iter()
+            .map(|a| (a.source.clone(), a.key.clone(), a.value.clone()))
+            .collect();
+        let hydrated_collections: Vec<_> = content
+            .collections
+            .iter()
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        assert_eq!(hydrated_attributes, attributes);
+        assert_eq!(hydrated_collections, collections);
+        assert!(content
+            .attributes
+            .iter()
+            .all(|a| a.content_type == ContentType::Movie
+                && a.content_source == "tmdb"
+                && a.content_id == "42"));
+        assert!(content
+            .collections
+            .iter()
+            .all(|c| c.collection_type == "genre" && c.source == "tmdb"));
+        if attributes_discriminate {
+            assert_ne!(
+                hydrated_attributes, bytewise_attributes,
+                "attributes were re-sorted bytewise"
+            );
+        }
+        if collections_discriminate {
+            assert_ne!(
+                hydrated_collections, bytewise_collections,
+                "collections were re-sorted bytewise"
+            );
+        }
+    }
+    if !(attributes_discriminate && collections_discriminate) {
+        // Written past libtest's output capture, so a passing run still
+        // shows that half of this gate did not run here.
+        let _ = writeln!(
+            std::io::stderr(),
+            "worker_pg: bytewise-vs-collation check NOT exercised for the seeded {}: \
+             this database's default collation orders them as COLLATE \"C\" does",
+            match (attributes_discriminate, collections_discriminate) {
+                (false, false) => "attributes and collections",
+                (false, true) => "attributes",
+                _ => "collections",
+            }
+        );
+    }
+    // So the tsv the processor derives carries the associations in that order.
+    let mut content = by_id.clone();
+    content.update_tsv();
+    assert_association_lexeme_order(&content.tsv.to_string(), &attributes, &collections);
+
+    // Without the opt-in, rows stay scalar-only for the restricted shadow role.
+    let scalar = PgContentSearch::new(pool.clone())
+        .content_by_id(ContentType::Movie, "tmdb", "42")
+        .await
+        .expect("scalar by id")
+        .expect("seeded movie");
+    assert!(scalar.attributes.is_empty() && scalar.collections.is_empty());
+    assert_eq!(
+        Content {
+            attributes: Vec::new(),
+            collections: Vec::new(),
+            ..by_id
+        },
+        scalar
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn flags_on_admission_claims_both_explicit_subsets_and_nothing_else() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let hashes = format!("[\"{HASH_A}\"]");
+    let flags_off = enqueue_raw(
+        &pool,
+        &format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_OFF},\"InfoHashes\":{hashes}}}"
+        ),
+    )
+    .await;
+    let flags_on = enqueue_raw(
+        &pool,
+        &format!(
+            "{{\"ClassifyMode\":\"rematch\",\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{hashes}}}"
+        ),
+    )
+    .await;
+    let rejected_payloads = [
+        // Flags partly true, partly omitted, or not JSON booleans.
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":true,\"local_search_enabled\":true,\"tmdb_enabled\":false}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":true,\"local_search_enabled\":true}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":true,\"local_search_enabled\":true,\"tmdb_enabled\":\"true\"}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":1,\"local_search_enabled\":true,\"tmdb_enabled\":true}},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{{\"apis_enabled\":[true],\"local_search_enabled\":true,\"tmdb_enabled\":true}},\"InfoHashes\":{hashes}}}"
+        ),
+        // An empty, missing, or other workflow.
+        format!("{{\"ClassifierWorkflow\":\"\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{hashes}}}"),
+        format!("{{\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{hashes}}}"),
+        format!(
+            "{{\"ClassifierWorkflow\":\"custom\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{hashes}}}"
+        ),
+        // Extra top-level keys, including Go's case-insensitive aliases.
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_ON},\"classifierFlags\":{FLAGS_OFF},\"InfoHashes\":{hashes}}}"
+        ),
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_ON},\"InfoHashes\":{hashes},\"Extra\":1}}"
+        ),
+        // The organic shape.
+        format!("{{\"InfoHashes\":{hashes}}}"),
+    ];
+    let mut rejected = Vec::new();
+    for payload in &rejected_payloads {
+        rejected.push(enqueue_raw(&pool, payload).await);
+    }
+    let mut before = Vec::new();
+    for id in &rejected {
+        before.push(job_row(&pool, id).await);
+    }
+
+    let store = QueueStore::new(pool.clone());
+    let claim_all = |admission| {
+        let store = &store;
+        async move {
+            let mut claimed = Vec::new();
+            while let AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) = store
+                .consume_admitted_process_torrent_with(admission, &[], |_| async {
+                    JobVerdict::Complete
+                })
+                .await
+                .unwrap()
+            {
+                claimed.push(job.id);
+            }
+            claimed
+        }
+    };
+    // Without the switch only the flags-off payload is claimed; with it the
+    // flags-on payload too (the flags-off one is processed by then).
+    assert_eq!(
+        claim_all(ProcessTorrentAdmission::FlagsOff).await,
+        std::slice::from_ref(&flags_off)
+    );
+    assert_eq!(
+        claim_all(ProcessTorrentAdmission::FlagsOffOrOn).await,
+        std::slice::from_ref(&flags_on)
+    );
+    for id in [&flags_off, &flags_on] {
+        assert_eq!(job_row(&pool, id).await.status, "processed");
+    }
+    for (id, before) in rejected.iter().zip(&before) {
+        assert_eq!(&job_row(&pool, id).await, before, "job {id} was touched");
+    }
+
+    // The worker's admission follows its materializer.
+    assert_eq!(
+        worker(&pool, fast_config()).admission(),
+        ProcessTorrentAdmission::FlagsOff
+    );
+    assert_eq!(
+        flags_on_worker(&pool).admission(),
+        ProcessTorrentAdmission::FlagsOffOrOn
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn flags_on_claim_reads_only_admitted_rows_behind_an_organic_backlog() {
+    let pool = connect().await;
+    reset(&pool).await;
+    sqlx::query(
+        "INSERT INTO queue_jobs (fingerprint, queue, status, payload, retries, max_retries, \
+         run_after, archival_duration, created_at, priority) \
+         SELECT md5(n::text), 'process_torrent', 'pending', \
+                jsonb_build_object('InfoHashes', jsonb_build_array(lpad(to_hex(n), 40, '0'))), \
+                0, 2, clock_timestamp() - interval '1 hour', interval '168:00:00', \
+                clock_timestamp(), 0 \
+         FROM generate_series(1, 20000) AS n",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed organic backlog");
+    let store = QueueStore::new(pool.clone());
+    let admitted = [
+        enqueue(&store, &flags_on_params(&[HASH_A])).await,
+        enqueue(&store, &supported_params(&[HASH_B])).await,
+    ];
+    for id in &admitted {
+        make_ready(&pool, id).await;
+    }
+    sqlx::query("ANALYZE queue_jobs")
+        .execute(&pool)
+        .await
+        .expect("analyze queue_jobs");
+
+    for generic in [false, true] {
+        let plan = explain_claim(&pool, ADMITTED_FLAGS_ON_PROCESS_TORRENT_CLAIM_SQL, generic).await;
+        assert!(
+            plan.contains(ADMITTED_FLAGS_ON_CLAIM_INDEX),
+            "the {} flags-on claim must scan {ADMITTED_FLAGS_ON_CLAIM_INDEX}; the claim and \
+             migration 00036 predicates have drifted apart:\n{plan}",
+            if generic { "generic" } else { "custom" },
+        );
+        // The flags-off claim keeps its own index.
+        let plan = explain_admitted_claim(&pool, generic).await;
+        assert!(plan.contains(ADMITTED_CLAIM_INDEX), "{plan}");
+    }
+    let mut claimed = Vec::new();
+    while let AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) = store
+        .consume_admitted_process_torrent_with(
+            ProcessTorrentAdmission::FlagsOffOrOn,
+            &[],
+            |_| async { JobVerdict::Complete },
+        )
+        .await
+        .unwrap()
+    {
+        claimed.push(job.id);
+    }
+    assert_eq!(claimed, admitted);
+    let organic_pending: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM queue_jobs WHERE status = 'pending'")
+            .fetch_one(&pool)
+            .await
+            .expect("count organic backlog");
+    assert_eq!(organic_pending, 20_000);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn flags_on_job_attaches_local_content_with_its_ordered_associations() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    seed_torrent(
+        &pool,
+        HASH_LOCAL,
+        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
+        2_000_000_000,
+    )
+    .await;
+    let content_before = live_image(&pool).await;
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &flags_on_params(&[HASH_LOCAL])).await;
+    let worker = flags_on_worker(&pool);
+    // TMDB fails every call, so processing proves local search attached the
+    // movie (which skips TMDB) and nothing reached TMDB.
+    let outcome = worker.run_once().await.expect("run worker once");
+    let AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) = outcome else {
+        panic!("expected a processed job, got {outcome:?}");
+    };
+    assert_eq!(job.id, id);
+    let row = sqlx::query(
+        "SELECT content_type::text AS content_type, content_source, content_id, tsv::text AS tsv \
+         FROM torrent_contents WHERE info_hash = decode($1, 'hex')",
+    )
+    .bind(HASH_LOCAL)
+    .fetch_one(&pool)
+    .await
+    .expect("one torrent_contents row");
+    assert_eq!(row.get::<String, _>("content_type"), "movie");
+    assert_eq!(
+        row.get::<Option<String>, _>("content_source").as_deref(),
+        Some("tmdb")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("content_id").as_deref(),
+        Some("42")
+    );
+    // The torrent's tsv carries the hydrated genres and `id` attributes in
+    // the database's order, whatever its collation.
+    let (attributes, collections) = seeded_associations(&pool, false).await;
+    assert_association_lexeme_order(&row.get::<String, _>("tsv"), &attributes, &collections);
+    // An existing content row is reused, not rewritten (Go upserts only
+    // content TMDB just produced).
+    let content_after: Vec<_> = live_image(&pool)
+        .await
+        .into_iter()
+        .filter(|row| row.starts_with("content "))
+        .collect();
+    let content_before: Vec<_> = content_before
+        .into_iter()
+        .filter(|row| row.starts_with("content "))
+        .collect();
+    assert_eq!(content_after, content_before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_flags_on_resolver_failure_abstains_with_zero_writes() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    seed_torrent(
+        &pool,
+        HASH_LOCAL,
+        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
+        2_000_000_000,
+    )
+    .await;
+    seed_torrent(
+        &pool,
+        HASH_UNKNOWN,
+        "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
+        1_000_000_000,
+    )
+    .await;
+    let store = QueueStore::new(pool.clone());
+    // The first torrent attaches locally; the second reaches TMDB, which fails.
+    let id = enqueue(&store, &flags_on_params(&[HASH_LOCAL, HASH_UNKNOWN])).await;
+    sqlx::query("UPDATE queue_jobs SET status = 'retry', retries = 1 WHERE id = $1")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = job_row(&pool, &id).await;
+    let image_before = live_image(&pool).await;
+    let worker = flags_on_worker(&pool);
+    let outcome = worker.run_once().await.unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+        panic!("expected an abstention, got {outcome:?}");
+    };
+    assert_eq!(job.id, id);
+    assert_eq!(job.retries, 1, "the reported row is the unchanged row");
+    assert!(
+        reason.contains("content resolver")
+            && reason.contains(HASH_UNKNOWN)
+            && reason.contains("503 Service Unavailable"),
+        "{reason}"
+    );
+    assert_eq!(
+        job_row(&pool, &id).await,
+        before,
+        "abstention changed the row"
+    );
+    assert_eq!(
+        live_image(&pool).await,
+        image_before,
+        "abstention wrote rows"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1,
+        "an abstention publishes no retry job"
+    );
+    // Excluded from this worker's next claim, and left unlocked for Go.
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+    ));
+    let go = QueueStore::new(pool.clone());
+    assert!(matches!(
+        go.consume_one(PROCESS_TORRENT, |_| async { Ok::<_, String>(()) })
+            .await
+            .unwrap(),
+        ConsumeOutcome::Processed { job } if job.id == id
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_flags_on_worker_processes_flags_off_jobs_exactly_as_without_the_switch() {
+    let pool = connect().await;
+    let store = QueueStore::new(pool.clone());
+    let params = supported_params(&[HASH_A, HASH_B]);
+    let mut images = Vec::new();
+    for switched_on in [false, true] {
+        reset(&pool).await;
+        seed_fixture_torrents(&pool).await;
+        let id = enqueue(&store, &params).await;
+        let worker = if switched_on {
+            flags_on_worker(&pool)
+        } else {
+            worker(&pool, fast_config())
+        };
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == id
+        ));
+        images.push(live_image(&pool).await);
+    }
+    assert_eq!(
+        images[0]
+            .iter()
+            .filter(|row| row.starts_with("tc "))
+            .count(),
+        2
+    );
+    assert_eq!(images[1], images[0]);
+}
+
+/// Counts the calls that reach it and, when `stall_first`, holds the first
+/// one until released. Local search answers nothing and TMDB fails.
+#[derive(Default)]
+struct CountingResolver {
+    calls: AtomicUsize,
+    stall_first: bool,
+    release: tokio::sync::Notify,
+    released: AtomicBool,
+}
+
+impl CountingResolver {
+    async fn enter(&self) {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 && self.stall_first {
+            self.release.notified().await;
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn tmdb<T>(&self) -> Result<T, ResolveError> {
+        self.enter().await;
+        Err(ResolveError::Tmdb("503 Service Unavailable".to_owned()))
+    }
+}
+
+#[async_trait]
+impl ContentResolver for CountingResolver {
+    async fn content_by_id(
+        &self,
+        _content_type: ContentType,
+        _source: &str,
+        _id: &str,
+    ) -> Result<Option<Content>, ResolveError> {
+        self.enter().await;
+        Ok(None)
+    }
+
+    async fn content_by_search(
+        &self,
+        _content_type: ContentType,
+        _base_title: &str,
+        _year: Option<u16>,
+    ) -> Result<Vec<ContentResultItem>, ResolveError> {
+        self.enter().await;
+        Ok(Vec::new())
+    }
+
+    async fn tmdb_find_by_external_id(
+        &self,
+        _request: &tmdb::FindByIdRequest,
+    ) -> Result<tmdb::FindByIdResponse, ResolveError> {
+        self.tmdb().await
+    }
+
+    async fn tmdb_movie_details(
+        &self,
+        _request: &tmdb::MovieDetailsRequest,
+    ) -> Result<Option<tmdb::MovieDetailsResponse>, ResolveError> {
+        self.tmdb().await
+    }
+
+    async fn tmdb_tv_details(
+        &self,
+        _request: &tmdb::TvDetailsRequest,
+    ) -> Result<Option<tmdb::TvDetailsResponse>, ResolveError> {
+        self.tmdb().await
+    }
+
+    async fn tmdb_search_movie(
+        &self,
+        _request: &tmdb::SearchMovieRequest,
+    ) -> Result<tmdb::SearchMovieResponse, ResolveError> {
+        self.tmdb().await
+    }
+
+    async fn tmdb_search_tv(
+        &self,
+        _request: &tmdb::SearchTvRequest,
+    ) -> Result<tmdb::SearchTvResponse, ResolveError> {
+        self.tmdb().await
+    }
+}
+
+/// A worker started with the flags-on switch, over `resolver`.
+fn counting_worker(
+    pool: &PgPool,
+    resolver: &Arc<CountingResolver>,
+    config: ProcessTorrentWorkerConfig,
+) -> ProcessTorrentWorker {
+    ProcessTorrentWorker::new(
+        QueueStore::new(pool.clone()),
+        Materializer::from_core_with_resolver(
+            Arc::clone(resolver) as Arc<dyn ContentResolver>,
+            tokio::runtime::Handle::current(),
+        )
+        .expect("compile embedded classifier"),
+        Arc::new(PersistentBlockingManager::new(pool.clone())),
+        config,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_flags_on_job_abandoned_at_its_timeout_makes_no_further_resolver_calls() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_torrent(
+        &pool,
+        HASH_UNKNOWN,
+        "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
+        1_000_000_000,
+    )
+    .await;
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &flags_on_params(&[HASH_UNKNOWN])).await;
+    let image_before = live_image(&pool).await;
+    let resolver = Arc::new(CountingResolver {
+        stall_first: true,
+        ..CountingResolver::default()
+    });
+    let worker = counting_worker(
+        &pool,
+        &resolver,
+        ProcessTorrentWorkerConfig {
+            job_timeout: Duration::from_secs(2),
+            ..fast_config()
+        },
+    );
+
+    // The first resolver call never returns on its own, so the job times out
+    // and is settled while its composition is still blocked in that call.
+    worker.run_once().await.unwrap();
+    assert_eq!(
+        job_row(&pool, &id).await.error.as_deref(),
+        Some("job exceeded its 2s timeout: context deadline exceeded")
+    );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+
+    // Unblocked, the abandoned composition goes on classifying, but its
+    // scope was stopped when the job was dropped: nothing reaches TMDB.
+    resolver.release.notify_one();
+    eventually("the stalled call to return", || {
+        resolver.released.load(Ordering::SeqCst)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        1,
+        "an abandoned composition made another resolver call"
+    );
+    assert_eq!(live_image(&pool).await, image_before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_flags_on_job_with_a_sourced_hint_abstains_before_any_resolver_call() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_local_movie(&pool).await;
+    seed_torrent(
+        &pool,
+        HASH_LOCAL,
+        "Reusable Movie 1999 1080p BluRay x264-GRP.mkv",
+        2_000_000_000,
+    )
+    .await;
+    seed_torrent(
+        &pool,
+        HASH_UNKNOWN,
+        "Unknown Picture 2004 720p WEB-DL x264-GRP.mkv",
+        1_000_000_000,
+    )
+    .await;
+    // Go would look this hint up by ID (local, then TMDB): M3, so Rust
+    // leaves the whole job to Go before classifying any of its torrents.
+    sqlx::query(
+        "INSERT INTO torrent_hints \
+         (info_hash, content_type, content_source, content_id, created_at, updated_at) \
+         VALUES (decode($1, 'hex'), 'movie', 'tmdb', '42', NOW(), NOW())",
+    )
+    .bind(HASH_UNKNOWN)
+    .execute(&pool)
+    .await
+    .expect("seed sourced hint");
+    let store = QueueStore::new(pool.clone());
+    let id = enqueue(&store, &flags_on_params(&[HASH_LOCAL, HASH_UNKNOWN])).await;
+    let before = job_row(&pool, &id).await;
+    let image_before = live_image(&pool).await;
+    let resolver = Arc::new(CountingResolver::default());
+    let worker = counting_worker(&pool, &resolver, fast_config());
+
+    let outcome = worker.run_once().await.unwrap();
+    let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+        panic!("expected an abstention, got {outcome:?}");
+    };
+    assert_eq!(job.id, id);
+    assert_eq!(
+        reason,
+        WriterPlanError::AttachHintUnsupported {
+            info_hash: HASH_UNKNOWN.to_owned()
+        }
+        .to_string()
+    );
+    assert_eq!(
+        resolver.calls.load(Ordering::SeqCst),
+        0,
+        "a hint-abstained job reached the resolver"
+    );
+    assert_eq!(
+        job_row(&pool, &id).await,
+        before,
+        "abstention changed the row"
+    );
+    assert_eq!(
+        live_image(&pool).await,
+        image_before,
+        "abstention wrote rows"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1,
+        "an abstention publishes no retry job"
     );
 }
