@@ -33,7 +33,9 @@ const (
 // QueryParams is recorded in full because it is where a port's mistakes show
 // up: a missing year, a dropped include_adult, a differently rendered id. The
 // api_key is not part of it -- it is set once on the HTTP client and never
-// passes through here -- so a tape carries no credential.
+// passes through here. A recorded transport failure's message does name the
+// request URL, but the requester has already redacted its api_key, so a tape
+// carries no credential.
 type tapeRequest struct {
 	Method      string            `json:"method"`
 	Path        string            `json:"path"`

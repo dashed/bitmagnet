@@ -53,7 +53,9 @@ search string, a dropped year filter, a missing query parameter -- even when the
 answers happen to coincide.
 
 The `api_key` is set once on the TMDB HTTP client and never passes through the
-recorded parameter map, so a tape carries no credential.
+recorded parameter map. A recorded transport failure's message does name the
+request URL, but the requester redacts its `api_key` first (`api_key=REDACTED`),
+so a tape carries no credential.
 
 ## 🚨 What a green replay against this tape does NOT prove
 
