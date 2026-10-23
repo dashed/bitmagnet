@@ -84,7 +84,28 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: process_torrent_worker seed|requeue|dump [flags]")
+		return errors.New("usage: process_torrent_worker seed|requeue|dump|" +
+			"flagson-seed|flagson-requeue|flagson-dump|flagson-coverage|flagson-abstained|" +
+			"tmdb-stub|request-diff [flags]")
+	}
+
+	// The flags-on subcommands (see flagson.go) parse their own flags; the
+	// flags-off ones below are unchanged.
+	switch os.Args[1] {
+	case "flagson-seed":
+		return runFlagsOnSeed(os.Args[2:])
+	case "flagson-requeue":
+		return runFlagsOnRequeue(os.Args[2:])
+	case "flagson-dump":
+		return runFlagsOnDump(os.Args[2:])
+	case "flagson-coverage":
+		return runFlagsOnCoverage(os.Args[2:])
+	case "flagson-abstained":
+		return runFlagsOnAbstained(os.Args[2:])
+	case "tmdb-stub":
+		return runTMDBStub(os.Args[2:])
+	case "request-diff":
+		return runRequestDiff(os.Args[2:])
 	}
 
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
@@ -200,50 +221,9 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 	add := func(corpus string, in input) error {
 		hash := fixtureHash(corpus, in.ID)
 
-		var filesData []byte
-
-		if len(in.Files) > 0 {
-			files := make([]model.TorrentFile, len(in.Files))
-			for i, f := range in.Files {
-				files[i] = model.TorrentFile{Index: f.Index, Path: f.Path, Size: f.Size}
-			}
-
-			if filesData, err = blobmigration.SerializeFiles(files); err != nil {
-				return err
-			}
-		}
-
-		batch.Queue(`INSERT INTO torrents
-			(info_hash, name, size, private, files_status, files_count, files_data, created_at, updated_at)
-			VALUES ($1, $2, $3, false, $4::"FilesStatus", $5, $6, $7, $7)`,
-			hash[:], in.Name, in.Size, in.FilesStatus, in.FilesCount, filesData, ts)
-		// Deterministic, varied swarm counts; every third row also has a
-		// publication date so the projection's published_at branch is covered.
-		var publishedAt *time.Time
-		if hash[2]%3 == 0 {
-			p := ts.Add(-time.Duration(hash[3]) * time.Hour)
-			publishedAt = &p
-		}
-
-		batch.Queue(`INSERT INTO torrents_torrent_sources
-			(source, info_hash, seeders, leechers, published_at, created_at, updated_at)
-			VALUES ('dht', $1, $2, $3, $4, $5, $5)`,
-			hash[:], int(hash[0])%50, int(hash[1])%20, publishedAt, ts)
-
-		sourced := false
-
-		if in.Hint != nil {
-			sourced = in.Hint.ContentSource != ""
-
-			var source, id *string
-			if sourced {
-				source, id = &in.Hint.ContentSource, &in.Hint.ContentID
-			}
-
-			batch.Queue(`INSERT INTO torrent_hints
-				(info_hash, content_type, content_source, content_id, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $5)`,
-				hash[:], in.Hint.ContentType, source, id, ts)
+		sourced, err := queueTorrent(batch, hash, in, ts)
+		if err != nil {
+			return err
 		}
 
 		all = append(all, seeded{hash: hash, sourced: sourced, deleted: corpus == "synthetic" && deleted[in.ID]})
@@ -279,6 +259,60 @@ func seed(ctx context.Context, conn *pgx.Conn, root string, replayLimit, jobSize
 	_, _ = fmt.Fprintf(os.Stderr, "seeded %d torrents and %d jobs\n", len(all), len(jobs))
 
 	return nil
+}
+
+// queueTorrent queues the rows of one seeded torrent: the torrent with its file
+// list in Go's blob format, one DHT source, and the explicit hint when the input
+// has one. It reports whether the hint names a content source.
+func queueTorrent(batch *pgx.Batch, hash protocol.ID, in input, ts time.Time) (bool, error) {
+	var filesData []byte
+
+	if len(in.Files) > 0 {
+		files := make([]model.TorrentFile, len(in.Files))
+		for i, f := range in.Files {
+			files[i] = model.TorrentFile{Index: f.Index, Path: f.Path, Size: f.Size}
+		}
+
+		var err error
+		if filesData, err = blobmigration.SerializeFiles(files); err != nil {
+			return false, err
+		}
+	}
+
+	batch.Queue(`INSERT INTO torrents
+		(info_hash, name, size, private, files_status, files_count, files_data, created_at, updated_at)
+		VALUES ($1, $2, $3, false, $4::"FilesStatus", $5, $6, $7, $7)`,
+		hash[:], in.Name, in.Size, in.FilesStatus, in.FilesCount, filesData, ts)
+	// Deterministic, varied swarm counts; every third row also has a
+	// publication date so the projection's published_at branch is covered.
+	var publishedAt *time.Time
+	if hash[2]%3 == 0 {
+		p := ts.Add(-time.Duration(hash[3]) * time.Hour)
+		publishedAt = &p
+	}
+
+	batch.Queue(`INSERT INTO torrents_torrent_sources
+		(source, info_hash, seeders, leechers, published_at, created_at, updated_at)
+		VALUES ('dht', $1, $2, $3, $4, $5, $5)`,
+		hash[:], int(hash[0])%50, int(hash[1])%20, publishedAt, ts)
+
+	sourced := false
+
+	if in.Hint != nil {
+		sourced = in.Hint.ContentSource != ""
+
+		var source, id *string
+		if sourced {
+			source, id = &in.Hint.ContentSource, &in.Hint.ContentID
+		}
+
+		batch.Queue(`INSERT INTO torrent_hints
+			(info_hash, content_type, content_source, content_id, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $5)`,
+			hash[:], in.Hint.ContentType, source, id, ts)
+	}
+
+	return sourced, nil
 }
 
 // enqueueJobs inserts one supported-subset job per hash list, built with Go's

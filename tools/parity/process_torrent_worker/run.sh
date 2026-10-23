@@ -20,7 +20,12 @@
 #   OUT            evidence directory (default: mktemp)
 #   BITMAGNET_GO   Go binary (default: go build into $OUT)
 #   RUST_WORKER    Rust worker binary (default: cargo build --release)
+#   PARITY_DB_PREFIX  database name prefix (default bm_ptw_parity)
+#   MODE           flags-on runs the flags-on differential (flags_on.sh)
+#                  instead; anything else runs this flags-off one
 set -euo pipefail
+
+if [[ "${MODE:-}" == flags-on ]]; then exec bash "$(dirname "$0")/flags_on.sh"; fi
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PG_HOST="${PG_HOST:-/tmp}"
@@ -30,7 +35,8 @@ GOOSE_VERSION="${GOOSE_VERSION:-35}"
 REPLAY_LIMIT="${REPLAY_LIMIT:-20000}"
 OUT="${OUT:-$(mktemp -d)}"
 mkdir -p "$OUT"
-PREFIX=bm_ptw_parity
+# Overridable only so two lanes can share one server; the default is unchanged.
+PREFIX="${PARITY_DB_PREFIX:-bm_ptw_parity}"
 
 dsn() { echo "postgres://${PG_USER}@localhost:${PG_PORT}/$1?host=${PG_HOST}&sslmode=disable"; }
 sql() { psql -X -q -v ON_ERROR_STOP=1 -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
