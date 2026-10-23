@@ -87,6 +87,8 @@ func run() error {
 		return errors.New("usage: process_torrent_worker seed|requeue|dump|" +
 			"flagson-seed|flagson-requeue|flagson-dump|flagson-coverage|flagson-abstained|" +
 			"flagson-faultcheck|flagson-attribution|flagson-rawdiff|flagson-rematch-coverage|" +
+			"flagson-organic-produce|flagson-organic-enqueue|flagson-organic-coverage|flagson-organic-check|" +
+			"flagson-organic-info|" +
 			"tmdb-stub|request-diff [flags]")
 	}
 
@@ -111,6 +113,16 @@ func run() error {
 		return runFlagsOnRawDiff(os.Args[2:])
 	case "flagson-rematch-coverage":
 		return runFlagsOnRematchCoverage(os.Args[2:])
+	case "flagson-organic-produce":
+		return runFlagsOnOrganicProduce(os.Args[2:])
+	case "flagson-organic-enqueue":
+		return runFlagsOnOrganicEnqueue(os.Args[2:])
+	case "flagson-organic-coverage":
+		return runFlagsOnOrganicCoverage(os.Args[2:])
+	case "flagson-organic-check":
+		return runFlagsOnOrganicCheck(os.Args[2:])
+	case "flagson-organic-info":
+		return runFlagsOnOrganicInfo(os.Args[2:])
 	case "tmdb-stub":
 		return runTMDBStub(os.Args[2:])
 	case "request-diff":

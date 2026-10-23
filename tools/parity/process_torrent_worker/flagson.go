@@ -69,6 +69,13 @@ type plannedJob struct {
 	Hold        string   `json:"hold,omitempty"`  // parked until flags_on.sh releases it (holdAlone, holdAuth)
 	// ClassifyMode is the payload's mode (the rematch phase's rematch jobs).
 	ClassifyMode processor.ClassifyMode `json:"classifyMode,omitempty"`
+	// An organic job (flagson_organic.go) as its producer wrote it, queued
+	// byte for byte by enqueueRawJobs: never decoded and marshalled again,
+	// which would normalize exactly what the negative slice is made of.
+	Payload          string `json:"payload,omitempty"`
+	Priority         int    `json:"priority,omitempty"`
+	MaxRetries       uint   `json:"maxRetries,omitempty"`
+	ArchivalDuration string `json:"archivalDuration,omitempty"`
 }
 
 type jobSpec struct {
@@ -140,6 +147,43 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 	}
 
 	return planned, nil
+}
+
+// rawJobArgs are the queue_jobs values of an organic job: its fingerprint,
+// payload, priority, retries and archival duration as its producer wrote them.
+func rawJobArgs(job plannedJob, runAfter time.Time) []any {
+	return []any{
+		job.Fingerprint, processTorrentQueue, job.Payload, job.MaxRetries, runAfter,
+		job.ArchivalDuration, job.Priority,
+	}
+}
+
+// enqueueRawJobs inserts organic jobs verbatim, in a strictly increasing
+// run_after order.
+func enqueueRawJobs(ctx context.Context, conn *pgx.Conn, jobs []plannedJob, base time.Time) error {
+	batch := &pgx.Batch{}
+
+	for i, job := range jobs {
+		batch.Queue(`INSERT INTO queue_jobs
+			(fingerprint, queue, status, payload, retries, max_retries, run_after,
+			 archival_duration, created_at, priority)
+			VALUES ($1, $2, 'pending', $3::jsonb, 0, $4, $5, $6::interval, $5, $7)`,
+			rawJobArgs(job, base.Add(time.Duration(i)*time.Millisecond))...)
+
+		if batch.Len() >= 1500 {
+			if err := conn.SendBatch(ctx, batch).Close(); err != nil {
+				return err
+			}
+
+			batch = &pgx.Batch{}
+		}
+	}
+
+	if batch.Len() == 0 {
+		return nil
+	}
+
+	return conn.SendBatch(ctx, batch).Close()
 }
 
 // planFlagsOnJobs groups the seeded torrents:

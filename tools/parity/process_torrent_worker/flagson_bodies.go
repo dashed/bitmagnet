@@ -86,7 +86,7 @@ func loadBodyTemplates(root string) (*bodyTemplates, error) {
 			}
 
 			for _, o := range line.Observations {
-				if o.Kind != "tmdb.request" || o.Response == nil || o.Response.StatusCode != http.StatusOK {
+				if o.Kind != observationTMDBRequest || o.Response == nil || o.Response.StatusCode != http.StatusOK {
 					continue
 				}
 

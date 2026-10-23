@@ -15,6 +15,12 @@ package main
 //     for any other job, each with the expected reason and naming a torrent
 //     of that job: "hint" for the attach-hint refusal before classification,
 //     "resolver" for a content resolver failure, "none" for no abstention.
+//
+// With -organic-bound (the organic corpus, flagson_organic.go) the expected
+// jobs come from each job's slice and priority instead: a negative slice's
+// jobs, never claimed (no line); the hinted slice's, claimed and abstained
+// from ("hint"); and every other job above the bound, never claimed. Their
+// TMDB content is not checked: the replay slices share search keys.
 
 import (
 	"context"
@@ -39,6 +45,7 @@ func runFlagsOnAbstained(args []string) error {
 	expect := fs.Int("expect", -1, "the number of jobs Rust must have abstained from")
 	rustLog := fs.String("rust-log", "", "the Rust worker's log of this phase alone")
 	reason := fs.String("reason", "", "hint | resolver | none: the abstention every -rust-log line must give")
+	organicBound := fs.Int("organic-bound", -1, "the organic corpus's Rust --organic-max-priority (replaces -slice, -reason, -expect)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -62,6 +69,14 @@ func runFlagsOnAbstained(args []string) error {
 	byFingerprint := map[string]plannedJob{}
 	for _, j := range jobs {
 		byFingerprint[j.Fingerprint] = j
+	}
+
+	// The reason each job Rust must leave gives, by fingerprint.
+	var wantReason map[string]string
+
+	if *organicBound >= 0 {
+		wantReason = organicLeft(jobs, *organicBound)
+		*expect = len(wantReason)
 	}
 
 	plannedBy := map[string]plannedTorrent{}
@@ -129,7 +144,10 @@ func runFlagsOnAbstained(args []string) error {
 		case !ok:
 			violations = append(violations, "active job not queued by the seed: "+a.fingerprint)
 			continue
-		case j.Slice != *slice:
+		case wantReason != nil && wantReason[a.fingerprint] == "":
+			violations = append(violations, fmt.Sprintf("job %d (%s) of slice %s at priority %d is active",
+				j.Index, a.fingerprint, j.Slice, j.Priority))
+		case wantReason == nil && j.Slice != *slice:
 			violations = append(violations, fmt.Sprintf("job %d (%s) of slice %s is active", j.Index, a.fingerprint, j.Slice))
 		case a.status != "pending" || a.retries != 0 || !a.noError:
 			violations = append(violations, fmt.Sprintf("job %d (%s) was touched: status %s, retries %d, error set %t",
@@ -145,6 +163,25 @@ func runFlagsOnAbstained(args []string) error {
 				}
 			}
 		}
+	}
+
+	activeFingerprints := map[string]bool{}
+	for _, a := range active {
+		activeFingerprints[a.fingerprint] = true
+	}
+
+	for _, fp := range sortedKeys(wantReason) {
+		if !activeFingerprints[fp] {
+			j := byFingerprint[fp]
+			violations = append(violations, fmt.Sprintf("job %d (%s) of slice %s at priority %d was claimed",
+				j.Index, fp, j.Slice, j.Priority))
+		}
+	}
+
+	if wantReason != nil {
+		tmdbIDs = nil
+
+		organicShares(jobs, wantReason, activeFingerprints)
 	}
 
 	for _, q := range []struct{ label, sql string }{
@@ -179,18 +216,32 @@ func runFlagsOnAbstained(args []string) error {
 	logged := ""
 
 	if *rustLog != "" {
-		hashesOf := map[string][]string{}
+		hashesOf, reasonOf := map[string][]string{}, map[string]string{}
+		reasons := map[string]int{}
+
 		for _, a := range active {
 			hashesOf[a.id] = byFingerprint[a.fingerprint].InfoHashes
+			reasonOf[a.id] = *reason
+
+			if wantReason != nil {
+				// A job left that should not be (a violation above) must
+				// still have no abstention line.
+				reasonOf[a.id] = abstainNone
+				if r, ok := wantReason[a.fingerprint]; ok {
+					reasonOf[a.id] = r
+				}
+			}
+
+			reasons[reasonOf[a.id]]++
 		}
 
-		lines, logViolations, err := checkAbstainLog(*rustLog, *reason, hashesOf)
+		lines, logViolations, err := checkAbstainLog(*rustLog, reasonOf, hashesOf)
 		if err != nil {
 			return err
 		}
 
 		violations = append(violations, logViolations...)
-		logged = fmt.Sprintf(", %d Rust abstention lines (reason %s)", lines, *reason)
+		logged = fmt.Sprintf(", %d Rust abstention lines (reasons of the left jobs %v)", lines, reasons)
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "abstained %d jobs (expected %d), %d torrents, %d TMDB ids checked%s: %d violations\n",
@@ -207,6 +258,14 @@ func runFlagsOnAbstained(args []string) error {
 	return nil
 }
 
+// The abstention a left job's Rust log line gives (worker.rs): the
+// attach-hint refusal, a content resolver failure, or no line at all.
+const (
+	abstainHint     = "hint"
+	abstainResolver = "resolver"
+	abstainNone     = "none"
+)
+
 var (
 	ansiEscape  = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	logJobID    = regexp.MustCompile(`job_id=([0-9a-f-]{36})`)
@@ -215,10 +274,13 @@ var (
 )
 
 // checkAbstainLog matches the Rust worker's abstention lines (worker.rs) to the
-// jobs left behind, by queue job ID.
-func checkAbstainLog(path, reason string, hashesOf map[string][]string) (int, []string, error) {
-	if reason != "hint" && reason != "resolver" && reason != "none" {
-		return 0, nil, fmt.Errorf("-reason %q: want hint, resolver or none", reason)
+// jobs left behind, by queue job ID: one line with the job's reason, or none
+// for reason "none".
+func checkAbstainLog(path string, reasonOf map[string]string, hashesOf map[string][]string) (int, []string, error) {
+	for _, reason := range reasonOf {
+		if reason != abstainHint && reason != abstainResolver && reason != abstainNone {
+			return 0, nil, fmt.Errorf("reason %q: want hint, resolver or none", reason)
+		}
 	}
 
 	raw, err := os.ReadFile(path)
@@ -244,22 +306,22 @@ func checkAbstainLog(path, reason string, hashesOf map[string][]string) (int, []
 
 		switch {
 		case strings.Contains(line, "abstaining from process_torrent job after a content resolver failure"):
-			kind, hash = "resolver", logInfoHash.FindStringSubmatch(line)
+			kind, hash = abstainResolver, logInfoHash.FindStringSubmatch(line)
 		case strings.Contains(line, "abstaining from unsupported process_torrent job"):
 			if hash = logHintHash.FindStringSubmatch(line); hash != nil {
-				kind = "hint"
+				kind = abstainHint
 			}
 		}
 
 		id := logJobID.FindStringSubmatch(line)
 
 		switch {
-		case kind == "" || kind != reason:
-			violations = append(violations, "unexpected Rust abstention: "+line)
-		case id == nil || hash == nil:
+		case id == nil || hash == nil || kind == "":
 			violations = append(violations, "unparsed Rust abstention: "+line)
 		case hashesOf[id[1]] == nil:
 			violations = append(violations, "Rust abstained from a job that is not left: "+line)
+		case kind != reasonOf[id[1]]:
+			violations = append(violations, "unexpected Rust abstention: "+line)
 		case !slices.Contains(hashesOf[id[1]], hash[1]):
 			violations = append(violations, "Rust abstention names a torrent outside its job: "+line)
 		default:
@@ -268,8 +330,13 @@ func checkAbstainLog(path, reason string, hashesOf map[string][]string) (int, []
 	}
 
 	for id := range hashesOf {
-		if seen[id] != 1 {
-			violations = append(violations, fmt.Sprintf("job %s left with %d Rust abstention lines, want 1", id, seen[id]))
+		want := 1
+		if reasonOf[id] == abstainNone {
+			want = 0
+		}
+
+		if seen[id] != want {
+			violations = append(violations, fmt.Sprintf("job %s left with %d Rust abstention lines, want %d", id, seen[id], want))
 		}
 	}
 

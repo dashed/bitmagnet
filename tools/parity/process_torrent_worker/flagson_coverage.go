@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/classifier"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -92,6 +93,12 @@ type tapeObservation struct {
 type tapeRecordOutcome struct {
 	Kind string `json:"kind"`
 }
+
+// Tape observation kinds and coverage verdicts.
+const (
+	observationTMDBRequest = "tmdb.request"
+	verdictMet             = "MET"
+)
 
 type tapeTMDBRequest struct {
 	Path        string            `json:"path"`
@@ -200,7 +207,7 @@ func runFlagsOnCoverage(args []string) error {
 		_, _ = fmt.Fprintf(os.Stdout, " %10d", total[k])
 
 		if f, ok := floorOf[k]; ok {
-			over, counted, status := corpusMain, perCorpus[corpusMain][k], "MET"
+			over, counted, status := corpusMain, perCorpus[corpusMain][k], verdictMet
 			if f.byID {
 				over, counted = "total", total[k]
 			}
@@ -366,7 +373,7 @@ func corpusCoverage(dir, dsn string) (coverageCounts, error) {
 			case "local.content_by_search":
 				c["attach-local-by-search"]++
 				countLocalSearch(c, o.Request, o.Response)
-			case "tmdb.request":
+			case observationTMDBRequest:
 				var req tapeTMDBRequest
 				if err := json.Unmarshal(o.Request, &req); err != nil {
 					return err
@@ -661,4 +668,210 @@ func forEachTapeRecord(path string, fn func(tapeRecord) error) error {
 	}
 
 	return scanner.Err()
+}
+
+// ---- flagson-organic-coverage ----
+
+// organicSliceCounts is what Go's tape shows one organic slice did.
+type organicSliceCounts struct {
+	records, mismatched, localSearches, tmdbSearches, tmdbOther int
+	outcomes                                                    map[string]int
+}
+
+// Per-slice floors of a replay slice of the organic corpus: about one in
+// twelve replay torrents searches (the first organic run: 101-129 local and
+// 65-113 TMDB searches per slice of 1,524 torrents).
+const (
+	organicFloorRecords  = 1000 // classifications
+	organicFloorSearches = 50   // local searches with local search on, TMDB searches with TMDB on
+)
+
+// organicExpectedFlags resolves every non-negative slice's attach flags from
+// its jobs' payloads over Go's defaults; the slice's jobs must agree.
+func organicExpectedFlags(jobs []plannedJob, defaults classifier.Flags) (map[string]map[string]bool, error) {
+	expected := map[string]map[string]bool{}
+
+	for _, j := range jobs {
+		if sl, ok := organicSliceByName(j.Slice); !ok || sl.role == organicRoleNegative {
+			continue
+		}
+
+		var params struct {
+			ClassifierFlags map[string]any `json:"ClassifierFlags"`
+		}
+
+		if err := json.Unmarshal([]byte(j.Payload), &params); err != nil {
+			return nil, fmt.Errorf("job %d: %w", j.Index, err)
+		}
+
+		resolved, ok := resolveAttachFlags(params.ClassifierFlags, defaults)
+		if !ok {
+			return nil, fmt.Errorf("job %d (%s): a non-boolean attach flag", j.Index, j.Slice)
+		}
+
+		if prev, seen := expected[j.Slice]; seen && fmt.Sprint(prev) != fmt.Sprint(resolved) {
+			return nil, fmt.Errorf("slice %s: its jobs resolve to %v and %v", j.Slice, prev, resolved)
+		}
+
+		expected[j.Slice] = resolved
+	}
+
+	return expected, nil
+}
+
+// runFlagsOnOrganicCoverage counts, per slice, from a Go-alone run's tape:
+// classifications, those whose effective attach flags differ from the
+// slice's payloads resolved over Go's defaults (must be none), and the
+// searches each flag allows (a floor when on, none when off).
+func runFlagsOnOrganicCoverage(args []string) error {
+	fs := flag.NewFlagSet("flagson-organic-coverage", flag.ExitOnError)
+	dir := fs.String("dir", "", "a Go-alone run dir: seed/jobs.jsonl, tape/tape.jsonl")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if err := requireFlag("dir", *dir); err != nil {
+		return err
+	}
+
+	jobs, err := readJSONL[plannedJob](filepath.Join(*dir, "seed", "jobs.jsonl"), 0)
+	if err != nil {
+		return err
+	}
+
+	expected, err := organicExpectedFlags(jobs, goFlagDefaults())
+	if err != nil {
+		return err
+	}
+
+	sliceOf := map[string]string{}
+	for _, j := range jobs {
+		for _, h := range j.InfoHashes {
+			sliceOf[strings.ToLower(strings.TrimPrefix(h, "0x"))] = j.Slice
+		}
+	}
+
+	counts := map[string]*organicSliceCounts{}
+
+	if err := forEachTapeRecord(filepath.Join(*dir, "tape", "tape.jsonl"), func(r tapeRecord) error {
+		name := sliceOf[r.Subject]
+
+		c := counts[name]
+		if c == nil {
+			c = &organicSliceCounts{outcomes: map[string]int{}}
+			counts[name] = c
+		}
+
+		c.records++
+
+		if want, ok := expected[name]; ok {
+			for _, k := range attachFlags {
+				if got, isBool := r.Flags[k].(bool); !isBool || got != want[k] {
+					c.mismatched++
+					break
+				}
+			}
+		}
+
+		if r.Outcome != nil {
+			c.outcomes[r.Outcome.Kind]++
+		}
+
+		for _, o := range r.Observations {
+			switch o.Kind {
+			case "local.content_by_search":
+				c.localSearches++
+			case observationTMDBRequest:
+				var req tapeTMDBRequest
+				if err := json.Unmarshal(o.Request, &req); err != nil {
+					return err
+				}
+
+				if strings.HasPrefix(req.Path, "/search/") {
+					c.tmdbSearches++
+				} else {
+					c.tmdbOther++
+				}
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	var unmet []string
+
+	_, _ = fmt.Fprintf(os.Stdout, "%-30s %-11s %8s %8s %8s %8s %8s  %s\n",
+		"slice", "flags", "records", "mismatch", "local", "tmdb-srch", "tmdb-oth", "outcomes")
+
+	for _, sl := range slices.Concat(organicRound1, organicRound2) {
+		c := counts[sl.name]
+		if c == nil {
+			continue
+		}
+
+		want, resolved := expected[sl.name]
+		flags := "-"
+
+		if resolved {
+			flags = ""
+			for _, k := range attachFlags {
+				flags += map[bool]string{true: "T", false: "F"}[want[k]]
+			}
+		}
+
+		var verdicts []string
+
+		check := func(ok bool, what string) {
+			if !ok {
+				verdicts = append(verdicts, what)
+				unmet = append(unmet, sl.name+": "+what)
+			}
+		}
+
+		check(c.mismatched == 0, "effective flags differ from the payload's")
+
+		// Round 2's slices are smaller; flagson-rematch-coverage has its floors.
+		floors := slices.ContainsFunc(organicRound1, func(r organicSlice) bool { return r.name == sl.name })
+
+		if resolved && sl.role == "" {
+			if floors {
+				check(c.records >= organicFloorRecords, fmt.Sprintf("records < %d", organicFloorRecords))
+			}
+
+			switch {
+			case !want["local_search_enabled"]:
+				check(c.localSearches == 0, "local searches with local search off")
+			case floors:
+				check(c.localSearches >= organicFloorSearches, fmt.Sprintf("local searches < %d", organicFloorSearches))
+			}
+
+			switch {
+			case !want["apis_enabled"] || !want["tmdb_enabled"]:
+				check(c.tmdbSearches+c.tmdbOther == 0, "TMDB requests with TMDB off")
+			case floors:
+				check(c.tmdbSearches >= organicFloorSearches, fmt.Sprintf("TMDB searches < %d", organicFloorSearches))
+			}
+		}
+
+		verdict := verdictMet
+		if len(verdicts) > 0 {
+			verdict = "NOT MET: " + strings.Join(verdicts, "; ")
+		}
+
+		_, _ = fmt.Fprintf(os.Stdout, "%-30s %-11s %8d %8d %8d %8d %8d  %v %s\n", sl.name, flags, c.records,
+			c.mismatched, c.localSearches, c.tmdbSearches, c.tmdbOther, c.outcomes, verdict)
+	}
+
+	if c := counts[""]; c != nil {
+		unmet = append(unmet, fmt.Sprintf("%d tape records of torrents in no organic job", c.records))
+	}
+
+	if len(unmet) > 0 {
+		return fmt.Errorf("flagson-organic-coverage: %s", strings.Join(unmet, "; "))
+	}
+
+	return nil
 }

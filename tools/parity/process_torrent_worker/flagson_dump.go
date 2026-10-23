@@ -84,7 +84,10 @@ const canonicalQueueJobsView = "flagson_queue_jobs"
 func runFlagsOnDump(args []string) error {
 	fs := flag.NewFlagSet("flagson-dump", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "PostgreSQL DSN")
-	seedJobs := fs.String("seed-jobs", "", "the corpus's jobs.jsonl: the seed's own jobs are never canonicalized")
+	var seedJobs stringList
+
+	fs.Var(&seedJobs, "seed-jobs",
+		"the corpus's jobs.jsonl: the seed's own jobs are never canonicalized (repeat for an earlier round's)")
 	rawOut := fs.String("raw-out", "", "also write the dump without the canonical fields here")
 
 	if err := fs.Parse(args); err != nil {
@@ -117,8 +120,8 @@ func runFlagsOnDump(args []string) error {
 
 	seeded := map[string]bool{}
 
-	if *seedJobs != "" {
-		jobs, err := readJSONL[plannedJob](*seedJobs, 0)
+	for _, path := range seedJobs {
+		jobs, err := readJSONL[plannedJob](path, 0)
 		if err != nil {
 			return err
 		}

@@ -34,6 +34,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -228,6 +229,8 @@ func runFlagsOnRequeue(args []string) error {
 	jobSize := fs.Int("job-size", 100, "info hashes per job")
 	ruleDerived := fs.Int("rule-derived", 2400, "rule-derived torrents to queue again")
 	keepHints := fs.Bool("keep-hints", true, "keep type-only hints, as a reprocess does")
+	organicRoundOne := fs.String("organic", "",
+		"organic round 1's seed dir: requeue its replay slices' torrents as round 2's organic slices (flagson_organic.go)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -256,10 +259,20 @@ func runFlagsOnRequeue(args []string) error {
 		return err
 	}
 
+	if *organicRoundOne != "" {
+		if before, err = organicReplayAttachments(*organicRoundOne, before); err != nil {
+			return err
+		}
+	}
+
 	plan, better := planRematch(before, hints, *ruleDerived)
 
 	if err := mutateForRematch(ctx, conn, plan, better); err != nil {
 		return err
+	}
+
+	if *organicRoundOne != "" {
+		return requeueOrganic(ctx, conn, *outDir, plan, len(better))
 	}
 
 	ts, _ := time.Parse(time.RFC3339Nano, fixtureTime)
@@ -423,12 +436,16 @@ func rematchFloors(plan []rematchTorrent, after map[string]attachment) []rematch
 // rematchChanges counts, per mode, the requeued torrents and the jobs whose
 // attachment round 2 changed: a different torrent_contents row, or no longer
 // exactly one. These are information, not floors: a proof in which no
-// attachment switches proves little.
+// attachment switches proves little. A job's mode is its torrents' plan mode
+// (a job holds one mode), whatever its slice is called.
 func rematchChanges(jobs []plannedJob, plan []rematchTorrent, after map[string]attachment) []rematchFloor {
 	changed := make(map[string]bool, len(plan))
+	modeOf := make(map[string]string, len(plan))
+
 	for _, t := range plan {
 		a, ok := after[t.Hash]
 		changed[t.Hash] = !ok || a != t.Before
+		modeOf[t.Hash] = t.Mode
 	}
 
 	modes := []string{sliceRematch, sliceReuse}
@@ -448,7 +465,7 @@ func rematchChanges(jobs []plannedJob, plan []rematchTorrent, after map[string]a
 		}
 
 		for _, j := range jobs {
-			if j.Slice != mode {
+			if len(j.InfoHashes) == 0 || modeOf[j.InfoHashes[0]] != mode {
 				continue
 			}
 
@@ -475,6 +492,7 @@ func runFlagsOnRematchCoverage(args []string) error {
 	fs := flag.NewFlagSet("flagson-rematch-coverage", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "Go's round-2 database")
 	seedDir := fs.String("seed", "", "the phase's seed dir (rematchplan.jsonl)")
+	floorScale := fs.Float64("floor-scale", 1, "scale every floor (rounded up) to a smaller corpus")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -508,12 +526,13 @@ func runFlagsOnRematchCoverage(args []string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "%-56s %8s %6s\n", "metric", "count", "floor")
 
 	for _, f := range append(rematchFloors(plan, after), rematchChanges(jobs, plan, after)...) {
+		f.floor = int(math.Ceil(float64(f.floor) * *floorScale))
 		verdict := ""
 
 		switch {
 		case f.floor == 0:
 		case f.got >= f.floor:
-			verdict = "MET"
+			verdict = verdictMet
 		default:
 			verdict = "NOT MET"
 			unmet = append(unmet, f.name)

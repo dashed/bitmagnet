@@ -64,6 +64,7 @@ type seedOptions struct {
 	deletionCopies         int
 	hintCount              int
 	faultReplay            int
+	organicReplay          int
 }
 
 // seedRun accumulates one corpus: queued torrent rows, local content, stub
@@ -105,13 +106,14 @@ func runFlagsOnSeed(args []string) error {
 	fs.StringVar(&o.dsn, "dsn", "", "disposable PostgreSQL DSN, migrated and empty")
 	fs.StringVar(&o.root, "root", ".", "repository root")
 	fs.StringVar(&o.out, "out", "", "directory for responses.jsonl, faults.jsonl, jobs.jsonl, plan.jsonl, ...")
-	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | fault | abstain")
+	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | fault | abstain | organic")
 	fs.IntVar(&o.replayLimit, "replay-limit", 120000, "real-name replay inputs in the main corpus")
 	fs.IntVar(&o.jobSize, "job-size", 100, "info hashes per job")
 	fs.IntVar(&o.flagsOffEvery, "flags-off-every", 8, "every Nth main chunk carries a flags-off payload (0 = none)")
 	fs.IntVar(&o.deletionCopies, "deletion-copies", 32, "copies of each synthetic deletion input in the main corpus")
 	fs.IntVar(&o.hintCount, "hints", 4000, "hinted torrents in the hint corpus")
 	fs.IntVar(&o.faultReplay, "fault-replay", 4000, "replay inputs in the fault and abstain corpora")
+	fs.IntVar(&o.organicReplay, "organic-replay", 18000, "replay inputs in the organic corpus")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -176,6 +178,8 @@ func runFlagsOnSeed(args []string) error {
 		err = s.seedFaultCorpus(faultCorpusClasses)
 	case corpusAbstain:
 		err = s.seedFaultCorpus(abstainCorpusClasses)
+	case corpusOrganic:
+		err = s.seedOrganic()
 	default:
 		err = fmt.Errorf("unknown corpus %q", o.corpus)
 	}
@@ -339,8 +343,15 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 		}
 	}
 
+	return jobs, s.writeSeedFiles(planned, digest, jobs, len(held))
+}
+
+// writeSeedFiles analyzes the seeded database and writes the fixtures, the
+// plan and the summary; jobs.jsonl too unless jobs is nil (the organic corpus
+// queues its jobs in a later step, flagson-organic-enqueue).
+func (s *seedRun) writeSeedFiles(planned []plannedTorrent, digest string, jobs []plannedJob, heldJobs int) error {
 	if _, err := s.conn.Exec(s.ctx, "ANALYZE"); err != nil {
-		return nil, err
+		return err
 	}
 
 	responses := make([]stubResponse, 0, len(s.responses))
@@ -360,21 +371,29 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 
 	out := func(name string) string { return filepath.Join(s.opts.out, name) }
 
-	for _, w := range []struct {
+	files := []struct {
 		name string
 		fn   func(string) error
 	}{
 		{"responses.jsonl", func(p string) error { return writeJSONLFile(p, responses) }},
 		{"faults.jsonl", func(p string) error { return writeJSONLFile(p, s.faults) }},
-		{"jobs.jsonl", func(p string) error { return writeJSONLFile(p, jobs) }},
 		{"plan.jsonl", func(p string) error { return writeJSONLFile(p, planned) }},
 		{"notes.jsonl", func(p string) error { return writeJSONLFile(p, s.notes) }},
 		{"seeded-content.txt", func(p string) error {
 			return os.WriteFile(p, []byte(strings.Join(contentRefs, "\n")+"\n"), 0o644)
 		}},
-	} {
+	}
+
+	if jobs != nil {
+		files = append(files, struct {
+			name string
+			fn   func(string) error
+		}{"jobs.jsonl", func(p string) error { return writeJSONLFile(p, jobs) }})
+	}
+
+	for _, w := range files {
 		if err := w.fn(out(w.name)); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -398,7 +417,7 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 		"torrents":              len(s.hashes),
 		"jobs":                  len(jobs),
 		"jobsBySlice":           slices,
-		"heldJobs":              len(held),
+		"heldJobs":              heldJobs,
 		"plannedOutcomes":       outcomes,
 		"responses":             len(responses),
 		"faults":                len(s.faults),
@@ -410,7 +429,7 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 	_, _ = fmt.Fprintf(os.Stderr, "flagson-seed %s: %d torrents, %d jobs %v, %d responses, %d faults, %d content, digest %s\n",
 		s.opts.corpus, len(s.hashes), len(jobs), slices, len(responses), len(s.faults), len(s.contents), digest)
 
-	return jobs, writeJSONFile(out("summary.json"), summary)
+	return writeJSONFile(out("summary.json"), summary)
 }
 
 // ---- main corpus ----

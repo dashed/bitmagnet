@@ -46,6 +46,25 @@
 #          drops some file lists and inserts better candidates. G-1 as for
 #          main, then flagson-rematch-coverage counts the phase's floors. G2
 #          (with RUST_WORKER): Rust alone vs Go run 1, as for main.
+#   organic  process_torrent jobs as Go's own producers write them
+#          (flagson_organic.go), in slices of one producer shape each: the
+#          GraphQL and CLI slices' jobs come from Go's own batch handler, in a
+#          copy of the seed per slice (flagson-organic-produce), and every job
+#          is queued verbatim (flagson-organic-enqueue). G-1 as for main, then
+#          flagson-organic-coverage (per-slice floors from Go's tape) and
+#          flagson-organic-check (G7: the fault slices' republish rows). With
+#          RUST_WORKER (an M4b worker, organic admission on): Rust then Go at
+#          --organic-max-priority 20 (G2, G3, G5) and at 0 (G4), each equal to
+#          Go alone; flagson-abstained -organic-bound checks that Rust left
+#          exactly the negative slices' jobs, the hinted slice's (one
+#          abstention each) and those above the bound, untouched.
+#   organic2  Round 2 over Go's drained organic round 1 (organic go1, from
+#          ORGANIC_RUN): flagson-requeue -organic queues the round-1 replay
+#          slices' torrents again in organic round-2 slices, half in
+#          ClassifyMode rematch, half in the default mode, made and queued as
+#          for organic. G-1, flagson-rematch-coverage (floors scaled to the
+#          smaller corpus) and flagson-organic-coverage; with RUST_WORKER,
+#          Rust then Go at bound 20 vs Go alone (G6).
 #
 # Dumps are canonical (flagson_dump.go); dump.raw beside each is not, and its
 # comparison is reported for information. Then flagson-coverage counts every
@@ -58,6 +77,9 @@
 #   PHASES         corpora to run (default "main hint fault abstain rematch")
 #   MAIN_RUN       the main phase's evidence the rematch phase starts from
 #                  (default $OUT/main); ${PREFIX}_main_go1 must still hold it
+#   ORGANIC_RUN    the same for organic2 (default $OUT/organic)
+#   ORGANIC        1: every Rust phase admits organic jobs up to priority 20
+#                  (G0: main, hint, fault and abstain must pass unchanged)
 #   OUT            evidence directory (default: mktemp)
 #   BITMAGNET_GO   Go binary (default: go build into $OUT)
 #   RUST_WORKER    Rust worker binary; without it only the Go-side gates run
@@ -65,6 +87,8 @@
 #                  which downgrades Go to 1 request/s)
 #   STUB_PORT      the stub's port (default 38573)
 #   SEED_ARGS      extra flagson-seed flags, e.g. "-hints 300" for a smoke run
+#   FLAGSON_PREFIX database name prefix (default bm_ptw_flagson), to keep
+#                  another run's databases on the same server
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -79,11 +103,15 @@ TMDB_KEY="${TMDB_KEY:-flagson-harness-dummy-key-0001}"
 # Fixed, because Go's job error text quotes the request URL (host and port
 # included) and the dump compares it.
 STUB_PORT="${STUB_PORT:-38573}"
-PREFIX=bm_ptw_flagson
+PREFIX="${FLAGSON_PREFIX:-bm_ptw_flagson}"
 HELD=2099-01-01
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 MAIN_RUN="${MAIN_RUN:-$OUT/main}"
+ORGANIC_RUN="${ORGANIC_RUN:-$OUT/organic}"
+ORGANIC="${ORGANIC:-}"
+# The organic phases' bound, set around their Rust phases.
+ORGANIC_BOUND=
 
 if [[ "$TMDB_KEY" == 9c6689fa83ae6814fbfb200d70bba3a8 ]]; then
   echo "TMDB_KEY must not be Go's default key" >&2; exit 2
@@ -136,9 +164,15 @@ start_go() { # db rundir [tape] -> pid
 # with the resolver guard's call events (debug). The cool-off outlasts any
 # phase, so each abstention is logged (and its requests made) once.
 start_rust() { # db rundir log -> pid
+  local organic=()
+  if [[ -n "$ORGANIC_BOUND" ]]; then
+    organic=(--admit-organic --organic-max-priority "$ORGANIC_BOUND")
+  elif [[ "$ORGANIC" == 1 ]]; then
+    organic=(--admit-organic --organic-max-priority 20)
+  fi
   (cd "$2" && BITMAGNET_POSTGRES_DSN="$(dsn "$1")" RUST_LOG=info,bitmagnet_processor::live=debug exec "$RUST_WORKER" \
     --expected-classifier-config-digest "$GO_DIGEST" --check-interval-seconds 1 --abstain-cooloff-seconds 86400 \
-    --admit-flags-on --tmdb-api-key "$TMDB_KEY" --tmdb-base-url "$STUB_URL" >>"$2/$3" 2>&1) &
+    --admit-flags-on "${organic[@]}" --tmdb-api-key "$TMDB_KEY" --tmdb-base-url "$STUB_URL" >>"$2/$3" 2>&1) &
   echo $!
 }
 # The workers are not this shell's children (they start inside a command
@@ -181,8 +215,12 @@ wait_abstained() { # log n
 
 clone() { sql -d postgres -c "DROP DATABASE IF EXISTS $2" -c "CREATE DATABASE $2 TEMPLATE $1"; }
 
+# A round-2 seed's round1-jobs.jsonl lists round 1's seeded jobs, which stay
+# in its database (organic round 1's negative payloads do not even decode).
 dump_run() { # db rundir
-  "$PTW" flagson-dump -dsn "$(dsn "$1")" -seed-jobs "$2/seed/jobs.jsonl" -raw-out "$2/dump.raw" \
+  local seeded=(-seed-jobs "$2/seed/jobs.jsonl")
+  [[ -e "$2/seed/round1-jobs.jsonl" ]] && seeded+=(-seed-jobs "$2/seed/round1-jobs.jsonl")
+  "$PTW" flagson-dump -dsn "$(dsn "$1")" "${seeded[@]}" -raw-out "$2/dump.raw" \
     >"$2/dump" 2>"$2/dump.counts"
 }
 
@@ -255,6 +293,42 @@ seed_rematch() {
   clone ${PREFIX}_main_go1 "$db" >/dev/null
   for f in responses.jsonl faults.jsonl plan.jsonl notes.jsonl; do ln -sfn "$MAIN_RUN/seed/$f" "$seed/$f"; done
   "$PTW" flagson-requeue -dsn "$(dsn "$db")" -out "$seed" 2>&1 | tee "$OUT/rematch/seed.log"
+}
+
+# An organic phase's jobs: the batch slices' made by Go's own batch handler,
+# each in a copy of the phase's seed holding only its torrents, then every
+# slice's queued verbatim in the seed.
+organic_jobs() { # corpus
+  local corpus=$1 db=${PREFIX}_$1_produce run="$OUT/$1/produce" slice
+  mkdir -p "$run"
+  start_stub "$corpus" "$run"
+  for slice in $("$PTW" flagson-organic-info -seed "$OUT/$corpus/seed" -batch); do
+    clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
+    "$PTW" flagson-organic-produce -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -slice "$slice" \
+      -bitmagnet "$BITMAGNET_GO" -run "$run" -tmdb-base-url "$STUB_URL" -tmdb-api-key "$TMDB_KEY" \
+      2>&1 | tee -a "$OUT/$corpus/seed.log"
+  done
+  stop "$STUB_PID"
+  sql -d postgres -c "DROP DATABASE IF EXISTS $db" >/dev/null
+  "$PTW" flagson-organic-enqueue -dsn "$(dsn "${PREFIX}_${corpus}_seed")" -seed "$OUT/$corpus/seed" \
+    2>&1 | tee -a "$OUT/$corpus/seed.log"
+}
+
+# organic2's seed: a copy of Go's drained organic round 1 (checked as for
+# rematch) that flagson-requeue -organic queues again, answering TMDB from
+# the organic seed's fixtures.
+seed_organic2() {
+  local db=${PREFIX}_organic2_seed seed="$OUT/organic2/seed" f
+  mkdir -p "$seed"
+  "$PTW" flagson-dump -dsn "$(dsn ${PREFIX}_organic_go1)" -seed-jobs "$ORGANIC_RUN/seed/jobs.jsonl" \
+    >"$OUT/organic2/organic-go1.dump" 2>/dev/null
+  if ! cmp -s "$OUT/organic2/organic-go1.dump" "$ORGANIC_RUN/go1/dump"; then
+    echo "organic2: ${PREFIX}_organic_go1 no longer holds $ORGANIC_RUN/go1's round 1" >&2; exit 1
+  fi
+  clone ${PREFIX}_organic_go1 "$db" >/dev/null
+  for f in responses.jsonl faults.jsonl plan.jsonl notes.jsonl; do ln -sfn "$ORGANIC_RUN/seed/$f" "$seed/$f"; done
+  ln -sfn "$ORGANIC_RUN/seed/jobs.jsonl" "$seed/round1-jobs.jsonl"
+  "$PTW" flagson-requeue -organic "$ORGANIC_RUN/seed" -dsn "$(dsn "$db")" -out "$seed" 2>&1 | tee "$OUT/organic2/seed.log"
 }
 
 # Go alone over a clone of the corpus seed; $3 = tape to record the tape.
@@ -359,6 +433,48 @@ rust_alone() { # corpus name
   dump_run "$db" "$run"
 }
 
+# Rust with organic admission up to priority $3, then Go for what it left.
+# flagson-abstained -organic-bound checks what Rust left: the negative
+# slices' jobs and those above the bound never claimed, the hinted slice's
+# abstained from once each (the cool-off outlasts the phase), all untouched.
+rust_then_go_organic() { # corpus name bound
+  local corpus=$1 name=$2 bound=$3 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid T0=$SECONDS info expect hinted left
+  mkdir -p "$run"; ln -sfn ../seed "$run/seed"
+  clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
+  info="$("$PTW" flagson-organic-info -seed "$OUT/$corpus/seed" -left "$bound")"
+  read -r expect hinted <<<"$info"
+  : >"$run/stub.jsonl"
+  start_stub "$corpus" "$run"
+  ORGANIC_BOUND=$bound
+  pid="$(start_rust "$db" "$run" rust.log)"; wait_abstained "$run/rust.log" "$hinted"; drain "$db" "$expect" 15; stop "$pid"
+  ORGANIC_BOUND=
+  stop "$STUB_PID"
+  cp "$run/stub.jsonl" "$run/rust-requests.jsonl"
+  left="$(active "$db")"
+  echo "$corpus $name Rust phase (bound $bound): $((SECONDS - T0))s, $(grep -c . "$run/rust-requests.jsonl" || true) stub requests, left for Go: $left (expected $expect, $hinted hinted)" \
+    | tee -a "$OUT/timing.txt" "$OUT/gates.txt"
+  if ! "$PTW" flagson-abstained -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -organic-bound "$bound" \
+      -rust-log "$run/rust.log" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
+  if [[ "$left" -gt 0 ]]; then
+    start_stub "$corpus" "$run"
+    pid="$(start_go "$db" "$run")"; drain "$db" 0; stop "$pid"
+    stop "$STUB_PID"
+  fi
+  dump_run "$db" "$run"
+  echo "$corpus $name (Rust then Go, bound $bound): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
+}
+
+# G7 in a drained organic run ($2).
+organic_check() { # name
+  if "$PTW" flagson-organic-check -dsn "$(dsn "${PREFIX}_organic_$1")" -seed "$OUT/organic/seed" \
+      >"$OUT/organic/$1/organic-check.txt" 2>&1; then
+    echo "organic G7 $1: $(tail -1 "$OUT/organic/$1/organic-check.txt")" | tee -a "$OUT/gates.txt"
+  else
+    echo "organic G7 $1: FAIL (see $OUT/organic/$1/organic-check.txt)" | tee -a "$OUT/gates.txt"
+    status=1
+  fi
+}
+
 # Go alone ($2) against its corpus's fault classes (flagson-faultcheck).
 faultcheck() { # corpus name
   if "$PTW" flagson-faultcheck -dsn "$(dsn "${PREFIX}_$1_$2")" -seed "$OUT/$1/seed" \
@@ -380,7 +496,12 @@ GO_DIGEST="$(cd "$OUT" && POSTGRES_DSN="$(dsn ${PREFIX}_digest)" "$BITMAGNET_GO"
 echo "go classifier digest: $GO_DIGEST (goose $GOOSE_VERSION)" | tee "$OUT/digest.txt"
 
 for corpus in $PHASES; do
-  if [[ $corpus == rematch ]]; then seed_rematch; else seed_corpus "$corpus"; fi
+  case $corpus in
+    rematch) seed_rematch ;;
+    organic2) seed_organic2; organic_jobs organic2 ;;
+    organic) seed_corpus organic; organic_jobs organic ;;
+    *) seed_corpus "$corpus" ;;
+  esac
   case $corpus in
     main|hint)
       go_alone "$corpus" go1 tape
@@ -444,6 +565,35 @@ print(sum(1 for l in open(sys.argv[1]) if not json.loads(l).get("hold")))' "$OUT
       if [[ -n "$RUST_WORKER" ]]; then
         rust_alone rematch rust
         compare "rematch G2 go1 vs rust" "$OUT/rematch/go1" "$OUT/rematch/rust"
+      fi
+      ;;
+    organic|organic2)
+      go_alone "$corpus" go1 tape
+      go_alone "$corpus" go2
+      compare "$corpus G-1 go1 vs go2" "$OUT/$corpus/go1" "$OUT/$corpus/go2"
+      if "$PTW" flagson-organic-coverage -dir "$OUT/$corpus/go1" | tee "$OUT/$corpus/coverage.txt"; then
+        echo "$corpus coverage: every floor met" | tee -a "$OUT/gates.txt"
+      else
+        echo "$corpus coverage: floors NOT met (see $OUT/$corpus/coverage.txt)" | tee -a "$OUT/gates.txt"
+        status=1
+      fi
+      if [[ $corpus == organic ]]; then
+        organic_check go1
+      elif "$PTW" flagson-rematch-coverage -dsn "$(dsn ${PREFIX}_organic2_go1)" -seed "$OUT/organic2/seed" \
+          -floor-scale 0.15 | tee "$OUT/organic2/rematch-coverage.txt"; then
+        echo "organic2 rematch coverage: every floor met" | tee -a "$OUT/gates.txt"
+      else
+        echo "organic2 rematch coverage: floors NOT met (see $OUT/organic2/rematch-coverage.txt)" | tee -a "$OUT/gates.txt"
+        status=1
+      fi
+      if [[ -n "$RUST_WORKER" ]]; then
+        rust_then_go_organic "$corpus" rust 20
+        compare "$corpus G2 go1 vs rust-then-go (bound 20)" "$OUT/$corpus/go1" "$OUT/$corpus/rust"
+        if [[ $corpus == organic ]]; then
+          organic_check rust
+          rust_then_go_organic organic rust0 0
+          compare "organic G4 go1 vs rust-then-go (bound 0)" "$OUT/organic/go1" "$OUT/organic/rust0"
+        fi
       fi
       ;;
   esac
