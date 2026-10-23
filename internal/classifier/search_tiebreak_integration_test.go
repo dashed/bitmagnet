@@ -119,7 +119,7 @@ func newLocalSearch(t *testing.T, db *gorm.DB) localSearch {
 	searcher, err := resource.Search.Get()
 	require.NoError(t, err)
 
-	return localSearch{Search: searcher}
+	return localSearch{contentSearch: searcher}
 }
 
 type plannerVariant struct {
