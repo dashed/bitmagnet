@@ -95,7 +95,7 @@ const MAX_CONCURRENT_REQUESTS: usize = 2;
 ///
 /// A newtype rather than a `String` so it cannot be printed by accident: the
 /// `Debug` is redacted and there is no `Display`. Reading it back out is
-/// `pub(crate)`, and its one caller is [`TmdbClient::url`].
+/// `pub(crate)`, and its one caller is the private `TmdbClient::url`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ApiKey(String);
 
@@ -342,7 +342,8 @@ impl<T: Transport> TmdbClient<T> {
     /// Issues `spec` and decodes the response.
     ///
     /// The four failure classes stay apart here — see [`TmdbError`]. Callers
-    /// that need a 404 as an absence rather than a failure use [`optional`].
+    /// that need a 404 as an absence rather than a failure use the private
+    /// `optional`.
     ///
     /// # Errors
     ///

@@ -46,10 +46,12 @@ const CANONICAL_IDENTIFIER_SOURCE: &str = "tmdb";
 /// Go's `contentIdentityColumns` (`order_content.go`), in primary-key order.
 ///
 /// 🚨 These are `text` columns, so PostgreSQL orders them by the database
-/// collation (`en_US.utf8` in production), NOT bytewise — `"10"` sorts before
-/// `"9"`. That is why the ordering is left to PostgreSQL and the rows are used
-/// in the order they arrive. Re-sorting them in Rust would silently pick a
-/// different winner from a tied window than Go does.
+/// collation. Prod and CI run musl `postgres:16-alpine`, which sorts bytewise
+/// although `datcollate` is `en_US.utf8`; a glibc or ICU database does not
+/// (`"a7"` sorts before `"B8"` there, after it bytewise). That is why the
+/// ordering is left to PostgreSQL and the rows are used in the order they
+/// arrive. Re-sorting them in Rust would tie the order to one collation, and
+/// under any other pick a different winner from a tied window than Go does.
 const CONTENT_IDENTITY_ORDER_BY: &str = "content.type, content.source, content.id";
 
 /// The alias the relevance rank is projected under, and ordered by. Go names it
@@ -113,7 +115,7 @@ impl PgContentSearch {
     /// Go `LocalSearch.ContentByID` — look a content row up by an identifier.
     ///
     /// The dispatch on `source` is Go's, and the two branches are genuinely
-    /// different queries; see [`content_by_id_sql`].
+    /// different queries; see the private `content_by_id_sql`.
     ///
     /// `Ok(None)` is Go's `classification.ErrUnmatched`: the query ran and
     /// matched nothing. A failure to run it is an [`Err`]. Conflating the two

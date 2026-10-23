@@ -7,7 +7,9 @@
 //! the `tsv` the processor writes. The order is attributes by `(source, key)`
 //! and collections by the collection's `(type, source, id)`, compared under the
 //! database collation, so the statements below sort and Rust keeps the row
-//! order. Never re-sort these in Rust: the collation is not bytewise.
+//! order. Never re-sort these in Rust: the order is the database collation's.
+//! Prod and CI run musl `postgres:16-alpine`, which sorts bytewise whatever
+//! `datcollate` says; a glibc or ICU database puts `a7` before `B8`.
 //!
 //! The statements are shared with the processor's writer loader, which hydrates
 //! a reused content row the same way.
