@@ -12,13 +12,12 @@ package main
 //     by-ID attach actions and /find. The Rust worker abstains from them by
 //     design (load.rs is_supported_type_only), so this corpus is the Go
 //     oracle's by-ID coverage and an abstention check, not part of G2.
-//   - fault: G3. A keyed TMDB fault per fault job, every torrent of a fault
-//     job unique in the corpus, so a hand-off that runs the fault jobs last
-//     cannot change any other job's result.
+//   - fault and abstain: TMDB failures by class, the first the ones Go handles
+//     per torrent (G2-fault), the second the ones Rust leaves to Go (G3); see
+//     flagson_faults.go.
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"net/url"
@@ -38,13 +37,13 @@ import (
 )
 
 const (
-	corpusMain  = "main"
-	corpusHint  = "hint"
-	corpusFault = "fault"
+	corpusMain    = "main"
+	corpusHint    = "hint"
+	corpusFault   = "fault"
+	corpusAbstain = "abstain"
 
-	// heldRunAfter parks the 401 fault jobs until flags_on.sh releases them,
-	// one at a time, into fresh worker processes: a 401 latches both TMDB
-	// clients fail-fast for the life of the process.
+	// heldRunAfter parks the held fault jobs (holdAlone, holdAuth) until
+	// flags_on.sh releases them into fresh worker processes.
 	heldRunAfter = "2100-01-01T00:00:00Z"
 
 	// sourceLocal is the metadata source of seeded content no TMDB request
@@ -106,13 +105,13 @@ func runFlagsOnSeed(args []string) error {
 	fs.StringVar(&o.dsn, "dsn", "", "disposable PostgreSQL DSN, migrated and empty")
 	fs.StringVar(&o.root, "root", ".", "repository root")
 	fs.StringVar(&o.out, "out", "", "directory for responses.jsonl, faults.jsonl, jobs.jsonl, plan.jsonl, ...")
-	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | fault")
+	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | fault | abstain")
 	fs.IntVar(&o.replayLimit, "replay-limit", 120000, "real-name replay inputs in the main corpus")
 	fs.IntVar(&o.jobSize, "job-size", 100, "info hashes per job")
 	fs.IntVar(&o.flagsOffEvery, "flags-off-every", 8, "every Nth main chunk carries a flags-off payload (0 = none)")
 	fs.IntVar(&o.deletionCopies, "deletion-copies", 32, "copies of each synthetic deletion input in the main corpus")
 	fs.IntVar(&o.hintCount, "hints", 4000, "hinted torrents in the hint corpus")
-	fs.IntVar(&o.faultReplay, "fault-replay", 8000, "replay inputs in the fault corpus")
+	fs.IntVar(&o.faultReplay, "fault-replay", 4000, "replay inputs in the fault and abstain corpora")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -174,7 +173,9 @@ func runFlagsOnSeed(args []string) error {
 	case corpusHint:
 		err = s.seedHint()
 	case corpusFault:
-		err = s.seedFault()
+		err = s.seedFaultCorpus(faultCorpusClasses)
+	case corpusAbstain:
+		err = s.seedFaultCorpus(abstainCorpusClasses)
 	default:
 		err = fmt.Errorf("unknown corpus %q", o.corpus)
 	}
@@ -305,38 +306,41 @@ func (s *seedRun) plan() ([]plannedTorrent, string, error) {
 	return planned, digest, nil
 }
 
-// finish inserts the local content, queues the jobs and writes the fixtures.
-func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpec, held map[int]bool) error {
+// finish inserts the local content, queues the jobs and writes the fixtures;
+// it returns the queued jobs.
+func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpec, held map[int]string) ([]plannedJob, error) {
 	if err := s.flush(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := s.insertContents(); err != nil {
-		return err
+		return nil, err
 	}
 
 	jobs, err := enqueueFlagsOnJobs(s.ctx, s.conn, specs, s.ts.Add(-time.Hour))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if len(held) > 0 {
 		heldAt, _ := time.Parse(time.RFC3339, heldRunAfter)
 
 		for i := range jobs {
-			if !held[i] {
+			if held[i] == "" {
 				continue
 			}
 
+			jobs[i].Hold = held[i]
+
 			if _, err := s.conn.Exec(s.ctx, `UPDATE queue_jobs SET run_after = $1 WHERE fingerprint = $2`,
 				heldAt.Add(time.Duration(i)*time.Millisecond), jobs[i].Fingerprint); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 
 	if _, err := s.conn.Exec(s.ctx, "ANALYZE"); err != nil {
-		return err
+		return nil, err
 	}
 
 	responses := make([]stubResponse, 0, len(s.responses))
@@ -370,7 +374,7 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 		}},
 	} {
 		if err := w.fn(out(w.name)); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -406,7 +410,7 @@ func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpe
 	_, _ = fmt.Fprintf(os.Stderr, "flagson-seed %s: %d torrents, %d jobs %v, %d responses, %d faults, %d content, digest %s\n",
 		s.opts.corpus, len(s.hashes), len(jobs), slices, len(responses), len(s.faults), len(s.contents), digest)
 
-	return writeJSONFile(out("summary.json"), summary)
+	return jobs, writeJSONFile(out("summary.json"), summary)
 }
 
 // ---- main corpus ----
@@ -500,7 +504,9 @@ func (s *seedRun) seedMain() error {
 
 	specs := planFlagsOnJobs(main, nil, deletionOnly, o.jobSize, o.flagsOffEvery, true)
 
-	return s.finish(labelPlanned(planned, specs), digest, specs, nil)
+	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
+
+	return err
 }
 
 // labelPlanned stamps each planned torrent with the slice of the job it was
@@ -1234,270 +1240,9 @@ func (s *seedRun) seedHint() error {
 
 	specs := planFlagsOnJobs(nil, append([]protocol.ID(nil), s.hashes...), nil, s.opts.jobSize, 0, false)
 
-	return s.finish(labelPlanned(planned, specs), digest, specs, nil)
-}
+	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
 
-// ---- fault corpus ----
-
-var faultPlan = []struct {
-	fault   string
-	details bool // fault the details request after a matching search
-	count   int
-}{
-	{faultRateLimited, false, 3},
-	{faultInternal, false, 3},
-	{faultUnavailable, false, 3},
-	{faultNotFound, false, 3},
-	{faultTimeout, false, 2},
-	{faultInternal, true, 3},
-	{faultUnauthorized, false, 2},
-}
-
-func (s *seedRun) seedFault() error {
-	o := s.opts
-
-	replay, err := readJSONL[input](filepath.Join(o.root, "testdata/parity/classifier-replay/inputs.jsonl"), o.faultReplay)
-	if err != nil {
-		return err
-	}
-
-	for _, in := range replay {
-		if _, err := s.addTorrent("fault", sliceMain, in); err != nil {
-			return err
-		}
-	}
-
-	// Fault jobs hold only torrents whose titles are pseudo-words no other
-	// title contains. Distinct exact keys would not be enough: local search is
-	// a phrase query, so content titled "A B C" is a candidate for base title
-	// "A B", and moving a job could then change another torrent's result.
-	pseudo := map[string]bool{}
-
-	for i := range 6 * faultJobCount() {
-		h, err := s.addTorrent("fault-pseudo", sliceMain, pseudoInput(i))
-		if err != nil {
-			return err
-		}
-
-		pseudo[h.String()] = true
-	}
-
-	planned, digest, err := s.plan()
-	if err != nil {
-		return err
-	}
-
-	var unique, noIO []plannedTorrent
-
-	seenKeys := map[string]bool{}
-
-	for _, p := range planned {
-		k, hasLocal := localKeyOf(p)
-		c, hasSearch := tmdbSearchOf(p)
-
-		switch {
-		case p.Outcome != outcomeClassified:
-		case pseudo[p.Hash] && hasLocal && hasSearch:
-			if seenKeys[k] || seenKeys[planSearchKey(c)] {
-				return fmt.Errorf("fault corpus: pseudo title %q is not unique", p.BaseTitle)
-			}
-
-			seenKeys[k], seenKeys[planSearchKey(c)] = true, true
-
-			unique = append(unique, p)
-		case !pseudo[p.Hash] && !hasLocal && !hasSearch:
-			noIO = append(noIO, p)
-		}
-	}
-
-	sliceOfHash := map[string]string{}
-
-	var faultJobs [][]protocol.ID
-
-	var faultKinds []string
-
-	take := func(list *[]plannedTorrent) plannedTorrent {
-		p := (*list)[0]
-		*list = (*list)[1:]
-
-		return p
-	}
-
-	for _, f := range faultPlan {
-		for range f.count {
-			if len(unique) < 4 || len(noIO) < 5 {
-				return errors.New("fault corpus: too few pseudo-titled or no-I/O torrents")
-			}
-
-			ft := take(&unique)
-			c, _ := tmdbSearchOf(ft)
-			key := planSearchKey(c)
-			kind := f.fault
-
-			if f.details {
-				tv := c.Endpoint == endpointSearchTV
-				id := s.allocTMDBID()
-
-				if err := s.respond(key, 200, buildSearchBody(s.tpl, fixtureRand("fault/"+key), tv,
-					[]searchItem{{id: id, title: c.Query, year: c.Year}})); err != nil {
-					return err
-				}
-
-				key = detailsKey(tv, id)
-				kind = "details-" + f.fault
-			}
-
-			s.faults = append(s.faults, stubFault{Key: key, Fault: f.fault})
-			s.note(fixtureNote{Kind: "fault", Key: key, Category: kind})
-
-			job := []protocol.ID{mustHash(ft.Hash)}
-			sliceOfHash[ft.Hash] = sliceFault
-
-			// A 401 latches the Go client for the process, so a 401 job holds
-			// no other torrent that does I/O; other fault jobs carry three
-			// unique I/O torrents, whose writes Rust must withhold too.
-			if f.fault != faultUnauthorized {
-				for range 3 {
-					p := take(&unique)
-					job = append(job, mustHash(p.Hash))
-					sliceOfHash[p.Hash] = sliceFault
-				}
-			}
-
-			for range 5 {
-				p := take(&noIO)
-				job = append(job, mustHash(p.Hash))
-				sliceOfHash[p.Hash] = sliceFault
-			}
-
-			faultJobs = append(faultJobs, job)
-			faultKinds = append(faultKinds, kind)
-		}
-	}
-
-	for i := range planned {
-		if sl, ok := sliceOfHash[planned[i].Hash]; ok {
-			planned[i].Slice = sl
-		}
-	}
-
-	// Unique torrents that are left over, and everything else, get ordinary
-	// fixtures; the fault jobs' companions too.
-	if err := s.searchFixtures(planned, searchWeights{local: 30, tmdbNew: 40, tmdbExisting: 15, details404: 10, decoys: 10}); err != nil {
-		return err
-	}
-
-	// Their companions in fault jobs, which searchFixtures skipped.
-	if err := s.companionFixtures(planned, sliceOfHash); err != nil {
-		return err
-	}
-
-	var other []protocol.ID
-
-	for _, h := range s.hashes {
-		if _, inFault := sliceOfHash[h.String()]; !inFault {
-			other = append(other, h)
-		}
-	}
-
-	sortHashes(other)
-
-	step := o.jobSize - 1
-
-	var specs []jobSpec
-
-	held := map[int]bool{}
-	every := max(1, (len(other)/step)/max(1, len(faultJobs)))
-	f := 0
-
-	for i := 0; i < len(other) || f < len(faultJobs); i += step {
-		if i < len(other) {
-			specs = append(specs, jobSpec{
-				slice: sliceMain, flagsOn: true,
-				hashes: append([]protocol.ID(nil), other[i:min(i+step, len(other))]...),
-			})
-		}
-
-		if f < len(faultJobs) && ((i/step)%every == every-1 || i+step >= len(other)) {
-			if faultKinds[f] == faultUnauthorized {
-				held[len(specs)] = true
-			}
-
-			specs = append(specs, jobSpec{slice: sliceFault, flagsOn: true, hashes: faultJobs[f], fault: faultKinds[f]})
-			f++
-		}
-	}
-
-	return s.finish(labelPlanned(planned, specs), digest, specs, held)
-}
-
-func faultJobCount() int {
-	n := 0
-	for _, f := range faultPlan {
-		n += f.count
-	}
-
-	return n
-}
-
-var pseudoSyllables = []string{"zor", "vex", "qui", "lam", "drav", "oth", "kem", "bru", "sil", "fen", "gax", "tor", "mib", "yul"}
-
-// pseudoInput is a single-file video torrent whose title is two pseudo-words
-// built from i, so no other title in the corpus contains either word.
-func pseudoInput(i int) input {
-	word := func(n int) string {
-		w := ""
-		for range 3 {
-			w += pseudoSyllables[n%len(pseudoSyllables)]
-			n /= len(pseudoSyllables)
-		}
-
-		return strings.ToUpper(w[:1]) + w[1:] + "q"
-	}
-
-	title := word(2*i+7) + " " + word(2*i+8+len(pseudoSyllables)*len(pseudoSyllables))
-
-	name := fmt.Sprintf("%s %d 1080p BluRay x264-QZ.mkv", title, 1975+i%45)
-	if i%2 == 1 {
-		name = fmt.Sprintf("%s S%02dE%02d 720p HDTV x264-QZ.mkv", title, 1+i%5, 1+i%12)
-	}
-
-	return input{ID: fmt.Sprintf("p%d", i), Name: name, Size: 1_500_000_000 + uint64(i)*1_000_003, FilesStatus: "single"}
-}
-
-// companionFixtures answers the unique I/O torrents riding in fault jobs:
-// half find their content on TMDB, half find nothing.
-func (s *seedRun) companionFixtures(planned []plannedTorrent, sliceOfHash map[string]string) error {
-	faulted := map[string]bool{}
-	for _, f := range s.faults {
-		faulted[f.Key] = true
-	}
-
-	for _, p := range planned {
-		if sliceOfHash[p.Hash] != sliceFault {
-			continue
-		}
-
-		c, ok := tmdbSearchOf(p)
-		if !ok || faulted[planSearchKey(c)] {
-			continue
-		}
-
-		if _, answered := s.responses[planSearchKey(c)]; answered {
-			continue // the details-fault torrent's search
-		}
-
-		category := categoryUnmatched
-		if fixtureRand("companion/"+p.Hash).IntN(2) == 0 {
-			category = categoryNew
-		}
-
-		if err := s.tmdbGroup(c.Endpoint+"\x00"+c.Query, []plannedCall{c}, category, false); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return err
 }
 
 func mustHash(hex string) protocol.ID {

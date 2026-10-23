@@ -38,7 +38,7 @@ const (
 	sliceHint     = "hint"      // explicit content-ID hints: the by-ID actions
 	sliceMissing  = "missing"   // hashes with no torrent row
 	sliceDeletion = "deletion"  // a deletion-only job
-	sliceFault    = "fault"     // G3: one TMDB fault per job
+	sliceFault    = "fault"     // a fault job of the fault or abstain corpus
 )
 
 func flagsOnFlags() classifier.Flags {
@@ -66,7 +66,8 @@ type plannedJob struct {
 	FlagsOn     bool     `json:"flagsOn"`
 	Fingerprint string   `json:"fingerprint"`
 	InfoHashes  []string `json:"infoHashes"`
-	Fault       string   `json:"fault,omitempty"`
+	Fault       string   `json:"fault,omitempty"` // the fault class (flagson_faults.go)
+	Hold        string   `json:"hold,omitempty"`  // parked until flags_on.sh releases it (holdAlone, holdAuth)
 }
 
 type jobSpec struct {

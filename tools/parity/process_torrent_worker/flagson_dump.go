@@ -13,6 +13,39 @@ package main
 //   - queue_jobs.run_after, created_at: Go's random retry jitter and the
 //     harness's retry collapsing; queue_jobs.ran_at: wall clock (rendered as
 //     whether it is set, as in `dump`).
+//
+// Canonical fields. Both sections read queue_jobs through a temporary view
+// (canonicalQueueJobs) that puts in canonical form only what Go alone, run
+// more than once over the same corpus, varied (G-1); -raw-out writes the dump
+// without it, and flagson-rawdiff names the field behind each difference
+// between two raw dumps. None of them can hide a difference in the multiset
+// of hashes or of error lines:
+//
+//   - payload InfoHashes of a job the processor queued (not the seed):
+//     after the leading hashes that have no torrent row, sorted. Go appends
+//     failed hashes to failedHashes from each torrent's goroutine as it
+//     finishes (processor.go Process), so a job with two or more failures
+//     republishes them in completion order. Missing hashes lead, in the
+//     job's order, and stay put.
+//   - fingerprint of such a job: sha256 of queue and payload
+//     (model.NewQueueJob), so it follows the order above. It is recomputed
+//     from the canonical payload only after checking that the stored
+//     fingerprint is processor.NewQueueJob's for the stored payload; a row
+//     that fails the check keeps its fingerprint, prefixed "unverified:".
+//   - error: errors.Join(errs) under the handler's "job failed to process: "
+//     prefix; errs gets each failure in completion order after the "missing
+//     N info hashes" line, so the lines after that one are sorted.
+//   - error: the client's ephemeral port in a reset's "read tcp
+//     127.0.0.1:<port>->...". Go's net.OpError text names both ends.
+//
+// Evidence, G-1 of 2026-10-23 (m2a-runs/g1a on the parity workspace), as
+// flagson-rawdiff classifies the raw dumps:
+//
+//   - fault corpus, Go alone three times: run 1 vs 2, 7 rows differ in
+//     InfoHashes order (and fingerprint) and 6 in error line order; run 1 vs
+//     3, 4 and 6; nothing else. The canonical dumps are identical.
+//   - abstain corpus, Go alone twice: 4 rows differ in the error's client
+//     port; nothing else. The canonical dumps are identical.
 
 import (
 	"context"
@@ -45,9 +78,14 @@ var flagsOnRawTables = []struct {
 	},
 }
 
+// canonicalQueueJobsView is the temporary view canonicalQueueJobs creates.
+const canonicalQueueJobsView = "flagson_queue_jobs"
+
 func runFlagsOnDump(args []string) error {
 	fs := flag.NewFlagSet("flagson-dump", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "PostgreSQL DSN")
+	seedJobs := fs.String("seed-jobs", "", "the corpus's jobs.jsonl: the seed's own jobs are never canonicalized")
+	rawOut := fs.String("raw-out", "", "also write the dump without the canonical fields here")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -61,14 +99,55 @@ func runFlagsOnDump(args []string) error {
 	}
 	defer conn.Close(ctx)
 
-	if err := dump(ctx, conn, os.Stdout); err != nil {
+	if *rawOut != "" {
+		f, err := os.Create(*rawOut)
+		if err != nil {
+			return err
+		}
+
+		if err := dumpAll(ctx, conn, f, "queue_jobs"); err != nil {
+			_ = f.Close()
+			return err
+		}
+
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+
+	seeded := map[string]bool{}
+
+	if *seedJobs != "" {
+		jobs, err := readJSONL[plannedJob](*seedJobs, 0)
+		if err != nil {
+			return err
+		}
+
+		for _, j := range jobs {
+			seeded[j.Fingerprint] = true
+		}
+	}
+
+	stats, err := canonicalQueueJobs(ctx, conn, seeded)
+	if err != nil {
 		return err
 	}
 
-	return dumpRaw(ctx, conn, os.Stdout)
+	_, _ = fmt.Fprintf(os.Stderr, "canonical queue_jobs: %s\n", stats)
+
+	return dumpAll(ctx, conn, os.Stdout, canonicalQueueJobsView)
 }
 
-func dumpRaw(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
+func dumpAll(ctx context.Context, conn *pgx.Conn, w io.Writer, queueJobs string) error {
+	if err := dumpFrom(ctx, conn, w, queueJobs); err != nil {
+		return err
+	}
+
+	return dumpRaw(ctx, conn, w, queueJobs)
+}
+
+// dumpRaw prints the raw sections, reading queue_jobs from queueJobs.
+func dumpRaw(ctx context.Context, conn *pgx.Conn, w io.Writer, queueJobs string) error {
 	for _, t := range flagsOnRawTables {
 		columns, err := tableColumns(ctx, conn, t.table)
 		if err != nil {
@@ -92,9 +171,14 @@ func dumpRaw(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
 			}
 		}
 
+		from := pgx.Identifier{t.table}.Sanitize()
+		if t.table == "queue_jobs" {
+			from = pgx.Identifier{queueJobs}.Sanitize()
+		}
+
 		label := "raw:" + t.table + "(" + strings.Join(exprs, ",") + ")"
 		sql := fmt.Sprintf(`SELECT line FROM (SELECT ROW(%s)::text AS line FROM %s t) s ORDER BY line COLLATE "C"`,
-			strings.Join(exprs, ", "), pgx.Identifier{t.table}.Sanitize())
+			strings.Join(exprs, ", "), from)
 
 		if _, err := fmt.Fprintf(w, "%s\n", label); err != nil {
 			return err

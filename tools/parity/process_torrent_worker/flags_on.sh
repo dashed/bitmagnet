@@ -20,21 +20,35 @@
 #          must abstain from every hint job before classification, with the
 #          attach-hint reason, zero stub requests and zero writes, and the
 #          result (dump and request multiset) must equal Go alone.
-#   fault  G-1 as for main (the G3 oracle must be deterministic too).
-#          G3: Go alone vs Rust then Go, over a corpus whose fault jobs hold
-#          only pseudo-titled torrents no other job can see. Rust abstains
-#          from exactly the fault jobs, after a content resolver failure, and
-#          writes nothing for them. The 401 jobs are held and released one at
-#          a time into fresh processes, since a 401 latches both clients for
-#          the life of the process.
+#   fault  TMDB failures Go handles per torrent, and transport faults its
+#          client's retry recovers from, by class (flagson_faults.go), in
+#          fault jobs of pseudo-titled torrents no other job can see.
+#          G-1: Go alone three times, then flagson-faultcheck: every fault job
+#          ends as its class says (the per-class floors). G2-fault (with
+#          RUST_WORKER): Rust alone vs Go run 1, identical dumps and request
+#          multisets, no job left behind, no abstention logged.
+#   abstain  Failures Rust leaves to Go: a 401, timeouts, resets, a failed
+#          key validation. G-1 and flagson-faultcheck as for fault. G3 (with
+#          RUST_WORKER): Rust then Go vs Go alone. Rust abstains from exactly
+#          the fault jobs and writes nothing for them; the dumps must be
+#          identical; and flagson-attribution checks that the extra requests
+#          are Rust's, on the abstained jobs' keys, and that by the worker's
+#          guard events no call started after its job's failure was
+#          recorded. Held jobs run after the others, in fresh processes: the
+#          401 jobs one at a time, since a 401 latches both clients for the
+#          life of the process; the key-validation jobs together, and in
+#          Rust's process the stub fails /authentication.
+#   The fault and abstain stubs run without keep-alive (tmdb-stub -keepalive).
 #
-# Then flagson-coverage counts every floor over main + hint.
+# Dumps are canonical (flagson_dump.go); dump.raw beside each is not, and its
+# comparison is reported for information. Then flagson-coverage counts every
+# floor over main + hint.
 #
 # Inputs (env):
 #   PG_HOST, PG_PORT, PG_USER  disposable server (as run.sh)
 #   GOOSE_VERSION  schema head (default: the highest migration in the tree)
 #   REPLAY_LIMIT   real-name replay inputs in the main corpus (default 120000)
-#   PHASES         corpora to run (default "main hint fault")
+#   PHASES         corpora to run (default "main hint fault abstain")
 #   OUT            evidence directory (default: mktemp)
 #   BITMAGNET_GO   Go binary (default: go build into $OUT)
 #   RUST_WORKER    Rust worker binary; without it only the Go-side gates run
@@ -50,7 +64,7 @@ PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 GOOSE_VERSION="${GOOSE_VERSION:-$(ls "$ROOT/migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.sql$/\1/p' | sort -n | tail -1)}"
 REPLAY_LIMIT="${REPLAY_LIMIT:-120000}"
-PHASES="${PHASES:-main hint fault}"
+PHASES="${PHASES:-main hint fault abstain}"
 OUT="${OUT:-$(mktemp -d)}"
 TMDB_KEY="${TMDB_KEY:-flagson-harness-dummy-key-0001}"
 # Fixed, because Go's job error text quotes the request URL (host and port
@@ -67,7 +81,7 @@ fi
 
 dsn() { echo "postgres://${PG_USER}@localhost:${PG_PORT}/$1?host=${PG_HOST}&sslmode=disable"; }
 sql() { psql -X -q -v ON_ERROR_STOP=1 -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
-# Jobs a worker may claim now: held 401 jobs (run_after in 2100) don't count.
+# Jobs a worker may claim now: held jobs (run_after in 2100) don't count.
 active() { sql -d "$1" -tAc "SELECT count(*) FROM queue_jobs WHERE status IN ('pending','retry') AND run_after < '$HELD'"; }
 # Open transactions other than ours: a claimed job is in flight.
 inflight() { sql -d "$1" -tAc "SELECT count(*) FROM pg_stat_activity WHERE datname = '$1' AND xact_start IS NOT NULL AND pid <> pg_backend_pid()"; }
@@ -86,12 +100,14 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do [[ -n "$p" ]] && kill -INT "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
-start_stub() { # corpus rundir -> sets STUB_PID, STUB_URL
-  local corpus=$1 run=$2
+start_stub() { # corpus rundir [stub flags] -> sets STUB_PID, STUB_URL
+  local corpus=$1 run=$2 keepalive=true
+  shift 2
+  [[ $corpus == fault || $corpus == abstain ]] && keepalive=false
   rm -f "$run/stub.ready"
-  "$PTW" tmdb-stub -listen "127.0.0.1:$STUB_PORT" -api-key "$TMDB_KEY" \
+  "$PTW" tmdb-stub -listen "127.0.0.1:$STUB_PORT" -api-key "$TMDB_KEY" -keepalive="$keepalive" \
     -responses "$OUT/$corpus/seed/responses.jsonl" -faults "$OUT/$corpus/seed/faults.jsonl" \
-    -log "$run/stub.jsonl" -ready "$run/stub.ready" 2>>"$run/stub.log" &
+    -log "$run/stub.jsonl" -ready "$run/stub.ready" "$@" 2>>"$run/stub.log" &
   STUB_PID=$!
   PIDS+=("$STUB_PID")
   for _ in $(seq 100); do [[ -s "$run/stub.ready" ]] && break; sleep 0.1; done
@@ -106,10 +122,11 @@ start_go() { # db rundir [tape] -> pid
   (cd "$2" && exec env "${env[@]}" "$BITMAGNET_GO" worker run --keys=queue_server >>"$2/go.log" 2>&1) &
   echo $!
 }
-# One log per Rust phase ($3), for flagson-abstained. The cool-off outlasts
-# any phase, so each abstention is logged (and its requests made) once.
+# One log per Rust phase ($3), for flagson-abstained and flagson-attribution,
+# with the resolver guard's call events (debug). The cool-off outlasts any
+# phase, so each abstention is logged (and its requests made) once.
 start_rust() { # db rundir log -> pid
-  (cd "$2" && BITMAGNET_POSTGRES_DSN="$(dsn "$1")" RUST_LOG=info exec "$RUST_WORKER" \
+  (cd "$2" && BITMAGNET_POSTGRES_DSN="$(dsn "$1")" RUST_LOG=info,bitmagnet_processor::live=debug exec "$RUST_WORKER" \
     --expected-classifier-config-digest "$GO_DIGEST" --check-interval-seconds 1 --abstain-cooloff-seconds 86400 \
     --admit-flags-on --tmdb-api-key "$TMDB_KEY" --tmdb-base-url "$STUB_URL" >>"$2/$3" 2>&1) &
   echo $!
@@ -155,7 +172,8 @@ wait_abstained() { # log n
 clone() { sql -d postgres -c "DROP DATABASE IF EXISTS $2" -c "CREATE DATABASE $2 TEMPLATE $1"; }
 
 dump_run() { # db rundir
-  "$PTW" flagson-dump -dsn "$(dsn "$1")" >"$2/dump" 2>"$2/dump.counts"
+  "$PTW" flagson-dump -dsn "$(dsn "$1")" -seed-jobs "$2/seed/jobs.jsonl" -raw-out "$2/dump.raw" \
+    >"$2/dump" 2>"$2/dump.counts"
 }
 
 # Request multisets leave /authentication out: Go validates its key on first
@@ -171,6 +189,13 @@ compare() { # label rundirA rundirB [info]
     echo "$label dumps: DIFFERENT ($(grep -c '^[-+][^-+]' "$b/dump.diff") changed lines, see $b/dump.diff)" | tee -a "$OUT/gates.txt"
     status=1
   fi
+  if diff -u "$a/dump.raw" "$b/dump.raw" >"$b/dump.raw.diff"; then
+    echo "$label raw dumps (info): IDENTICAL" | tee -a "$OUT/gates.txt"
+  else
+    echo "$label raw dumps (info): $(grep -c '^[-+][^-+]' "$b/dump.raw.diff") changed lines, see $b/dump.raw.diff" | tee -a "$OUT/gates.txt"
+    "$PTW" flagson-rawdiff "$a/dump.raw" "$b/dump.raw" >"$b/dump.raw.fields" 2>&1 || true
+    echo "$label raw dumps by field (info): $(head -1 "$b/dump.raw.fields")" | tee -a "$OUT/gates.txt"
+  fi
   if "$PTW" request-diff -ignore-endpoint /authentication "$a/stub.jsonl" "$b/stub.jsonl" \
       >"$b/requests.diff" 2>"$b/requests.summary"; then
     echo "$label requests: $(tail -1 "$b/requests.summary")" | tee -a "$OUT/gates.txt"
@@ -182,12 +207,12 @@ compare() { # label rundirA rundirB [info]
 }
 auth_count() { grep -c '"endpoint":"/authentication"' "$1/stub.jsonl" || true; }
 
-# Held 401 jobs, in queue order.
-held_jobs() {
+# Held jobs of one hold kind (flagson_faults.go: alone, auth), in queue order.
+held_jobs() { # corpus kind
   python3 -I -c 'import json,sys
 for l in open(sys.argv[1]):
     j = json.loads(l)
-    if j.get("fault") == "401": print(j["fingerprint"])' "$OUT/$1/seed/jobs.jsonl"
+    if j.get("hold") == sys.argv[2]: print(j["fingerprint"])' "$OUT/$1/seed/jobs.jsonl" "$2"
 }
 release() { sql -d "$1" -c "UPDATE queue_jobs SET run_after = clock_timestamp() WHERE fingerprint = '$2'" >/dev/null; }
 
@@ -207,42 +232,51 @@ seed_corpus() {
 
 # Go alone over a clone of the corpus seed; $3 = tape to record the tape.
 go_alone() { # corpus name [tape]
-  local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid fp T0=$SECONDS
+  local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid fp auth T0=$SECONDS
   mkdir -p "$run"; ln -sfn ../seed "$run/seed"
   clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
   start_stub "$corpus" "$run"
   pid="$(start_go "$db" "$run" "${3:-}")"; drain "$db" 0; stop "$pid"
-  for fp in $(held_jobs "$corpus"); do
+  for fp in $(held_jobs "$corpus" alone); do
     release "$db" "$fp"
     pid="$(start_go "$db" "$run")"; drain "$db" 0; stop "$pid"
   done
+  auth="$(held_jobs "$corpus" auth)"
+  if [[ -n "$auth" ]]; then
+    for fp in $auth; do release "$db" "$fp"; done
+    pid="$(start_go "$db" "$run")"; drain "$db" 0; stop "$pid"
+  fi
   stop "$STUB_PID"
   dump_run "$db" "$run"
   echo "$corpus $name (Go alone): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
 }
 
 # Rust, then Go for whatever Rust left; $3 = how many jobs Rust must leave in
-# its first phase (each held job is one more), checked by flagson-abstained
-# against the phase's log with reason $5. The stub restarts around every Rust
-# phase, which flushes its log, so the requests Rust made are the lines that
-# phase added (rust-requests.jsonl); with $6 = none Rust must make none.
+# its first phase (each held job is one more: a phase per holdAlone job, one
+# for the holdAuth jobs, whose stub fails /authentication), checked by
+# flagson-abstained against the phase's log with reason $5. The stub restarts around every Rust
+# phase, which flushes its log and restarts its fault sequences, so the
+# requests Rust made are the lines that phase added (rust-requests-<phase>.jsonl,
+# all of them in rust-requests.jsonl); with $6 = none Rust must make none.
 rust_then_go() { # corpus name expected slice reason [none]
   local corpus=$1 name=$2 expect=$3 slice=$4 reason=$5 requests=${6:-any} db=${PREFIX}_$1_$2 run="$OUT/$1/$2"
-  local pid fp T0=$SECONDS left n=0
+  local pid fp T0=$SECONDS left n=0 auth=()
   mkdir -p "$run"; ln -sfn ../seed "$run/seed"
   clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
   : >"$run/stub.jsonl"; : >"$run/rust-requests.jsonl"
-  rust_phase() { # expect log
-    local before after
+  rust_phase() { # expect log [stub flags]
+    local expect=$1 log=$2 before after
+    shift 2
     before="$(wc -l <"$run/stub.jsonl")"
-    start_stub "$corpus" "$run"
-    pid="$(start_rust "$db" "$run" "$2")"; wait_abstained "$run/$2" "$1"; drain "$db" "$1" 15; stop "$pid"
+    start_stub "$corpus" "$run" "$@"
+    pid="$(start_rust "$db" "$run" "$log")"; wait_abstained "$run/$log" "$expect"; drain "$db" "$expect" 15; stop "$pid"
     stop "$STUB_PID"
     after="$(wc -l <"$run/stub.jsonl")"
-    tail -n "+$((before + 1))" "$run/stub.jsonl" >>"$run/rust-requests.jsonl"
-    echo "$corpus $name Rust phase $2: $((after - before)) stub requests" | tee -a "$OUT/timing.txt"
-    if ! "$PTW" flagson-abstained -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -slice "$slice" -expect "$1" \
-        -rust-log "$run/$2" -reason "$reason" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
+    tail -n "+$((before + 1))" "$run/stub.jsonl" >"$run/rust-requests-${log%.log}.jsonl"
+    cat "$run/rust-requests-${log%.log}.jsonl" >>"$run/rust-requests.jsonl"
+    echo "$corpus $name Rust phase $log: $((after - before)) stub requests" | tee -a "$OUT/timing.txt"
+    if ! "$PTW" flagson-abstained -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -slice "$slice" -expect "$expect" \
+        -rust-log "$run/$log" -reason "$reason" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
   }
   go_phase() {
     start_stub "$corpus" "$run"
@@ -253,12 +287,18 @@ rust_then_go() { # corpus name expected slice reason [none]
   left="$(active "$db")"
   echo "$corpus $name Rust phase: $((SECONDS - T0))s, left for Go: $left (expected $expect)" | tee -a "$OUT/timing.txt" "$OUT/gates.txt"
   if [[ "$left" -gt 0 ]]; then go_phase; fi
-  for fp in $(held_jobs "$corpus"); do
+  for fp in $(held_jobs "$corpus" alone); do
     release "$db" "$fp"
     n=$((n + 1))
     rust_phase 1 "rust-held-$n.log"
     go_phase
   done
+  mapfile -t auth < <(held_jobs "$corpus" auth)
+  if [[ ${#auth[@]} -gt 0 ]]; then
+    for fp in "${auth[@]}"; do release "$db" "$fp"; done
+    rust_phase "${#auth[@]}" rust-auth.log -authentication-fault 500
+    go_phase
+  fi
   n="$(grep -c . "$run/rust-requests.jsonl" || true)"
   if [[ "$requests" == none ]]; then
     if [[ "$n" == 0 ]]; then
@@ -292,6 +332,17 @@ rust_alone() { # corpus name
   dump_run "$db" "$run"
 }
 
+# Go alone ($2) against its corpus's fault classes (flagson-faultcheck).
+faultcheck() { # corpus name
+  if "$PTW" flagson-faultcheck -dsn "$(dsn "${PREFIX}_$1_$2")" -seed "$OUT/$1/seed" \
+      -requests "$OUT/$1/$2/stub.jsonl" 2>&1 | tee "$OUT/$1/$2/faultcheck.txt" | tee -a "$OUT/gates.txt"; then
+    echo "$1 faultcheck $2: every fault job as modelled" | tee -a "$OUT/gates.txt"
+  else
+    echo "$1 faultcheck $2: FAIL (see $OUT/$1/$2/faultcheck.txt)" | tee -a "$OUT/gates.txt"
+    status=1
+  fi
+}
+
 status=0
 
 # The Go processor logs its effective classifier digest; the plan and the Rust
@@ -321,13 +372,35 @@ for corpus in $PHASES; do
     fault)
       go_alone fault go1
       go_alone fault go2
+      go_alone fault go3
       compare "fault G-1 go1 vs go2" "$OUT/fault/go1" "$OUT/fault/go2"
+      compare "fault G-1 go1 vs go3" "$OUT/fault/go1" "$OUT/fault/go3"
+      faultcheck fault go1
+      if [[ -n "$RUST_WORKER" ]]; then
+        rust_alone fault rust
+        compare "fault G2-fault go1 vs rust" "$OUT/fault/go1" "$OUT/fault/rust"
+      fi
+      ;;
+    abstain)
+      go_alone abstain go1
+      go_alone abstain go2
+      compare "abstain G-1 go1 vs go2" "$OUT/abstain/go1" "$OUT/abstain/go2"
+      faultcheck abstain go1
       if [[ -n "$RUST_WORKER" ]]; then
         unheld="$(python3 -I -c 'import json,sys
-print(sum(1 for l in open(sys.argv[1]) if json.loads(l)["slice"] == "fault" and json.loads(l).get("fault") != "401"))' \
-          "$OUT/fault/seed/jobs.jsonl")"
-        rust_then_go fault rust "$unheld" fault resolver
-        compare "fault G3 go1 vs rust-then-go" "$OUT/fault/go1" "$OUT/fault/rust" info
+print(sum(1 for l in open(sys.argv[1]) if not json.loads(l).get("hold")))' "$OUT/abstain/seed/faultplan.jsonl")"
+        rust_then_go abstain rust "$unheld" fault resolver
+        compare "abstain G3 go1 vs rust-then-go" "$OUT/abstain/go1" "$OUT/abstain/rust" info
+        logs=()
+        for f in "$OUT"/abstain/rust/rust*.log; do logs+=(-rust-log "$f"); done
+        if "$PTW" flagson-attribution -go "$OUT/abstain/go1/stub.jsonl" -rtg "$OUT/abstain/rust/stub.jsonl" \
+            -seed "$OUT/abstain/seed" "${logs[@]}" 2>&1 \
+            | tee "$OUT/abstain/rust/attribution.txt" | tee -a "$OUT/gates.txt"; then
+          echo "abstain G3 attribution: PASS" | tee -a "$OUT/gates.txt"
+        else
+          echo "abstain G3 attribution: FAIL (see $OUT/abstain/rust/attribution.txt)" | tee -a "$OUT/gates.txt"
+          status=1
+        fi
       fi
       ;;
   esac

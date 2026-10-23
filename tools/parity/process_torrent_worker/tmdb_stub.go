@@ -12,6 +12,12 @@ package main
 // Every request is appended to a JSONL log, one line per HTTP request (each
 // client retry is its own line), so the request multisets of two runs can be
 // compared with `request-diff`.
+//
+// A fault fixture names either one fault, answered every time, or a sequence
+// of steps answered in turn per request key, the last step repeating: ["500",
+// "ok"] fails the first request for its key and answers the second normally.
+// A per-key count is deterministic only when one torrent owns the key, which
+// the fault corpora guarantee.
 
 import (
 	"bufio"
@@ -29,6 +35,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -60,6 +67,25 @@ const (
 	faultInternal     = "500"
 	faultUnavailable  = "503"
 	faultTimeout      = "timeout"
+	// faultReset reads the request, then resets the connection (SO_LINGER 0).
+	faultReset = "reset"
+
+	// stepOK is a sequence step answered as if the key had no fault.
+	stepOK = "ok"
+
+	// sourceFault is stubLogEntry.Source for an answer a fault fixture gave.
+	sourceFault = "fault"
+)
+
+// isTransportFault reports whether a fault kind fails below HTTP, where both
+// clients see an error rather than a status.
+func isTransportFault(kind string) bool { return kind == faultTimeout || kind == faultReset }
+
+// Answers that are not an HTTP status: abort the connection (a timeout fault),
+// or reset it.
+const (
+	statusAbort = 0
+	statusReset = -1
 )
 
 // stubResponse is one line of the responses fixture: the canonical request key
@@ -70,17 +96,34 @@ type stubResponse struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-// stubFault is one line of the faults fixture.
+// stubFault is one line of the faults fixture: Fault, answered to every
+// request for Key, or Sequence, answered step by step.
 type stubFault struct {
-	Key   string `json:"key"`
-	Fault string `json:"fault"`
+	Key      string   `json:"key"`
+	Fault    string   `json:"fault,omitempty"`
+	Sequence []string `json:"sequence,omitempty"`
 }
 
-// stubLogEntry is one line of the request log. Seq and Elapsed are the only
-// order- or time-dependent fields; request-diff ignores both.
+// steps is the fault as a sequence.
+func (f stubFault) steps() ([]string, error) {
+	switch {
+	case f.Fault != "" && len(f.Sequence) == 0:
+		return []string{f.Fault}, nil
+	case f.Fault == "" && len(f.Sequence) > 0:
+		return f.Sequence, nil
+	default:
+		return nil, fmt.Errorf("fault %q: want exactly one of fault and sequence", f.Key)
+	}
+}
+
+// stubLogEntry is one line of the request log. Seq, Elapsed and Step are the
+// only order- or time-dependent fields; request-diff ignores them. Seq numbers
+// the answers in the order they are decided (just before one is written, or
+// when a timeout gives up), which is the order of the lines.
 type stubLogEntry struct {
 	Seq       int64             `json:"seq"`
 	Elapsed   string            `json:"elapsed"`
+	Step      int               `json:"step,omitempty"` // 1-based, for keys with a fault fixture
 	Method    string            `json:"method"`
 	Path      string            `json:"path"`
 	Query     map[string]string `json:"query"`
@@ -98,12 +141,14 @@ type tmdbStub struct {
 	apiKey       string
 	timeoutDelay time.Duration
 	responses    map[string]stubResponse
-	faults       map[string]string
+	faults       map[string][]string
 	started      time.Time
 
-	mu  sync.Mutex
-	seq int64
-	log io.Writer
+	seq atomic.Int64
+
+	mu     sync.Mutex
+	served map[string]int // requests per fault key so far
+	log    io.Writer
 }
 
 // requestKey renders the canonical fixture key of a request: the method, the
@@ -173,11 +218,15 @@ func (s *tmdbStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.record(entry)
 
-	if status == 0 {
+	switch status {
+	case statusAbort:
 		// A timeout fault. Returning normally would send an implicit empty
 		// 200; abort the connection instead, which is what a client that held
 		// on past -timeout-delay sees too.
 		panic(http.ErrAbortHandler)
+	case statusReset:
+		resetConnection(w)
+		return
 	}
 
 	w.Header().Set("Content-Type", tmdbContentType)
@@ -191,11 +240,20 @@ func (s *tmdbStub) answer(
 	apiKeyOK bool,
 	entry *stubLogEntry,
 ) (int, []byte) {
-	if fault, ok := s.faults[key]; ok {
-		entry.Source = "fault"
-		entry.FaultKind = fault
+	if steps, ok := s.faults[key]; ok {
+		s.mu.Lock()
+		n := s.served[key]
+		s.served[key] = n + 1
+		s.mu.Unlock()
 
-		return s.fault(ctx, fault)
+		entry.Step = n + 1
+
+		if step := steps[min(n, len(steps)-1)]; step != stepOK {
+			entry.Source = sourceFault
+			entry.FaultKind = step
+
+			return s.fault(ctx, step)
+		}
 	}
 
 	if !apiKeyOK {
@@ -242,18 +300,39 @@ func (s *tmdbStub) fault(ctx context.Context, fault string) (int, []byte) {
 		case <-time.After(s.timeoutDelay):
 		}
 
-		return 0, nil
+		return statusAbort, nil
+	case faultReset:
+		return statusReset, nil
 	default:
 		return http.StatusInternalServerError, []byte(tmdbInternalErrorBody)
 	}
+}
+
+// resetConnection takes the connection from the server and closes it with
+// SO_LINGER 0, so the client, waiting for its answer, reads ECONNRESET.
+func resetConnection(w http.ResponseWriter) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		panic(http.ErrAbortHandler)
+	}
+
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		panic(http.ErrAbortHandler)
+	}
+
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetLinger(0)
+	}
+
+	_ = conn.Close()
 }
 
 func (s *tmdbStub) record(entry stubLogEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.seq++
-	entry.Seq = s.seq
+	entry.Seq = s.seq.Add(1)
 	entry.Elapsed = time.Since(s.started).Round(time.Millisecond).String()
 
 	line, err := json.Marshal(entry)
@@ -278,6 +357,36 @@ func flatQuery(query url.Values) map[string]string {
 	return flat
 }
 
+// stubFaultSteps indexes the fault fixtures' steps by key, with authFault,
+// when set, answered to every /authentication request.
+func stubFaultSteps(faults []stubFault, authFault string) (map[string][]string, error) {
+	out := make(map[string][]string, len(faults)+1)
+
+	for _, f := range faults {
+		steps, err := f.steps()
+		if err != nil {
+			return nil, err
+		}
+
+		if _, dup := out[f.Key]; dup {
+			return nil, fmt.Errorf("faults: duplicate key %q", f.Key)
+		}
+
+		out[f.Key] = steps
+	}
+
+	if authFault != "" {
+		key := requestKey(http.MethodGet, endpointAuthentication, nil)
+		if _, dup := out[key]; dup {
+			return nil, fmt.Errorf("faults: -authentication-fault and a fixture both fault %q", key)
+		}
+
+		out[key] = []string{authFault}
+	}
+
+	return out, nil
+}
+
 func readStubJSONL[T any](path string) ([]T, error) {
 	if path == "" {
 		return nil, nil
@@ -297,6 +406,10 @@ func runTMDBStub(args []string) error {
 	timeoutDelay := fs.Duration("timeout-delay", 2*time.Minute,
 		"how long a timeout fault holds a request before aborting it (both clients give up after 10s)")
 	readyPath := fs.String("ready", "", "file written with the listen address once serving")
+	keepAlive := fs.Bool("keepalive", true, "HTTP keep-alive; off for transport faults, since on a reused "+
+		"connection net/http resends an idempotent request that met a reset, so counts would follow pool state")
+	authFault := fs.String("authentication-fault", "", "a fault kind answered to every /authentication "+
+		"request, failing both clients' key validation")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -316,12 +429,18 @@ func runTMDBStub(args []string) error {
 		return fmt.Errorf("faults: %w", err)
 	}
 
+	steps, err := stubFaultSteps(faults, *authFault)
+	if err != nil {
+		return err
+	}
+
 	stub := &tmdbStub{
 		basePath:     *basePath,
 		apiKey:       *apiKey,
 		timeoutDelay: *timeoutDelay,
 		responses:    make(map[string]stubResponse, len(responses)),
-		faults:       make(map[string]string, len(faults)),
+		faults:       steps,
+		served:       map[string]int{},
 		started:      time.Now(),
 	}
 
@@ -331,10 +450,6 @@ func runTMDBStub(args []string) error {
 		}
 
 		stub.responses[r.Key] = r
-	}
-
-	for _, f := range faults {
-		stub.faults[f.Key] = f.Fault
 	}
 
 	logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -352,6 +467,7 @@ func runTMDBStub(args []string) error {
 	}
 
 	server := &http.Server{Handler: stub, ReadHeaderTimeout: 10 * time.Second}
+	server.SetKeepAlivesEnabled(*keepAlive)
 
 	if *readyPath != "" {
 		if err := os.WriteFile(*readyPath, []byte(listener.Addr().String()+"\n"), 0o644); err != nil {

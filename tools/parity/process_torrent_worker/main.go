@@ -86,6 +86,7 @@ func run() error {
 	if len(os.Args) < 2 {
 		return errors.New("usage: process_torrent_worker seed|requeue|dump|" +
 			"flagson-seed|flagson-requeue|flagson-dump|flagson-coverage|flagson-abstained|" +
+			"flagson-faultcheck|flagson-attribution|flagson-rawdiff|" +
 			"tmdb-stub|request-diff [flags]")
 	}
 
@@ -102,6 +103,12 @@ func run() error {
 		return runFlagsOnCoverage(os.Args[2:])
 	case "flagson-abstained":
 		return runFlagsOnAbstained(os.Args[2:])
+	case "flagson-faultcheck":
+		return runFlagsOnFaultCheck(os.Args[2:])
+	case "flagson-attribution":
+		return runFlagsOnAttribution(os.Args[2:])
+	case "flagson-rawdiff":
+		return runFlagsOnRawDiff(os.Args[2:])
 	case "tmdb-stub":
 		return runTMDBStub(os.Args[2:])
 	case "request-diff":
@@ -485,6 +492,12 @@ func planJobs(all []seeded, jobSize int) [][]protocol.ID {
 // canonical order, excluding write timestamps, generated IDs, and Go's random
 // retry jitter (run_after/ran_at).
 func dump(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
+	return dumpFrom(ctx, conn, w, "queue_jobs")
+}
+
+// dumpFrom is dump with the queue image read from queueJobs, a relation with
+// queue_jobs's columns (flagson-dump's canonical view).
+func dumpFrom(ctx context.Context, conn *pgx.Conn, w io.Writer, queueJobs string) error {
 	queries := []struct{ label, sql string }{
 		// to_jsonb renders SQL NULL and JSON null alike; flag the former.
 		{"torrent_contents", `SELECT (to_jsonb(t) - 'created_at' - 'updated_at'
@@ -503,7 +516,7 @@ func dump(ctx context.Context, conn *pgx.Conn, w io.Writer) error {
 				retries::text, max_retries::text, coalesce(error, '<null>'), priority::text,
 				(ran_at IS NOT NULL)::text, coalesce(deadline::text, '<null>'),
 				archival_duration::text)
-			FROM queue_jobs ORDER BY fingerprint, status, retries`},
+			FROM ` + queueJobs + ` ORDER BY fingerprint, status, retries`},
 	}
 
 	for _, q := range queries {
