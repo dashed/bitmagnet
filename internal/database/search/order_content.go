@@ -43,6 +43,57 @@ func ContentIdentityOrderByColumns() []query.OrderByColumn {
 	return columns
 }
 
+// contentAttributeOrderColumns order one content's attributes. With the owning
+// content's identity they are the content_attributes primary key (content_type,
+// content_source, content_id, source, key), so within a content the order is total.
+var contentAttributeOrderColumns = []string{"source", "key"}
+
+// contentCollectionLinkOrderColumns order one content's collection links by the
+// linked collection's identity (type, source, id). With the owning content's
+// identity they are the content_collections_content primary key, so within a
+// content the order is total.
+var contentCollectionLinkOrderColumns = []string{
+	"content_collection_type",
+	"content_collection_source",
+	"content_collection_id",
+}
+
+// ContentAttributeOrderBy orders a content's attributes by (source, key).
+//
+// It exists because the order is load-bearing: Content.UpdateTsv appends every
+// `id` attribute's value to the tsvector in slice order, so the attribute order
+// decides the lexeme positions persisted into torrent_contents.tsv. Without an
+// ORDER BY the preload returns rows in whatever order the plan produced them.
+//
+// The same collation caveat as ContentIdentityOrderByColumns applies: these are
+// text columns, ordered by the database collation, not bytewise. The Rust worker's
+// writer_load.rs orders the same columns the same way, and any reimplementation
+// must too.
+func ContentAttributeOrderBy() clause.OrderBy {
+	return orderByColumns(model.TableNameContentAttribute, contentAttributeOrderColumns)
+}
+
+// ContentCollectionLinkOrderBy orders a content's collection links by the
+// linked collection's (type, source, id).
+//
+// Content.UpdateTsv appends every genre collection's name in slice order, so like
+// ContentAttributeOrderBy this decides tsvector positions, and like it the order
+// is the database collation's.
+func ContentCollectionLinkOrderBy() clause.OrderBy {
+	return orderByColumns(model.TableNameContentCollectionContent, contentCollectionLinkOrderColumns)
+}
+
+func orderByColumns(table string, names []string) clause.OrderBy {
+	columns := make([]clause.OrderByColumn, 0, len(names))
+	for _, name := range names {
+		columns = append(columns, clause.OrderByColumn{
+			Column: clause.Column{Table: table, Name: name},
+		})
+	}
+
+	return clause.OrderBy{Columns: columns}
+}
+
 // ContentOrderByIdentity orders content results by their canonical identity.
 func ContentOrderByIdentity() query.Option {
 	return query.OrderBy(ContentIdentityOrderByColumns()...)

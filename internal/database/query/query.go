@@ -881,10 +881,52 @@ func (b optionBuilder) applyPost(db *gorm.DB) error {
 	db.Offset(int(b.offset))
 
 	for _, p := range b.preloads {
-		db.Preload(p.Name(), p)
+		args, err := preloadArgs(p)
+		if err != nil {
+			return err
+		}
+
+		db.Preload(p.Name(), args...)
 	}
 
 	return nil
+}
+
+// preloadArgs translates a gen relation into GORM preload arguments.
+//
+// GORM applies a func(*gorm.DB) *gorm.DB preload argument to the preload query,
+// so a relation's Clauses and Scopes become such functions: a relation built as
+// Relation.Clauses(clause.OrderBy{...}) orders its preload query. The relation
+// used to be passed as the only argument, which GORM read as an inline condition
+// with no fields: it added nothing, and its Clauses and Scopes were silently
+// dropped.
+//
+// Conditions, selects, order columns and paging have no lossless translation
+// here, so a relation that sets them is rejected instead of silently dropped.
+func preloadArgs(relation field.RelationField) ([]any, error) {
+	offset, limit := relation.GetPage()
+	if len(relation.GetConds()) > 0 || len(relation.GetSelects()) > 0 ||
+		len(relation.GetOrderCol()) > 0 || offset != 0 || limit != 0 {
+		return nil, fmt.Errorf(
+			"preload %s: only Clauses and Scopes are supported on a preloaded relation",
+			relation.Name(),
+		)
+	}
+
+	scopes := relation.GetScopes()
+	args := make([]any, 0, len(scopes)+1)
+
+	if clauses := relation.GetClauses(); len(clauses) > 0 {
+		args = append(args, func(tx *gorm.DB) *gorm.DB {
+			return tx.Clauses(clauses...)
+		})
+	}
+
+	for _, scope := range scopes {
+		args = append(args, (func(*gorm.DB) *gorm.DB)(scope))
+	}
+
+	return args, nil
 }
 
 func (b optionBuilder) applyCallbacks(ctx context.Context, results any) error {

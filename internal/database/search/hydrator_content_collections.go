@@ -61,6 +61,9 @@ func (contentCollectionsHydrator) GetJoinSubs(
 	for _, cond := range conds {
 		qCtx = qCtx.Or(cond)
 	}
+	// hydrateHasMany keeps each root's subs in the order the links come back, and
+	// that order decides tsvector positions; see ContentCollectionLinkOrderBy.
+	qCtx = qCtx.Clauses(ContentCollectionLinkOrderBy())
 
 	var results []model.ContentCollectionContent
 	if err := qCtx.Find(&results).Error; err != nil {
