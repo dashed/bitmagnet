@@ -1,0 +1,19 @@
+query HealthCheck {
+  health {
+    status
+    checks {
+      key
+      status
+      timestamp
+      error
+    }
+  }
+  workers {
+    listAll {
+      workers {
+        key
+        started
+      }
+    }
+  }
+}

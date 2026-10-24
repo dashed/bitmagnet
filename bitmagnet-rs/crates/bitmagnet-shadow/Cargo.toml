@@ -1,0 +1,34 @@
+[package]
+name = "bitmagnet-shadow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "V2 dual-read shadow harness: runs equivalent torrent_files SQL and FileSearchService gRPC query pairs and compares the results exactly — the L2 DROP gate."
+
+[dependencies]
+# The gRPC FileSearchService client (tonic codegen ships client + server).
+bitmagnet-proto = { path = "../bitmagnet-proto" }
+# init_tracing for the CLI binary.
+bitmagnet-common = { path = "../bitmagnet-common" }
+# PG pool + error types (the torrent_files side is raw sqlx here, mirroring the
+# sidecar's SQL builder predicate exactly — see src/pg.rs).
+bitmagnet-db = { path = "../bitmagnet-db" }
+tokio.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+sqlx.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde = { workspace = true }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "v2-shadow"
+path = "src/bin/v2-shadow.rs"
+
+[lints]
+workspace = true

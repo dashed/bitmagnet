@@ -1,0 +1,11 @@
+*
+!bench/
+bench/*
+!bench/graphql-rss/
+bench/graphql-rss/*
+!bench/graphql-rss/helper.py
+!bench/graphql-rss/requirements.txt
+!bitmagnet-rs/
+bitmagnet-rs/*
+!bitmagnet-rs/proto/
+!bitmagnet-rs/proto/**

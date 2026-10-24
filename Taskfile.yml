@@ -8,6 +8,7 @@ tasks:
       - task gen-gql-enums
       - task gen-gql
       - task gen-protoc
+      - task gen-search-proto
       - task gen-mockery
       - task gen-classifier-schema
       - task gen-webui-graphql
@@ -31,6 +32,28 @@ tasks:
   gen-protoc:
     cmds:
       - protoc --go_out=. ./internal/protobuf/bitmagnet.proto
+
+  # Go gRPC bindings for the Tantivy search sidecar, generated from the
+  # Rust-owned contract in bitmagnet-rs/proto. The go_package is overridden at
+  # gen time (the .proto is shared with Rust) so output lands in
+  # internal/search/tantivy/pb. Needs protoc-gen-go + protoc-gen-go-grpc on PATH.
+  gen-search-proto:
+    vars:
+      PB: github.com/bitmagnet-io/bitmagnet/internal/search/tantivy/pb
+    cmds:
+      - >-
+        protoc -I bitmagnet-rs/proto
+        --go_out=. --go_opt=module=github.com/bitmagnet-io/bitmagnet
+        --go_opt=Mbitmagnet/common.proto={{.PB}}
+        --go_opt=Mbitmagnet/search.proto={{.PB}}
+        --go_opt=Mbitmagnet/path_search.proto={{.PB}}
+        --go_opt=Mbitmagnet/file_search.proto={{.PB}}
+        --go-grpc_out=. --go-grpc_opt=module=github.com/bitmagnet-io/bitmagnet
+        --go-grpc_opt=Mbitmagnet/common.proto={{.PB}}
+        --go-grpc_opt=Mbitmagnet/search.proto={{.PB}}
+        --go-grpc_opt=Mbitmagnet/path_search.proto={{.PB}}
+        --go-grpc_opt=Mbitmagnet/file_search.proto={{.PB}}
+        bitmagnet/common.proto bitmagnet/search.proto bitmagnet/path_search.proto bitmagnet/file_search.proto
 
   gen-mockery:
     cmds:
@@ -74,6 +97,7 @@ tasks:
     cmds:
       - task test-go
       - task test-webui
+      - task test-prometheus-rules
 
   test-go:
     cmds:
@@ -85,6 +109,11 @@ tasks:
       - npm test
     env:
       CHROME_BIN: chromium
+
+  test-prometheus-rules:
+    cmds:
+      - promtool check rules observability/rules/graphql-shadow-gate.rules.yml
+      - promtool test rules observability/rules/graphql-shadow-gate.test.yml
 
   migrate:
     cmds:
@@ -98,6 +127,22 @@ tasks:
     dir: ./webui
     cmds:
       - npm run build
+
+  build-webui-react:
+    dir: ./webui-react
+    cmds:
+      # Include these assets in the Go binary with: go build -tags webuireact ./...
+      - pnpm build
+
+  # Tagged Go build INCLUDING the React app. go:embed all:dist errors on a
+  # fresh checkout (webui-react/dist is gitignored), so the Vite build MUST
+  # run first — this task encodes that ordering; CI must use it (or replicate
+  # the deps).
+  build-with-webui-react:
+    deps:
+      - build-webui-react
+    cmds:
+      - go build -tags webuireact -ldflags "-X github.com/bitmagnet-io/bitmagnet/internal/version.GitTag=$(git describe --tags --always --dirty)"
 
   build-docsite:
     dir: ./bitmagnet.io

@@ -1,0 +1,10 @@
+query CollapsePaths($input: TorrentContentCollapsePathsInput!) {
+  torrentContent {
+    collapsePaths(input: $input) {
+      groups {
+        path
+        infoHashes
+      }
+    }
+  }
+}

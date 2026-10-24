@@ -1,0 +1,69 @@
+services:
+  # Direct PostgreSQL connection to the remote server
+  postgres-proxy:
+    image: alpine:latest
+    container_name: postgres-proxy
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo 'Installing socat for port forwarding...' &&
+        apk add --no-cache socat postgresql-client &&
+        echo 'Setting up direct port forwarding to remote PostgreSQL...' &&
+        socat TCP-LISTEN:5432,fork,reuseaddr TCP:192.168.55.11:5432
+      "
+    # Expose PostgreSQL port locally within the Docker network
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-h",
+          "192.168.55.11",
+          "-p",
+          "5432",
+          "-U",
+          "postgres",
+          "-d",
+          "bitmagnet",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  bitmagnet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bitmagnet-dev
+    volumes:
+      - ./config:/root/.config/bitmagnet:rw
+      - ./data/bitmagnet:/root/.local/share/bitmagnet:rw
+    ports:
+      - "3333:3333" # Web UI
+      - "3334:3334/tcp" # BitTorrent
+      - "3334:3334/udp" # BitTorrent UDP
+    restart: unless-stopped
+    environment:
+      - LOG_FILE_ROTATOR_ENABLED=true
+      # Use the postgres proxy for PostgreSQL connection
+      - POSTGRES_HOST=postgres-proxy
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=bitmagnet
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    command:
+      - worker
+      - run
+      # Run specific workers, excluding dht_crawler
+      - --keys=http_server
+      - --keys=queue_server
+    # depends_on:
+    #   postgres-proxy:
+    #     condition: service_healthy
+
+networks:
+  default:
+    driver: bridge

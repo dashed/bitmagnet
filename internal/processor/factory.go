@@ -18,6 +18,9 @@ type Params struct {
 	Dao              lazy.Lazy[*dao.Query]
 	BlockingManager  lazy.Lazy[blocking.Manager]
 	Logger           *zap.SugaredLogger
+	// SearchIndexer dual-writes to the Tantivy sidecar; nil when search or the
+	// dual-write sub-feature is disabled (provided by processorfx).
+	SearchIndexer SearchIndexer `optional:"true"`
 }
 
 type Result struct {
@@ -51,6 +54,8 @@ func New(p Params) Result {
 				blockingManager: bm,
 				runner:          w,
 				defaultWorkflow: p.ClassifierConfig.Workflow,
+				searchIndexer:   p.SearchIndexer,
+				logger:          p.Logger,
 			}, nil
 		}),
 	}

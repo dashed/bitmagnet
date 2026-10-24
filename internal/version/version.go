@@ -1,3 +1,7 @@
 package version
 
-var GitTag string
+var (
+	GitTag       string
+	SourceCommit string
+	SourceTree   string
+)

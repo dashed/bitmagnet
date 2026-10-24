@@ -33,6 +33,11 @@
       "processed": "Оброблено",
       "updated": "Оновлено"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Усі",
       "days": "Дні",
@@ -51,8 +56,17 @@
       "seconds_30": "30 секунд",
       "weeks_1": "1 тиждень"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Подія",
+      "no_data": "__missing__",
       "resolution": "Роздільна здатність",
       "throughput": "Пропускна здатність",
       "timeframe": "Проміжок часу",
@@ -84,6 +98,22 @@
       "total_counts_by_status": "Загальна кількість за статусами"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Тип контенту",
     "file_type": "Тип файлу",
@@ -109,6 +139,7 @@
   },
   "general": {
     "all": "Усі",
+    "apply": "__missing__",
     "dismiss": "Закрити",
     "error": "Помилка",
     "none": "Немає",
@@ -239,12 +270,17 @@
   "torrents": {
     "classification": "Класифікація",
     "clear_search": "Очистити пошук",
+    "clear_size_filter": "__missing__",
     "copy": "Копіювати",
     "copy_to_clipboard": "Копіювати в буфер обміну",
     "delete": "Видалити",
     "delete_action_cannot_be_undone": "Цю дію не можна скасувати",
     "delete_are_you_sure": "Ви впевнені, що хочете видалити цей торрент?",
     "deselect_all": "Зняти виділення",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Редагувати теги",
     "episodes": "Епізоди",
     "external_links": "Зовнішні посилання",
@@ -263,6 +299,8 @@
     "leechers": "Лічери",
     "magnet": "Магнет",
     "magnet_links": "Магнет-посилання",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Новий тег",
     "order_by": "Сортувати за",
     "order_direction_toggle": "Змінити напрямок",
@@ -281,6 +319,7 @@
     "permalink": "Постійне посилання",
     "poster": "Постер",
     "published": "Опубліковано",
+    "published_date_filter": "__missing__",
     "rating": "Рейтинг",
     "refresh": "Оновити результати",
     "reprocess": {
@@ -295,6 +334,17 @@
     "select_all": "Вибрати всі",
     "showing_x_of_y_files": "Показано {{x}} з {{y}} файлів",
     "size": "Розмір",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Джерело торрента",
     "summary": "Зведення",
     "tags": {
@@ -308,6 +358,7 @@
     },
     "title": "Назва",
     "toggle_drawer": "Перемкнути панель",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} голосів"
   },
   "version": {

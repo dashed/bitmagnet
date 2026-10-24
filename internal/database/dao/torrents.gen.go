@@ -36,6 +36,11 @@ func newTorrent(db *gorm.DB, opts ...gen.DOOption) torrent {
 	_torrent.FilesStatus = field.NewField(tableName, "files_status")
 	_torrent.Extension = field.NewString(tableName, "extension")
 	_torrent.FilesCount = field.NewField(tableName, "files_count")
+	_torrent.FilesData = field.NewBytes(tableName, "files_data")
+	_torrent.FileExts = field.NewField(tableName, "file_extensions")
+	_torrent.InfoHashV1 = field.NewField(tableName, "info_hash_v1")
+	_torrent.InfoHashV2 = field.NewField(tableName, "info_hash_v2")
+	_torrent.MetaVersion = field.NewField(tableName, "meta_version")
 	_torrent.Hint = torrentHasOneHint{
 		db: db.Session(&gorm.Session{}),
 
@@ -95,6 +100,11 @@ type torrent struct {
 	FilesStatus field.Field
 	Extension   field.String
 	FilesCount  field.Field
+	FilesData   field.Bytes
+	FileExts    field.Field
+	InfoHashV1  field.Field
+	InfoHashV2  field.Field
+	MetaVersion field.Field
 	Hint        torrentHasOneHint
 
 	Contents torrentHasManyContents
@@ -131,6 +141,11 @@ func (t *torrent) updateTableName(table string) *torrent {
 	t.FilesStatus = field.NewField(table, "files_status")
 	t.Extension = field.NewString(table, "extension")
 	t.FilesCount = field.NewField(table, "files_count")
+	t.FilesData = field.NewBytes(table, "files_data")
+	t.FileExts = field.NewField(table, "file_extensions")
+	t.InfoHashV1 = field.NewField(table, "info_hash_v1")
+	t.InfoHashV2 = field.NewField(table, "info_hash_v2")
+	t.MetaVersion = field.NewField(table, "meta_version")
 
 	t.fillFieldMap()
 
@@ -147,7 +162,7 @@ func (t *torrent) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (t *torrent) fillFieldMap() {
-	t.fieldMap = make(map[string]field.Expr, 15)
+	t.fieldMap = make(map[string]field.Expr, 20)
 	t.fieldMap["info_hash"] = t.InfoHash
 	t.fieldMap["name"] = t.Name
 	t.fieldMap["size"] = t.Size
@@ -157,6 +172,11 @@ func (t *torrent) fillFieldMap() {
 	t.fieldMap["files_status"] = t.FilesStatus
 	t.fieldMap["extension"] = t.Extension
 	t.fieldMap["files_count"] = t.FilesCount
+	t.fieldMap["files_data"] = t.FilesData
+	t.fieldMap["file_extensions"] = t.FileExts
+	t.fieldMap["info_hash_v1"] = t.InfoHashV1
+	t.fieldMap["info_hash_v2"] = t.InfoHashV2
+	t.fieldMap["meta_version"] = t.MetaVersion
 
 }
 

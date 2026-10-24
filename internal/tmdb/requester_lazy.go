@@ -61,15 +61,7 @@ func newRequester(ctx context.Context, config Config, logger *zap.SugaredLogger)
 			requester: requesterSemaphore{
 				requester: requesterLimiter{
 					requester: requester{
-						resty: resty.New().
-							SetBaseURL(config.BaseURL).
-							SetQueryParam("api_key", config.APIKey).
-							SetRetryCount(3).
-							SetRetryWaitTime(2 * time.Second).
-							SetRetryMaxWaitTime(20 * time.Second).
-							SetTimeout(10 * time.Second).
-							EnableTrace().
-							SetLogger(logger),
+						resty: newResty(config, logger),
 					},
 					limiter: rate.NewLimiter(rate.Every(config.RateLimit), config.RateLimitBurst),
 				},
@@ -94,4 +86,16 @@ func newRequester(ctx context.Context, config Config, logger *zap.SugaredLogger)
 	}
 
 	return r, err
+}
+
+func newResty(config Config, logger *zap.SugaredLogger) *resty.Client {
+	return resty.New().
+		SetBaseURL(config.BaseURL).
+		SetQueryParam("api_key", config.APIKey).
+		SetRetryCount(3).
+		SetRetryWaitTime(2 * time.Second).
+		SetRetryMaxWaitTime(20 * time.Second).
+		SetTimeout(10 * time.Second).
+		EnableTrace().
+		SetLogger(newRestyLogger(logger))
 }

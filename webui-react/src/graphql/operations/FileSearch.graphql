@@ -1,0 +1,30 @@
+query FileSearch($input: FileSearchInput!) {
+  torrentContent {
+    fileSearch(input: $input) {
+      totalCount
+      totalCountIsEstimate
+      hasNextPage
+      items {
+        infoHash
+        index
+        path
+        extension
+        size
+        torrentContent {
+          infoHash
+          seeders
+          leechers
+          publishedAt
+          updatedAt
+          dhtLastSeenAt
+          dhtSeenCount
+          title
+          torrent {
+            name
+            magnetUri
+          }
+        }
+      }
+    }
+  }
+}

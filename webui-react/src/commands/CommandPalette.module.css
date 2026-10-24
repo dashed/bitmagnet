@@ -1,0 +1,175 @@
+.backdrop {
+  align-items: flex-start;
+  animation: backdropEnter 180ms ease;
+  background: rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding-top: 12vh;
+  position: fixed;
+  z-index: 60;
+}
+
+:global([data-mantine-color-scheme="dark"]) .backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.palette {
+  animation: paletteEnter 180ms ease;
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  box-shadow: var(--mantine-shadow-md);
+  box-sizing: border-box;
+  color: var(--mantine-color-text);
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+  overflow: hidden;
+  width: min(560px, calc(100vw - 32px));
+}
+
+.input {
+  appearance: none;
+  background: var(--mantine-color-body);
+  border: 0;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  box-sizing: border-box;
+  color: var(--mantine-color-text);
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: var(--mantine-font-size-sm);
+  min-height: 52px;
+  outline: 0;
+  padding: 0 16px;
+  width: 100%;
+}
+
+.input:focus-visible {
+  box-shadow: inset 0 -2px 0 var(--mantine-color-blue-6);
+}
+
+.input::placeholder {
+  color: var(--mantine-color-dimmed);
+}
+
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+}
+
+.group + .group {
+  margin-top: 8px;
+}
+
+.groupHeader {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 8px 10px 4px;
+  text-transform: uppercase;
+}
+
+.option {
+  align-items: center;
+  background: transparent;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: flex;
+  font-size: var(--mantine-font-size-sm);
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 8px 10px;
+}
+
+.option:hover,
+.option[aria-selected="true"] {
+  background: var(--mantine-color-default-hover);
+}
+
+.optionTitle {
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--mantine-color-dimmed);
+  flex: 0 0 auto;
+  font-size: var(--mantine-font-size-xs);
+  text-align: end;
+}
+
+.empty {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  padding: 24px 12px;
+  text-align: center;
+}
+
+@keyframes backdropEnter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes paletteEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sheetEnter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 61.999em) {
+  .backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .palette {
+    animation-name: sheetEnter;
+    border-radius: var(--mantine-radius-lg) var(--mantine-radius-lg) 0 0;
+    max-height: 85dvh;
+    padding-bottom: env(safe-area-inset-bottom);
+    width: 100%;
+  }
+
+  .option {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop,
+  .palette {
+    animation: none;
+  }
+}

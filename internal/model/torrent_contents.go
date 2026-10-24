@@ -98,8 +98,19 @@ func (tc *TorrentContent) UpdateTsv() {
 	tsv.AddText(tc.InfoHash.String(), fts.TsvectorWeightA)
 	tsv.AddText(tc.Torrent.Name, fts.TsvectorWeightA)
 
+	// The weight-D file-path bag is unbounded (a torrent may list tens of
+	// thousands of long paths) and would otherwise let a single row build a
+	// tsvector larger than PostgreSQL's ~1MB limit — aborting the whole persist
+	// batch and taking up to 99 innocent neighbours down with it. Bound it to a
+	// safe budget; the higher-weight name/title/infohash lexemes above are always
+	// kept, only the lowest-weight path segments are truncated.
+	budget := fts.MaxTsvectorBytes - len(tsv.String())
 	for _, str := range tc.Torrent.fileSearchStrings() {
-		tsv.AddText(str, fts.TsvectorWeightD)
+		if budget <= 0 {
+			break
+		}
+
+		budget = tsv.AddTextBounded(str, fts.TsvectorWeightD, budget)
 	}
 
 	tc.Tsv = tsv

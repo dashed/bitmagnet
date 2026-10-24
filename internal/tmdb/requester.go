@@ -26,7 +26,9 @@ func (r requester) Request(
 		SetQueryParams(queryParams).
 		SetResult(&result).
 		Get(path)
-	if err == nil && !res.IsSuccess() {
+	if err != nil {
+		err = redactTransportError(err)
+	} else if !res.IsSuccess() {
 		switch res.StatusCode() {
 		case http.StatusUnauthorized:
 			err = ErrUnauthorized

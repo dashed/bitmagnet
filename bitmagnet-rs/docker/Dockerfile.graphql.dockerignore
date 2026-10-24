@@ -1,0 +1,6 @@
+.git
+data
+webui/node_modules
+webui-react/node_modules
+bitmagnet-rs/target
+bitmagnet-rs/**/target

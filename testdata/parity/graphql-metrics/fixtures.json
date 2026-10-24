@@ -1,0 +1,112 @@
+{
+  "queueJobs": [
+    {
+      "id": "graphql-metrics-oracle-pending-early",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-pending-early",
+      "queue": "graphql_metrics_oracle",
+      "status": "pending",
+      "runAfter": "2099-06-01T00:05:00Z",
+      "ranAt": null,
+      "createdAt": "2099-06-01T00:05:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-pending-late",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-pending-late",
+      "queue": "graphql_metrics_oracle",
+      "status": "pending",
+      "runAfter": "2099-06-01T02:05:00Z",
+      "ranAt": null,
+      "createdAt": "2099-06-01T02:05:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-processed-a",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-processed-a",
+      "queue": "graphql_metrics_oracle",
+      "status": "processed",
+      "runAfter": "2099-06-01T00:09:59.250000Z",
+      "ranAt": "2099-06-01T00:10:00Z",
+      "createdAt": "2099-06-01T00:10:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-processed-b",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-processed-b",
+      "queue": "graphql_metrics_oracle",
+      "status": "processed",
+      "runAfter": "2099-06-01T00:10:59.500000Z",
+      "ranAt": "2099-06-01T00:11:00Z",
+      "createdAt": "2099-06-01T00:11:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-retry-zero",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-retry-zero",
+      "queue": "graphql_metrics_oracle",
+      "status": "retry",
+      "runAfter": "2099-06-01T00:20:00Z",
+      "ranAt": "2099-06-01T00:20:00Z",
+      "createdAt": "2099-06-01T00:20:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-failed-negative",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-failed-negative",
+      "queue": "graphql_metrics_oracle",
+      "status": "failed",
+      "runAfter": "2099-06-01T00:31:00Z",
+      "ranAt": "2099-06-01T00:30:00Z",
+      "createdAt": "2099-06-01T00:30:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-other-processed",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-other-processed",
+      "queue": "graphql_metrics_other",
+      "status": "processed",
+      "runAfter": "2099-06-01T00:39:00Z",
+      "ranAt": "2099-06-01T00:40:00Z",
+      "createdAt": "2099-06-01T00:40:00Z"
+    },
+    {
+      "id": "graphql-metrics-oracle-other-go-float",
+      "fingerprint": "graphql-metrics-oracle-fingerprint-other-go-float",
+      "queue": "graphql_metrics_other",
+      "status": "processed",
+      "runAfter": "2099-06-01T00:41:48.500267Z",
+      "ranAt": "2099-06-01T00:42:00Z",
+      "createdAt": "2099-06-01T00:42:00Z"
+    }
+  ],
+  "sources": [
+    {"key": "graphql_metrics_a", "name": "GraphQL metrics A"},
+    {"key": "graphql_metrics_b", "name": "GraphQL metrics B"}
+  ],
+  "torrentSources": [
+    {
+      "infoHash": "feedfacefeedfacefeedfacefeedface00000001",
+      "source": "graphql_metrics_a",
+      "createdAt": "2099-06-01T00:00:00Z",
+      "updatedAt": "2099-06-01T00:59:59.999999Z"
+    },
+    {
+      "infoHash": "feedfacefeedfacefeedfacefeedface00000002",
+      "source": "graphql_metrics_a",
+      "createdAt": "2099-06-01T00:00:00Z",
+      "updatedAt": "2099-06-01T01:00:00Z"
+    },
+    {
+      "infoHash": "feedfacefeedfacefeedfacefeedface00000003",
+      "source": "graphql_metrics_a",
+      "createdAt": "2099-06-01T00:00:00Z",
+      "updatedAt": "2099-06-01T01:00:00.000001Z"
+    },
+    {
+      "infoHash": "feedfacefeedfacefeedfacefeedface00000004",
+      "source": "graphql_metrics_b",
+      "createdAt": "2099-06-01T00:30:00Z",
+      "updatedAt": "2099-06-01T01:30:00Z"
+    },
+    {
+      "infoHash": "feedfacefeedfacefeedfacefeedface00000005",
+      "source": "graphql_metrics_b",
+      "createdAt": "2099-06-01T00:00:00Z",
+      "updatedAt": "2099-06-01T02:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package bitmagnet.v1;
+
+import "bitmagnet/common.proto";
+
+// FileSearchService — the L2b cross-file search surface served by the DuckDB
+// on-Parquet sidecar (bitmagnet-filesearch). Kept SEPARATE from the
+// torrent-grained SearchService: different grain (per file), different engine
+// (DuckDB, not Tantivy). See docs/dev/L2-duckdb-parquet-search-rust-spec.md §2d.
+//
+// All filters are STRUCTURED so the sidecar binds them as SQL parameters; the
+// only free-text field is `path_query`, applied as an escaped ILIKE substring
+// (mandatorily paginated — a broad path-ILIKE is an unprunable full scan, the
+// L3 ngram index is the escalation, out of scope here).
+
+// One matching file row (collapse_to_torrent = false).
+message FileHit {
+  string info_hash = 1;       // 40-char hex
+  uint32 file_index = 2;
+  string path = 3;
+  string extension = 4;       // "" = NULL extension
+  uint64 size = 5;
+}
+
+// One matching torrent (collapse_to_torrent = true, the default): a torrent
+// with >= 1 matching file plus a per-torrent count and a small preview.
+message TorrentFileGroup {
+  string info_hash = 1;
+  uint64 matching_file_count = 2;
+  uint64 matching_total_size = 3;
+  uint64 matching_max_size = 4;
+  repeated FileHit preview = 5;   // up to `preview_limit` matching files
+}
+
+// Structured file filters. Empty repeated fields / unset optionals = no filter.
+message FileFilters {
+  repeated string extensions = 1;        // ext IN (...), '' = NULL extension
+  repeated ContentType content_types = 2; // reserved (denorm column, v2)
+  optional uint64 size_min = 3;
+  optional uint64 size_max = 4;
+  optional string path_query = 5;        // escaped ILIKE substring
+  // BitTorrent padding files (BEP-47 `.pad/`, BitComet markers) are excluded
+  // by default — they are alignment filler, 3.7% of rows and 55% of the
+  // NULL-extension bucket. true = include them (forces the fact path; the
+  // rollups are built padding-free).
+  bool include_padding = 6;
+}
+
+// Keyset cursor: opaque token from a previous response (sort-key + tiebreak).
+message FilePagination {
+  uint32 limit = 1;
+  string cursor = 2;          // empty = first page
+}
+
+// field in {"size", "path", "info_hash"}.
+message FileSortBy {
+  string field = 1;
+  bool descending = 2;
+}
+
+message SearchFilesRequest {
+  FileFilters filters = 1;
+  FilePagination pagination = 2;
+  repeated FileSortBy sort = 3;
+  // Default true: one row per torrent. false: individual file rows.
+  bool collapse_to_torrent = 4;
+  // Matching-file preview size when collapsed (default 5).
+  uint32 preview_limit = 5;
+}
+
+message SearchFilesResponse {
+  // Exactly one of these is populated depending on collapse_to_torrent.
+  repeated FileHit files = 1;
+  repeated TorrentFileGroup groups = 2;
+  // Opaque keyset cursor for the next page ("" = no more).
+  string next_cursor = 3;
+  bool has_next = 4;
+}
+
+message CountFilesRequest {
+  FileFilters filters = 1;
+  // Count distinct torrents (true) vs files (false).
+  bool collapse_to_torrent = 2;
+}
+
+message CountFilesResponse {
+  uint64 count = 1;
+  // True if the count is an estimate (e.g. a deadline-capped scan).
+  bool estimated = 2;
+}
+
+message FacetsRequest {
+  FileFilters filters = 1;
+  // e.g. "extension", "size_histogram".
+  repeated string facet_fields = 2;
+}
+
+message FileFacetBucket {
+  string value = 1;
+  uint64 count = 2;
+  uint64 total_size = 3;
+}
+
+message FileFacet {
+  string field = 1;
+  repeated FileFacetBucket buckets = 2;
+}
+
+message FacetsResponse {
+  repeated FileFacet facets = 1;
+}
+
+message ReloadRequest {
+  // Optional: only reload if the current generation differs from this token.
+  string expect_version = 1;
+}
+
+message ReloadResponse {
+  bool reloaded = 1;
+  string base_version = 2;
+  string delta_version = 3;
+}
+
+message FileHealthCheckRequest {}
+
+message FileHealthCheckResponse {
+  enum ServingStatus {
+    SERVING_STATUS_UNKNOWN = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+  }
+  ServingStatus status = 1;
+  string base_version = 2;
+  string delta_version = 3;
+  // Seconds since the loaded delta generation's watermark (freshness monitor).
+  int64 delta_age_seconds = 4;
+}
+
+service FileSearchService {
+  rpc SearchFiles(SearchFilesRequest) returns (SearchFilesResponse);
+  rpc CountFiles(CountFilesRequest) returns (CountFilesResponse);
+  rpc Facets(FacetsRequest) returns (FacetsResponse);
+  rpc Reload(ReloadRequest) returns (ReloadResponse);
+  rpc HealthCheck(FileHealthCheckRequest) returns (FileHealthCheckResponse);
+}

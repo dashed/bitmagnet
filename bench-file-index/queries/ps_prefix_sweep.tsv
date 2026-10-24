@@ -1,0 +1,84 @@
+# PS-T3 micro-bench — broad per-keystroke prefix sweep (group<TAB>query)
+#
+# Purpose: measure latency at the SHORT-prefix end (the per-keystroke worst case
+# that EXP-D2 left open). Groups are charset×length so `recall`/`pathquery`
+# report p50/p95/p99 PER (charset, prefix-length). Members are deliberately the
+# BROADEST substrings we expect in torrent paths (largest match-sets = slowest
+# queries) — the bench is a worst-case probe, not a representative-query probe.
+#
+# Length is the # of chars a user has typed. min-chars=3 is the design floor, so
+# ascii3/cjk3 are the GATE rows (G3 = broadest-3-char < 50 ms warm p50); the
+# 2-char rows are included to quantify what min-chars=3 buys, and 4/5-char rows
+# to show the selectivity gradient as the user keeps typing.
+#
+# ASCII members lean on release-name boilerplate (years, codecs, resolutions,
+# scene tags) — the highest-frequency substrings in the corpus.
+
+# --- 2 chars (broadest; below the min-chars=3 floor — diagnostic only) -------
+ascii2	20
+ascii2	10
+ascii2	x2
+ascii2	mp
+ascii2	s0
+ascii2	72
+ascii2	dv
+ascii2	19
+
+# --- 3 chars (THE GATE: broadest realistic firing query) ---------------------
+ascii3	202
+ascii3	108
+ascii3	720
+ascii3	264
+ascii3	265
+ascii3	mp4
+ascii3	mkv
+ascii3	s01
+ascii3	web
+ascii3	rar
+ascii3	the
+ascii3	x26
+ascii3	dts
+ascii3	aac
+
+# --- 4 chars -----------------------------------------------------------------
+ascii4	1080
+ascii4	x264
+ascii4	x265
+ascii4	2020
+ascii4	2021
+ascii4	h264
+ascii4	web-
+ascii4	s01e
+ascii4	hevc
+ascii4	blur
+
+# --- 5 chars -----------------------------------------------------------------
+ascii5	1080p
+ascii5	s01e0
+ascii5	bluray
+ascii5	2160p
+ascii5	hdtv.
+ascii5	webrip
+
+# --- CJK 2 chars (broadest CJK; below the floor — diagnostic) ----------------
+cjk2	电影
+cjk2	中文
+cjk2	高清
+cjk2	字幕
+cjk2	动画
+cjk2	日本
+cjk2	国语
+
+# --- CJK 3 chars (CJK GATE) --------------------------------------------------
+cjk3	中文字
+cjk3	高清版
+cjk3	电影版
+cjk3	无删减
+cjk3	蓝光原
+cjk3	国语版
+
+# --- CJK 4 chars -------------------------------------------------------------
+cjk4	中文字幕
+cjk4	蓝光原盘
+cjk4	高清完整
+cjk4	无损音乐

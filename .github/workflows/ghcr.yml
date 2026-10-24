@@ -2,6 +2,8 @@ name: Deploy Image to GHCR
 
 on:
   push:
+    branches:
+      - "**"
     tags:
       - "v*.*.*"
 
@@ -10,7 +12,7 @@ env:
   REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
@@ -100,6 +102,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}},prefix=v
             type=semver,pattern={{major}}.{{minor}},prefix=v
+            type=sha,prefix=,format=short
             type=ref,event=branch
             type=ref,event=pr
           flavor: |
@@ -121,7 +124,7 @@ jobs:
           context: .
           file: ./ci.Dockerfile
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=${{ (github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request') && 'true' || 'false' }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}

@@ -1,0 +1,11 @@
+# Keep the Docker build context small and the layer cache stable.
+# The builder only needs Cargo manifests, the lockfile, crates/ and proto/.
+target/
+**/target/
+.git/
+.gitignore
+.github/
+docs/
+docker/
+*.md
+.dockerignore

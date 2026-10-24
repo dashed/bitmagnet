@@ -4,11 +4,13 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli/args"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cli/hooks"
+	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/blobmigrationcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/classifiercmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/configcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/processcmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/reprocesscmd"
 	"github.com/bitmagnet-io/bitmagnet/internal/app/cmd/workercmd"
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration/blobmigrationfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking/blockingfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classifierfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/config/configfx"
@@ -25,6 +27,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/dhtfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainfofx"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/queuefx"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/searchfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/telemetry/telemetryfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb/tmdbfx"
 	"github.com/bitmagnet-io/bitmagnet/internal/torznab/torznabfx"
@@ -38,6 +41,7 @@ import (
 func New() fx.Option {
 	return fx.Module(
 		"app",
+		blobmigrationfx.New(),
 		blockingfx.New(),
 		classifierfx.New(),
 		configfx.New(),
@@ -53,17 +57,20 @@ func New() fx.Option {
 		metricsfx.New(),
 		processorfx.New(),
 		queuefx.New(),
+		searchfx.New(),
 		telemetryfx.New(),
 		tmdbfx.New(),
 		torznabfx.New(),
 		validationfx.New(),
 		versionfx.New(),
 		workerfx.New(),
+		configfx.NewConfigModule[webui.Config]("webui", webui.NewDefaultConfig()),
 		fx.Provide(
 			args.New,
 			cli.New,
 			hooks.New,
 			// cli commands:
+			blobmigrationcmd.New,
 			classifiercmd.New,
 			configcmd.New,
 			reprocesscmd.New,
@@ -72,5 +79,9 @@ func New() fx.Option {
 		),
 		fx.Provide(webui.New),
 		fx.Decorate(migrations.NewDecorator),
+		// Wrap the Postgres search.Search in the SearchRouter at root scope so the
+		// decoration reaches every consumer (GraphQL, Torznab, processor). No-op
+		// passthrough unless the "search" section is enabled. See searchfx.
+		fx.Decorate(searchfx.Decorator),
 	)
 }

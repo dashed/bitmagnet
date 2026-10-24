@@ -1,0 +1,323 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Nebula Nebula Nebula Rising 2024 1080p BluRay x264-AXIS</title>
+      <guid>61a59a48fdf3f3a42ade614352707f9bd46c42ba</guid>
+      <pubDate>Sun, 26 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>2100000000</size>
+      <enclosure length="2100000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:61a59a48fdf3f3a42ade614352707f9bd46c42ba&amp;dn=Nebula+Nebula+Nebula+Rising+2024+1080p+BluRay+x264-AXIS&amp;xl=2100000000"/>
+      <torznab:attr name="infohash" value="61a59a48fdf3f3a42ade614352707f9bd46c42ba"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:61a59a48fdf3f3a42ade614352707f9bd46c42ba&amp;dn=Nebula+Nebula+Nebula+Rising+2024+1080p+BluRay+x264-AXIS&amp;xl=2100000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="2100000000"/>
+      <torznab:attr name="publishdate" value="Sun, 26 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="500"/>
+      <torznab:attr name="leechers" value="10"/>
+      <torznab:attr name="peers" value="510"/>
+      <torznab:attr name="files" value="3"/>
+      <torznab:attr name="year" value="2024"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="AXIS"/>
+      <torznab:attr name="tmdb" value="101"/>
+      <torznab:attr name="imdb" value="1010101"/>
+    </item>
+    <item>
+      <title>Nebula Nebula Aurora 2019 720p WEB h264-LUME</title>
+      <guid>394ac0eff62c01d12ec9e30f3fbb23d33732e4e7</guid>
+      <pubDate>Sat, 25 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1400000000</size>
+      <enclosure length="1400000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:394ac0eff62c01d12ec9e30f3fbb23d33732e4e7&amp;dn=Nebula+Nebula+Aurora+2019+720p+WEB+h264-LUME&amp;xl=1400000000"/>
+      <torznab:attr name="infohash" value="394ac0eff62c01d12ec9e30f3fbb23d33732e4e7"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:394ac0eff62c01d12ec9e30f3fbb23d33732e4e7&amp;dn=Nebula+Nebula+Aurora+2019+720p+WEB+h264-LUME&amp;xl=1400000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1400000000"/>
+      <torznab:attr name="publishdate" value="Sat, 25 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="120"/>
+      <torznab:attr name="leechers" value="5"/>
+      <torznab:attr name="peers" value="125"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="video" value="H264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="LUME"/>
+    </item>
+    <item>
+      <title>Comet 2018 480p DVDRip XviD-RARL</title>
+      <guid>2e4474b2a3512a5fdf66c4328e2a76e8a895ea58</guid>
+      <pubDate>Fri, 24 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>730000000</size>
+      <enclosure length="730000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:2e4474b2a3512a5fdf66c4328e2a76e8a895ea58&amp;dn=Comet+2018+480p+DVDRip+XviD-RARL&amp;xl=730000000"/>
+      <torznab:attr name="infohash" value="2e4474b2a3512a5fdf66c4328e2a76e8a895ea58"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:2e4474b2a3512a5fdf66c4328e2a76e8a895ea58&amp;dn=Comet+2018+480p+DVDRip+XviD-RARL&amp;xl=730000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="730000000"/>
+      <torznab:attr name="publishdate" value="Fri, 24 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="video" value="XviD"/>
+      <torznab:attr name="resolution" value="480p"/>
+      <torznab:attr name="team" value="RARL"/>
+    </item>
+    <item>
+      <title>Titan 2021 2160p UHD BluRay x265-ZONE</title>
+      <guid>3a009cef7ee9190d9d740cccb5a6037cea0d23c2</guid>
+      <pubDate>Thu, 23 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>8200000000</size>
+      <enclosure length="8200000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="infohash" value="3a009cef7ee9190d9d740cccb5a6037cea0d23c2"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:3a009cef7ee9190d9d740cccb5a6037cea0d23c2&amp;dn=Titan+2021+2160p+UHD+BluRay+x265-ZONE&amp;xl=8200000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="8200000000"/>
+      <torznab:attr name="publishdate" value="Thu, 23 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="900"/>
+      <torznab:attr name="leechers" value="50"/>
+      <torznab:attr name="peers" value="950"/>
+      <torznab:attr name="files" value="5"/>
+      <torznab:attr name="year" value="2021"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="2160p"/>
+      <torznab:attr name="team" value="ZONE"/>
+      <torznab:attr name="tmdb" value="104"/>
+      <torznab:attr name="imdb" value="1040404"/>
+    </item>
+    <item>
+      <title>Vertex 3D 2022 1080p BluRay Half-SBS x264-DEPTH</title>
+      <guid>ccd8334a0fce9e94a7035156546adaddc3050136</guid>
+      <pubDate>Wed, 22 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>3100000000</size>
+      <enclosure length="3100000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:ccd8334a0fce9e94a7035156546adaddc3050136&amp;dn=Vertex+3D+2022+1080p+BluRay+Half-SBS+x264-DEPTH&amp;xl=3100000000"/>
+      <torznab:attr name="infohash" value="ccd8334a0fce9e94a7035156546adaddc3050136"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:ccd8334a0fce9e94a7035156546adaddc3050136&amp;dn=Vertex+3D+2022+1080p+BluRay+Half-SBS+x264-DEPTH&amp;xl=3100000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="3100000000"/>
+      <torznab:attr name="publishdate" value="Wed, 22 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="70"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="peers" value="73"/>
+      <torznab:attr name="files" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="DEPTH"/>
+    </item>
+    <item>
+      <title>Quasar 2023 1080p WEB x264-AXIS</title>
+      <guid>f0958739887453f248b21c0fa92b6b30ebd9934c</guid>
+      <pubDate>Tue, 21 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1900000000</size>
+      <enclosure length="1900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="infohash" value="f0958739887453f248b21c0fa92b6b30ebd9934c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:f0958739887453f248b21c0fa92b6b30ebd9934c&amp;dn=Quasar+2023+1080p+WEB+x264-AXIS&amp;xl=1900000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1900000000"/>
+      <torznab:attr name="publishdate" value="Tue, 21 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="300"/>
+      <torznab:attr name="leechers" value="8"/>
+      <torznab:attr name="peers" value="308"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2023"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="AXIS"/>
+      <torznab:attr name="tmdb" value="106"/>
+    </item>
+    <item>
+      <title>Pulsar 2017 720p BRRip x264-GRP</title>
+      <guid>9cd6504c6a1165bff923172c27ead0e8d92eee79</guid>
+      <pubDate>Mon, 20 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>1100000000</size>
+      <enclosure length="1100000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:9cd6504c6a1165bff923172c27ead0e8d92eee79&amp;dn=Pulsar+2017+720p+BRRip+x264-GRP&amp;xl=1100000000"/>
+      <torznab:attr name="infohash" value="9cd6504c6a1165bff923172c27ead0e8d92eee79"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:9cd6504c6a1165bff923172c27ead0e8d92eee79&amp;dn=Pulsar+2017+720p+BRRip+x264-GRP&amp;xl=1100000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="1100000000"/>
+      <torznab:attr name="publishdate" value="Mon, 20 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="40"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="42"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="GRP"/>
+    </item>
+    <item>
+      <title>Meteor 2016 480p WEBRip x264</title>
+      <guid>18f19bd92e28ae94ee49208ca3aeb23765d4d72c</guid>
+      <pubDate>Sun, 19 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>410000000</size>
+      <enclosure length="410000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="infohash" value="18f19bd92e28ae94ee49208ca3aeb23765d4d72c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="410000000"/>
+      <torznab:attr name="publishdate" value="Sun, 19 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="15"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="16"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="480p"/>
+    </item>
+    <item>
+      <title>Nebula S01E02 720p HDTV x264-FLEET</title>
+      <guid>59ecbf312f12bb268e28b0c866fb9222a75c8e58</guid>
+      <pubDate>Sat, 18 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>900000000</size>
+      <enclosure length="900000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="infohash" value="59ecbf312f12bb268e28b0c866fb9222a75c8e58"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:59ecbf312f12bb268e28b0c866fb9222a75c8e58&amp;dn=Nebula+S01E02+720p+HDTV+x264-FLEET&amp;xl=900000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="900000000"/>
+      <torznab:attr name="publishdate" value="Sat, 18 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="250"/>
+      <torznab:attr name="leechers" value="12"/>
+      <torznab:attr name="peers" value="262"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2020"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+      <torznab:attr name="team" value="FLEET"/>
+      <torznab:attr name="tmdb" value="201"/>
+      <torznab:attr name="imdb" value="2010101"/>
+    </item>
+    <item>
+      <title>Aurora S03E05 1080p WEB x265-DRACO</title>
+      <guid>58c718eb15c659bb2a8b162b87a0f67731807a90</guid>
+      <pubDate>Fri, 17 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>1600000000</size>
+      <enclosure length="1600000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:58c718eb15c659bb2a8b162b87a0f67731807a90&amp;dn=Aurora+S03E05+1080p+WEB+x265-DRACO&amp;xl=1600000000"/>
+      <torznab:attr name="infohash" value="58c718eb15c659bb2a8b162b87a0f67731807a90"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:58c718eb15c659bb2a8b162b87a0f67731807a90&amp;dn=Aurora+S03E05+1080p+WEB+x265-DRACO&amp;xl=1600000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="1600000000"/>
+      <torznab:attr name="publishdate" value="Fri, 17 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="180"/>
+      <torznab:attr name="leechers" value="9"/>
+      <torznab:attr name="peers" value="189"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="year" value="2019"/>
+      <torznab:attr name="season" value="3"/>
+      <torznab:attr name="episode" value="5"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="1080p"/>
+      <torznab:attr name="team" value="DRACO"/>
+      <torznab:attr name="tmdb" value="202"/>
+    </item>
+    <item>
+      <title>Comet S01E01 480p HDTV XviD</title>
+      <guid>ddeab1f8bfb935c35f47e4610d2919bbf46cb2c6</guid>
+      <pubDate>Thu, 16 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>350000000</size>
+      <enclosure length="350000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:ddeab1f8bfb935c35f47e4610d2919bbf46cb2c6&amp;dn=Comet+S01E01+480p+HDTV+XviD&amp;xl=350000000"/>
+      <torznab:attr name="infohash" value="ddeab1f8bfb935c35f47e4610d2919bbf46cb2c6"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:ddeab1f8bfb935c35f47e4610d2919bbf46cb2c6&amp;dn=Comet+S01E01+480p+HDTV+XviD&amp;xl=350000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="350000000"/>
+      <torznab:attr name="publishdate" value="Thu, 16 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="30"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="31"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="1"/>
+      <torznab:attr name="video" value="XviD"/>
+      <torznab:attr name="resolution" value="480p"/>
+    </item>
+    <item>
+      <title>Titan S02E10 2160p WEB x265-ZONE</title>
+      <guid>f0e68c086ec7981ced58cf7502b45b18c44c258f</guid>
+      <pubDate>Wed, 15 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>4200000000</size>
+      <enclosure length="4200000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:f0e68c086ec7981ced58cf7502b45b18c44c258f&amp;dn=Titan+S02E10+2160p+WEB+x265-ZONE&amp;xl=4200000000"/>
+      <torznab:attr name="infohash" value="f0e68c086ec7981ced58cf7502b45b18c44c258f"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:f0e68c086ec7981ced58cf7502b45b18c44c258f&amp;dn=Titan+S02E10+2160p+WEB+x265-ZONE&amp;xl=4200000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="4200000000"/>
+      <torznab:attr name="publishdate" value="Wed, 15 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="400"/>
+      <torznab:attr name="leechers" value="20"/>
+      <torznab:attr name="peers" value="420"/>
+      <torznab:attr name="files" value="2"/>
+      <torznab:attr name="year" value="2018"/>
+      <torznab:attr name="season" value="2"/>
+      <torznab:attr name="episode" value="10"/>
+      <torznab:attr name="video" value="x265"/>
+      <torznab:attr name="resolution" value="2160p"/>
+      <torznab:attr name="team" value="ZONE"/>
+      <torznab:attr name="tmdb" value="204"/>
+    </item>
+    <item>
+      <title>Quasar S05 Complete 1080p WEB x264</title>
+      <guid>3b9571986dbb3aedbca8b8cc7d305cd22d3601d3</guid>
+      <pubDate>Tue, 14 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>9000000000</size>
+      <enclosure length="9000000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:3b9571986dbb3aedbca8b8cc7d305cd22d3601d3&amp;dn=Quasar+S05+Complete+1080p+WEB+x264&amp;xl=9000000000"/>
+      <torznab:attr name="infohash" value="3b9571986dbb3aedbca8b8cc7d305cd22d3601d3"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:3b9571986dbb3aedbca8b8cc7d305cd22d3601d3&amp;dn=Quasar+S05+Complete+1080p+WEB+x264&amp;xl=9000000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="9000000000"/>
+      <torznab:attr name="publishdate" value="Tue, 14 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="60"/>
+      <torznab:attr name="leechers" value="3"/>
+      <torznab:attr name="peers" value="63"/>
+      <torznab:attr name="files" value="12"/>
+      <torznab:attr name="season" value="5"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="1080p"/>
+    </item>
+    <item>
+      <title>Pulsar S01E02 720p HDTV x264</title>
+      <guid>6e0555c97b1b7fb6e53867e644e0747a15938196</guid>
+      <pubDate>Mon, 13 Jan 2020 00:00:00 +0000</pubDate>
+      <category>tv_show</category>
+      <size>700000000</size>
+      <enclosure length="700000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:6e0555c97b1b7fb6e53867e644e0747a15938196&amp;dn=Pulsar+S01E02+720p+HDTV+x264&amp;xl=700000000"/>
+      <torznab:attr name="infohash" value="6e0555c97b1b7fb6e53867e644e0747a15938196"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:6e0555c97b1b7fb6e53867e644e0747a15938196&amp;dn=Pulsar+S01E02+720p+HDTV+x264&amp;xl=700000000"/>
+      <torznab:attr name="category" value="5000"/>
+      <torznab:attr name="size" value="700000000"/>
+      <torznab:attr name="publishdate" value="Mon, 13 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="22"/>
+      <torznab:attr name="leechers" value="2"/>
+      <torznab:attr name="peers" value="24"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="season" value="1"/>
+      <torznab:attr name="episode" value="2"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="720p"/>
+    </item>
+    <item>
+      <title>Mystery Bundle Pack</title>
+      <guid>4b594b976f5fa0811fe817039e0f7166001337ea</guid>
+      <pubDate>Thu, 02 Jan 2020 00:00:00 +0000</pubDate>
+      <category>Unknown</category>
+      <size>120000000</size>
+      <enclosure length="120000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="infohash" value="4b594b976f5fa0811fe817039e0f7166001337ea"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="category" value="8000"/>
+      <torznab:attr name="size" value="120000000"/>
+      <torznab:attr name="publishdate" value="Thu, 02 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="8"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="9"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

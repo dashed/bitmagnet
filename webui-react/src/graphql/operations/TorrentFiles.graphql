@@ -1,0 +1,28 @@
+query TorrentFiles(
+  $hasNextPage: Boolean
+  $infoHashes: [Hash20!]
+  $limit: Int
+  $orderBy: [TorrentFilesOrderByInput!]
+  $totalCount: Boolean
+) {
+  torrent {
+    files(
+      input: {
+        hasNextPage: $hasNextPage
+        infoHashes: $infoHashes
+        limit: $limit
+        orderBy: $orderBy
+        totalCount: $totalCount
+      }
+    ) {
+      totalCount
+      hasNextPage
+      items {
+        index
+        path
+        fileType
+        size
+      }
+    }
+  }
+}

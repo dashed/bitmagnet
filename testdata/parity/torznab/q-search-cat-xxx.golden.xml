@@ -1,0 +1,43 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Some Adult Scene 1080p</title>
+      <guid>61105f9672987bf12af7b7258b4ddc1e317063d8</guid>
+      <pubDate>Sun, 05 Jan 2020 00:00:00 +0000</pubDate>
+      <category>xxx</category>
+      <size>2000000000</size>
+      <enclosure length="2000000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:61105f9672987bf12af7b7258b4ddc1e317063d8&amp;dn=Some+Adult+Scene+1080p&amp;xl=2000000000"/>
+      <torznab:attr name="infohash" value="61105f9672987bf12af7b7258b4ddc1e317063d8"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:61105f9672987bf12af7b7258b4ddc1e317063d8&amp;dn=Some+Adult+Scene+1080p&amp;xl=2000000000"/>
+      <torznab:attr name="category" value="6000"/>
+      <torznab:attr name="size" value="2000000000"/>
+      <torznab:attr name="publishdate" value="Sun, 05 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="55"/>
+      <torznab:attr name="leechers" value="6"/>
+      <torznab:attr name="peers" value="61"/>
+      <torznab:attr name="files" value="1"/>
+      <torznab:attr name="resolution" value="1080p"/>
+    </item>
+    <item>
+      <title>Mystery Bundle Pack</title>
+      <guid>4b594b976f5fa0811fe817039e0f7166001337ea</guid>
+      <pubDate>Thu, 02 Jan 2020 00:00:00 +0000</pubDate>
+      <category>Unknown</category>
+      <size>120000000</size>
+      <enclosure length="120000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="infohash" value="4b594b976f5fa0811fe817039e0f7166001337ea"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:4b594b976f5fa0811fe817039e0f7166001337ea&amp;dn=Mystery+Bundle+Pack&amp;xl=120000000"/>
+      <torznab:attr name="category" value="8000"/>
+      <torznab:attr name="size" value="120000000"/>
+      <torznab:attr name="publishdate" value="Thu, 02 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="8"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="9"/>
+      <torznab:attr name="files" value="1"/>
+    </item>
+  </channel>
+</rss>

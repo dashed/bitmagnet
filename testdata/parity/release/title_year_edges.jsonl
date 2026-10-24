@@ -1,0 +1,10 @@
+{"id":"two_digit_no_year","name":"Movie.99.1080p","hint":"","matched":true,"title":"Movie 99 1080p","year":0,"episodes":"","rest":""}
+{"id":"year_17xx_no_match","name":"Movie.1750.1080p","hint":"","matched":true,"title":"Movie 1750 1080p","year":0,"episodes":"","rest":""}
+{"id":"year_2099_boundary","name":"Movie.2099.1080p","hint":"","matched":true,"title":"Movie","year":2099,"episodes":"","rest":"1080p"}
+{"id":"year_2100_no_match","name":"Movie.2100.1080p","hint":"","matched":true,"title":"Movie 2100 1080p","year":0,"episodes":"","rest":""}
+{"id":"only_year","name":"1999","hint":"","matched":true,"title":"1999","year":0,"episodes":"","rest":""}
+{"id":"double_year","name":"1984.1999.1080p","hint":"","matched":true,"title":"1984","year":1999,"episodes":"","rest":"1080p"}
+{"id":"year_glued","name":"Movie2019.1080p","hint":"","matched":true,"title":"Movie2019 1080p","year":0,"episodes":"","rest":""}
+{"id":"tv_no_ep_hint","name":"Just.A.Show.1080p","hint":"tv_show","matched":true,"title":"Just A Show 1080p","year":0,"episodes":"","rest":""}
+{"id":"empty_name","name":"","hint":"","matched":false,"title":"","year":0,"episodes":"","rest":""}
+{"id":"year_1800","name":"Movie.1800.1080p","hint":"","matched":true,"title":"Movie","year":1800,"episodes":"","rest":"1080p"}

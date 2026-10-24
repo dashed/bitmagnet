@@ -1,0 +1,26 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:torznab="http://torznab.com/schemas/2015/feed">
+  <channel>
+    <title>bitmagnet</title>
+    <pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate>
+    <lastBuildDate>Mon, 01 Jan 0001 00:00:00 +0000</lastBuildDate>
+    <response xmlns="http://www.newznab.com/DTD/2010/feeds/attributes/"/>
+    <item>
+      <title>Meteor 2016 480p WEBRip x264</title>
+      <guid>18f19bd92e28ae94ee49208ca3aeb23765d4d72c</guid>
+      <pubDate>Sun, 19 Jan 2020 00:00:00 +0000</pubDate>
+      <category>movie</category>
+      <size>410000000</size>
+      <enclosure length="410000000" type="application/x-bittorrent;x-scheme-handler/magnet" url="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="infohash" value="18f19bd92e28ae94ee49208ca3aeb23765d4d72c"/>
+      <torznab:attr name="magneturl" value="magnet:?xt=urn:btih:18f19bd92e28ae94ee49208ca3aeb23765d4d72c&amp;dn=Meteor+2016+480p+WEBRip+x264&amp;xl=410000000"/>
+      <torznab:attr name="category" value="2000"/>
+      <torznab:attr name="size" value="410000000"/>
+      <torznab:attr name="publishdate" value="Sun, 19 Jan 2020 00:00:00 +0000"/>
+      <torznab:attr name="seeders" value="15"/>
+      <torznab:attr name="leechers" value="1"/>
+      <torznab:attr name="peers" value="16"/>
+      <torznab:attr name="video" value="x264"/>
+      <torznab:attr name="resolution" value="480p"/>
+    </item>
+  </channel>
+</rss>

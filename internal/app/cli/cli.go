@@ -65,7 +65,10 @@ func New(p Params) (Result, error) {
 					args = []string{args[0]}
 				}
 				if err := app.RunContext(context.Background(), args); err != nil {
-					panic(err)
+					p.Logger.Errorw("cli command failed", "error", err)
+					if shutdownErr := p.Shutdowner.Shutdown(fx.ExitCode(1)); shutdownErr != nil {
+						p.Logger.Errorw("cli shutdown failed", "error", shutdownErr)
+					}
 				}
 			})()
 			return nil

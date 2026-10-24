@@ -1,0 +1,16 @@
+/*
+ * Mantine 9.4.0 exports ./styles/* from @mantine/core. Its build script generates
+ * these files from package source CSS modules, so P0 imports only the provider
+ * globals and the component CSS actually used below instead of the blanket
+ * @mantine/core/styles.css bundle.
+ */
+@import "@mantine/core/styles/baseline.css";
+@import "@mantine/core/styles/default-css-variables.css";
+@import "@mantine/core/styles/global.css";
+@import "@mantine/core/styles/Alert.css";
+@import "@mantine/core/styles/Button.css";
+@import "@mantine/core/styles/Combobox.css";
+@import "@mantine/core/styles/Input.css";
+@import "@mantine/core/styles/SegmentedControl.css";
+@import "@mantine/core/styles/Skeleton.css";
+@import "@mantine/core/styles/Text.css";

@@ -1,6 +1,8 @@
 package resolvers
 
 import (
+	"net/http"
+
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
@@ -9,6 +11,8 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/metrics/torrentmetrics"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/queue/manager"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/filesearch"
+	"github.com/bitmagnet-io/bitmagnet/internal/search/pathsearch"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 )
 
@@ -21,9 +25,18 @@ type Resolver struct {
 	Search               search.Search
 	Workers              worker.Registry
 	Checker              health.Checker
+	HealthPeerConfig     health.PeerConfig
+	healthPeerHTTPClient *http.Client
 	QueueMetricsClient   queuemetrics.Client
 	QueueManager         manager.Manager
 	TorrentMetricsClient torrentmetrics.Client
 	Processor            processor.Processor
 	BlockingManager      blocking.Manager
+	// Pathsearch is the L3 exact-refine composer, or nil when the pathsearch
+	// feature is disabled (SEARCH_PATHSEARCH_ENABLED=false). A nil composer means
+	// the GraphQL search layer takes its existing PostgreSQL path unchanged.
+	Pathsearch *pathsearch.Composer
+	// FileSearch is the L2 direct-serve filesearch client. It may be the
+	// intentional disabled implementation when SEARCH_FILE_SEARCH_ENABLED=false.
+	FileSearch filesearch.Client
 }

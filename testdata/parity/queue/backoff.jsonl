@@ -1,0 +1,6 @@
+{"id":"backoff_retries_0","subsystem":"queue_backoff","input":{"retries":0},"expected":{"deterministicSeconds":16,"jitterMinSeconds":0,"jitterMaxSeconds":0}}
+{"id":"backoff_retries_1","subsystem":"queue_backoff","input":{"retries":1},"expected":{"deterministicSeconds":17,"jitterMinSeconds":0,"jitterMaxSeconds":29}}
+{"id":"backoff_retries_2","subsystem":"queue_backoff","input":{"retries":2},"expected":{"deterministicSeconds":32,"jitterMinSeconds":0,"jitterMaxSeconds":58}}
+{"id":"backoff_retries_3","subsystem":"queue_backoff","input":{"retries":3},"expected":{"deterministicSeconds":97,"jitterMinSeconds":0,"jitterMaxSeconds":87}}
+{"id":"backoff_retries_4","subsystem":"queue_backoff","input":{"retries":4},"expected":{"deterministicSeconds":272,"jitterMinSeconds":0,"jitterMaxSeconds":116}}
+{"id":"backoff_retries_5","subsystem":"queue_backoff","input":{"retries":5},"expected":{"deterministicSeconds":641,"jitterMinSeconds":0,"jitterMaxSeconds":145}}
