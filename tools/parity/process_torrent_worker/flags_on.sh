@@ -14,18 +14,23 @@
 #          must be identical.
 #          G2 (with RUST_WORKER): Rust alone vs Go run 1; identical dumps and
 #          request multisets, no job left behind, no abstention logged.
-#   hint, enriched, conflict, ambiguous  Explicit hints as prod has them
-#          (flagson_hints.go): sourced (by-ID actions, /find, existing
-#          associations), enriched type-only, two images of one content in a
-#          job, and associations Go picks among by row order; each in a
-#          database of its own. G-1 as for main, then flagson-hint-coverage
+#   hint, enriched, conflict, ambiguous, payload  Explicit hints as prod has
+#          them (flagson_hints.go): sourced (by-ID actions, /find and its
+#          failures, existing associations, flags-off jobs), enriched
+#          type-only (flags-off and rematch jobs too), two images of one
+#          content in a job, and associations Go picks among by row order;
+#          and payloads with a flag beside the attach flags or a top-level key
+#          not spelled as Go's (M4c); each in a database of its own. G-1 as
+#          for main, then flagson-hint-coverage
 #          (hint and enriched: floors over the jobs the HINT_EXPECT generation
-#          processes, enforced for process). With RUST_WORKER: Rust then Go;
-#          flagson-abstained -expect-mode checks Rust left exactly the jobs
-#          that generation leaves (HINT_EXPECT=abstain: a worker before M3b,
-#          every hinted job but a bare type-only one, reason hint;
-#          HINT_EXPECT=process: M3b, only the refused values, ambiguities and
-#          conflicts), each with its reason, none of its writes, and no
+#          processes, enforced for process and offline). With RUST_WORKER:
+#          Rust then Go; flagson-abstained -expect-mode checks Rust left
+#          exactly the jobs that generation leaves (HINT_EXPECT=abstain: a
+#          worker before M3b, every hinted job but a bare type-only one,
+#          reason hint; HINT_EXPECT=process: M3b, only the refused values,
+#          ambiguities and conflicts; HINT_EXPECT=offline: M3b without
+#          --admit-flags-on, every flags-on job unclaimed and the flags-off
+#          sourced hints), each with its reason, none of its writes, and no
 #          resolver call started for a job left before classification; the
 #          dumps and request multisets must equal Go alone. A conflict job is
 #          refused after classification, so under process its Rust requests
@@ -63,11 +68,12 @@
 #          is queued verbatim (flagson-organic-enqueue). G-1 as for main, then
 #          flagson-organic-coverage (per-slice floors from Go's tape) and
 #          flagson-organic-check (G7: the fault slices' republish rows). With
-#          RUST_WORKER (an M4b worker, organic admission on): Rust then Go at
-#          --organic-max-priority 20 (G2, G3, G5) and at 0 (G4), each equal to
-#          Go alone; flagson-abstained -organic-bound checks that Rust left
-#          exactly the negative slices' jobs, the hinted slice's (one
-#          abstention each) and those above the bound, untouched.
+#          RUST_WORKER (an M4b worker or later, organic admission on): Rust
+#          then Go at --organic-max-priority 20 (G2, G3, G5) and at 0 (G4),
+#          each equal to Go alone; flagson-abstained -organic-bound checks that
+#          Rust left exactly the negative slices' jobs, the hinted slice's
+#          (one abstention each; HINT_EXPECT=process: M3b processes them) and
+#          those above the bound, untouched.
 #   organic2  Round 2 over Go's drained organic round 1 (organic go1, from
 #          ORGANIC_RUN): flagson-requeue -organic queues the round-1 replay
 #          slices' torrents again in organic round-2 slices, half in
@@ -86,8 +92,10 @@
 #   REPLAY_LIMIT   real-name replay inputs in the main corpus (default 120000)
 #   PHASES         corpora to run (default "main hint enriched conflict ambiguous
 #                  fault abstain rematch")
-#   HINT_EXPECT    abstain (default: a worker before M3b) | process (M3b): what
-#                  the hint corpora's Rust phases expect
+#   HINT_EXPECT    abstain (default: a worker before M3b) | process (M3b) |
+#                  offline (M3b without --admit-flags-on, which every Rust
+#                  phase then runs; hint corpora and payload only): what the
+#                  hint corpora's Rust phases expect
 #   MAIN_RUN       the main phase's evidence the rematch phase starts from
 #                  (default $OUT/main); ${PREFIX}_main_go1 must still hold it
 #   ORGANIC_RUN    the same for organic2 (default $OUT/organic)
@@ -99,6 +107,12 @@
 #   TMDB_KEY       the dummy API key both sides send (never Go's default key,
 #                  which downgrades Go to 1 request/s)
 #   STUB_PORT      the stub's port (default 38573)
+#   G1_RUN         a previous run's evidence whose G-1 the hint corpora and
+#                  payload reuse: each corpus is seeded again and its seed files
+#                  must be byte-identical to G1_RUN's, whose go1 and go2 then
+#                  stand for this run's (no Go-alone runs)
+#   G1_PREFIX      G1_RUN's FLAGSON_PREFIX, for the coverage report's go1
+#                  database (default: this run's)
 #   SEED_ARGS      extra flagson-seed flags, e.g. "-hints 300" for a smoke run
 #   FLAGSON_PREFIX database name prefix (default bm_ptw_flagson), to keep
 #                  another run's databases on the same server
@@ -118,6 +132,8 @@ TMDB_KEY="${TMDB_KEY:-flagson-harness-dummy-key-0001}"
 # included) and the dump compares it.
 STUB_PORT="${STUB_PORT:-38573}"
 PREFIX="${FLAGSON_PREFIX:-bm_ptw_flagson}"
+G1_RUN="${G1_RUN:-}"
+G1_PREFIX="${G1_PREFIX:-$PREFIX}"
 HELD=2099-01-01
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
@@ -127,8 +143,18 @@ ORGANIC="${ORGANIC:-}"
 # The organic phases' bound, set around their Rust phases.
 ORGANIC_BOUND=
 
-if [[ "$HINT_EXPECT" != abstain && "$HINT_EXPECT" != process ]]; then
-  echo "HINT_EXPECT must be abstain or process" >&2; exit 2
+if [[ "$HINT_EXPECT" != abstain && "$HINT_EXPECT" != process && "$HINT_EXPECT" != offline ]]; then
+  echo "HINT_EXPECT must be abstain, process or offline" >&2; exit 2
+fi
+for corpus in $PHASES; do
+  case "$HINT_EXPECT/$corpus" in
+    offline/hint|offline/enriched|offline/conflict|offline/ambiguous|offline/payload|process/payload) ;;
+    offline/*) echo "HINT_EXPECT=offline runs the hint corpora and payload only, not $corpus" >&2; exit 2 ;;
+    */payload) echo "the payload corpus has expectations for process and offline only" >&2; exit 2 ;;
+  esac
+done
+if [[ "$HINT_EXPECT" == offline && -n "$ORGANIC" ]]; then
+  echo "HINT_EXPECT=offline: the worker without --admit-flags-on has no organic admission" >&2; exit 2
 fi
 if [[ "$TMDB_KEY" == 9c6689fa83ae6814fbfb200d70bba3a8 ]]; then
   echo "TMDB_KEY must not be Go's default key" >&2; exit 2
@@ -179,17 +205,21 @@ start_go() { # db rundir [tape] -> pid
 }
 # One log per Rust phase ($3), for flagson-abstained and flagson-attribution,
 # with the resolver guard's call events (debug). The cool-off outlasts any
-# phase, so each abstention is logged (and its requests made) once.
+# phase, so each abstention is logged (and its requests made) once. Under
+# HINT_EXPECT=offline the worker runs without --admit-flags-on, and so
+# without a TMDB key or URL, which it refuses without the switch.
 start_rust() { # db rundir log -> pid
-  local organic=()
+  local admit=(--admit-flags-on)
   if [[ -n "$ORGANIC_BOUND" ]]; then
-    organic=(--admit-organic --organic-max-priority "$ORGANIC_BOUND")
+    admit+=(--admit-organic --organic-max-priority "$ORGANIC_BOUND")
   elif [[ "$ORGANIC" == 1 ]]; then
-    organic=(--admit-organic --organic-max-priority 20)
+    admit+=(--admit-organic --organic-max-priority 20)
   fi
+  admit+=(--tmdb-api-key "$TMDB_KEY" --tmdb-base-url "$STUB_URL")
+  [[ "$HINT_EXPECT" == offline ]] && admit=()
   (cd "$2" && BITMAGNET_POSTGRES_DSN="$(dsn "$1")" RUST_LOG=info,bitmagnet_processor::live=debug exec "$RUST_WORKER" \
     --expected-classifier-config-digest "$GO_DIGEST" --check-interval-seconds 1 --abstain-cooloff-seconds 86400 \
-    --admit-flags-on "${organic[@]}" --tmdb-api-key "$TMDB_KEY" --tmdb-base-url "$STUB_URL" >>"$2/$3" 2>&1) &
+    "${admit[@]}" >>"$2/$3" 2>&1) &
   echo $!
 }
 # The workers are not this shell's children (they start inside a command
@@ -458,7 +488,7 @@ rust_then_go_organic() { # corpus name bound
   local corpus=$1 name=$2 bound=$3 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid T0=$SECONDS info expect hinted left
   mkdir -p "$run"; ln -sfn ../seed "$run/seed"
   clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
-  info="$("$PTW" flagson-organic-info -seed "$OUT/$corpus/seed" -left "$bound")"
+  info="$("$PTW" flagson-organic-info -seed "$OUT/$corpus/seed" -left "$bound" -expect-mode "$HINT_EXPECT")"
   read -r expect hinted <<<"$info"
   : >"$run/stub.jsonl"
   start_stub "$corpus" "$run"
@@ -471,7 +501,7 @@ rust_then_go_organic() { # corpus name bound
   echo "$corpus $name Rust phase (bound $bound): $((SECONDS - T0))s, $(grep -c . "$run/rust-requests.jsonl" || true) stub requests, left for Go: $left (expected $expect, $hinted hinted)" \
     | tee -a "$OUT/timing.txt" "$OUT/gates.txt"
   if ! "$PTW" flagson-abstained -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -organic-bound "$bound" \
-      -rust-log "$run/rust.log" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
+      -expect-mode "$HINT_EXPECT" -rust-log "$run/rust.log" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
   if [[ "$left" -gt 0 ]]; then
     start_stub "$corpus" "$run"
     pid="$(start_go "$db" "$run")"; drain "$db" 0; stop "$pid"
@@ -483,18 +513,18 @@ rust_then_go_organic() { # corpus name bound
 
 # Rust, then Go for what it left, over a hint corpus (flagson_hints.go) under
 # HINT_EXPECT: flagson-abstained -expect-mode checks Rust left exactly the jobs
-# that worker generation leaves. Rust's requests are rust-requests.jsonl, Go's
-# after it go-requests.jsonl.
+# that worker generation leaves; an unclaimed job logs no line. Rust's
+# requests are rust-requests.jsonl, Go's after it go-requests.jsonl.
 rust_then_go_hinted() { # corpus name
-  local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid T0=$SECONDS expect left rust_lines
+  local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid T0=$SECONDS expect lines left rust_lines
   mkdir -p "$run"; ln -sfn ../seed "$run/seed"
   clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
-  expect="$(python3 -I -c 'import json,sys
-print(sum(1 for l in open(sys.argv[1]) if json.loads(l)["expect"][sys.argv[2]] != "none"))' \
-    "$OUT/$corpus/seed/jobs.jsonl" "$HINT_EXPECT")"
+  read -r expect lines < <(python3 -I -c 'import json,sys
+left = [r for r in (json.loads(l)["expect"][sys.argv[2]] for l in open(sys.argv[1])) if r != "none"]
+print(len(left), sum(1 for r in left if r != "unclaimed"))' "$OUT/$corpus/seed/jobs.jsonl" "$HINT_EXPECT")
   : >"$run/stub.jsonl"
   start_stub "$corpus" "$run"
-  pid="$(start_rust "$db" "$run" rust.log)"; wait_abstained "$run/rust.log" "$expect"; drain "$db" "$expect" 15; stop "$pid"
+  pid="$(start_rust "$db" "$run" rust.log)"; wait_abstained "$run/rust.log" "$lines"; drain "$db" "$expect" 15; stop "$pid"
   stop "$STUB_PID"
   cp "$run/stub.jsonl" "$run/rust-requests.jsonl"
   rust_lines="$(wc -l <"$run/stub.jsonl")"
@@ -511,6 +541,21 @@ print(sum(1 for l in open(sys.argv[1]) if json.loads(l)["expect"][sys.argv[2]] !
   tail -n "+$((rust_lines + 1))" "$run/stub.jsonl" >"$run/go-requests.jsonl"
   dump_run "$db" "$run"
   echo "$corpus $name (Rust then Go, HINT_EXPECT=$HINT_EXPECT): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
+}
+
+# G1_RUN's G-1 for a corpus whose fresh seed is byte-identical to that run's.
+reuse_g1() { # corpus
+  local corpus=$1 f
+  for f in jobs.jsonl plan.jsonl notes.jsonl responses.jsonl faults.jsonl seeded-content.txt \
+      seeded-associations.txt summary.json; do
+    if ! cmp -s "$OUT/$corpus/seed/$f" "$G1_RUN/$corpus/seed/$f"; then
+      echo "$corpus: seed/$f differs from $G1_RUN's, so its G-1 cannot stand for this run's" >&2; exit 1
+    fi
+  done
+  ln -sfn "$G1_RUN/$corpus/go1" "$OUT/$corpus/go1"
+  ln -sfn "$G1_RUN/$corpus/go2" "$OUT/$corpus/go2"
+  echo "$corpus G-1 reused from $G1_RUN (seed files byte-identical):" | tee -a "$OUT/gates.txt"
+  grep "^$corpus G-1 " "$G1_RUN/gates.txt" | sed 's/^/  /' | tee -a "$OUT/gates.txt"
 }
 
 # G7 in a drained organic run ($2).
@@ -561,12 +606,16 @@ for corpus in $PHASES; do
         compare "main G2 go1 vs rust" "$OUT/main/go1" "$OUT/main/rust"
       fi
       ;;
-    hint|enriched|conflict|ambiguous)
-      go_alone "$corpus" go1 tape
-      go_alone "$corpus" go2
-      compare "$corpus G-1 go1 vs go2" "$OUT/$corpus/go1" "$OUT/$corpus/go2"
+    hint|enriched|conflict|ambiguous|payload)
+      if [[ -n "$G1_RUN" ]]; then
+        reuse_g1 "$corpus"
+      else
+        go_alone "$corpus" go1 tape
+        go_alone "$corpus" go2
+        compare "$corpus G-1 go1 vs go2" "$OUT/$corpus/go1" "$OUT/$corpus/go2"
+      fi
       if [[ $corpus == hint || $corpus == enriched ]]; then
-        if "$PTW" flagson-hint-coverage -dir "$OUT/$corpus/go1" -dsn "$(dsn "${PREFIX}_${corpus}_go1")" \
+        if "$PTW" flagson-hint-coverage -dir "$OUT/$corpus/go1" -dsn "$(dsn "${G1_PREFIX}_${corpus}_go1")" \
             -mode "$HINT_EXPECT" >"$OUT/$corpus/coverage.txt" 2>&1; then
           echo "$corpus coverage (HINT_EXPECT=$HINT_EXPECT): PASS (see $OUT/$corpus/coverage.txt)" | tee -a "$OUT/gates.txt"
         else

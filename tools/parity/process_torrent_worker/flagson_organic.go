@@ -23,8 +23,9 @@ package main
 // whose keys no other torrent shares, so moving their jobs in the claim order
 // changes nobody else's result:
 //
-//   - hinted (G5): DHT-shaped jobs with one sourced hint each, which Rust
-//     claims and abstains from once, leaving them to Go;
+//   - hinted (G5): DHT-shaped jobs with one sourced hint each, which a worker
+//     before M3b claims and abstains from once, leaving them to Go, and M3b
+//     processes;
 //   - fault-* (G7): a per-torrent 500 in a DHT-shaped, a rematch and a
 //     local-search-off batch child, whose republish must be Go's
 //     {"ClassifierWorkflow":"default",...} row at priority 0, mode and flags
@@ -1156,9 +1157,10 @@ func runFlagsOnOrganicCheck(args []string) error {
 
 // organicLeft is the reason each job a Rust worker with --organic-max-priority
 // bound must leave gives, by fingerprint: "none" for a negative slice's job
-// and for one above the bound (never claimed), "hint" for a hinted slice's
-// (claimed, then abstained from).
-func organicLeft(jobs []plannedJob, bound int) map[string]string {
+// and for one above the bound (never claimed), and for a worker generation
+// before M3b (mode abstain, flags_on.sh HINT_EXPECT) "hint" for a hinted
+// slice's (claimed, then abstained from); M3b (process) processes those.
+func organicLeft(jobs []plannedJob, bound int, mode string) map[string]string {
 	left := map[string]string{}
 
 	for _, j := range jobs {
@@ -1167,7 +1169,7 @@ func organicLeft(jobs []plannedJob, bound int) map[string]string {
 		switch {
 		case sl.role == organicRoleNegative || j.Priority > bound:
 			left[j.Fingerprint] = abstainNone
-		case sl.role == organicRoleHinted:
+		case sl.role == organicRoleHinted && mode == hintExpectAbstain:
 			left[j.Fingerprint] = abstainHint
 		}
 	}
@@ -1219,6 +1221,7 @@ func runFlagsOnOrganicInfo(args []string) error {
 	seedDir := fs.String("seed", "", "the phase's seed dir (slices.jsonl, jobs.jsonl)")
 	batchSlices := fs.Bool("batch", false, "print the batch slices, one per line")
 	bound := fs.Int("left", -1, "print \"<jobs left> <abstentions>\" for this --organic-max-priority")
+	mode := fs.String("expect-mode", hintExpectAbstain, "abstain | process: the worker generation (hinted jobs left or processed)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1252,7 +1255,11 @@ func runFlagsOnOrganicInfo(args []string) error {
 		return err
 	}
 
-	left := organicLeft(jobs, *bound)
+	if *mode != hintExpectAbstain && *mode != hintExpectProcess {
+		return fmt.Errorf("-expect-mode %q: want %s or %s", *mode, hintExpectAbstain, hintExpectProcess)
+	}
+
+	left := organicLeft(jobs, *bound, *mode)
 	hinted := 0
 
 	for _, reason := range left {

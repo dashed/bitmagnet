@@ -2,11 +2,11 @@ package main
 
 // flagson-hint-coverage: the hint corpora's floors (flagson_hints.go), from a
 // Go-alone run's drained database and tape, over the jobs a worker generation
-// processes (-mode, flags_on.sh HINT_EXPECT). In process mode those are the
-// Rust-vs-Go counts once the run's G2 dumps are identical, and the floors are
-// enforced; in abstain mode a worker before M3b leaves these jobs to Go, so
-// they are reported only. Every count over all of the corpus's jobs (the Go
-// oracle's) is reported beside it.
+// processes (-mode, flags_on.sh HINT_EXPECT). In process and offline mode
+// those are the Rust-vs-Go counts once the run's G2 dumps are identical, and
+// that generation's floors are enforced; in abstain mode a worker before M3b
+// leaves these jobs to Go, so process's floors are reported only. Every count
+// over all of the corpus's jobs (the Go oracle's) is reported beside it.
 
 import (
 	"context"
@@ -47,9 +47,36 @@ const (
 	metricLanguages    = "languages applied"
 	metricReuse        = "reuse kept the hint's attributes"
 	metricBare         = "bare type-only hint classified"
+
+	metricOffAttached    = "flags-off: sourced hint attached locally, no request"
+	metricOffKept        = "flags-off: association kept by ID, no request"
+	metricOffStale       = "flags-off: stale association replaced, no request"
+	metricOffUnmatched   = "flags-off: sourced hint unmatched, no request"
+	metricFind404Failed  = "/find 404: torrent failed, nothing written"
+	metricFind500Failed  = "/find 500: torrent failed, nothing written"
+	metricFindFaultOK    = "/find fault job: companion attached by /find"
+	metricFindDetails404 = "/find fault job: details 404 unmatched, searched"
+	metricFindEmpty      = "/find fault job: empty /find, searched"
+	metricOffVideo       = "flags-off: video_* applied"
+	metricOffReuse       = "flags-off: reuse kept the hint's video_*"
+	metricOffOtherType   = "flags-off: other-type association replaced"
+	metricRematchVideo   = "rematch: video_* applied, stale association replaced"
 )
 
-var hintFloors = map[string][]hintFloor{
+// hintFloors are each generation's floors by corpus; abstain reports
+// process's.
+var hintFloors = map[string]map[string][]hintFloor{
+	hintExpectProcess: processFloors,
+	hintExpectOffline: {
+		corpusEnriched: {
+			{metricOffVideo, 200},
+			{metricOffReuse, 50},
+			{metricOffOtherType, 25},
+		},
+	},
+}
+
+var processFloors = map[string][]hintFloor{
 	corpusHint: {
 		{metricImdbFind, 2000},
 		{metricTvdbFind, 200},
@@ -60,6 +87,15 @@ var hintFloors = map[string][]hintFloor{
 		{metricIDNoSource, 100},
 		{metricTvdbMovie, 100},
 		{metricSourcedRich, 200},
+		{metricOffAttached, 150},
+		{metricOffKept, 50},
+		{metricOffStale, 40},
+		{metricOffUnmatched, 40},
+		{metricFind404Failed, 10},
+		{metricFind500Failed, 10},
+		{metricFindFaultOK, 15},
+		{metricFindDetails404, 15},
+		{metricFindEmpty, 15},
 	},
 	corpusEnriched: {
 		{"video_resolution applied", 500},
@@ -78,6 +114,10 @@ var hintFloors = map[string][]hintFloor{
 		{metricLanguages, 100},
 		{metricReuse, 100},
 		{metricBare, 100},
+		{metricOffVideo, 200},
+		{metricOffReuse, 50},
+		{metricOffOtherType, 25},
+		{metricRematchVideo, 100},
 	},
 }
 
@@ -86,6 +126,7 @@ type hintTape struct {
 	finds        []string // each /find's external_source
 	findDetails  bool     // a details request after a /find
 	byIDDetails  bool     // a details request before any /find or search
+	searched     bool     // a TMDB search
 	tmdbRequests int
 	observations int
 }
@@ -110,7 +151,7 @@ func runFlagsOnHintCoverage(args []string) error {
 	fs := flag.NewFlagSet("flagson-hint-coverage", flag.ExitOnError)
 	dir := fs.String("dir", "", "a Go-alone run of a hint corpus: seed/ (jobs.jsonl, notes.jsonl, summary.json), tape/tape.jsonl")
 	dsn := fs.String("dsn", "", "that run's drained database")
-	mode := fs.String("mode", hintExpectProcess, "abstain | process: the worker generation whose processed jobs count")
+	mode := fs.String("mode", hintExpectProcess, "abstain | process | offline: the worker generation whose processed jobs count")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -237,7 +278,7 @@ func readHintTapes(path string) (map[string]hintTape, error) {
 				sawFind = true
 				t.finds = append(t.finds, req.QueryParams["external_source"])
 			case strings.HasPrefix(req.Path, "/search/"):
-				sawSearch = true
+				sawSearch, t.searched = true, true
 			case sawFind:
 				t.findDetails = true
 			case !sawSearch:
@@ -373,11 +414,20 @@ func hintMetrics(category string, t hintTape, o *hintOutcome, seeded map[string]
 	}
 
 	if o == nil || len(o.tcs) == 0 {
+		switch {
+		case !slices.Contains(t.finds, "imdb_id"):
+		case category == catFindFault404:
+			metrics = append(metrics, metricFind404Failed)
+		case category == catFindFault500:
+			metrics = append(metrics, metricFind500Failed)
+		}
+
 		return metrics
 	}
 
 	tc := o.tcs[0]
 	single := len(o.tcs) == 1 && tc.touched
+	attached := !strings.HasSuffix(tc.id, ":?:?")
 	videoApplied, folded, anyVideo := true, 0, false
 
 	for _, c := range videoColumns {
@@ -458,9 +508,74 @@ func hintMetrics(category string, t hintTape, o *hintOutcome, seeded map[string]
 		if single {
 			metrics = append(metrics, metricBare)
 		}
+	default:
+		metrics = append(metrics, newSliceMetrics(category, t, o, seeded, attached, anyVideo && videoApplied)...)
 	}
 
 	return metrics
+}
+
+// newSliceMetrics are the metrics of the pseudo-titled slices' categories.
+func newSliceMetrics(category string, t hintTape, o *hintOutcome, seeded map[string]bool, attached, videoApplied bool) []string {
+	tc := o.tcs[0]
+	single := len(o.tcs) == 1 && tc.touched
+	replaced := len(o.tcs) == 1 && !seeded[tc.id]
+	noRequest := t.tmdbRequests == 0
+
+	var metric string
+
+	switch category {
+	case catOffLocalImdb, catOffLocalMulti, catOffLocalTmdb:
+		if single && attached && !seeded[tc.id] && noRequest {
+			metric = metricOffAttached
+		}
+	case catOffPreAttached, catOffReAttached:
+		if single && seeded[tc.id] && noRequest {
+			metric = metricOffKept
+		}
+	case catOffStale:
+		if replaced && attached && noRequest {
+			metric = metricOffStale
+		}
+	case catOffUnmatched:
+		if single && !attached && noRequest {
+			metric = metricOffUnmatched
+		}
+	case catFindFaultOK:
+		if single && attached && t.findDetails {
+			metric = metricFindFaultOK
+		}
+	case catFindFaultDetails:
+		if single && !attached && t.findDetails && t.searched {
+			metric = metricFindDetails404
+		}
+	case catFindFaultEmpty:
+		if single && !attached && len(t.finds) > 0 && !t.findDetails && t.searched {
+			metric = metricFindEmpty
+		}
+	case catOffVideo:
+		if single && videoApplied {
+			metric = metricOffVideo
+		}
+	case catOffReuse:
+		if single && seeded[tc.id] && noRequest && videoApplied {
+			metric = metricOffReuse
+		}
+	case catOffReuseOtherType:
+		if replaced {
+			metric = metricOffOtherType
+		}
+	case catRematchVideo:
+		if single && replaced && videoApplied {
+			metric = metricRematchVideo
+		}
+	}
+
+	if metric == "" {
+		return nil
+	}
+
+	return []string{metric}
 }
 
 func reportHintCoverage(corpus, mode string, oracle, counted coverageCounts, jobsBySlice map[string][2]int) error {
@@ -469,14 +584,19 @@ func reportHintCoverage(corpus, mode string, oracle, counted coverageCounts, job
 
 	failed := 0
 	isFloor := map[string]bool{}
+	floors, enforced := hintFloors[mode][corpus], mode != hintExpectAbstain
 
-	for _, f := range hintFloors[corpus] {
+	if !enforced {
+		floors = hintFloors[hintExpectProcess][corpus]
+	}
+
+	for _, f := range floors {
 		isFloor[f.name] = true
 		status := verdictMet
 
 		switch {
 		case counted[f.name] >= f.floor:
-		case mode == hintExpectProcess:
+		case enforced:
 			status = verdictNotMet
 			failed++
 		default:

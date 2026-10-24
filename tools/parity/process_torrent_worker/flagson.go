@@ -69,6 +69,10 @@ type plannedJob struct {
 	Hold        string   `json:"hold,omitempty"`  // parked until flags_on.sh releases it (holdAlone, holdAuth)
 	// ClassifyMode is the payload's mode (the rematch phase's rematch jobs).
 	ClassifyMode processor.ClassifyMode `json:"classifyMode,omitempty"`
+	// ExtraFlags are the payload's flags beside the three attach flags.
+	ExtraFlags classifier.Flags `json:"extraFlags,omitempty"`
+	// PayloadEdit is the edit of the payload's top-level keys.
+	PayloadEdit payloadEdit `json:"payloadEdit,omitempty"`
 	// Expect is what each worker generation does with a hint corpus's job
 	// (flagson_hints.go sliceExpect), keyed by flags_on.sh HINT_EXPECT.
 	Expect map[string]string `json:"expect,omitempty"`
@@ -87,6 +91,8 @@ type jobSpec struct {
 	classifyMode processor.ClassifyMode
 	hashes       []protocol.ID
 	fault        string
+	extraFlags   classifier.Flags // beside the three attach flags (the payload corpus)
+	edit         payloadEdit      // of the payload's top-level keys (the payload corpus)
 	expect       map[string]string
 }
 
@@ -102,6 +108,10 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 			flags = flagsOnFlags()
 		}
 
+		for name, value := range spec.extraFlags {
+			flags[name] = value
+		}
+
 		job, err := processor.NewQueueJob(processor.MessageParams{
 			ClassifyMode:       spec.classifyMode,
 			ClassifierWorkflow: "default",
@@ -110,6 +120,12 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 		})
 		if err != nil {
 			return nil, err
+		}
+
+		if spec.edit != "" {
+			if job, err = editedQueueJob(job, spec.edit); err != nil {
+				return nil, err
+			}
 		}
 
 		batch.Queue(`INSERT INTO queue_jobs
@@ -133,6 +149,8 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 			InfoHashes:   hashes,
 			Fault:        spec.fault,
 			ClassifyMode: spec.classifyMode,
+			ExtraFlags:   spec.extraFlags,
+			PayloadEdit:  spec.edit,
 			Expect:       spec.expect,
 		})
 

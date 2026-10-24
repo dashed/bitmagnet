@@ -16,8 +16,10 @@ package main
 //     of that job: "hint" for the attach-hint refusal before classification,
 //     "ambiguous" for associations Go picks among by row order (also before
 //     classification), "conflict" for two images of one content (after it,
-//     naming the content), "resolver" for a content resolver failure, "none"
-//     for no abstention; and no resolver call started for a torrent of a job
+//     naming the content), "resolver" for a content resolver failure,
+//     "payload" for a payload outside Go's key set (before anything is read,
+//     naming no torrent), "none" and "unclaimed" for no abstention (a job
+//     never claimed); and no resolver call started for a torrent of a job
 //     left before classification.
 //
 // With -expect-mode (the hint corpora, flagson_hints.go) the expected jobs and
@@ -28,8 +30,10 @@ package main
 // With -organic-bound (the organic corpus, flagson_organic.go) the expected
 // jobs come from each job's slice and priority instead: a negative slice's
 // jobs, never claimed (no line); the hinted slice's, claimed and abstained
-// from ("hint"); and every other job above the bound, never claimed. Their
-// TMDB content is not checked: the replay slices share search keys.
+// from ("hint") by a worker before M3b (-expect-mode abstain, the default)
+// and processed by M3b (process); and every other job above the bound,
+// never claimed. Their TMDB content is not checked: the replay slices share
+// search keys.
 
 import (
 	"context"
@@ -58,7 +62,7 @@ func runFlagsOnAbstained(args []string) error {
 	rustLog := fs.String("rust-log", "", "the Rust worker's log of this phase alone")
 	reason := fs.String("reason", "", "hint | resolver | none: the abstention every -rust-log line must give")
 	organicBound := fs.Int("organic-bound", -1, "the organic corpus's Rust --organic-max-priority (replaces -slice, -reason, -expect)")
-	expectMode := fs.String("expect-mode", "", "abstain | process: the hint corpora's worker generation (replaces -slice, -reason, -expect)")
+	expectMode := fs.String("expect-mode", "", "abstain | process | offline: the hint corpora's worker generation (replaces -slice, -reason, -expect); with -organic-bound, abstain | process")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -89,7 +93,16 @@ func runFlagsOnAbstained(args []string) error {
 
 	switch {
 	case *organicBound >= 0:
-		wantReason = organicLeft(jobs, *organicBound)
+		mode := *expectMode
+		if mode == "" {
+			mode = hintExpectAbstain
+		}
+
+		if mode != hintExpectAbstain && mode != hintExpectProcess {
+			return fmt.Errorf("-expect-mode %q with -organic-bound: want %s or %s", mode, hintExpectAbstain, hintExpectProcess)
+		}
+
+		wantReason = organicLeft(jobs, *organicBound, mode)
 		*expect = len(wantReason)
 	case *expectMode != "":
 		if wantReason, err = hintExpectations(jobs, *expectMode); err != nil {
@@ -106,17 +119,9 @@ func runFlagsOnAbstained(args []string) error {
 
 	// TMDB ids whose content the seed holds already (a search's "existing"
 	// category): Rust writing nothing leaves those as they are.
-	seededTMDB := map[string]bool{}
-
-	seededContent, err := os.ReadFile(filepath.Join(*seedDir, "seeded-content.txt"))
+	seededTMDB, err := readSeededTMDB(*seedDir)
 	if err != nil {
 		return err
-	}
-
-	for _, ref := range strings.Split(string(seededContent), "\n") {
-		if _, id, ok := strings.Cut(ref, "/"+model.SourceTmdb+"/"); ok {
-			seededTMDB[id] = true
-		}
 	}
 
 	plannedBy := map[string]plannedTorrent{}
@@ -330,7 +335,8 @@ func runFlagsOnAbstained(args []string) error {
 
 // The abstention a left job's Rust log line gives (worker.rs): the
 // attach-hint refusal, a content resolver failure, or no line at all (and
-// abstainAmbiguous, abstainConflict: flagson_hints.go).
+// abstainAmbiguous, abstainConflict, abstainPayload, abstainUnclaimed:
+// flagson_hints.go).
 const (
 	abstainHint     = "hint"
 	abstainResolver = "resolver"
@@ -346,9 +352,14 @@ var (
 	logReason        = regexp.MustCompile(` reason="?([a-z]+)"?`)
 )
 
-// logConflict is the case-E abstention's text, which names the content, not a
-// torrent.
-const logConflict = "conflicting attached content images for "
+// The conflict abstentions' texts name the content, not a torrent; the
+// payload abstentions name neither.
+const (
+	logConflict           = "conflicting attached content images for "
+	logConflictReusable   = "conflicting reusable content images for "
+	logPayloadKeySet      = "abstaining from process_torrent payload outside Go's key set"
+	logPayloadUndecodable = "abstaining from undecodable process_torrent payload"
+)
 
 // readSeededAssociations reads a seed's association ids, if it has any.
 func readSeededAssociations(seedDir string) ([]string, error) {
@@ -366,6 +377,30 @@ func readSeededAssociations(seedDir string) ([]string, error) {
 	for _, line := range strings.Split(string(raw), "\n") {
 		if line != "" {
 			ids = append(ids, line)
+		}
+	}
+
+	return ids, nil
+}
+
+// readSeededTMDB reads the TMDB ids of a seed's content, if it seeds any
+// (organic2's seed doesn't). Without the file every TMDB id an abstained
+// torrent leads to must have no content row, the stricter check.
+func readSeededTMDB(seedDir string) (map[string]bool, error) {
+	raw, err := os.ReadFile(filepath.Join(seedDir, "seeded-content.txt"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	ids := map[string]bool{}
+
+	for _, ref := range strings.Split(string(raw), "\n") {
+		if _, id, ok := strings.Cut(ref, "/"+model.SourceTmdb+"/"); ok {
+			ids[id] = true
 		}
 	}
 
@@ -391,9 +426,13 @@ func seededOf(seeded []string, hashes [][]byte) int {
 	return n
 }
 
-// checkNoResolverCalls: Rust left a hint or ambiguous job before classifying
-// it, so no resolver call may have started for one of its torrents (the
-// guard's debug events, flagson_attribution.go).
+// leftBeforeClassification are the reasons of jobs Rust leaves before it
+// classifies any of their torrents, or never claims.
+var leftBeforeClassification = []string{abstainHint, abstainAmbiguous, abstainPayload, abstainUnclaimed}
+
+// checkNoResolverCalls: Rust left a hint, ambiguous or payload job before
+// classifying it, or never claimed it, so no resolver call may have started
+// for one of its torrents (the guard's debug events, flagson_attribution.go).
 func checkNoResolverCalls(path string, reasonOf map[string]string, hashesOf map[string][]string) (int, []string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -417,7 +456,7 @@ func checkNoResolverCalls(path string, reasonOf map[string]string, hashesOf map[
 	var violations []string
 
 	for id, hashes := range hashesOf {
-		if reasonOf[id] != abstainHint && reasonOf[id] != abstainAmbiguous {
+		if !slices.Contains(leftBeforeClassification, reasonOf[id]) {
 			continue
 		}
 
@@ -435,13 +474,18 @@ func checkNoResolverCalls(path string, reasonOf map[string]string, hashesOf map[
 	return calls, violations, nil
 }
 
+// abstainReasons are the reasons checkAbstainLog knows.
+var abstainReasons = []string{
+	abstainHint, abstainAmbiguous, abstainConflict, abstainResolver, abstainPayload, abstainNone, abstainUnclaimed,
+}
+
 // checkAbstainLog matches the Rust worker's abstention lines (worker.rs) to the
 // jobs left behind, by queue job ID: one line with the job's reason, or none
-// for reason "none".
+// for reason "none" or "unclaimed".
 func checkAbstainLog(path string, reasonOf map[string]string, hashesOf map[string][]string) (int, []string, error) {
 	for _, reason := range reasonOf {
-		if !slices.Contains([]string{abstainHint, abstainAmbiguous, abstainConflict, abstainResolver, abstainNone}, reason) {
-			return 0, nil, fmt.Errorf("reason %q: want hint, ambiguous, conflict, resolver or none", reason)
+		if !slices.Contains(abstainReasons, reason) {
+			return 0, nil, fmt.Errorf("reason %q: want one of %v", reason, abstainReasons)
 		}
 	}
 
@@ -462,24 +506,26 @@ func checkAbstainLog(path string, reasonOf map[string]string, hashesOf map[strin
 
 		lines++
 
-		var kind string
+		var kind, wantLabel string
 
 		var hash []string
 
 		switch {
 		case strings.Contains(line, "abstaining from process_torrent job after a content resolver failure"):
-			kind, hash = abstainResolver, logInfoHash.FindStringSubmatch(line)
+			kind, wantLabel, hash = abstainResolver, abstainResolver, logInfoHash.FindStringSubmatch(line)
 		case strings.Contains(line, "abstaining from unsupported process_torrent job"):
-			kind, hash = unsupportedAbstention(line)
+			kind, wantLabel, hash = unsupportedAbstention(line)
+		case strings.Contains(line, logPayloadKeySet), strings.Contains(line, logPayloadUndecodable):
+			kind, wantLabel = abstainPayload, abstainPayload
 		}
 
 		id := logJobID.FindStringSubmatch(line)
 		label := logReason.FindStringSubmatch(line)
 
 		switch {
-		case id == nil || kind == "" || (hash == nil && kind != abstainConflict):
+		case id == nil || kind == "" || (hash == nil && kind != abstainConflict && kind != abstainPayload):
 			violations = append(violations, "unparsed Rust abstention: "+line)
-		case label != nil && label[1] != kind:
+		case label != nil && label[1] != wantLabel:
 			violations = append(violations, fmt.Sprintf("Rust abstention labelled %s for a %s text: %s", label[1], kind, line))
 		case hashesOf[id[1]] == nil:
 			violations = append(violations, "Rust abstained from a job that is not left: "+line)
@@ -494,7 +540,7 @@ func checkAbstainLog(path string, reasonOf map[string]string, hashesOf map[strin
 
 	for id := range hashesOf {
 		want := 1
-		if reasonOf[id] == abstainNone {
+		if reasonOf[id] == abstainNone || reasonOf[id] == abstainUnclaimed {
 			want = 0
 		}
 
@@ -509,20 +555,26 @@ func checkAbstainLog(path string, reasonOf map[string]string, hashesOf map[strin
 }
 
 // unsupportedAbstention classifies an "unsupported" abstention line by its
-// error text: the hint and ambiguity texts name a torrent, the conflict text
-// names the content.
-func unsupportedAbstention(line string) (string, []string) {
+// error text, with the reason label the worker gives it: the hint and
+// ambiguity texts name a torrent, the conflict texts name the content. Two
+// attached images of one content (case E) are labelled unsupported, two
+// reusable ones conflict (worker.rs AbstainReason::of).
+func unsupportedAbstention(line string) (kind, label string, hash []string) {
 	if hash := logHintHash.FindStringSubmatch(line); hash != nil {
-		return abstainHint, hash
+		return abstainHint, abstainHint, hash
 	}
 
 	if hash := logAmbiguousHash.FindStringSubmatch(line); hash != nil {
-		return abstainAmbiguous, hash
+		return abstainAmbiguous, abstainAmbiguous, hash
 	}
 
 	if strings.Contains(line, logConflict) {
-		return abstainConflict, nil
+		return abstainConflict, "unsupported", nil
 	}
 
-	return "", nil
+	if strings.Contains(line, logConflictReusable) {
+		return abstainConflict, abstainConflict, nil
+	}
+
+	return "", "", nil
 }

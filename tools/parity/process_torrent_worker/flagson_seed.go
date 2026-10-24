@@ -12,6 +12,9 @@ package main
 //     and the associations they meet (flagson_hints.go). A worker before M3b
 //     abstains from every hinted job but a bare type-only one; M3b processes
 //     them as Go does.
+//   - payload: payloads with a flag beside the three attach flags or a
+//     top-level key not spelled as Go's, which M4c leaves to Go
+//     (flagson_hints.go).
 //   - fault and abstain: TMDB failures by class, the first the ones Go handles
 //     per torrent (G2-fault), the second the ones Rust leaves to Go (G3); see
 //     flagson_faults.go.
@@ -115,7 +118,7 @@ func runFlagsOnSeed(args []string) error {
 	fs.StringVar(&o.dsn, "dsn", "", "disposable PostgreSQL DSN, migrated and empty")
 	fs.StringVar(&o.root, "root", ".", "repository root")
 	fs.StringVar(&o.out, "out", "", "directory for responses.jsonl, faults.jsonl, jobs.jsonl, plan.jsonl, ...")
-	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | enriched | conflict | ambiguous | fault | abstain | organic")
+	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | enriched | conflict | ambiguous | payload | fault | abstain | organic")
 	fs.IntVar(&o.replayLimit, "replay-limit", 120000, "real-name replay inputs in the main corpus")
 	fs.IntVar(&o.jobSize, "job-size", 100, "info hashes per job")
 	fs.IntVar(&o.flagsOffEvery, "flags-off-every", 8, "every Nth main chunk carries a flags-off payload (0 = none)")
@@ -192,6 +195,8 @@ func runFlagsOnSeed(args []string) error {
 		err = s.seedConflict()
 	case corpusAmbiguous:
 		err = s.seedAmbiguous()
+	case corpusPayload:
+		err = s.seedPayload()
 	case corpusFault:
 		err = s.seedFaultCorpus(faultCorpusClasses)
 	case corpusAbstain:

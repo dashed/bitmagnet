@@ -178,16 +178,22 @@ func TestOrganicLeft(t *testing.T) {
 
 	for _, tc := range []struct {
 		bound int
+		mode  string
 		want  map[string]string
 	}{
-		{20, map[string]string{"hinted": "hint", "negative": "none"}},
-		{10, map[string]string{"hinted": "hint", "negative": "none", "importer": "none"}},
-		{0, map[string]string{
+		{20, hintExpectAbstain, map[string]string{"hinted": "hint", "negative": "none"}},
+		{10, hintExpectAbstain, map[string]string{"hinted": "hint", "negative": "none", "importer": "none"}},
+		{0, hintExpectAbstain, map[string]string{
 			"hinted": "hint", "negative": "none", "importer": "none", "graphql": "none", "apis-off": "none", "fault": "none",
 		}},
+		// M3b processes the hinted slice's sourced hints.
+		{20, hintExpectProcess, map[string]string{"negative": "none"}},
+		{0, hintExpectProcess, map[string]string{
+			"negative": "none", "importer": "none", "graphql": "none", "apis-off": "none", "fault": "none",
+		}},
 	} {
-		if got := organicLeft(jobs, tc.bound); !maps.Equal(got, tc.want) {
-			t.Errorf("bound %d: %v, want %v", tc.bound, got, tc.want)
+		if got := organicLeft(jobs, tc.bound, tc.mode); !maps.Equal(got, tc.want) {
+			t.Errorf("bound %d, %s: %v, want %v", tc.bound, tc.mode, got, tc.want)
 		}
 	}
 }

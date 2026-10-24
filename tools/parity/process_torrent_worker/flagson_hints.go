@@ -18,7 +18,14 @@ package main
 //     job holds two images of it (CONTRACT.md case E);
 //   - ambiguous: torrents whose associations Go picks among by row order
 //     (several reusable ones, or source-less ones of several types), and the
-//     same shapes with one candidate.
+//     same shapes with one candidate;
+//   - payload (M4c): payloads Go accepts that are not exactly a producer's:
+//     ClassifierFlags carrying a flag beside the three attach flags, or a
+//     top-level key not spelled as Go's; and the same jobs canonical.
+//
+// Each corpus also has pseudo-titled slices in flags-off jobs (sourced hints
+// resolved by ID against local content only, enriched hints, refused values,
+// ambiguities), and the hint corpus a slice of /find failures.
 //
 // Every job holds torrents of one slice, and sliceExpect says what each worker
 // generation does with a slice's jobs (plannedJob.Expect, keyed by flags_on.sh
@@ -27,9 +34,16 @@ package main
 //   - abstain: a worker before M3b, which processes a bare type-only hint only
 //     (languages '[]' or NULL, episodes '{}' or NULL, nothing else) and
 //     abstains from any other hinted job with reason hint;
-//   - process: M3b, which processes sourced and enriched hints as Go does and
-//     abstains only from values it cannot reproduce (hint), from row-order
-//     ambiguities (ambiguous) and from conflicting images (conflict).
+//   - process: M3b with --admit-flags-on, which processes sourced and enriched
+//     hints as Go does and abstains only from values it cannot reproduce
+//     (hint), from row-order ambiguities (ambiguous) and from conflicting
+//     images (conflict);
+//   - offline: M3b without the switch, the flags-off worker: it never claims
+//     a flags-on job (unclaimed, no line), leaves a sourced hint to Go (hint:
+//     no live resolver) and processes an enriched one.
+//
+// The payload corpus's expectations are M4c's: M3b claims its extra-flag jobs
+// and classifies them.
 //
 // Rust runs first and Go settles what it left, so a slice one generation
 // processes and the other leaves must share no search or by-ID key with a
@@ -38,14 +52,17 @@ package main
 // pseudo-titled, with keys no other torrent makes.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/classifier"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -58,13 +75,19 @@ const (
 	corpusConflict  = "conflict"
 	corpusAmbiguous = "ambiguous"
 
+	corpusPayload = "payload"
+
 	// HINT_EXPECT: the worker generation a Rust phase runs.
 	hintExpectAbstain = "abstain"
 	hintExpectProcess = "process"
+	hintExpectOffline = "offline"
 
-	// Abstention reasons M3b adds (worker.rs AbstainReason).
+	// Abstention reasons M3b and M4c add (worker.rs AbstainReason), and
+	// unclaimed: a job the generation never claims, so it logs no line.
 	abstainAmbiguous = "ambiguous"
 	abstainConflict  = "conflict"
+	abstainPayload   = "payload"
+	abstainUnclaimed = "unclaimed"
 
 	// The note kind of every torrent of the hint corpora.
 	noteHint = "hint"
@@ -109,6 +132,28 @@ const (
 	catBare              = "bare"
 	catBareEpisodesEmpty = "bare-episodes-empty"
 	catBareReuse         = "bare-reuse"
+
+	// Flags-off sourced hints: by ID against local content only.
+	catOffLocalImdb   = "off-local-imdb"   // content carrying the imdb id
+	catOffLocalMulti  = "off-local-multi"  // several such, the first in identity order winning
+	catOffLocalTmdb   = "off-local-tmdb"   // content by primary key
+	catOffPreAttached = "off-pre-attached" // the association is the hinted content
+	catOffReAttached  = "off-re-attached"  // the association's content carries the imdb id
+	catOffStale       = "off-stale"        // the hinted content exists, the association is other content
+	catOffUnmatched   = "off-unmatched"    // no such content
+
+	// The /find failures and their companions.
+	catFindFault404     = "find-fault-404"
+	catFindFault500     = "find-fault-500"
+	catFindFaultOK      = "find-fault-ok"
+	catFindFaultDetails = "find-fault-details-404"
+	catFindFaultEmpty   = "find-fault-empty"
+
+	// Enriched hints in flags-off jobs, and rematched.
+	catOffVideo          = "off-video"
+	catOffReuse          = "off-reuse"
+	catOffReuseOtherType = "off-reuse-other-type"
+	catRematchVideo      = "rematch-video"
 )
 
 // Slices of the hint corpora; sliceHint (flagson.go) is the sourced one.
@@ -120,20 +165,87 @@ const (
 	sliceConflict         = "conflict"          // two images of one content in a job
 	sliceAmbiguous        = "ambiguous"         // associations Go picks among by row order
 	sliceAmbiguityControl = "ambiguity-control" // the same shapes with one candidate
+
+	sliceHintFlagsOff        = "hint-flags-off"         // pseudo-titled sourced hints in flags-off jobs
+	sliceHintFindFault       = "hint-find-fault"        // pseudo-titled: a /find 404 or 500 and its companions
+	sliceEnrichedFlagsOff    = "enriched-flags-off"     // pseudo-titled video_* hints in flags-off jobs
+	sliceRefusedFlagsOff     = "hint-refused-flags-off" // pseudo-titled refused values in flags-off jobs
+	sliceEnrichedRematch     = "enriched-rematch"       // pseudo-titled video_* hints over an association, rematched
+	sliceAmbiguousFlagsOff   = "ambiguous-flags-off"    // the ambiguities in flags-off jobs
+	sliceAmbiguityControlOff = "ambiguity-control-flags-off"
+
+	slicePayloadExtraOff  = "payload-extra-off"  // flags off, plus delete_xxx: false
+	slicePayloadExtraOn   = "payload-extra-on"   // flags on, plus delete_xxx: false
+	slicePayloadControl   = "payload-control"    // flags off, canonical
+	slicePayloadControlOn = "payload-control-on" // flags on, canonical
+
+	slicePayloadUnknownOff  = "payload-unknown-flag-off" // flags off, plus unknown_flag: "x"
+	slicePayloadUnknownOn   = "payload-unknown-flag-on"
+	slicePayloadFlagCaseOff = "payload-flag-case-off" // flags off, plus Tmdb_enabled: true
+	slicePayloadFlagCaseOn  = "payload-flag-case-on"  // flags on, plus Tmdb_enabled: false
+	slicePayloadListOff     = "payload-list-flag-off" // flags off, plus delete_content_types: ["movie"]
+	slicePayloadListOn      = "payload-list-flag-on"
+	slicePayloadKeyCaseOff  = "payload-key-case-off" // flags off, InfoHashes spelled infohashes
+	slicePayloadKeyCaseOn   = "payload-key-case-on"
+	slicePayloadExtraKeyOff = "payload-extra-key-off" // flags off, plus a top-level Extra: true
+	slicePayloadExtraKeyOn  = "payload-extra-key-on"
 )
 
 // sliceExpect is what each worker generation does with a slice's jobs: the
-// abstention reason, or abstainNone for a job it processes.
+// abstention reason, abstainNone for a job it processes, or abstainUnclaimed
+// for one it never claims. The payload slices have no abstain expectation:
+// that corpus is M4c's.
 var sliceExpect = map[string]map[string]string{
-	sliceHint:             {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone},
-	sliceEnriched:         {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone},
-	sliceHintBare:         {hintExpectAbstain: abstainNone, hintExpectProcess: abstainNone},
-	sliceHintRefused:      {hintExpectAbstain: abstainHint, hintExpectProcess: abstainHint},
-	sliceHintGoFail:       {hintExpectAbstain: abstainHint, hintExpectProcess: abstainHint},
-	sliceConflict:         {hintExpectAbstain: abstainHint, hintExpectProcess: abstainConflict},
-	sliceAmbiguous:        {hintExpectAbstain: abstainNone, hintExpectProcess: abstainAmbiguous},
-	sliceAmbiguityControl: {hintExpectAbstain: abstainNone, hintExpectProcess: abstainNone},
+	sliceHint:             {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+	sliceEnriched:         {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+	sliceHintBare:         {hintExpectAbstain: abstainNone, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+	sliceHintRefused:      {hintExpectAbstain: abstainHint, hintExpectProcess: abstainHint, hintExpectOffline: abstainUnclaimed},
+	sliceHintGoFail:       {hintExpectAbstain: abstainHint, hintExpectProcess: abstainHint, hintExpectOffline: abstainUnclaimed},
+	sliceConflict:         {hintExpectAbstain: abstainHint, hintExpectProcess: abstainConflict, hintExpectOffline: abstainUnclaimed},
+	sliceAmbiguous:        {hintExpectAbstain: abstainNone, hintExpectProcess: abstainAmbiguous, hintExpectOffline: abstainUnclaimed},
+	sliceAmbiguityControl: {hintExpectAbstain: abstainNone, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+
+	sliceHintFlagsOff:        {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainHint},
+	sliceHintFindFault:       {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+	sliceEnrichedFlagsOff:    {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainNone},
+	sliceRefusedFlagsOff:     {hintExpectAbstain: abstainHint, hintExpectProcess: abstainHint, hintExpectOffline: abstainHint},
+	sliceEnrichedRematch:     {hintExpectAbstain: abstainHint, hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+	sliceAmbiguousFlagsOff:   {hintExpectAbstain: abstainNone, hintExpectProcess: abstainAmbiguous, hintExpectOffline: abstainAmbiguous},
+	sliceAmbiguityControlOff: {hintExpectAbstain: abstainNone, hintExpectProcess: abstainNone, hintExpectOffline: abstainNone},
+
+	slicePayloadExtraOff:  {hintExpectProcess: abstainPayload, hintExpectOffline: abstainPayload},
+	slicePayloadExtraOn:   {hintExpectProcess: abstainPayload, hintExpectOffline: abstainUnclaimed},
+	slicePayloadControl:   {hintExpectProcess: abstainNone, hintExpectOffline: abstainNone},
+	slicePayloadControlOn: {hintExpectProcess: abstainNone, hintExpectOffline: abstainUnclaimed},
+
+	slicePayloadUnknownOff:  {hintExpectProcess: abstainPayload, hintExpectOffline: abstainPayload},
+	slicePayloadUnknownOn:   {hintExpectProcess: abstainPayload, hintExpectOffline: abstainUnclaimed},
+	slicePayloadFlagCaseOff: {hintExpectProcess: abstainPayload, hintExpectOffline: abstainPayload},
+	slicePayloadFlagCaseOn:  {hintExpectProcess: abstainPayload, hintExpectOffline: abstainUnclaimed},
+	slicePayloadListOff:     {hintExpectProcess: abstainPayload, hintExpectOffline: abstainPayload},
+	slicePayloadListOn:      {hintExpectProcess: abstainPayload, hintExpectOffline: abstainUnclaimed},
+	slicePayloadKeyCaseOff:  {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadKeyCaseOn:   {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadExtraKeyOff: {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadExtraKeyOn:  {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
 }
+
+// Pseudo-input ranges of the new slices. pseudoInput's titles repeat every
+// pseudoTitlePeriod indices, so a corpus's ranges are disjoint modulo it
+// (checked by TestPseudoRangesDisjoint); the flags-off slices never search,
+// but stay disjoint all the same.
+const (
+	pseudoTitlePeriod = 1372
+
+	hintFlagsOffBase      = 2000 // 400 torrents: 628..1027 modulo the period
+	hintFindFaultBase     = 3000 // 86 torrents: 256..341
+	enrichedFlagsOffBase  = 2000 // 500 torrents: 628..1127
+	enrichedRematchBase   = 2500 // 200 torrents: 1128..1327
+	refusedFlagsOffBase   = 450  // len(refusedEnriched) torrents
+	hintFlagsOffCount     = 400
+	enrichedFlagsOffCount = 500
+	enrichedRematchCount  = 200
+)
 
 // hintRewrite stores a value model.TorrentHint never writes: a spelling Go's
 // scan folds, or a shape its JSON decoder takes or rejects. A late one is a
@@ -260,17 +372,22 @@ func reverseByID(tcs []model.TorrentContent) {
 	sort.Slice(tcs, func(i, j int) bool { return tcs[i].InferID() > tcs[j].InferID() })
 }
 
-// hintGroup is one slice's torrents, chunked into jobs of size.
+// hintGroup is one slice's torrents, chunked into jobs of size, or its jobs
+// as given; flags-on unless flagsOff, with extra flags beside the three.
 type hintGroup struct {
-	slice  string
-	hashes []protocol.ID
-	size   int
-	mode   processor.ClassifyMode
+	slice    string
+	hashes   []protocol.ID
+	jobs     [][]protocol.ID
+	size     int
+	mode     processor.ClassifyMode
+	flagsOff bool
+	extra    classifier.Flags
+	edit     payloadEdit
 }
 
-// planHintedJobs chunks every group in info-hash order and spreads each
-// group's jobs evenly through the queue: job k of a group of n sits at
-// (2k+1)/2n, ties in the order the groups are given.
+// planHintedJobs chunks every group in info-hash order (or takes its jobs)
+// and spreads each group's jobs evenly through the queue: job k of a group of
+// n sits at (2k+1)/2n, ties in the order the groups are given.
 func planHintedJobs(groups []hintGroup) []jobSpec {
 	type placed struct {
 		num, den, group int
@@ -280,15 +397,21 @@ func planHintedJobs(groups []hintGroup) []jobSpec {
 	var all []placed
 
 	for g, grp := range groups {
-		hashes := append([]protocol.ID(nil), grp.hashes...)
-		sortHashes(hashes)
+		chunks := grp.jobs
 
-		n := (len(hashes) + grp.size - 1) / grp.size
-		for k := range n {
-			all = append(all, placed{num: 2*k + 1, den: 2 * n, group: g, spec: jobSpec{
-				slice: grp.slice, flagsOn: true, classifyMode: grp.mode,
-				hashes: hashes[k*grp.size : min((k+1)*grp.size, len(hashes))],
-				expect: sliceExpect[grp.slice],
+		if chunks == nil {
+			hashes := append([]protocol.ID(nil), grp.hashes...)
+			sortHashes(hashes)
+
+			for k := 0; k < len(hashes); k += grp.size {
+				chunks = append(chunks, hashes[k:min(k+grp.size, len(hashes))])
+			}
+		}
+
+		for k, chunk := range chunks {
+			all = append(all, placed{num: 2*k + 1, den: 2 * len(chunks), group: g, spec: jobSpec{
+				slice: grp.slice, flagsOn: !grp.flagsOff, classifyMode: grp.mode, hashes: chunk,
+				extraFlags: grp.extra, edit: grp.edit, expect: sliceExpect[grp.slice],
 			}})
 		}
 	}
@@ -600,6 +723,16 @@ func (s *seedRun) seedHint() error {
 		s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: "gofail", Variant: "content-type-unknown"})
 	}
 
+	flagsOff, err := s.seedHintFlagsOff()
+	if err != nil {
+		return err
+	}
+
+	findFaults, err := s.seedFindFaults()
+	if err != nil {
+		return err
+	}
+
 	planned, digest, err := s.plan()
 	if err != nil {
 		return err
@@ -609,11 +742,218 @@ func (s *seedRun) seedHint() error {
 		{slice: sliceHint, hashes: sourced, size: o.jobSize},
 		{slice: sliceHintRefused, hashes: refused, size: 4},
 		{slice: sliceHintGoFail, hashes: gofail, size: 1},
+		{slice: sliceHintFlagsOff, hashes: flagsOff, size: 10, flagsOff: true},
+		{slice: sliceHintFindFault, jobs: findFaults},
 	})
 
 	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
 
 	return err
+}
+
+// hintFlagsOffCategories cycle over the flags-off sourced hints (i mod 20).
+var hintFlagsOffCategories = []string{
+	catOffLocalImdb, catOffLocalImdb, catOffLocalImdb, catOffLocalImdb, catOffLocalImdb,
+	catOffLocalMulti, catOffLocalMulti,
+	catOffLocalTmdb, catOffLocalTmdb, catOffLocalTmdb,
+	catOffPreAttached, catOffPreAttached,
+	catOffReAttached, catOffReAttached,
+	catOffStale, catOffStale, catOffStale,
+	catOffUnmatched, catOffUnmatched, catOffUnmatched,
+}
+
+// seedHintFlagsOff seeds sourced hints (imdb as prod's, some tmdb) in
+// flags-off jobs. Go resolves them by ID against local content only:
+// attach_local_content_by_id is gated by no flag, the TMDB by-ID action by
+// apis and tmdb. So M3b with --admit-flags-on makes the local lookup, and the
+// worker without it leaves them to Go (no live resolver). One in three
+// carries video_* too.
+func (s *seedRun) seedHintFlagsOff() ([]protocol.ID, error) {
+	hashes := make([]protocol.ID, 0, hintFlagsOffCount)
+
+	for i := range hintFlagsOffCount {
+		in := pseudoInput(hintFlagsOffBase + i)
+		r := fixtureRand(fmt.Sprintf("hint-flags-off/%d", i))
+		cat := hintFlagsOffCategories[i%len(hintFlagsOffCategories)]
+		ct := pseudoType(i)
+		tmdbID := strconv.FormatInt(s.allocTMDBID(), 10)
+		imdbID := fmt.Sprintf("tt%07d", 8000000+i)
+		hint := model.TorrentHint{
+			ContentType:   ct,
+			ContentSource: model.NewNullString(model.SourceImdb),
+			ContentID:     model.NewNullString(imdbID),
+		}
+
+		byPK := func() {
+			hint.ContentSource, hint.ContentID = model.NewNullString(model.SourceTmdb), model.NewNullString(tmdbID)
+		}
+
+		// The hinted content: by primary key under a tmdb hint, else
+		// carrying the imdb id.
+		hinted := func(title string) *model.Content {
+			sc := s.newLocalContent(ct, model.SourceTmdb, tmdbID, title, 0, r)
+			if hint.ContentSource.String == model.SourceImdb {
+				sc.withExternalID(model.SourceImdb, imdbID)
+			}
+
+			s.contents = append(s.contents, sc)
+
+			return &sc.content
+		}
+
+		var assoc *model.Content
+
+		assocType := ct
+
+		switch cat {
+		case catOffLocalImdb:
+			hinted(fmt.Sprintf("Qz %s Offline", tmdbID))
+		case catOffLocalMulti:
+			s.seedAlternatives(ct, model.SourceImdb, imdbID, 2+r.IntN(2), r,
+				func(k int) string { return fmt.Sprintf("Qz offline alternative %d/%d", i, k) })
+		case catOffLocalTmdb:
+			byPK()
+			hinted(fmt.Sprintf("Qz %s Offline", tmdbID))
+		case catOffPreAttached:
+			byPK()
+			assoc = hinted(fmt.Sprintf("Qz %s Association", tmdbID))
+		case catOffReAttached:
+			assoc = hinted(fmt.Sprintf("Qz %s Association", tmdbID))
+		case catOffStale:
+			if r.IntN(2) == 0 {
+				byPK()
+			}
+
+			hinted(fmt.Sprintf("Qz %s Offline", tmdbID))
+
+			if r.IntN(3) == 0 {
+				assocType = otherType(ct)
+			}
+
+			n := s.allocLocalID()
+			sc := s.newLocalContent(assocType, model.SourceTmdb, strconv.FormatInt(n, 10), fmt.Sprintf("Qz %x Stale", n), 0, r)
+			s.contents = append(s.contents, sc)
+			assoc = &sc.content
+		case catOffUnmatched: // no content
+		}
+
+		hash, err := s.addHinted(corpusHint+"-flags-off", sliceHintFlagsOff, in, hint)
+		if err != nil {
+			return nil, err
+		}
+
+		if i%3 == 0 {
+			s.enrichVideo(hash, &s.hints[len(s.hints)-1], r, 40)
+		}
+
+		if assoc != nil {
+			s.associate(hash, in, assocType, assoc)
+		}
+
+		hashes = append(hashes, hash)
+		s.note(fixtureNote{
+			Kind: noteHint, Key: hash.String(), Category: cat,
+			ID: hint.ContentSource.String + ":" + hint.ContentID.String,
+		})
+	}
+
+	return hashes, nil
+}
+
+// findFaultJobs are the /find failures' jobs: a 404 (an error, unlike a
+// details 404) or a 500 on one imdb hint's /find, in a mixed job (with a
+// torrent /find then details attach, one whose details 404 and one whose
+// /find is empty, both then searched) or alone. Go fails the faulted torrent
+// into the retry job, or the whole job when it is alone; one failure per job
+// keeps Go's error text in one order.
+var findFaultJobs = []struct {
+	fault string
+	mixed bool
+	count int
+}{
+	{"404", true, 10},
+	{"500", true, 10},
+	{"404", false, 3},
+	{"500", false, 3},
+}
+
+func (s *seedRun) seedFindFaults() ([][]protocol.ID, error) {
+	var jobs [][]protocol.ID
+
+	k := 0
+
+	for _, shape := range findFaultJobs {
+		cats := []string{catFindFault404}
+		if shape.fault == "500" {
+			cats[0] = catFindFault500
+		}
+
+		if shape.mixed {
+			cats = append(cats, catFindFaultOK, catFindFaultDetails, catFindFaultEmpty)
+		}
+
+		for range shape.count {
+			job := make([]protocol.ID, 0, len(cats))
+
+			for _, cat := range cats {
+				hash, err := s.findFaultTorrent(k, cat, shape.fault)
+				if err != nil {
+					return nil, err
+				}
+
+				job = append(job, hash)
+				k++
+			}
+
+			jobs = append(jobs, job)
+		}
+	}
+
+	return jobs, nil
+}
+
+// findFaultTorrent seeds one torrent of a /find failure's job, with its
+// fixtures.
+func (s *seedRun) findFaultTorrent(k int, cat, fault string) (protocol.ID, error) {
+	in := pseudoInput(hintFindFaultBase + k)
+	r := fixtureRand(fmt.Sprintf("hint-find-fault/%d", k))
+	ct := pseudoType(k)
+	tv := ct == model.ContentTypeTvShow
+	imdbID := fmt.Sprintf("tt%07d", 8100000+k)
+	key := findKey(imdbID, "imdb_id")
+	tmdbID := s.allocTMDBID()
+
+	var err error
+
+	switch cat {
+	case catFindFault404, catFindFault500:
+		s.faults = append(s.faults, stubFault{Key: key, Fault: fault})
+	case catFindFaultOK, catFindFaultDetails:
+		err = s.respond(key, 200, buildFindBody(s.tpl, r, tv, []searchItem{{id: tmdbID, title: "Fault find " + imdbID, year: 2004}}))
+		if err == nil && cat == catFindFaultOK {
+			err = s.respond(detailsKey(tv, tmdbID), 200, buildDetailsBody(s.tpl, r, detailsSpec{
+				tv: tv, id: tmdbID, title: fmt.Sprintf("Fault find %s %d", ct, k), year: 2004, imdbID: imdbID,
+			}))
+		}
+	case catFindFaultEmpty: // /find answers empty
+	}
+
+	if err != nil {
+		return protocol.ID{}, err
+	}
+
+	hash, err := s.addHinted(corpusHint+"-find-fault", sliceHintFindFault, in, model.TorrentHint{
+		ContentType:   ct,
+		ContentSource: model.NewNullString(model.SourceImdb),
+		ContentID:     model.NewNullString(imdbID),
+	})
+	if err != nil {
+		return hash, err
+	}
+
+	s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: cat, ID: model.SourceImdb + ":" + imdbID})
+
+	return hash, nil
 }
 
 // replayHint seeds one replay-named sourced hint of a category, with its TMDB
@@ -721,25 +1061,8 @@ func (s *seedRun) replayHint(i int, in input, fetched *[]model.ContentRef) (prot
 			copies = 2 + r.IntN(2)
 		}
 
-		p := tiePatterns[r.IntN(len(tiePatterns))]
-		n := s.allocLocalID()
-
-		for k := copies - 1; k >= 0; k-- {
-			var source, id string
-
-			switch k {
-			case 0:
-				source, id = p.first(n)
-			case 1:
-				source, id = p.second(n)
-			default:
-				source, id = sourceLocal, fmt.Sprintf("z%d-%d", n, k)
-			}
-
-			sc := s.newLocalContent(ct, source, id, fmt.Sprintf("Local alternative %d/%d", i, k), 0, r)
-			sc.withExternalID(hint.ContentSource.String, hint.ContentID.String)
-			s.contents = append(s.contents, sc)
-		}
+		s.seedAlternatives(ct, hint.ContentSource.String, hint.ContentID.String, copies, r,
+			func(k int) string { return fmt.Sprintf("Local alternative %d/%d", i, k) })
 	case catAssociationImdb:
 		setHint(model.SourceImdb, imdbID)
 
@@ -836,6 +1159,31 @@ func (s *seedRun) replayHint(i int, in input, fetched *[]model.ContentRef) (prot
 	})
 
 	return hash, nil
+}
+
+// seedAlternatives seeds copies of content that all carry the external id a
+// hint names: a tie pattern's pair (the winner second, physically), then
+// local identities.
+func (s *seedRun) seedAlternatives(ct model.ContentType, source, id string, copies int, r *rand.Rand, title func(k int) string) {
+	p := tiePatterns[r.IntN(len(tiePatterns))]
+	n := s.allocLocalID()
+
+	for k := copies - 1; k >= 0; k-- {
+		var contentSource, contentID string
+
+		switch k {
+		case 0:
+			contentSource, contentID = p.first(n)
+		case 1:
+			contentSource, contentID = p.second(n)
+		default:
+			contentSource, contentID = sourceLocal, fmt.Sprintf("z%d-%d", n, k)
+		}
+
+		sc := s.newLocalContent(ct, contentSource, contentID, title(k), 0, r)
+		sc.withExternalID(source, id)
+		s.contents = append(s.contents, sc)
+	}
 }
 
 // withExternalID gives the content the external id a hint names, first in
@@ -1011,12 +1359,17 @@ func (s *seedRun) seedEnriched() error {
 		s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: "gofail", Variant: v.variant})
 	}
 
+	flagsOff, refusedOff, rematch, err := s.seedEnrichedSlices()
+	if err != nil {
+		return err
+	}
+
 	planned, digest, err := s.plan()
 	if err != nil {
 		return err
 	}
 
-	if err := s.searchFixtures(planned, searchWeights{local: 25, tmdbNew: 42, tmdbExisting: 20, details404: 12, decoys: 9}); err != nil {
+	if err := s.searchFixtures(searching(planned), searchWeights{local: 25, tmdbNew: 42, tmdbExisting: 20, details404: 12, decoys: 9}); err != nil {
 		return err
 	}
 
@@ -1025,11 +1378,130 @@ func (s *seedRun) seedEnriched() error {
 		{slice: sliceHintBare, hashes: bare, size: 10},
 		{slice: sliceHintRefused, hashes: refused, size: 3},
 		{slice: sliceHintGoFail, hashes: gofail, size: 1},
+		{slice: sliceEnrichedFlagsOff, hashes: flagsOff, size: 10, flagsOff: true},
+		{slice: sliceRefusedFlagsOff, hashes: refusedOff, size: 3, flagsOff: true},
+		{slice: sliceEnrichedRematch, hashes: rematch, size: 10, mode: processor.ClassifyModeRematch},
 	})
 
 	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
 
 	return err
+}
+
+// flagsOffSlices never search: the plan's searches for them get no fixtures.
+var flagsOffSlices = []string{
+	sliceHintFlagsOff, sliceEnrichedFlagsOff, sliceRefusedFlagsOff, sliceAmbiguousFlagsOff, sliceAmbiguityControlOff,
+	slicePayloadExtraOff, slicePayloadControl, slicePayloadUnknownOff, slicePayloadFlagCaseOff, slicePayloadListOff,
+	slicePayloadKeyCaseOff, slicePayloadExtraKeyOff,
+}
+
+// searching is the planned torrents of jobs that search.
+func searching(planned []plannedTorrent) []plannedTorrent {
+	out := make([]plannedTorrent, 0, len(planned))
+
+	for _, p := range planned {
+		if !slices.Contains(flagsOffSlices, p.Slice) {
+			out = append(out, p)
+		}
+	}
+
+	return out
+}
+
+// seedEnrichedSlices seeds the enriched corpus's pseudo-titled slices:
+//
+//   - flags-off: type-only hints carrying video_* only, as prod's enriched
+//     hints (languages '[]', episodes NULL), seven in ten alone, two reusing
+//     a sourced association of the hint's type (the merge: the
+//     association's identity, the hint's attributes), one over an
+//     association of another type;
+//   - refused, flags-off: the values M3b refuses (refusedEnriched);
+//   - rematch: video_* hints over a sourced association of the hint's type,
+//     in rematch jobs, which search again (no reuse) and replace it.
+func (s *seedRun) seedEnrichedSlices() (flagsOff, refusedOff, rematch []protocol.ID, err error) {
+	association := func(hash protocol.ID, in input, ct model.ContentType, r *rand.Rand, title string) {
+		id := s.allocTMDBID()
+		sc := s.newLocalContent(ct, model.SourceTmdb, strconv.FormatInt(id, 10), fmt.Sprintf("Qz %x %s", id, title), 0, r)
+		s.contents = append(s.contents, sc)
+		s.associate(hash, in, ct, &sc.content)
+	}
+
+	for i := range enrichedFlagsOffCount {
+		in := pseudoInput(enrichedFlagsOffBase + i)
+		r := fixtureRand(fmt.Sprintf("enriched-flags-off/%d", i))
+		ct := pseudoType(i)
+
+		hash, err := s.addHinted(corpusEnriched+"-flags-off", sliceEnrichedFlagsOff, in, model.TorrentHint{ContentType: ct})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		s.enrichVideo(hash, &s.hints[len(s.hints)-1], r, 55)
+
+		cat := catOffVideo
+
+		switch i % 10 {
+		case 7, 8:
+			cat = catOffReuse
+			association(hash, in, ct, r, "Association")
+		case 9:
+			cat = catOffReuseOtherType
+			association(hash, in, otherType(ct), r, "Association")
+		}
+
+		flagsOff = append(flagsOff, hash)
+		s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: cat})
+	}
+
+	for i, v := range refusedEnriched {
+		in := pseudoInput(refusedFlagsOffBase + i)
+
+		hash, err := s.addHinted(corpusEnriched+"-refused-flags-off", sliceRefusedFlagsOff, in, model.TorrentHint{ContentType: pseudoType(i)})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		s.rewrite(hash, v.column, v.value, false)
+		refusedOff = append(refusedOff, hash)
+		s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: "refused", Variant: v.variant})
+	}
+
+	for i := range enrichedRematchCount {
+		in := pseudoInput(enrichedRematchBase + i)
+		r := fixtureRand(fmt.Sprintf("enriched-rematch/%d", i))
+		ct := pseudoType(i)
+
+		hash, err := s.addHinted(corpusEnriched+"-rematch", sliceEnrichedRematch, in, model.TorrentHint{ContentType: ct})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		s.enrichVideo(hash, &s.hints[len(s.hints)-1], r, 55)
+		association(hash, in, ct, r, "Stale")
+		rematch = append(rematch, hash)
+		s.note(fixtureNote{Kind: noteHint, Key: hash.String(), Category: catRematchVideo})
+	}
+
+	return flagsOff, refusedOff, rematch, nil
+}
+
+// pseudoType is the content type pseudoInput(base+i)'s name reads as, for an
+// even base: a movie, or a series for odd i.
+func pseudoType(i int) model.ContentType {
+	if i%2 == 1 {
+		return model.ContentTypeTvShow
+	}
+
+	return model.ContentTypeMovie
+}
+
+// otherType is a movie for a series and a series otherwise.
+func otherType(ct model.ContentType) model.ContentType {
+	if ct == model.ContentTypeMovie {
+		return model.ContentTypeTvShow
+	}
+
+	return model.ContentTypeMovie
 }
 
 // replayEnriched seeds one replay-named type-only enriched hint of a category.
@@ -1238,12 +1710,14 @@ type assocShape struct {
 }
 
 // ambiguityShape is one slice of the ambiguous corpus: pseudo-titled torrents
-// with these associations, a bare movie hint or none, and a file list or none.
+// with these associations, a bare movie hint or none, and a file list or
+// none, in flags-on jobs unless flagsOff.
 type ambiguityShape struct {
 	slice, name string
 	hint        bool
 	noFiles     bool
 	rematch     bool
+	flagsOff    bool
 	assocs      []assocShape
 }
 
@@ -1265,6 +1739,10 @@ var ambiguityShapes = []ambiguityShape{
 	{slice: sliceAmbiguityControl, name: "preserved-with-files", assocs: []assocShape{xxxRule, movieRule}},
 	{slice: sliceAmbiguityControl, name: "preserved-one", noFiles: true, assocs: []assocShape{xxxRule}},
 	{slice: sliceAmbiguityControl, name: "rematch-two", rematch: true, assocs: []assocShape{movieTMDB, movieTMDB}},
+	// The flags-off worker meets them too.
+	{slice: sliceAmbiguousFlagsOff, name: "reuse-two-flags-off", flagsOff: true, assocs: []assocShape{movieTMDB, movieTMDB}},
+	{slice: sliceAmbiguousFlagsOff, name: "preserved-two-types-flags-off", flagsOff: true, noFiles: true, assocs: []assocShape{xxxRule, movieRule}},
+	{slice: sliceAmbiguityControlOff, name: "reuse-one-flags-off", flagsOff: true, assocs: []assocShape{movieTMDB}},
 }
 
 func (s *seedRun) seedAmbiguous() error {
@@ -1272,7 +1750,7 @@ func (s *seedRun) seedAmbiguous() error {
 	next := 0
 
 	for _, shape := range ambiguityShapes {
-		g := hintGroup{slice: shape.slice, size: 10}
+		g := hintGroup{slice: shape.slice, size: 10, flagsOff: shape.flagsOff}
 		if shape.rematch {
 			g.mode = processor.ClassifyModeRematch
 		}
@@ -1331,7 +1809,124 @@ func (s *seedRun) seedAmbiguous() error {
 		return err
 	}
 
-	if err := s.searchFixtures(planned, searchWeights{local: 25, tmdbNew: 42, tmdbExisting: 20, details404: 12, decoys: 9}); err != nil {
+	if err := s.searchFixtures(searching(planned), searchWeights{local: 25, tmdbNew: 42, tmdbExisting: 20, details404: 12, decoys: 9}); err != nil {
+		return err
+	}
+
+	specs := planHintedJobs(groups)
+
+	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
+
+	return err
+}
+
+// ---- payload corpus ----
+
+// payloadSlices are payloads Go accepts. Go reads only the flags its
+// workflows define, each as its type: delete_xxx (bool, default false) and
+// delete_content_types (content types; movie deletes the movies) are
+// defined, unknown_flag and Tmdb_enabled are not, so Go never reads them. A
+// non-boolean value of a defined bool flag fails Go's job ("invalid value
+// for runtime flag"), so no slice has one. Go's decoder binds infohashes to
+// InfoHashes and ignores Extra.
+var payloadSlices = []struct {
+	slice    string
+	torrents int
+	flagsOff bool
+	extra    classifier.Flags
+	edit     payloadEdit
+}{
+	{slicePayloadExtraOff, 50, true, classifier.Flags{"delete_xxx": false}, ""},
+	{slicePayloadExtraOn, 50, false, classifier.Flags{"delete_xxx": false}, ""},
+	{slicePayloadControl, 50, true, nil, ""},
+	{slicePayloadControlOn, 50, false, nil, ""},
+	{slicePayloadUnknownOff, 25, true, classifier.Flags{"unknown_flag": "x"}, ""},
+	{slicePayloadUnknownOn, 25, false, classifier.Flags{"unknown_flag": "x"}, ""},
+	{slicePayloadFlagCaseOff, 25, true, classifier.Flags{"Tmdb_enabled": true}, ""},
+	{slicePayloadFlagCaseOn, 25, false, classifier.Flags{"Tmdb_enabled": false}, ""},
+	{slicePayloadListOff, 25, true, classifier.Flags{"delete_content_types": []string{"movie"}}, ""},
+	{slicePayloadListOn, 25, false, classifier.Flags{"delete_content_types": []string{"movie"}}, ""},
+	{slicePayloadKeyCaseOff, 25, true, nil, editHashesKeyCase},
+	{slicePayloadKeyCaseOn, 25, false, nil, editHashesKeyCase},
+	{slicePayloadExtraKeyOff, 25, true, nil, editExtraKey},
+	{slicePayloadExtraKeyOn, 25, false, nil, editExtraKey},
+}
+
+// payloadEdit changes a top-level key of the payload Go's
+// processor.NewQueueJob writes. The explicit admissions (migrations 00035
+// and 00036) claim the four exact keys only, so M4c never claims such a job.
+type payloadEdit string
+
+const (
+	editHashesKeyCase payloadEdit = "hashes-key-case" // InfoHashes spelled infohashes
+	editExtraKey      payloadEdit = "extra-key"       // Extra: true beside the four keys
+)
+
+func (e payloadEdit) apply(payload string) (string, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
+		return "", err
+	}
+
+	switch e {
+	case editHashesKeyCase:
+		fields["infohashes"] = fields["InfoHashes"]
+		delete(fields, "InfoHashes")
+	case editExtraKey:
+		fields["Extra"] = json.RawMessage("true")
+	default:
+		return "", fmt.Errorf("unknown payload edit %q", e)
+	}
+
+	out, err := json.Marshal(fields)
+
+	return string(out), err
+}
+
+// editedQueueJob is job with its payload edited, as model.NewQueueJob queues
+// that payload: the fingerprint is the edited payload's.
+func editedQueueJob(job model.QueueJob, edit payloadEdit) (model.QueueJob, error) {
+	payload, err := edit.apply(job.Payload)
+	if err != nil {
+		return model.QueueJob{}, err
+	}
+
+	return model.NewQueueJob(job.Queue, json.RawMessage(payload), model.QueueJobMaxRetries(job.MaxRetries))
+}
+
+// seedPayload: jobs of five unhinted pseudo-titled torrents whose
+// ClassifierFlags carry a flag beside the three attach flags, or whose
+// top-level keys are not exactly Go's, which no Go producer writes, and the
+// same jobs canonical. The explicit admissions claim ClassifierFlags by
+// containment, so M4c claims the extra-flag jobs it admits and abstains
+// (reason payload) before reading anything; it never claims the others.
+func (s *seedRun) seedPayload() error {
+	groups := make([]hintGroup, 0, len(payloadSlices))
+	next := 0
+
+	for _, ps := range payloadSlices {
+		g := hintGroup{slice: ps.slice, size: 5, flagsOff: ps.flagsOff, extra: ps.extra, edit: ps.edit}
+
+		for range ps.torrents {
+			hash, err := s.addTorrent(corpusPayload, ps.slice, pseudoInput(next))
+			if err != nil {
+				return err
+			}
+
+			next++
+
+			g.hashes = append(g.hashes, hash)
+		}
+
+		groups = append(groups, g)
+	}
+
+	planned, digest, err := s.plan()
+	if err != nil {
+		return err
+	}
+
+	if err := s.searchFixtures(searching(planned), searchWeights{local: 25, tmdbNew: 42, tmdbExisting: 20, details404: 12, decoys: 9}); err != nil {
 		return err
 	}
 
@@ -1348,8 +1943,8 @@ var errNoHintExpect = errors.New("job has no expectation for this HINT_EXPECT")
 // hintExpectations maps each job that a worker generation leaves to its
 // abstention reason (abstainNone jobs are processed and left out).
 func hintExpectations(jobs []plannedJob, mode string) (map[string]string, error) {
-	if mode != hintExpectAbstain && mode != hintExpectProcess {
-		return nil, fmt.Errorf("HINT_EXPECT %q: want %s or %s", mode, hintExpectAbstain, hintExpectProcess)
+	if mode != hintExpectAbstain && mode != hintExpectProcess && mode != hintExpectOffline {
+		return nil, fmt.Errorf("HINT_EXPECT %q: want %s, %s or %s", mode, hintExpectAbstain, hintExpectProcess, hintExpectOffline)
 	}
 
 	left := map[string]string{}
