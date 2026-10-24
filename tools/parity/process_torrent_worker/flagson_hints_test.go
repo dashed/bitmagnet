@@ -177,7 +177,9 @@ func TestSliceExpectGenerations(t *testing.T) {
 		payload[ps.slice] = true
 		edited[ps.slice] = ps.edit != ""
 
-		if !ps.flagsOff {
+		// Go runs a flags-dup job under its classifierflags, the opposite.
+		goOff := ps.flagsOff != (ps.edit == editFlagsKeyCase)
+		if !goOff {
 			flagsOn = append(flagsOn, ps.slice)
 		}
 
@@ -194,8 +196,8 @@ func TestSliceExpectGenerations(t *testing.T) {
 			t.Errorf("payload slice %s: process %q, want %q", ps.slice, got, want)
 		}
 
-		if ps.flagsOff != slices.Contains(flagsOffSlices, ps.slice) {
-			t.Errorf("payload slice %s: flags off %t, in flagsOffSlices %t", ps.slice, ps.flagsOff, !ps.flagsOff)
+		if goOff != slices.Contains(flagsOffSlices, ps.slice) {
+			t.Errorf("payload slice %s: Go runs it with flags off %t, in flagsOffSlices %t", ps.slice, goOff, !goOff)
 		}
 	}
 
@@ -240,7 +242,8 @@ func TestSliceExpectGenerations(t *testing.T) {
 }
 
 // A payload edit keeps the job Go's decoder reads (infohashes binds to
-// InfoHashes, Extra is ignored) and fingerprints the edited payload.
+// InfoHashes, Priority is ignored, the later of two case variants wins) and
+// fingerprints the edited payload.
 func TestPayloadEdit(t *testing.T) {
 	t.Parallel()
 
@@ -252,8 +255,10 @@ func TestPayloadEdit(t *testing.T) {
 	}
 
 	for edit, keys := range map[payloadEdit][]string{
-		editHashesKeyCase: {"ClassifierFlags", "ClassifierWorkflow", "infohashes"},
-		editExtraKey:      {"ClassifierFlags", "ClassifierWorkflow", "Extra", "InfoHashes"},
+		editHashesKeyCase:   {"ClassifierFlags", "ClassifierWorkflow", "infohashes"},
+		editExtraKey:        {"ClassifierFlags", "ClassifierWorkflow", "InfoHashes", "Priority"},
+		editFlagsKeyCase:    {"ClassifierFlags", "ClassifierWorkflow", "InfoHashes", "classifierflags"},
+		editWorkflowKeyCase: {"ClassifierFlags", "ClassifierWorkflow", "InfoHashes", "classifierworkflow"},
 	} {
 		edited, err := editedQueueJob(job, edit)
 		if err != nil {
@@ -272,6 +277,16 @@ func TestPayloadEdit(t *testing.T) {
 		var params processor.MessageParams
 		if err := json.Unmarshal([]byte(edited.Payload), &params); err != nil || !slices.Equal(params.InfoHashes, testIDs(0, 2)) {
 			t.Errorf("%s: Go decodes %+v (%v)", edit, params, err)
+		}
+
+		// Go runs a flags-dup job under the flags it does not claim by.
+		wantFlags := flagsOffFlags()
+		if edit == editFlagsKeyCase {
+			wantFlags = flagsOnFlags()
+		}
+
+		if !maps.Equal(params.ClassifierFlags, wantFlags) || params.ClassifierWorkflow != "default" {
+			t.Errorf("%s: Go runs %s with %v", edit, params.ClassifierWorkflow, params.ClassifierFlags)
 		}
 
 		want, err := model.NewQueueJob(processor.MessageName, json.RawMessage(edited.Payload), model.QueueJobMaxRetries(2))

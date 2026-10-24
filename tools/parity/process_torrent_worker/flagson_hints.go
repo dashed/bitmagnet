@@ -187,8 +187,12 @@ const (
 	slicePayloadListOn      = "payload-list-flag-on"
 	slicePayloadKeyCaseOff  = "payload-key-case-off" // flags off, InfoHashes spelled infohashes
 	slicePayloadKeyCaseOn   = "payload-key-case-on"
-	slicePayloadExtraKeyOff = "payload-extra-key-off" // flags off, plus a top-level Extra: true
+	slicePayloadExtraKeyOff = "payload-extra-key-off" // flags off, plus a top-level Priority: 0
 	slicePayloadExtraKeyOn  = "payload-extra-key-on"
+	slicePayloadFlagsDupOff = "payload-flags-dup-off"    // flags off, plus classifierflags: flags on
+	slicePayloadFlagsDupOn  = "payload-flags-dup-on"     // flags on, plus classifierflags: flags off
+	slicePayloadFlowDupOff  = "payload-workflow-dup-off" // flags off, plus classifierworkflow: default
+	slicePayloadFlowDupOn   = "payload-workflow-dup-on"
 )
 
 // sliceExpect is what each worker generation does with a slice's jobs: the
@@ -228,6 +232,10 @@ var sliceExpect = map[string]map[string]string{
 	slicePayloadKeyCaseOn:   {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
 	slicePayloadExtraKeyOff: {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
 	slicePayloadExtraKeyOn:  {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadFlagsDupOff: {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadFlagsDupOn:  {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadFlowDupOff:  {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
+	slicePayloadFlowDupOn:   {hintExpectProcess: abstainUnclaimed, hintExpectOffline: abstainUnclaimed},
 }
 
 // Pseudo-input ranges of the new slices. pseudoInput's titles repeat every
@@ -1392,7 +1400,8 @@ func (s *seedRun) seedEnriched() error {
 var flagsOffSlices = []string{
 	sliceHintFlagsOff, sliceEnrichedFlagsOff, sliceRefusedFlagsOff, sliceAmbiguousFlagsOff, sliceAmbiguityControlOff,
 	slicePayloadExtraOff, slicePayloadControl, slicePayloadUnknownOff, slicePayloadFlagCaseOff, slicePayloadListOff,
-	slicePayloadKeyCaseOff, slicePayloadExtraKeyOff,
+	slicePayloadKeyCaseOff, slicePayloadExtraKeyOff, slicePayloadFlowDupOff,
+	slicePayloadFlagsDupOn, // Go runs it under its classifierflags: flags off
 }
 
 // searching is the planned torrents of jobs that search.
@@ -1828,7 +1837,10 @@ func (s *seedRun) seedAmbiguous() error {
 // defined, unknown_flag and Tmdb_enabled are not, so Go never reads them. A
 // non-boolean value of a defined bool flag fails Go's job ("invalid value
 // for runtime flag"), so no slice has one. Go's decoder binds infohashes to
-// InfoHashes and ignores Extra.
+// InfoHashes and ignores Priority. It binds classifierflags and
+// classifierworkflow too, and the later key wins: jsonb orders keys of one
+// length bytewise, so the lowercase key comes last, and Go runs a flags-dup
+// job under the opposite flags.
 var payloadSlices = []struct {
 	slice    string
 	torrents int
@@ -1850,6 +1862,10 @@ var payloadSlices = []struct {
 	{slicePayloadKeyCaseOn, 25, false, nil, editHashesKeyCase},
 	{slicePayloadExtraKeyOff, 25, true, nil, editExtraKey},
 	{slicePayloadExtraKeyOn, 25, false, nil, editExtraKey},
+	{slicePayloadFlagsDupOff, 25, true, nil, editFlagsKeyCase},
+	{slicePayloadFlagsDupOn, 25, false, nil, editFlagsKeyCase},
+	{slicePayloadFlowDupOff, 25, true, nil, editWorkflowKeyCase},
+	{slicePayloadFlowDupOn, 25, false, nil, editWorkflowKeyCase},
 }
 
 // payloadEdit changes a top-level key of the payload Go's
@@ -1858,8 +1874,10 @@ var payloadSlices = []struct {
 type payloadEdit string
 
 const (
-	editHashesKeyCase payloadEdit = "hashes-key-case" // InfoHashes spelled infohashes
-	editExtraKey      payloadEdit = "extra-key"       // Extra: true beside the four keys
+	editHashesKeyCase   payloadEdit = "hashes-key-case"   // InfoHashes spelled infohashes
+	editExtraKey        payloadEdit = "extra-key"         // Priority: 0 beside the four keys
+	editFlagsKeyCase    payloadEdit = "flags-key-case"    // classifierflags: each flag negated
+	editWorkflowKeyCase payloadEdit = "workflow-key-case" // classifierworkflow: the same workflow
 )
 
 func (e payloadEdit) apply(payload string) (string, error) {
@@ -1873,7 +1891,25 @@ func (e payloadEdit) apply(payload string) (string, error) {
 		fields["infohashes"] = fields["InfoHashes"]
 		delete(fields, "InfoHashes")
 	case editExtraKey:
-		fields["Extra"] = json.RawMessage("true")
+		fields["Priority"] = json.RawMessage("0")
+	case editFlagsKeyCase:
+		var flags map[string]bool
+		if err := json.Unmarshal(fields["ClassifierFlags"], &flags); err != nil {
+			return "", err
+		}
+
+		for name, value := range flags {
+			flags[name] = !value
+		}
+
+		raw, err := json.Marshal(flags)
+		if err != nil {
+			return "", err
+		}
+
+		fields["classifierflags"] = raw
+	case editWorkflowKeyCase:
+		fields["classifierworkflow"] = fields["ClassifierWorkflow"]
 	default:
 		return "", fmt.Errorf("unknown payload edit %q", e)
 	}
@@ -1896,8 +1932,9 @@ func editedQueueJob(job model.QueueJob, edit payloadEdit) (model.QueueJob, error
 
 // seedPayload: jobs of five unhinted pseudo-titled torrents whose
 // ClassifierFlags carry a flag beside the three attach flags, or whose
-// top-level keys are not exactly Go's, which no Go producer writes, and the
-// same jobs canonical. The explicit admissions claim ClassifierFlags by
+// top-level keys are not exactly Go's (a case variant, alone or beside the
+// key, or an unknown key), which no Go producer writes, and the same jobs
+// canonical. The explicit admissions claim ClassifierFlags by
 // containment, so M4c claims the extra-flag jobs it admits and abstains
 // (reason payload) before reading anything; it never claims the others.
 func (s *seedRun) seedPayload() error {
