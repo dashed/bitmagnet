@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
@@ -230,21 +229,27 @@ func collectionKeys(content model.Content) []string {
 func TestContentAssociationOrderSeedExercisesCollation(t *testing.T) {
 	db, _ := setupAssociationOrderDB(t)
 
-	var collation string
-	require.NoError(t, db.Raw("SELECT datcollate FROM pg_database WHERE datname = current_database()").
-		Scan(&collation).Error)
+	// The collation's name can't settle this: musl (postgres:*-alpine, as in CI
+	// and production) reports en_US.utf8 yet compares bytewise. Ask the database
+	// how it orders the seeded attribute and genre pairs that swap between the two.
+	var probe struct {
+		Collation string
+		Bytewise  bool
+	}
+	require.NoError(t, db.Raw(`SELECT datcollate AS collation, 'TVmaze' < 'tmdb' AND 'B7' < 'a7' AS bytewise
+		FROM pg_database WHERE datname = current_database()`).Scan(&probe).Error)
 
-	if collation == "C" || collation == "POSIX" || strings.HasPrefix(collation, "C.") {
-		t.Skipf("database collation %q is bytewise; the collation cases cannot be told apart", collation)
+	if probe.Bytewise {
+		t.Skipf("database collation %q orders bytewise; the collation cases cannot be told apart", probe.Collation)
 	}
 
 	seedAssociationOrderContent(t, db, []string{"1"})
 
 	attributes := wantedAttributes(t, db, "1")
-	require.False(t, slices.IsSorted(attributes), "attribute seed should not be byte-ordered under %s", collation)
+	require.False(t, slices.IsSorted(attributes), "attribute seed should not be byte-ordered under %s", probe.Collation)
 
 	collections := wantedCollections(t, db, "1")
-	require.False(t, slices.IsSorted(collections), "collection seed should not be byte-ordered under %s", collation)
+	require.False(t, slices.IsSorted(collections), "collection seed should not be byte-ordered under %s", probe.Collation)
 }
 
 // Local search hydrates every candidate's attributes and collections; both have to
