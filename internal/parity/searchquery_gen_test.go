@@ -221,8 +221,8 @@ type searchQueryResultRow struct {
 
 func TestGenerateSearchQueryParityFixtures(t *testing.T) {
 	ctx := context.Background()
-	db := setupSearchQueryParityDB(t, ctx)
-	seedSearchQueryParityCorpus(t, ctx, db)
+	db := setupSearchQueryParityDB(ctx, t)
+	seedSearchQueryParityCorpus(ctx, t, db)
 
 	scenarios := searchQueryScenarios()
 	assertDistinctRelevanceRanks(t, db, scenarios)
@@ -251,8 +251,8 @@ func TestGenerateSearchQueryParityFixtures(t *testing.T) {
 		if scenario.ID == "query_matrix_published_at" {
 			continue
 		}
-		first := runGoSearchQueryOracle(t, ctx, searcher, scenario.Params)
-		second := runGoSearchQueryOracle(t, ctx, searcher, scenario.Params)
+		first := runGoSearchQueryOracle(ctx, t, searcher, scenario.Params)
+		second := runGoSearchQueryOracle(ctx, t, searcher, scenario.Params)
 		if !reflect.DeepEqual(first, second) {
 			t.Fatalf(
 				"scenario %q is nondeterministic:\nfirst:  %v\nsecond: %v",
@@ -291,7 +291,7 @@ func TestGenerateSearchQueryParityFixtures(t *testing.T) {
 	t.Logf("wrote %d search-query parity fixtures to %s", len(fixtures), fixturePath)
 }
 
-func setupSearchQueryParityDB(t *testing.T, ctx context.Context) *gorm.DB {
+func setupSearchQueryParityDB(ctx context.Context, t *testing.T) *gorm.DB {
 	t.Helper()
 
 	dsn := os.Getenv("POSTGRES_DSN")
@@ -344,7 +344,7 @@ type searchQuerySeed struct {
 	contentID     string
 }
 
-func seedSearchQueryParityCorpus(t *testing.T, ctx context.Context, db *gorm.DB) {
+func seedSearchQueryParityCorpus(ctx context.Context, t *testing.T, db *gorm.DB) {
 	t.Helper()
 
 	if err := db.WithContext(ctx).Exec(
@@ -1045,8 +1045,8 @@ func video3DToGo(value string) (model.Video3D, error) {
 }
 
 func runGoSearchQueryOracle(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	searcher search.Search,
 	params TorznabParams,
 ) []searchQueryResultRow {

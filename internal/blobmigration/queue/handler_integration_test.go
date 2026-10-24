@@ -121,7 +121,7 @@ func testRanges(k, chunkSize int) []MessageParams {
 
 	out := make([]MessageParams, 0, k)
 
-	for i := 0; i < k; i++ {
+	for i := range k {
 		var lower, upper string
 
 		if i > 0 {
@@ -229,8 +229,9 @@ func TestBackfillFull_AllMigratedAndParity(t *testing.T) {
 		{hashFromBytes(0x00, 0x01), []string{"a/movie.mkv", "a/subs.srt", "a/info.nfo"}}, // first byte < 0x30
 		{hashFromBytes(0x00, 0x02), []string{"README", "LICENSE"}},                       // extension-less -> '[]'
 		{hashFromBytes(0x10), []string{"x.mp4", "y.mp4", "z.txt", "w.jpg"}},
-		{hashFromBytes(0x33, 0x07), []string{"日本語/映画.mkv", "中文/电影.mp4"}}, // CJK
-		{hashFromBytes(0x66, 0x09), make20(40, "data/blob_%03d.bin")},    // many files
+		// CJK: 日本語/映画.mkv and 中文/电影.mp4
+		{hashFromBytes(0x33, 0x07), []string{"\u65e5\u672c\u8a9e/\u6620\u753b.mkv", "\u4e2d\u6587/\u7535\u5f71.mp4"}},
+		{hashFromBytes(0x66, 0x09), make20(40, "data/blob_%03d.bin")}, // many files
 		{hashFromBytes(0x80), []string{"only.flac"}},
 		{hashFromBytes(0xC0, 0x05), []string{"vid.mkv", "vid.idx", "vid.sub"}},
 		{hashFromBytes(0xFF, 0xFE), []string{"last.mkv", "last.nfo"}}, // first byte > 0x66
@@ -316,7 +317,7 @@ func TestBackfillIdempotentRedelivery(t *testing.T) {
 	ctx := context.Background()
 	d := dao.Use(db)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		seedTorrentWithFiles(t, db, hashFromBytes(0x40, byte(i)), 3)
 	}
 
@@ -349,7 +350,7 @@ func TestBackfillResume(t *testing.T) {
 	d := dao.Use(db)
 
 	const n = 12
-	for i := 0; i < n; i++ {
+	for i := range n {
 		seedTorrentWithFiles(t, db, hashFromBytes(0x70, byte(i)), 2)
 	}
 

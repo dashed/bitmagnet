@@ -104,7 +104,7 @@ func TestCheckAll_AllMatch(t *testing.T) {
 	db := setupIntegrationDB(t)
 
 	const n = 40
-	for i := 0; i < n; i++ {
+	for i := range n {
 		// spread across leading bytes so multiple parallel ranges get work
 		seedMigratedTorrent(t, db, hashFromBytes(byte(i*6), byte(i)), []string{"a/x.mkv", "a/y.srt", "a/z.nfo"})
 	}
@@ -184,7 +184,7 @@ func TestCheckAllFileIndexSetReportsRowOnlyRowsWithinChunkAndTail(t *testing.T) 
 		detail, ok := details[infoHash]
 		require.True(t, ok, "expected row-only mismatch for %s", infoHash)
 		assert.Equal(t, 0, detail.BlobFiles)
-		assert.Greater(t, detail.RowFiles, 0)
+		assert.Positive(t, detail.RowFiles)
 		require.NotEmpty(t, detail.Mismatches)
 		assert.Equal(t, "missing_in_blob", detail.Mismatches[0].Field)
 	}
@@ -195,7 +195,7 @@ func TestCheckAllFileIndexSetReportsRowOnlyRowsWithinChunkAndTail(t *testing.T) 
 func TestCheckAll_DetectsMismatch(t *testing.T) {
 	db := setupIntegrationDB(t)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		seedMigratedTorrent(t, db, hashFromBytes(byte(i*20), byte(i)), []string{"a/x.mkv", "a/y.srt"})
 	}
 
@@ -220,14 +220,14 @@ func TestCheckAll_Sample(t *testing.T) {
 	db := setupIntegrationDB(t)
 
 	const n = 60
-	for i := 0; i < n; i++ {
+	for i := range n {
 		seedMigratedTorrent(t, db, hashFromBytes(byte(i*4), byte(i)), []string{"only.flac"})
 	}
 
 	summary, err := CheckAll(context.Background(), dao.Use(db), 4, 5, 20 /*sample*/)
 	require.NoError(t, err)
 
-	assert.Greater(t, summary.TotalChecked, 0)
+	assert.Positive(t, summary.TotalChecked)
 	assert.LessOrEqual(t, summary.TotalChecked, n, "sample must not exceed the population")
 	// ~20 requested (perRange rounding may overshoot a little); should be well under the full 60.
 	assert.Less(t, summary.TotalChecked, n, "sample should check fewer than all")

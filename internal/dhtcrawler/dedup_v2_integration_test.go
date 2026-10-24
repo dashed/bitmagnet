@@ -176,6 +176,6 @@ func TestV2DedupCounterIncrements(t *testing.T) {
 	}
 
 	got := testutil.ToFloat64(c.torrentsDropped.WithLabelValues("v2_duplicate"))
-	assert.Equal(t, float64(1), got,
+	assert.InDelta(t, 1, got, 0,
 		`torrents_dropped_total{reason="v2_duplicate"} must equal the dropped count`)
 }

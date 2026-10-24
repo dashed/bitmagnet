@@ -156,10 +156,10 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 		{seed: 0x05, numFiles: 100},
 	}
 
-	allHashes := make([]protocol.ID, len(cases))
-	for i, tc := range cases {
+	allHashes := make([]protocol.ID, 0, len(cases)+2)
+	for _, tc := range cases {
 		hash := makeInfoHash(tc.seed)
-		allHashes[i] = hash
+		allHashes = append(allHashes, hash)
 		insertTestTorrent(t, db, hash, tc.numFiles)
 	}
 
@@ -190,7 +190,8 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 	blob, err := blobmigration.SerializeFiles(dualWriteFiles)
 	require.NoError(t, err)
 	exts := blobmigration.ExtractUniqueExtensions(dualWriteFiles)
-	extsJSON, _ := json.Marshal(exts)
+	extsJSON, err := json.Marshal(exts)
+	require.NoError(t, err)
 
 	err = db.Table("torrents").
 		Where("info_hash = ?", dualWriteHash).
@@ -270,8 +271,8 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 			Where("info_hash = ?", hash).
 			First(&summary).Error
 		require.NoError(t, err, "summary missing for %x", hash[:4])
-		assert.Greater(t, summary.FileCount, 0)
-		assert.Greater(t, summary.TotalSize, int64(0))
+		assert.Positive(t, summary.FileCount)
+		assert.Positive(t, summary.TotalSize)
 	}
 
 	// Step 5: Verify AfterFind — load via GORM and confirm Files populated from blob.
@@ -322,7 +323,7 @@ func TestConsistencyCheckerIntegration(t *testing.T) {
 
 	// CheckTorrent should return an error for the corrupt blob.
 	_, checkErr := consistency.CheckTorrent(ctx, q, corruptHash)
-	assert.Error(t, checkErr, "corrupt blob should cause a deserialization error")
+	require.Error(t, checkErr, "corrupt blob should cause a deserialization error")
 
 	// Simulate heal: NULL out the corrupt blob (as LiveChecker does).
 	err = db.Table("torrents").
@@ -390,7 +391,7 @@ func TestCleanupSafetyGates(t *testing.T) {
 			Where("files_data IS NULL AND files_status != ?", model.FilesStatusNoInfo).
 			Count(&count).Error
 		require.NoError(t, err)
-		assert.Greater(t, count, int64(0), "unmigrated torrents should exist")
+		assert.Positive(t, count, "unmigrated torrents should exist")
 	})
 
 	// Gate 3: No verification timestamp.
@@ -465,7 +466,7 @@ func TestBlobSourcedFilesMatchRows(t *testing.T) {
 	assert.Equal(t, rowFileExtensions, blobFileExtensions,
 		"FileExtensions should be identical whether sourced from rows or blob")
 
-	assert.Equal(t, len(rowTorrent.Files), len(blobTorrent.Files),
+	assert.Len(t, blobTorrent.Files, len(rowTorrent.Files),
 		"file count should match between row-loaded and blob-loaded")
 }
 
@@ -479,7 +480,7 @@ func insertCJKTorrent(t *testing.T, db *gorm.DB, infoHash protocol.ID) {
 		Omit("Extension", "FilesCount", "Hint", "Contents", "Sources", "Files", "Pieces", "Tags", "FilesData", "FileExts").
 		Create(&model.Torrent{
 			InfoHash:    infoHash,
-			Name:        "日本語テスト",
+			Name:        "\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8", // 日本語テスト
 			Size:        5000,
 			Private:     false,
 			FilesStatus: model.FilesStatusMulti,
@@ -489,8 +490,9 @@ func insertCJKTorrent(t *testing.T, db *gorm.DB, infoHash protocol.ID) {
 	require.NoError(t, err)
 
 	files := []model.TorrentFile{
-		{InfoHash: infoHash, Index: 0, Path: "日本語/映画.mkv", Size: 2000, CreatedAt: now, UpdatedAt: now},
-		{InfoHash: infoHash, Index: 1, Path: "中文/电影 (2024).mp4", Size: 3000, CreatedAt: now, UpdatedAt: now},
+		// 日本語/映画.mkv and 中文/电影 (2024).mp4
+		{InfoHash: infoHash, Index: 0, Path: "\u65e5\u672c\u8a9e/\u6620\u753b.mkv", Size: 2000, CreatedAt: now, UpdatedAt: now},
+		{InfoHash: infoHash, Index: 1, Path: "\u4e2d\u6587/\u7535\u5f71 (2024).mp4", Size: 3000, CreatedAt: now, UpdatedAt: now},
 	}
 	err = db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error
 	require.NoError(t, err)
@@ -558,7 +560,9 @@ func migrateOneTorrent(t *testing.T, ctx context.Context, db *gorm.DB, q *dao.Qu
 	exts := blobmigration.ExtractUniqueExtensions(derefFiles)
 	summary := blobmigration.BuildFileSummary(infoHash, derefFiles, len(blob))
 
-	extsJSON, _ := json.Marshal(exts)
+	extsJSON, err := json.Marshal(exts)
+	require.NoError(t, err)
+
 	err = db.WithContext(ctx).Table("torrents").
 		Where("info_hash = ?", infoHash).
 		Updates(map[string]any{

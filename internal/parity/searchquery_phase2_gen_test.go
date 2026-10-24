@@ -194,9 +194,9 @@ type phase2Content struct {
 
 func TestGeneratePhase2SearchQueryParityFixtures(t *testing.T) {
 	ctx := context.Background()
-	db := setupSearchQueryParityDB(t, ctx)
-	seedSearchQueryParityCorpus(t, ctx, db)
-	seedPhase2SearchQueryCorpus(t, ctx, db)
+	db := setupSearchQueryParityDB(ctx, t)
+	seedSearchQueryParityCorpus(ctx, t, db)
+	seedPhase2SearchQueryCorpus(ctx, t, db)
 
 	daoQuery := dao.Use(db)
 	resource := search.New(search.Params{Query: lazy.New(func() (*dao.Query, error) {
@@ -210,8 +210,8 @@ func TestGeneratePhase2SearchQueryParityFixtures(t *testing.T) {
 	scenarios := phase2SearchScenarios(t)
 	fixtures := make([]Fixture, 0, len(scenarios))
 	for _, scenario := range scenarios {
-		first := runPhase2GoOracle(t, ctx, db, searcher, scenario)
-		second := runPhase2GoOracle(t, ctx, db, searcher, scenario)
+		first := runPhase2GoOracle(ctx, t, db, searcher, scenario)
+		second := runPhase2GoOracle(ctx, t, db, searcher, scenario)
 		if !jsonEqual(t, first, second) {
 			t.Fatalf("phase-2 scenario %q is nondeterministic", scenario.ID)
 		}
@@ -237,7 +237,7 @@ func TestGeneratePhase2SearchQueryParityFixtures(t *testing.T) {
 	t.Logf("wrote %d phase-2 search-query fixtures to %s", len(fixtures), path)
 }
 
-func seedPhase2SearchQueryCorpus(t *testing.T, ctx context.Context, db *gorm.DB) {
+func seedPhase2SearchQueryCorpus(ctx context.Context, t *testing.T, db *gorm.DB) {
 	t.Helper()
 	baseTime := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -354,11 +354,12 @@ func phase2SearchScenarios(t *testing.T) []phase2Scenario {
 		}}
 	}
 
-	var scenarios []phase2Scenario
 	orderFields := []string{
 		"relevance", "published_at", "updated_at", "size", "files_count",
 		"seeders", "leechers", "name", "info_hash",
 	}
+	// One scenario per order field, then the eight below.
+	scenarios := make([]phase2Scenario, 0, len(orderFields)+8)
 	for _, field := range orderFields {
 		input := exact()
 		if field == "relevance" {
@@ -448,8 +449,8 @@ func phase2SearchScenarios(t *testing.T) []phase2Scenario {
 }
 
 func runPhase2GoOracle(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	db *gorm.DB,
 	searcher search.Search,
 	scenario phase2Scenario,
@@ -483,7 +484,7 @@ func runPhase2GoOracle(
 		projected := phase2ProjectGoItem(item)
 		if scenario.Input.Options.Query != nil && *scenario.Input.Options.Query != "" {
 			projected.QueryStringRank = phase2SemanticQueryRank(
-				t, ctx, db, item.ID, *scenario.Input.Options.Query,
+				ctx, t, db, item.ID, *scenario.Input.Options.Query,
 			)
 		}
 		output.Items = append(output.Items, projected)
@@ -499,8 +500,8 @@ func runPhase2GoOracle(
 }
 
 func phase2SemanticQueryRank(
-	t *testing.T,
 	ctx context.Context,
+	t *testing.T,
 	db *gorm.DB,
 	id string,
 	appQuery string,
@@ -780,7 +781,7 @@ func phase2ProjectGoItem(item search.TorrentContentResultItem) phase2ResultItem 
 	}
 }
 
-func dhtSeenStats(sources []model.TorrentsTorrentSource) (*int64, *int64, int) {
+func dhtSeenStats(sources []model.TorrentsTorrentSource) (firstSeenAt, lastSeenAt *int64, seenCount int) {
 	for _, source := range sources {
 		if source.Source == "dht" {
 			first, last := source.CreatedAt.Unix(), source.UpdatedAt.Unix()

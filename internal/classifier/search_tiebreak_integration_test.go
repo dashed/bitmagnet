@@ -241,6 +241,8 @@ func TestContentSearchTruncatesTiedCandidatesDeterministically(t *testing.T) {
 	}
 
 	forEachPlan(t, db, dsn, func(t *testing.T, l localSearch) {
+		t.Helper()
+
 		for run := range 3 {
 			got := searchIDs(t, l, "Cinderella")
 			require.Equal(t, want, got, "run %d returned a different LIMIT window", run)
@@ -256,6 +258,8 @@ func TestContentBySearchPicksSameContentEveryRun(t *testing.T) {
 	seedTiedCandidates(t, db)
 
 	forEachPlan(t, db, dsn, func(t *testing.T, l localSearch) {
+		t.Helper()
+
 		for run := range 3 {
 			content, err := l.ContentBySearch(
 				context.Background(), model.ContentTypeMovie, "Cinderella", model.Year(0),
@@ -278,6 +282,8 @@ func TestContentSearchRelevanceOutranksTiebreak(t *testing.T) {
 	require.NoError(t, db.Exec("ANALYZE content").Error)
 
 	forEachPlan(t, db, dsn, func(t *testing.T, l localSearch) {
+		t.Helper()
+
 		for run := range 3 {
 			got := searchIDs(t, l, "Cinderella")
 			require.Equal(t, "z99", got[0], "run %d did not rank the best match first", run)
@@ -303,6 +309,8 @@ func TestContentByIDAlternativeIdentifierMultiMatchIsDeterministic(t *testing.T)
 	ref := model.ContentRef{Type: model.ContentTypeMovie, Source: "imdb", ID: "tt7654321"}
 
 	forEachPlan(t, db, dsn, func(t *testing.T, l localSearch) {
+		t.Helper()
+
 		for run := range 3 {
 			content, err := l.ContentByID(context.Background(), ref)
 			require.NoError(t, err)

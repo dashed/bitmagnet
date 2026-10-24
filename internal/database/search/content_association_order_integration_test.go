@@ -258,6 +258,8 @@ func TestContentHydrationOrdersAssociations(t *testing.T) {
 	wantTsv := map[string]string{}
 
 	forEachAssociationOrderPlan(t, db, dsn, func(t *testing.T, s search) {
+		t.Helper()
+
 		for run := range 3 {
 			result, err := s.Content(
 				context.Background(),

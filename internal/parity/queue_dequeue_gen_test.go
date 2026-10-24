@@ -146,7 +146,7 @@ func TestGenerateQueueDequeueOrderingFixture(t *testing.T) {
 		}
 	}
 
-	got := drainQueueInGoOrder(t, ctx, db, input.Queue)
+	got := drainQueueInGoOrder(ctx, t, db, input.Queue)
 	if !equalStrings(got, expected.Order) {
 		t.Fatalf("dequeue order mismatch:\nwant: %v\n got: %v", expected.Order, got)
 	}
@@ -158,7 +158,7 @@ func TestGenerateQueueDequeueOrderingFixture(t *testing.T) {
 // a bind parameter, to dodge the generic-plan tie nondeterminism) — claiming and
 // completing one job at a time until the queue is empty, and returns the id
 // sequence.
-func drainQueueInGoOrder(t *testing.T, ctx context.Context, db *gorm.DB, queueName string) []string {
+func drainQueueInGoOrder(ctx context.Context, t *testing.T, db *gorm.DB, queueName string) []string {
 	t.Helper()
 
 	order := make([]string, 0)

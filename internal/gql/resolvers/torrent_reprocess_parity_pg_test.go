@@ -27,6 +27,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/tmdb"
+	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 	goose "github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/fx/fxtest"
@@ -34,8 +35,6 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-
-	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 )
 
 const (

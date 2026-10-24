@@ -17,13 +17,12 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
+	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 	goose "github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-
-	migrationssql "github.com/bitmagnet-io/bitmagnet/migrations"
 )
 
 type queueMutationCase struct {
@@ -234,7 +233,8 @@ func insertQueueMutationRow(t *testing.T, db *gorm.DB, row queueMutationRow) {
 
 func readQueueMutationRows(t *testing.T, db interface {
 	Query(string, ...any) (*sql.Rows, error)
-}) []queueMutationRow {
+},
+) []queueMutationRow {
 	t.Helper()
 	rows, err := db.Query(
 		`SELECT fingerprint, queue, status::text, payload::text, max_retries, priority
