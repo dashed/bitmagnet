@@ -174,13 +174,7 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 
 	// Step 1: Verify initial state — files_data should be NULL for all.
 	for _, hash := range allHashes {
-		var filesData []byte
-		err := db.Table("torrents").
-			Select("files_data").
-			Where("info_hash = ?", hash).
-			Scan(&filesData).Error
-		require.NoError(t, err)
-		assert.Nil(t, filesData, "files_data should be NULL before migration for %x", hash[:4])
+		assert.Nil(t, filesDataOf(t, db, hash), "files_data should be NULL before migration for %x", hash[:4])
 	}
 
 	// Step 2: Simulate dual-write (like DHT persist does for new torrents).
@@ -202,9 +196,7 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify dual-write: both files_data and torrent_files exist.
-	var dualBlob []byte
-	err = db.Table("torrents").Select("files_data").Where("info_hash = ?", dualWriteHash).Scan(&dualBlob).Error
-	require.NoError(t, err)
+	dualBlob := filesDataOf(t, db, dualWriteHash)
 	assert.NotNil(t, dualBlob, "dual-write should set files_data")
 
 	var dualRowCount int64
@@ -223,12 +215,7 @@ func TestBlobMigrationLifecycle(t *testing.T) {
 
 	// Step 4: Verify migration results.
 	for _, hash := range allHashes {
-		var filesData []byte
-		err := db.Table("torrents").
-			Select("files_data").
-			Where("info_hash = ?", hash).
-			Scan(&filesData).Error
-		require.NoError(t, err)
+		filesData := filesDataOf(t, db, hash)
 		assert.NotNil(t, filesData, "files_data should be set after migration for %x", hash[:4])
 
 		blobFiles, err := blobmigration.DeserializeFiles(filesData)
@@ -332,13 +319,7 @@ func TestConsistencyCheckerIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify healed torrent has NULL files_data.
-	var healedBlob []byte
-	err = db.Table("torrents").
-		Select("files_data").
-		Where("info_hash = ?", corruptHash).
-		Scan(&healedBlob).Error
-	require.NoError(t, err)
-	assert.Nil(t, healedBlob, "healed torrent should have NULL files_data")
+	assert.Nil(t, filesDataOf(t, db, corruptHash), "healed torrent should have NULL files_data")
 
 	// Re-migrate the healed torrent.
 	migrateOneTorrent(t, ctx, db, q, corruptHash)
@@ -521,6 +502,22 @@ func insertNoExtensionTorrent(t *testing.T, db *gorm.DB, infoHash protocol.ID) {
 	}
 	err = db.Clauses(clause.OnConflict{DoNothing: true}).Omit("Extension").Create(&files).Error
 	require.NoError(t, err)
+}
+
+// filesDataOf reads one torrent's files_data. GORM's Scan treats a *[]byte
+// destination as a column of uint8 rows, so a bytea (or NULL) goes through
+// database/sql's Row instead, which reads either into a []byte.
+func filesDataOf(t *testing.T, db *gorm.DB, infoHash protocol.ID) []byte {
+	t.Helper()
+
+	var filesData []byte
+	require.NoError(t, db.Table("torrents").
+		Select("files_data").
+		Where("info_hash = ?", infoHash).
+		Row().
+		Scan(&filesData))
+
+	return filesData
 }
 
 func queryDistinctInfoHashes(ctx context.Context, db *gorm.DB, cursor string, limit int) ([]protocol.ID, error) {
