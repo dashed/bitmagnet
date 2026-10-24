@@ -69,6 +69,9 @@ type plannedJob struct {
 	Hold        string   `json:"hold,omitempty"`  // parked until flags_on.sh releases it (holdAlone, holdAuth)
 	// ClassifyMode is the payload's mode (the rematch phase's rematch jobs).
 	ClassifyMode processor.ClassifyMode `json:"classifyMode,omitempty"`
+	// Expect is what each worker generation does with a hint corpus's job
+	// (flagson_hints.go sliceExpect), keyed by flags_on.sh HINT_EXPECT.
+	Expect map[string]string `json:"expect,omitempty"`
 	// An organic job (flagson_organic.go) as its producer wrote it, queued
 	// byte for byte by enqueueRawJobs: never decoded and marshalled again,
 	// which would normalize exactly what the negative slice is made of.
@@ -84,6 +87,7 @@ type jobSpec struct {
 	classifyMode processor.ClassifyMode
 	hashes       []protocol.ID
 	fault        string
+	expect       map[string]string
 }
 
 // enqueueFlagsOnJobs inserts the jobs with Go's own processor.NewQueueJob, in a
@@ -129,6 +133,7 @@ func enqueueFlagsOnJobs(ctx context.Context, conn *pgx.Conn, specs []jobSpec, ba
 			InfoHashes:   hashes,
 			Fault:        spec.fault,
 			ClassifyMode: spec.classifyMode,
+			Expect:       spec.expect,
 		})
 
 		if batch.Len() >= 1500 {
@@ -193,14 +198,12 @@ func enqueueRawJobs(ctx context.Context, conn *pgx.Conn, jobs []plannedJob, base
 //     chunks of jobSize-1; every flagsOffEvery-th chunk carries a flags-off
 //     payload, and every tenth chunk gains a missing hash (partial failure:
 //     the failed hash is republished before persistence);
-//   - hint torrents in their own chunks, interleaved every hintEvery jobs: the
-//     Rust worker abstains from explicit content-ID hints (M3), so a job must
-//     not mix them with torrents it can process;
 //   - one deletion-only job (Go's second early return) and three jobs of only
 //     missing hashes (all-failed: the retry lifecycle to `failed`).
-func planFlagsOnJobs(main, hints, deletionOnly []protocol.ID, jobSize, flagsOffEvery int, withMissing bool) []jobSpec {
+//
+// The hint corpora plan their jobs with planHintedJobs (flagson_hints.go).
+func planFlagsOnJobs(main, deletionOnly []protocol.ID, jobSize, flagsOffEvery int, withMissing bool) []jobSpec {
 	sortHashes(main)
-	sortHashes(hints)
 
 	step := jobSize - 1
 
@@ -222,36 +225,13 @@ func planFlagsOnJobs(main, hints, deletionOnly []protocol.ID, jobSize, flagsOffE
 		mainJobs = append(mainJobs, spec)
 	}
 
-	var hintJobs []jobSpec
-
-	for i := 0; i < len(hints); i += jobSize {
-		hintJobs = append(hintJobs, jobSpec{
-			slice: sliceHint, flagsOn: true, hashes: append([]protocol.ID(nil), hints[i:min(i+jobSize, len(hints))]...),
-		})
-	}
-
-	specs := make([]jobSpec, 0, len(mainJobs)+len(hintJobs)+4)
+	specs := make([]jobSpec, 0, len(mainJobs)+4)
 
 	if len(deletionOnly) > 0 {
 		specs = append(specs, jobSpec{slice: sliceDeletion, flagsOn: true, hashes: deletionOnly})
 	}
 
-	// Spread the hint jobs evenly through the main jobs.
-	hintEvery := 1
-	if len(hintJobs) > 0 {
-		hintEvery = max(1, len(mainJobs)/len(hintJobs))
-	}
-
-	for i, h := 0, 0; i < len(mainJobs) || h < len(hintJobs); i++ {
-		if i < len(mainJobs) {
-			specs = append(specs, mainJobs[i])
-		}
-
-		if h < len(hintJobs) && (i%hintEvery == hintEvery-1 || i >= len(mainJobs)) {
-			specs = append(specs, hintJobs[h])
-			h++
-		}
-	}
+	specs = append(specs, mainJobs...)
 
 	for i := range 3 {
 		if !withMissing {

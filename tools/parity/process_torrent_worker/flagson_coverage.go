@@ -98,6 +98,7 @@ type tapeRecordOutcome struct {
 const (
 	observationTMDBRequest = "tmdb.request"
 	verdictMet             = "MET"
+	verdictNotMet          = "NOT MET"
 )
 
 type tapeTMDBRequest struct {
@@ -213,7 +214,7 @@ func runFlagsOnCoverage(args []string) error {
 			}
 
 			if counted < f.floor {
-				status = "NOT MET"
+				status = verdictNotMet
 				failed++
 			}
 

@@ -88,7 +88,7 @@ func run() error {
 			"flagson-seed|flagson-requeue|flagson-dump|flagson-coverage|flagson-abstained|" +
 			"flagson-faultcheck|flagson-attribution|flagson-rawdiff|flagson-rematch-coverage|" +
 			"flagson-organic-produce|flagson-organic-enqueue|flagson-organic-coverage|flagson-organic-check|" +
-			"flagson-organic-info|" +
+			"flagson-organic-info|flagson-hint-coverage|" +
 			"tmdb-stub|request-diff [flags]")
 	}
 
@@ -123,6 +123,8 @@ func run() error {
 		return runFlagsOnOrganicCheck(os.Args[2:])
 	case "flagson-organic-info":
 		return runFlagsOnOrganicInfo(os.Args[2:])
+	case "flagson-hint-coverage":
+		return runFlagsOnHintCoverage(os.Args[2:])
 	case "tmdb-stub":
 		return runTMDBStub(os.Args[2:])
 	case "request-diff":

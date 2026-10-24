@@ -1,17 +1,17 @@
 package main
 
 // flagson-seed: one flags-on corpus into a migrated, empty database, plus its
-// TMDB stub fixtures. Three corpora, each in its own database:
+// TMDB stub fixtures. Each corpus has a database of its own:
 //
 //   - main: the flags-off seed's torrents (synthetic inputs without a sourced
 //     hint, and the real-name replay corpus) plus copies of the deletion
 //     inputs. Content and stub fixtures are generated from what Go's own
 //     classifier asks for each torrent (flagson_plan.go), so local and TMDB
 //     searches really match. This is the G-1 and G2 corpus.
-//   - hint: torrents with explicit content-ID hints, the only way into the
-//     by-ID attach actions and /find. The Rust worker abstains from them by
-//     design (load.rs is_supported_type_only), so this corpus is the Go
-//     oracle's by-ID coverage and an abstention check, not part of G2.
+//   - hint, enriched, conflict and ambiguous: explicit hints as prod has them
+//     and the associations they meet (flagson_hints.go). A worker before M3b
+//     abstains from every hinted job but a bare type-only one; M3b processes
+//     them as Go does.
 //   - fault and abstain: TMDB failures by class, the first the ones Go handles
 //     per torrent (G2-fault), the second the ones Rust leaves to Go (G3); see
 //     flagson_faults.go.
@@ -63,6 +63,9 @@ type seedOptions struct {
 	flagsOffEvery          int
 	deletionCopies         int
 	hintCount              int
+	enrichedCount          int
+	conflictCount          int
+	ambiguousCount         int
 	faultReplay            int
 	organicReplay          int
 }
@@ -86,6 +89,12 @@ type seedRun struct {
 	contents  []seededContent
 	notes     []fixtureNote
 
+	// The hint corpora's explicit hints (written through GORM before the
+	// plan), raw value rewrites, and existing associations (flagson_hints.go).
+	hints        []model.TorrentHint
+	rewrites     []hintRewrite
+	associations []model.TorrentContent
+
 	nextTMDBID  int64
 	nextLocalID int64
 }
@@ -106,12 +115,15 @@ func runFlagsOnSeed(args []string) error {
 	fs.StringVar(&o.dsn, "dsn", "", "disposable PostgreSQL DSN, migrated and empty")
 	fs.StringVar(&o.root, "root", ".", "repository root")
 	fs.StringVar(&o.out, "out", "", "directory for responses.jsonl, faults.jsonl, jobs.jsonl, plan.jsonl, ...")
-	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | fault | abstain | organic")
+	fs.StringVar(&o.corpus, "corpus", corpusMain, "main | hint | enriched | conflict | ambiguous | fault | abstain | organic")
 	fs.IntVar(&o.replayLimit, "replay-limit", 120000, "real-name replay inputs in the main corpus")
 	fs.IntVar(&o.jobSize, "job-size", 100, "info hashes per job")
 	fs.IntVar(&o.flagsOffEvery, "flags-off-every", 8, "every Nth main chunk carries a flags-off payload (0 = none)")
 	fs.IntVar(&o.deletionCopies, "deletion-copies", 32, "copies of each synthetic deletion input in the main corpus")
-	fs.IntVar(&o.hintCount, "hints", 4000, "hinted torrents in the hint corpus")
+	fs.IntVar(&o.hintCount, "hints", 8000, "replay-named sourced hints in the hint corpus")
+	fs.IntVar(&o.enrichedCount, "enriched", 6000, "replay-named enriched hints in the enriched corpus")
+	fs.IntVar(&o.conflictCount, "conflicts", 100, "jobs of the conflict corpus")
+	fs.IntVar(&o.ambiguousCount, "ambiguous", 60, "torrents per shape in the ambiguous corpus")
 	fs.IntVar(&o.faultReplay, "fault-replay", 4000, "replay inputs in the fault and abstain corpora")
 	fs.IntVar(&o.organicReplay, "organic-replay", 18000, "replay inputs in the organic corpus")
 
@@ -174,6 +186,12 @@ func runFlagsOnSeed(args []string) error {
 		err = s.seedMain()
 	case corpusHint:
 		err = s.seedHint()
+	case corpusEnriched:
+		err = s.seedEnriched()
+	case corpusConflict:
+		err = s.seedConflict()
+	case corpusAmbiguous:
+		err = s.seedAmbiguous()
 	case corpusFault:
 		err = s.seedFaultCorpus(faultCorpusClasses)
 	case corpusAbstain:
@@ -292,6 +310,10 @@ func (s *seedRun) plan() ([]plannedTorrent, string, error) {
 		return nil, "", err
 	}
 
+	if err := s.writeHints(); err != nil {
+		return nil, "", err
+	}
+
 	runner, digest, err := newPlanRunner(s.db)
 	if err != nil {
 		return nil, "", err
@@ -310,14 +332,23 @@ func (s *seedRun) plan() ([]plannedTorrent, string, error) {
 	return planned, digest, nil
 }
 
-// finish inserts the local content, queues the jobs and writes the fixtures;
-// it returns the queued jobs.
+// finish inserts the local content and the associations that point at it,
+// stores the hint values Go's scan rejects, queues the jobs and writes the
+// fixtures; it returns the queued jobs.
 func (s *seedRun) finish(planned []plannedTorrent, digest string, specs []jobSpec, held map[int]string) ([]plannedJob, error) {
 	if err := s.flush(); err != nil {
 		return nil, err
 	}
 
 	if err := s.insertContents(); err != nil {
+		return nil, err
+	}
+
+	if err := s.insertAssociations(); err != nil {
+		return nil, err
+	}
+
+	if err := s.applyRewrites(true); err != nil {
 		return nil, err
 	}
 
@@ -382,6 +413,9 @@ func (s *seedRun) writeSeedFiles(planned []plannedTorrent, digest string, jobs [
 		{"seeded-content.txt", func(p string) error {
 			return os.WriteFile(p, []byte(strings.Join(contentRefs, "\n")+"\n"), 0o644)
 		}},
+		{"seeded-associations.txt", func(p string) error {
+			return os.WriteFile(p, []byte(strings.Join(s.associationIDs(), "\n")+"\n"), 0o644)
+		}},
 	}
 
 	if jobs != nil {
@@ -422,6 +456,8 @@ func (s *seedRun) writeSeedFiles(planned []plannedTorrent, digest string, jobs [
 		"responses":             len(responses),
 		"faults":                len(s.faults),
 		"seededContent":         len(s.contents),
+		"seededAssociations":    len(s.associations),
+		"hintRewrites":          len(s.rewrites),
 		"fixtureCategories":     categories,
 		"effectiveConfigDigest": digest,
 	}
@@ -521,7 +557,7 @@ func (s *seedRun) seedMain() error {
 		}
 	}
 
-	specs := planFlagsOnJobs(main, nil, deletionOnly, o.jobSize, o.flagsOffEvery, true)
+	specs := planFlagsOnJobs(main, deletionOnly, o.jobSize, o.flagsOffEvery, true)
 
 	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
 
@@ -1047,221 +1083,6 @@ func (s *seedRun) insertContents() error {
 	}
 
 	return s.conn.SendBatch(s.ctx, batch).Close()
-}
-
-// ---- hint corpus ----
-
-// hintCategories, with weights out of 100. "reuse" hints content an earlier
-// hint job fetched from TMDB, so it is found locally by then.
-var hintCategories = []struct {
-	name   string
-	weight int
-}{
-	{"local-canonical", 9},
-	{"local-alternative", 6},
-	{"local-alternative-multi", 3},
-	{"direct-new", 10},
-	{"direct-404", 4},
-	{"find-new", 34},
-	{"find-existing", 12},
-	{"find-empty", 8},
-	{"find-details-404", 6},
-	{"find-wrong-bucket", 3},
-	{"invalid-tmdb-id", 2},
-	{"reuse", 3},
-}
-
-func (s *seedRun) seedHint() error {
-	o := s.opts
-
-	synthetic, err := readJSONL[input](filepath.Join(o.root, "testdata/parity/classifier/inputs.jsonl"), 0)
-	if err != nil {
-		return err
-	}
-
-	replay, err := readJSONL[input](filepath.Join(o.root, "testdata/parity/classifier-replay/inputs.jsonl"), o.hintCount)
-	if err != nil {
-		return err
-	}
-
-	// The synthetic corpus's own sourced hints, as they are.
-	for _, in := range synthetic {
-		if in.Hint != nil && in.Hint.ContentSource != "" {
-			if _, err := s.addTorrent("synthetic", sliceHint, in); err != nil {
-				return err
-			}
-
-			s.note(fixtureNote{Kind: "hint", Key: in.ID, Category: "synthetic"})
-		}
-	}
-
-	var fetched []model.ContentRef // TMDB content earlier hints create, for "reuse"
-
-	for i, in := range replay {
-		r := fixtureRand("hint/" + in.ID)
-
-		ct := model.ContentTypeMovie
-
-		switch v := r.IntN(10); {
-		case v < 4:
-			ct = model.ContentTypeTvShow
-		case v == 4:
-			ct = model.ContentTypeXxx
-		}
-
-		tv := ct == model.ContentTypeTvShow
-
-		cat := ""
-		w := r.IntN(100)
-
-		for _, c := range hintCategories {
-			if w < c.weight {
-				cat = c.name
-				break
-			}
-
-			w -= c.weight
-		}
-
-		if cat == "reuse" && len(fetched) == 0 {
-			cat = "find-new"
-		}
-
-		hint := &inputHint{ContentType: string(ct)}
-		tmdbID := s.allocTMDBID()
-		imdbID := fmt.Sprintf("tt%07d", 5000000+i*3)
-		external, externalSource := imdbID, "imdb_id"
-
-		if tv && r.IntN(3) == 0 {
-			external, externalSource = strconv.Itoa(400000+i*7), "tvdb_id"
-		}
-
-		hintExternal := func() {
-			if externalSource == "tvdb_id" {
-				hint.ContentSource, hint.ContentID = model.SourceTvdb, external
-			} else {
-				hint.ContentSource, hint.ContentID = model.SourceImdb, external
-			}
-		}
-
-		details := func(id int64) error {
-			spec := detailsSpec{
-				tv: tv, id: id, title: fmt.Sprintf("Hinted %s %d", ct, i), year: 1970 + i%55,
-				adult: ct == model.ContentTypeXxx,
-			}
-			if externalSource == "imdb_id" {
-				spec.imdbID = external
-			} else {
-				spec.tvdbID, _ = strconv.ParseInt(external, 10, 64)
-			}
-
-			return s.respond(detailsKey(tv, id), 200, buildDetailsBody(s.tpl, r, spec))
-		}
-
-		find := func(items []searchItem, asTV bool) error {
-			return s.respond(findKey(external, externalSource), 200, buildFindBody(s.tpl, r, asTV, items))
-		}
-
-		var err error
-
-		switch cat {
-		case "local-canonical":
-			hint.ContentSource, hint.ContentID = model.SourceTmdb, strconv.FormatInt(tmdbID, 10)
-			s.contents = append(s.contents, s.newLocalContent(ct, model.SourceTmdb, hint.ContentID,
-				fmt.Sprintf("Local canonical %d", i), 0, r))
-		case "local-alternative", "local-alternative-multi":
-			hintExternal()
-
-			copies := 1
-			if cat == "local-alternative-multi" {
-				copies = 2 + r.IntN(2)
-			}
-
-			p := tiePatterns[r.IntN(len(tiePatterns))]
-			n := s.allocLocalID()
-
-			for k := copies - 1; k >= 0; k-- {
-				var source, id string
-
-				switch k {
-				case 0:
-					source, id = p.first(n)
-				case 1:
-					source, id = p.second(n)
-				default:
-					source, id = sourceLocal, fmt.Sprintf("z%d-%d", n, k)
-				}
-
-				sc := s.newLocalContent(ct, source, id, fmt.Sprintf("Local alternative %d/%d", i, k), 0, r)
-				sc.withoutAttribute(hint.ContentSource, "id")
-				sc.content.Attributes = append(sc.content.Attributes, model.ContentAttribute{
-					ContentType: ct, ContentSource: source, ContentID: id,
-					Source: hint.ContentSource, Key: "id", Value: hint.ContentID,
-				})
-				sc.attributeOrder = append([]int{len(sc.content.Attributes) - 1}, sc.attributeOrder...)
-				sc.content.UpdateTsv()
-				s.contents = append(s.contents, sc)
-			}
-		case "direct-new":
-			hint.ContentSource, hint.ContentID = model.SourceTmdb, strconv.FormatInt(tmdbID, 10)
-			err = details(tmdbID)
-			fetched = append(fetched, model.ContentRef{Type: ct, Source: model.SourceTmdb, ID: hint.ContentID})
-		case "direct-404":
-			hint.ContentSource, hint.ContentID = model.SourceTmdb, strconv.FormatInt(tmdbID, 10)
-		case "find-new", "find-existing":
-			hintExternal()
-
-			if err = find([]searchItem{{id: tmdbID, title: "Found " + external, year: 2001}}, tv); err == nil {
-				err = details(tmdbID)
-			}
-
-			if cat == "find-existing" {
-				s.contents = append(s.contents, s.newLocalContent(ct, model.SourceTmdb,
-					strconv.FormatInt(tmdbID, 10), fmt.Sprintf("Qz %x Placeholder", tmdbID), 0, r))
-			} else {
-				fetched = append(fetched, model.ContentRef{
-					Type: ct, Source: model.SourceTmdb,
-					ID: strconv.FormatInt(tmdbID, 10),
-				})
-			}
-		case "find-empty":
-			hintExternal()
-		case "find-details-404":
-			hintExternal()
-			err = find([]searchItem{{id: tmdbID, title: "Found " + external, year: 2002}}, tv)
-		case "find-wrong-bucket":
-			hintExternal()
-			err = find([]searchItem{{id: tmdbID, title: "Wrong bucket " + external}}, !tv)
-		case "invalid-tmdb-id":
-			hint.ContentSource, hint.ContentID = model.SourceTmdb, fmt.Sprintf("x%d", tmdbID)
-		case "reuse":
-			ref := fetched[r.IntN(len(fetched))]
-			hint.ContentType, hint.ContentSource, hint.ContentID = string(ref.Type), ref.Source, ref.ID
-		}
-
-		if err != nil {
-			return err
-		}
-
-		in.Hint = hint
-
-		if _, err := s.addTorrent("hint", sliceHint, in); err != nil {
-			return err
-		}
-
-		s.note(fixtureNote{Kind: "hint", Key: in.ID, Category: cat, ID: hint.ContentSource + ":" + hint.ContentID})
-	}
-
-	planned, digest, err := s.plan()
-	if err != nil {
-		return err
-	}
-
-	specs := planFlagsOnJobs(nil, append([]protocol.ID(nil), s.hashes...), nil, s.opts.jobSize, 0, false)
-
-	_, err = s.finish(labelPlanned(planned, specs), digest, specs, nil)
-
-	return err
 }
 
 func mustHash(hex string) protocol.ID {

@@ -534,7 +534,7 @@ func runFlagsOnRematchCoverage(args []string) error {
 		case f.got >= f.floor:
 			verdict = verdictMet
 		default:
-			verdict = "NOT MET"
+			verdict = verdictNotMet
 			unmet = append(unmet, f.name)
 		}
 

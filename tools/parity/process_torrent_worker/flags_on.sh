@@ -14,12 +14,22 @@
 #          must be identical.
 #          G2 (with RUST_WORKER): Rust alone vs Go run 1; identical dumps and
 #          request multisets, no job left behind, no abstention logged.
-#   hint   Explicit content-ID hints (by-ID actions, /find), in a database of
-#          their own, so they cannot change the main corpus's results. G-1 as
-#          for main. With RUST_WORKER (G2's hint slice): Rust then Go; Rust
-#          must abstain from every hint job before classification, with the
-#          attach-hint reason, zero stub requests and zero writes, and the
-#          result (dump and request multiset) must equal Go alone.
+#   hint, enriched, conflict, ambiguous  Explicit hints as prod has them
+#          (flagson_hints.go): sourced (by-ID actions, /find, existing
+#          associations), enriched type-only, two images of one content in a
+#          job, and associations Go picks among by row order; each in a
+#          database of its own. G-1 as for main, then flagson-hint-coverage
+#          (hint and enriched: floors over the jobs the HINT_EXPECT generation
+#          processes, enforced for process). With RUST_WORKER: Rust then Go;
+#          flagson-abstained -expect-mode checks Rust left exactly the jobs
+#          that generation leaves (HINT_EXPECT=abstain: a worker before M3b,
+#          every hinted job but a bare type-only one, reason hint;
+#          HINT_EXPECT=process: M3b, only the refused values, ambiguities and
+#          conflicts), each with its reason, none of its writes, and no
+#          resolver call started for a job left before classification; the
+#          dumps and request multisets must equal Go alone. A conflict job is
+#          refused after classification, so under process its Rust requests
+#          come on top, and Go's after Rust must equal Go alone's.
 #   fault  TMDB failures Go handles per torrent, and transport faults its
 #          client's retry recovers from, by class (flagson_faults.go), in
 #          fault jobs of pseudo-titled torrents no other job can see.
@@ -74,7 +84,10 @@
 #   PG_HOST, PG_PORT, PG_USER  disposable server (as run.sh)
 #   GOOSE_VERSION  schema head (default: the highest migration in the tree)
 #   REPLAY_LIMIT   real-name replay inputs in the main corpus (default 120000)
-#   PHASES         corpora to run (default "main hint fault abstain rematch")
+#   PHASES         corpora to run (default "main hint enriched conflict ambiguous
+#                  fault abstain rematch")
+#   HINT_EXPECT    abstain (default: a worker before M3b) | process (M3b): what
+#                  the hint corpora's Rust phases expect
 #   MAIN_RUN       the main phase's evidence the rematch phase starts from
 #                  (default $OUT/main); ${PREFIX}_main_go1 must still hold it
 #   ORGANIC_RUN    the same for organic2 (default $OUT/organic)
@@ -97,7 +110,8 @@ PG_PORT="${PG_PORT:-5432}"
 PG_USER="${PG_USER:-postgres}"
 GOOSE_VERSION="${GOOSE_VERSION:-$(ls "$ROOT/migrations" | sed -n 's/^0*\([0-9][0-9]*\)_.*\.sql$/\1/p' | sort -n | tail -1)}"
 REPLAY_LIMIT="${REPLAY_LIMIT:-120000}"
-PHASES="${PHASES:-main hint fault abstain rematch}"
+PHASES="${PHASES:-main hint enriched conflict ambiguous fault abstain rematch}"
+HINT_EXPECT="${HINT_EXPECT:-abstain}"
 OUT="${OUT:-$(mktemp -d)}"
 TMDB_KEY="${TMDB_KEY:-flagson-harness-dummy-key-0001}"
 # Fixed, because Go's job error text quotes the request URL (host and port
@@ -113,6 +127,9 @@ ORGANIC="${ORGANIC:-}"
 # The organic phases' bound, set around their Rust phases.
 ORGANIC_BOUND=
 
+if [[ "$HINT_EXPECT" != abstain && "$HINT_EXPECT" != process ]]; then
+  echo "HINT_EXPECT must be abstain or process" >&2; exit 2
+fi
 if [[ "$TMDB_KEY" == 9c6689fa83ae6814fbfb200d70bba3a8 ]]; then
   echo "TMDB_KEY must not be Go's default key" >&2; exit 2
 fi
@@ -464,6 +481,38 @@ rust_then_go_organic() { # corpus name bound
   echo "$corpus $name (Rust then Go, bound $bound): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
 }
 
+# Rust, then Go for what it left, over a hint corpus (flagson_hints.go) under
+# HINT_EXPECT: flagson-abstained -expect-mode checks Rust left exactly the jobs
+# that worker generation leaves. Rust's requests are rust-requests.jsonl, Go's
+# after it go-requests.jsonl.
+rust_then_go_hinted() { # corpus name
+  local corpus=$1 name=$2 db=${PREFIX}_$1_$2 run="$OUT/$1/$2" pid T0=$SECONDS expect left rust_lines
+  mkdir -p "$run"; ln -sfn ../seed "$run/seed"
+  clone "${PREFIX}_${corpus}_seed" "$db" >/dev/null
+  expect="$(python3 -I -c 'import json,sys
+print(sum(1 for l in open(sys.argv[1]) if json.loads(l)["expect"][sys.argv[2]] != "none"))' \
+    "$OUT/$corpus/seed/jobs.jsonl" "$HINT_EXPECT")"
+  : >"$run/stub.jsonl"
+  start_stub "$corpus" "$run"
+  pid="$(start_rust "$db" "$run" rust.log)"; wait_abstained "$run/rust.log" "$expect"; drain "$db" "$expect" 15; stop "$pid"
+  stop "$STUB_PID"
+  cp "$run/stub.jsonl" "$run/rust-requests.jsonl"
+  rust_lines="$(wc -l <"$run/stub.jsonl")"
+  left="$(active "$db")"
+  echo "$corpus $name Rust phase (HINT_EXPECT=$HINT_EXPECT): $((SECONDS - T0))s, $(grep -c . "$run/rust-requests.jsonl" || true) stub requests, left for Go: $left (expected $expect)" \
+    | tee -a "$OUT/timing.txt" "$OUT/gates.txt"
+  if ! "$PTW" flagson-abstained -dsn "$(dsn "$db")" -seed "$OUT/$corpus/seed" -expect-mode "$HINT_EXPECT" \
+      -rust-log "$run/rust.log" 2>&1 | tee -a "$run/abstained.txt" "$OUT/gates.txt"; then status=1; fi
+  if [[ "$left" -gt 0 ]]; then
+    start_stub "$corpus" "$run"
+    pid="$(start_go "$db" "$run")"; drain "$db" 0; stop "$pid"
+    stop "$STUB_PID"
+  fi
+  tail -n "+$((rust_lines + 1))" "$run/stub.jsonl" >"$run/go-requests.jsonl"
+  dump_run "$db" "$run"
+  echo "$corpus $name (Rust then Go, HINT_EXPECT=$HINT_EXPECT): $((SECONDS - T0))s" | tee -a "$OUT/timing.txt"
+}
+
 # G7 in a drained organic run ($2).
 organic_check() { # name
   if "$PTW" flagson-organic-check -dsn "$(dsn "${PREFIX}_organic_$1")" -seed "$OUT/organic/seed" \
@@ -503,17 +552,41 @@ for corpus in $PHASES; do
     *) seed_corpus "$corpus" ;;
   esac
   case $corpus in
-    main|hint)
+    main)
+      go_alone main go1 tape
+      go_alone main go2
+      compare "main G-1 go1 vs go2" "$OUT/main/go1" "$OUT/main/go2"
+      if [[ -n "$RUST_WORKER" ]]; then
+        rust_alone main rust
+        compare "main G2 go1 vs rust" "$OUT/main/go1" "$OUT/main/rust"
+      fi
+      ;;
+    hint|enriched|conflict|ambiguous)
       go_alone "$corpus" go1 tape
       go_alone "$corpus" go2
       compare "$corpus G-1 go1 vs go2" "$OUT/$corpus/go1" "$OUT/$corpus/go2"
-      if [[ -n "$RUST_WORKER" ]]; then
-        if [[ $corpus == main ]]; then
-          rust_alone main rust
-          compare "main G2 go1 vs rust" "$OUT/main/go1" "$OUT/main/rust"
+      if [[ $corpus == hint || $corpus == enriched ]]; then
+        if "$PTW" flagson-hint-coverage -dir "$OUT/$corpus/go1" -dsn "$(dsn "${PREFIX}_${corpus}_go1")" \
+            -mode "$HINT_EXPECT" >"$OUT/$corpus/coverage.txt" 2>&1; then
+          echo "$corpus coverage (HINT_EXPECT=$HINT_EXPECT): PASS (see $OUT/$corpus/coverage.txt)" | tee -a "$OUT/gates.txt"
         else
-          rust_then_go hint rust "$(grep -c . "$OUT/hint/seed/jobs.jsonl")" hint hint none
-          compare "hint G2 go1 vs rust-then-go" "$OUT/hint/go1" "$OUT/hint/rust"
+          echo "$corpus coverage (HINT_EXPECT=$HINT_EXPECT): floors NOT met (see $OUT/$corpus/coverage.txt)" | tee -a "$OUT/gates.txt"
+          status=1
+        fi
+      fi
+      if [[ -n "$RUST_WORKER" ]]; then
+        rust_then_go_hinted "$corpus" rust
+        if [[ $corpus == conflict && $HINT_EXPECT == process ]]; then
+          compare "conflict G3 go1 vs rust-then-go" "$OUT/conflict/go1" "$OUT/conflict/rust" info
+          if "$PTW" request-diff -ignore-endpoint /authentication "$OUT/conflict/go1/stub.jsonl" \
+              "$OUT/conflict/rust/go-requests.jsonl" >"$OUT/conflict/rust/go-requests.diff" 2>"$OUT/conflict/rust/go-requests.summary"; then
+            echo "conflict G3 Go-after-Rust requests: $(tail -1 "$OUT/conflict/rust/go-requests.summary")" | tee -a "$OUT/gates.txt"
+          else
+            echo "conflict G3 Go-after-Rust requests: $(tail -1 "$OUT/conflict/rust/go-requests.summary") (see $OUT/conflict/rust/go-requests.diff)" | tee -a "$OUT/gates.txt"
+            status=1
+          fi
+        else
+          compare "$corpus G2 go1 vs rust-then-go (HINT_EXPECT=$HINT_EXPECT)" "$OUT/$corpus/go1" "$OUT/$corpus/rust"
         fi
       fi
       ;;
