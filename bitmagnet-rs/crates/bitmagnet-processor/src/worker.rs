@@ -71,16 +71,16 @@ use prometheus::IntCounterVec;
 
 use crate::writer_plan::load_live_writer_plan;
 use crate::{
-    load_writer_plan, persist_writer_plan, BlockingManager, LoadError, MaterializeError,
-    Materializer, WriterLoadError, WriterPlanError,
+    check_payload_key_set, load_writer_plan, persist_writer_plan, BlockingManager, LoadError,
+    MaterializeError, Materializer, WriterLoadError, WriterPlanError,
 };
 
 /// Why the worker left a claimed job to Go: the `reason` label of
 /// `outcome="abstained"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AbstainReason {
-    /// The payload does not decode, or its workflow or flags are outside the
-    /// admission.
+    /// The payload has a key outside Go's key set, does not decode, or its
+    /// workflow or flags are outside the admission.
     Payload,
     /// An explicit hint the writer cannot reproduce, or a sourced one on a
     /// worker without a live resolver.
@@ -334,6 +334,12 @@ impl ProcessTorrentWorker {
         job: &DequeuedJob,
         admission: ProcessTorrentAdmission,
     ) -> Result<JobVerdict, (AbstainReason, String)> {
+        // serde ignores a key it does not know, where Go may bind it, so the
+        // keys are checked first, under every admission.
+        if let Err(error) = check_payload_key_set(&job.payload) {
+            tracing::info!(job_id = %job.id, %error, "abstaining from process_torrent payload outside Go's key set");
+            return Err((AbstainReason::Payload, format!("payload: {error}")));
+        }
         // Go's decoder is more lenient than serde (a `0x` hash prefix, JSON
         // null for a slice, case-insensitive keys), so a payload serde rejects
         // may be one Go processes. Leave it to Go rather than spend a retry.
@@ -666,6 +672,96 @@ mod tests {
                 "unsupported"
             ]
         );
+    }
+
+    struct UnusedBlocker;
+
+    impl BlockingManager for UnusedBlocker {
+        fn block<'a>(
+            &'a self,
+            _info_hashes: &'a [String],
+        ) -> futures::future::BoxFuture<'a, Result<(), crate::BoxError>> {
+            panic!("no job here reaches the writer")
+        }
+    }
+
+    /// Every admission checks the keys before serde and before the database: no
+    /// server listens on the pool's address, so a job that reached the
+    /// database would fail as Go's handler does, not abstain.
+    #[tokio::test]
+    async fn a_payload_outside_gos_key_set_abstains_before_any_database_access() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+            .expect("lazy pool");
+        let worker = ProcessTorrentWorker::new(
+            QueueStore::new(pool),
+            Materializer::from_core().expect("compile embedded classifier"),
+            Arc::new(UnusedBlocker),
+            ProcessTorrentWorkerConfig::default(),
+        );
+        let job = |payload: String| DequeuedJob {
+            id: "job".to_owned(),
+            fingerprint: String::new(),
+            queue: bitmagnet_queue::PROCESS_TORRENT.to_owned(),
+            original_status: bitmagnet_queue::QueueJobStatus::Pending,
+            payload,
+            retries: 0,
+            max_retries: 2,
+            priority: 0,
+        };
+        let hash = "a1".repeat(20);
+        let off = r#"{"apis_enabled":false,"local_search_enabled":false,"tmdb_enabled":false}"#;
+        let explicit = format!(r#""ClassifierWorkflow":"default","ClassifierFlags":{off}"#);
+        let refused = [
+            (
+                format!(r#"{{{explicit},"InfoHashes":["{hash}"],"classifierworkflow":"custom"}}"#),
+                r#"payload: unexpected key "classifierworkflow""#,
+            ),
+            (
+                format!(r#"{{"InfoHashes":["{hash}"],"Extra":true}}"#),
+                r#"payload: unexpected key "Extra""#,
+            ),
+            // serde refuses this one too; the key is what is reported.
+            (
+                format!(r#"{{"InfoHashes":"{hash}","Extra":true}}"#),
+                r#"payload: unexpected key "Extra""#,
+            ),
+            (
+                format!(
+                    r#"{{"ClassifierWorkflow":"default","ClassifierFlags":{},"InfoHashes":["{hash}"]}}"#,
+                    off.replace('}', r#","delete_xxx":false}"#)
+                ),
+                r#"payload: classifier flag "delete_xxx" is not an attach flag"#,
+            ),
+            (
+                format!(r#"{{"ClassifierFlags":null,"InfoHashes":["{hash}"]}}"#),
+                "payload: ClassifierFlags is not an object",
+            ),
+        ];
+        for admission in [
+            ProcessTorrentAdmission::FlagsOff,
+            ProcessTorrentAdmission::FlagsOffOrOn,
+            ProcessTorrentAdmission::Organic { max_priority: 0 },
+        ] {
+            for (payload, text) in &refused {
+                match worker.process(&job(payload.clone()), admission).await {
+                    Err((AbstainReason::Payload, abstained)) => {
+                        assert_eq!(abstained, *text, "{admission:?} {payload}");
+                    }
+                    other => panic!("{admission:?} {payload}: {other:?}"),
+                }
+            }
+            // The control: a payload inside the key set goes on to the database.
+            let control = format!(r#"{{{explicit},"InfoHashes":["{hash}"]}}"#);
+            assert!(
+                matches!(
+                    worker.process(&job(control), admission).await,
+                    Ok(JobVerdict::Fail(ref error)) if error.starts_with(GO_HANDLER_ERROR_PREFIX)
+                ),
+                "{admission:?}"
+            );
+        }
     }
 
     #[test]

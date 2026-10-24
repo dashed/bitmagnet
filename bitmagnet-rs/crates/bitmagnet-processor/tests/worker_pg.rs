@@ -18,8 +18,8 @@ use bitmagnet_classifier::{ContentResolver, ContentResultItem, ResolveError};
 use bitmagnet_content_search::PgContentSearch;
 use bitmagnet_model::{Content, ContentType, InfoHash};
 use bitmagnet_processor::{
-    load_writer_plan, persist_writer_plan, validate_supported_params, Materializer,
-    ProcessTorrentWorker, ProcessTorrentWorkerConfig, WriterPlanError,
+    check_payload_key_set, load_writer_plan, persist_writer_plan, validate_supported_params,
+    Materializer, ProcessTorrentWorker, ProcessTorrentWorkerConfig, WriterPlanError,
 };
 use bitmagnet_queue::{
     backoff, process_torrent_job, AdmittedConsumeOutcome, ConsumeOutcome, JobVerdict,
@@ -3752,10 +3752,10 @@ async fn organic_claim_steps_over_higher_bands_on_gos_claim_index() {
     assert!(!excluded.contains(&job.id));
 }
 
-/// An independent statement of the payloads organic admission claims, over
-/// the payload as PostgreSQL stores it (numbers normalized, duplicate keys
-/// dropped), which is also the text both decoders read.
-fn organic_reference(payload: &Value) -> bool {
+/// An independent statement of the keys every admission's worker accepts:
+/// only `MessageParams`' four, and in `ClassifierFlags`, if present, only the
+/// attach flags as booleans.
+fn key_set_reference(payload: &Value) -> bool {
     const KEYS: [&str; 4] = [
         "ClassifyMode",
         "ClassifierWorkflow",
@@ -3763,6 +3763,23 @@ fn organic_reference(payload: &Value) -> bool {
         "InfoHashes",
     ];
     const FLAGS: [&str; 3] = ["local_search_enabled", "apis_enabled", "tmdb_enabled"];
+    let Value::Object(fields) = payload else {
+        return false;
+    };
+    fields.keys().all(|key| KEYS.contains(&key.as_str()))
+        && fields.get("ClassifierFlags").is_none_or(|flags| {
+            flags.as_object().is_some_and(|flags| {
+                flags
+                    .iter()
+                    .all(|(name, value)| FLAGS.contains(&name.as_str()) && value.is_boolean())
+            })
+        })
+}
+
+/// An independent statement of the payloads organic admission claims, over
+/// the payload as PostgreSQL stores it (numbers normalized, duplicate keys
+/// dropped), which is also the text both decoders read.
+fn organic_reference(payload: &Value) -> bool {
     let is_hash = |hash: &Value| {
         hash.as_str().is_some_and(|hash| {
             hash.len() == 40
@@ -3774,7 +3791,7 @@ fn organic_reference(payload: &Value) -> bool {
     let Value::Object(fields) = payload else {
         return false;
     };
-    fields.keys().all(|key| KEYS.contains(&key.as_str()))
+    key_set_reference(payload)
         && fields
             .get("ClassifyMode")
             .is_none_or(|mode| mode.as_u64().is_some_and(|mode| mode <= 1))
@@ -3785,13 +3802,6 @@ fn organic_reference(payload: &Value) -> bool {
             .get("InfoHashes")
             .and_then(Value::as_array)
             .is_some_and(|hashes| (1..=100).contains(&hashes.len()) && hashes.iter().all(is_hash))
-        && fields.get("ClassifierFlags").is_none_or(|flags| {
-            flags.as_object().is_some_and(|flags| {
-                flags
-                    .iter()
-                    .all(|(name, value)| FLAGS.contains(&name.as_str()) && value.is_boolean())
-            })
-        })
 }
 
 /// Payloads around the organic shapes, as raw text: the producer shapes, each
@@ -4036,15 +4046,27 @@ async fn organic_sql_admission_agrees_with_an_independent_reference() {
         .map(|(id, stored, admitted)| (id, (stored, admitted)))
         .collect();
     let mut admitted = BTreeSet::new();
+    let mut outside_key_set = 0;
     for (payload, id) in variants.iter().zip(&ids) {
         let (stored, sql) = &evaluated[id];
-        let reference =
-            organic_reference(&serde_json::from_str(stored).expect("stored payload is JSON"));
+        let parsed: Value = serde_json::from_str(stored).expect("stored payload is JSON");
+        let reference = organic_reference(&parsed);
         assert_eq!(
             *sql,
             Some(reference),
             "payload {payload} (stored as {stored})"
         );
+        // The worker's own key check agrees with the reference's, so it never
+        // refuses an admitted payload.
+        let key_set = key_set_reference(&parsed);
+        assert_eq!(
+            check_payload_key_set(stored).is_ok(),
+            key_set,
+            "payload {payload} (stored as {stored})"
+        );
+        if !key_set {
+            outside_key_set += 1;
+        }
         if reference {
             admitted.insert(id.clone());
             // Whatever the claim admits, the worker decodes and accepts.
@@ -4060,15 +4082,20 @@ async fn organic_sql_admission_agrees_with_an_independent_reference() {
     }
     let _ = writeln!(
         std::io::stderr(),
-        "worker_pg: organic reference agreement over {} payloads, {} admitted",
+        "worker_pg: organic reference agreement over {} payloads, {} admitted, {} outside the key set",
         variants.len(),
-        admitted.len()
+        admitted.len(),
+        outside_key_set
     );
     assert!(
         admitted.len() >= 20 && variants.len() - admitted.len() >= 100,
         "{} of {} admitted",
         admitted.len(),
         variants.len()
+    );
+    assert!(
+        outside_key_set >= 20,
+        "{outside_key_set} outside the key set"
     );
     // The claim takes exactly those rows.
     let claimed: BTreeSet<String> =
@@ -4436,4 +4463,120 @@ async fn a_type_only_hint_with_empty_languages_and_null_episodes_is_bare() {
         ),
         "{outcome:?}"
     );
+}
+
+// --- The payload key set (Milestone 11) -------------------------------------
+
+/// The explicit claims match `ClassifierFlags` by containment, so they take a
+/// flag beside the three attach flags, which Go would read. The worker leaves
+/// the job to Go untouched and takes the one behind it.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_extra_flag_under_an_explicit_admission_is_left_to_go() {
+    let pool = connect().await;
+    for (live, flags, name, value) in [
+        (false, FLAGS_OFF, "delete_xxx", false),
+        (true, FLAGS_ON, "unknown_flag", true),
+    ] {
+        reset(&pool).await;
+        seed_fixture_torrents(&pool).await;
+        let refused = enqueue_raw(
+            &pool,
+            &format!(
+                "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{},\"InfoHashes\":[\"{HASH_A}\"]}}",
+                flags.replace('}', &format!(",\"{name}\":{value}}}"))
+            ),
+        )
+        .await;
+        let behind = enqueue(&QueueStore::new(pool.clone()), &supported_params(&[HASH_B])).await;
+        let before = job_row(&pool, &refused).await;
+        let registry = prometheus::Registry::new();
+        let metrics = bitmagnet_processor::register_worker_metrics(&registry).unwrap();
+        let worker = if live {
+            flags_on_worker(&pool)
+        } else {
+            worker(&pool, fast_config())
+        }
+        .with_metrics(metrics.clone());
+        assert_eq!(
+            worker.admission(),
+            if live {
+                ProcessTorrentAdmission::FlagsOffOrOn
+            } else {
+                ProcessTorrentAdmission::FlagsOff
+            }
+        );
+
+        let outcome = worker.run_once().await.unwrap();
+        let AdmittedConsumeOutcome::Abstained { job, reason } = outcome else {
+            panic!("live={live}: expected an abstention, got {outcome:?}");
+        };
+        assert_eq!(job.id, refused);
+        assert_eq!(
+            reason,
+            format!("payload: classifier flag \"{name}\" is not an attach flag")
+        );
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { job }) if job.id == behind
+        ));
+        assert!(matches!(
+            worker.run_once().await.unwrap(),
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+        ));
+        assert_eq!(
+            metrics.with_label_values(&["abstained", "payload"]).get(),
+            1
+        );
+        assert_eq!(metrics.with_label_values(&["processed", ""]).get(), 1);
+        assert_eq!(job_row(&pool, &refused).await, before, "live={live}");
+        let go = QueueStore::new(pool.clone());
+        assert!(matches!(
+            go.consume_one(PROCESS_TORRENT, |_| async { Ok::<_, String>(()) })
+                .await
+                .unwrap(),
+            ConsumeOutcome::Processed { job } if job.id == refused
+        ));
+    }
+}
+
+/// A case-variant or an extra top-level key is outside every claim, so no Rust
+/// worker sees it; the worker's own check is its unit test's.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn case_variant_and_extra_keys_are_claimed_under_no_admission() {
+    let pool = connect().await;
+    seed_tmdb_fixture(&pool).await;
+    let mut before = BTreeMap::new();
+    for payload in [
+        // Go reads "default", then "custom", and runs `custom`.
+        format!(
+            "{{\"ClassifierWorkflow\":\"default\",\"ClassifierFlags\":{FLAGS_OFF},\
+             \"InfoHashes\":[\"{HASH_FOUND}\"],\"classifierworkflow\":\"custom\"}}"
+        ),
+        format!("{{\"InfoHashes\":[\"{HASH_FOUND}\"],\"Extra\":true}}"),
+        format!(
+            "{{\"InfoHashes\":[\"{HASH_FOUND}\"],\"classifierflags\":{{\"tmdb_enabled\":false}}}}"
+        ),
+    ] {
+        let id = enqueue_raw(&pool, &payload).await;
+        before.insert(id.clone(), job_row(&pool, &id).await);
+    }
+    for admission in [
+        ProcessTorrentAdmission::FlagsOff,
+        ProcessTorrentAdmission::FlagsOffOrOn,
+        ProcessTorrentAdmission::Organic { max_priority: 0 },
+    ] {
+        assert_eq!(probe_claims(&pool, admission).await, Vec::<String>::new());
+    }
+    let tmdb = FakeTmdb::new(found_answers());
+    let worker = tmdb_worker_with(&pool, &tmdb, 1, organic_config(0));
+    assert!(matches!(
+        worker.run_once().await.unwrap(),
+        AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)
+    ));
+    assert!(tmdb.asked().is_empty(), "{:?}", tmdb.asked());
+    for (id, row) in &before {
+        assert_eq!(&job_row(&pool, id).await, row, "job {id} was touched");
+    }
 }

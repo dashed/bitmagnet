@@ -802,7 +802,7 @@ organic job within any bound.
 **Abstention reasons.** `bitmagnet_process_torrent_worker_jobs_total` has a
 `reason` label. It is empty except on `outcome="abstained"`, where it is one
 of:
-- `payload`: undecodable, or a workflow or flags outside the admission;
+- `payload`: a key outside Go's key set (Milestone 11), undecodable, or a workflow or flags outside the admission;
 - `hint`: an explicit hint the writer refuses to decode, or a sourced hint without a live resolver (Milestone 10);
 - `ambiguous`: Go's pick among the torrent's associations depends on row order (Milestone 10);
 - `resolver`: an abstaining resolver failure;
@@ -810,8 +810,9 @@ of:
 - `unsupported`: any other loader or composer limit.
 
 Under organic admission `payload` should stay at 0, because SQL rejects those
-shapes before any claim. A non-zero count means the SQL predicate and the
-validator disagree.
+shapes before any claim. A non-zero count there means the SQL predicate and
+the validator disagree. Under the explicit admissions it need not be 0
+(Milestone 11).
 
 **Operations.** The TMDB client latches its key validation and a 401 for the
 life of the process. After rotating the TMDB key, restart the Rust worker:
@@ -971,3 +972,68 @@ Known differences from Go, beyond Milestone 9's:
 - **Stricter decode.** The 19 fixture values that Go accepts and Rust refuses leave the job to Go. Prod has none.
 - **Ambiguous associations.** Jobs whose result would depend on Go's row order are left to Go.
 - **Conflicting images.** A job still abstains when TMDB resolves a sourced hint to content that another of its torrents attaches from the local table (`ConflictingAttachedContent`, reason `unsupported`). The job then holds two different images of one content row, and the writer does not reproduce how Go persists them.
+
+## Milestone 11: the payload key set
+
+serde drops a key `ProcessTorrentParams` does not declare. Go's
+`encoding/json` binds a case-variant key to the field, case-insensitively, and
+the last one in the stored order wins. Go's flag map also keeps any name. In
+`{"ClassifierWorkflow":"default", …, "classifierworkflow":"custom"}`, `jsonb`
+stores the lowercase key second, so Go runs `custom` while serde decodes
+`default`.
+
+`ProcessTorrentWorker` therefore checks the raw payload first
+(`check_payload_key_set`), before serde and the database, under every
+admission. A payload must be a JSON object:
+- its keys are a subset of `ClassifyMode`, `ClassifierWorkflow`, `ClassifierFlags` and `InfoHashes`, spelled exactly;
+- `ClassifierFlags`, if present, is an object; a JSON `null`, array or string is refused;
+- each flag is one of the three attach flags, spelled exactly, with a JSON boolean value.
+
+Anything else abstains with reason `payload`, and the row is untouched. The
+text names the first offending key in sorted order, never a value, for
+example `payload: unexpected key "classifierworkflow"`. Exact duplicate keys
+cannot reach the worker, because `jsonb` keeps only the last. The shared
+`ProcessTorrentParams` stays lenient, because the shadow runtime, the GraphQL
+reprocess path and the replay tools decode it too. Under organic admission
+`validate_supported_params` still re-checks the flags as a backstop for those
+callers.
+
+**Explicit admissions.** The flags-off and flags-on claims (Milestones 6 and 7)
+hold the top-level keys to the same four, but match `ClassifierFlags` by
+containment. So they claim a payload that carries another flag beside the
+three attach flags, such as `delete_xxx` or a case-variant name:
+- before this milestone, a boolean extra flag reached the Rust classifier, a path no gate compared with Go;
+- now such a job is claimed, abstained as `payload`, and left to Go.
+
+Under these admissions a non-zero `payload` count therefore means non-canonical
+rows were left for Go, not that the SQL and the validator disagree. No Go
+producer writes another flag beside explicit attach flags. Under organic
+admission the SQL refuses every such shape, so `payload` stays 0 there.
+
+Considered and rejected: tightening migrations 00035 and 00036 to key-set
+equality on `ClassifierFlags`. The validator now guards that path, and it
+would mean replacing both partial indexes in prod with a migration 00037.
+
+Gates:
+- **Unit** (`src/supported_subset.rs`):
+  - Accepted: every producer shape, including `{"InfoHashes":[…]}`, `ClassifyMode` without `ClassifierFlags`, an empty `ClassifierFlags`, flag subsets, and explicit `false` or `true`.
+  - Refused with the key named: a case-variant or extra top-level key, a non-object payload, a `ClassifierFlags` that is not an object, `delete_xxx` (`true` and `false`), `delete_content_types`, a case-variant or empty flag, and non-boolean values.
+  - No refusal text carries a value.
+- **Unit** (`src/worker.rs`), through the worker's own `process` on a pool with no server behind it: under each of the three admissions, a case-variant key, an extra key, an extra key on a payload serde also refuses, an extra flag, and a null `ClassifierFlags` each abstain as `payload` with that text, before any database access. A payload inside the key set goes on to the database and fails as Go's handler does.
+- **Migration-backed** (`tests/worker_pg.rs`):
+  - Under the flags-off admission (`delete_xxx: false`) and the flags-on admission (`unknown_flag: true`), the job is claimed and abstains as `payload`. The row is untouched, the job behind it is processed, the counts are `payload` 1 and `processed` 1, and Go then claims the row.
+  - A case-variant workflow key, an extra key and a case-variant `ClassifierFlags` are claimed under no admission: the organic worker stays idle with no TMDB request, and the rows are untouched.
+  - Over Milestone 9's 181 payload variants, `check_payload_key_set` agrees with an independent key-set reference, so it never refuses a payload the organic claim admits.
+
+- **Mutations:** 9, all killed:
+  - the worker skips the check, or checks only under organic admission;
+  - top-level keys match case-insensitively;
+  - the flag name or flag value check is skipped;
+  - a non-object `ClassifierFlags` is allowed;
+  - an extra top-level name is allowed;
+  - the refusal is counted under another reason;
+  - the check runs after serde.
+
+  The last mutation leaves every reason, row and count as they were. Only one
+  test catches it: a payload that both serde and the check refuse, whose
+  abstain text then names serde's error instead of the key.

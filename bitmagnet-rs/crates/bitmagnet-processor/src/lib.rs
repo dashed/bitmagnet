@@ -63,6 +63,7 @@ pub use runtime::{
 pub use shadow::{
     read_live_snapshot, LiveSnapshot, LiveTorrentSnapshot, LiveTorrentState, ShadowReadError,
 };
+pub use supported_subset::{check_payload_key_set, PayloadKeySetError};
 pub use worker::{
     register_worker_metrics, ProcessTorrentWorker, ProcessTorrentWorkerConfig,
     DEFAULT_ABSTAIN_COOLOFF, DEFAULT_CHECK_INTERVAL, DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED,
