@@ -19,7 +19,7 @@ func (m manager) EnqueueReprocessTorrentsBatch(ctx context.Context, req EnqueueR
 
 	return m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if req.Purge {
-			if _, err := tx.WithContext(ctx).Raw("TRUNCATE TABLE queue_jobs;").Rows(); err != nil {
+			if err := tx.WithContext(ctx).Exec("TRUNCATE TABLE queue_jobs").Error; err != nil {
 				return fmt.Errorf("error purging queue: %w", err)
 			}
 		}
