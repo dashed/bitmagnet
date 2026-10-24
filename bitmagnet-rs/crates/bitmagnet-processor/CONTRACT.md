@@ -731,6 +731,7 @@ Known differences from Go, beyond Milestone 7's:
   - For the common codes (500, 502, 503, 504, 429) the two texts agree.
   - They differ when a server's HTTP/1.1 phrase differs from Go's table (413 or 422 on a current server), and when a code has no table entry (Go writes `599 `).
   - The harness's plain-HTTP fake TMDB runs HTTP/1.1 on both sides, so it does not exercise this.
+  - Milestone 12 closes this difference.
 - **Failure order.** With two or more failed torrents in one job, Go's order is goroutine completion order and Rust's is input order (see above).
 - **Calls in flight.** With classification parallelism above one, calls already in flight when an abstaining error is recorded still complete; only calls that start afterwards are refused.
 
@@ -1037,3 +1038,93 @@ Gates:
   The last mutation leaves every reason, row and count as they were. Only one
   test catches it: a payload that both serde and the check refuse, whose
   abstain text then names serde's error instead of the key.
+
+## Milestone 12: HTTP/2 status text
+
+Go's TMDB client talks HTTP/2 to api.themoviedb.org, and over HTTP/2 the
+status text it stores is Go's own, not the server's. The Rust client now does
+the same. That closes Milestone 8's "HTTP/2 status text" difference.
+
+**Go negotiates HTTP/2.**
+- `newResty` (`internal/tmdb/requester_lazy.go:91-101`) is a plain `resty.New()`. Nothing in `internal/` or `cmd/` overrides its transport, TLS config or proxy.
+- resty's transport sets `ForceAttemptHTTP2: true`: `transport.go:29` in v2.17.2 (this tree's `go.mod`) and `transport.go:26-29` in v2.16.5 (the prod images `p0-f4412986` and `l3-hedge-f0fe01a6`). Both build with go 1.23.6 (`golang:1.23.6-alpine3.20`).
+- In go1.23.6 `net/http`, `ForceAttemptHTTP2` overrides the opt-out that resty's custom dialer would otherwise trigger (`transport.go:396-404`). Only `GODEBUG=http2client=0` or a non-nil `TLSNextProto` would turn HTTP/2 off, and neither is set: the live pods have no `GODEBUG` and no proxy variables, and gluetun is a pod-network VPN, not a TLS-intercepting proxy.
+- Go offers ALPN `h2`, then `http/1.1` (`h2_bundle.go:7429-7434`). A TLS-handshake-only probe of api.themoviedb.org:443 negotiated `h2` (2026-10-24).
+
+**The text.** HTTP/2 has no reason phrase. Go builds `res.Status` from the
+`:status` value, a space and `http.StatusText(code)` (`h2_bundle.go:9641`).
+`requester.Request` stores `TMDB request failed: <res.Status()>`, so a code
+Go does not name is stored as `599 `, with a trailing space. Go's table is not
+hyper's either. Both name the same 62 codes, but Go words 203, 413, 414 and 416
+differently, e.g. `413 Request Entity Too Large` where hyper has `413 Payload
+Too Large`. Turning on HTTP/2 without this milestone would have stored hyper's
+wording for those codes and abstained on every unnamed one.
+
+**Mechanism:**
+- `bitmagnet-tmdb` builds reqwest with `http2`, so it offers ALPN `h2`, then `http/1.1`, as Go does, and both sides get whatever the server picks.
+  - Cleartext stays HTTP/1.1, so the harness's plain-HTTP fake TMDB is unchanged.
+  - The only lock change outside dev-dependencies is reqwest's edge to `h2`, which tonic already builds.
+  - The dev-dependencies add `rcgen` 0.13.2 and `yasna` 0.5.2.
+- `HttpResponse::version` records the protocol the response came over.
+- `TmdbError::from_status_line` handles 2xx and the 401/404 sentinels first, whatever the protocol.
+  - Over HTTP/2 the line is then the code, a space and `go_status_text(code)`.
+  - Any other protocol keeps Milestone 8's HTTP/1.x rule unchanged.
+- `go_status_text` reads `src/go_status_text.tsv`, which Go writes itself. It has one row per code from 100 to 999, and the code stands alone where Go has no text.
+  - `go test ./internal/tmdb/ -run TestStatusTextFixture -update` regenerates it.
+  - The test refuses any toolchain but `go.mod`'s.
+- Every HTTP/2 status renders, so `UnrenderableStatus` is now HTTP/1.x only. An HTTP/2 `599` fails only its torrent with `TMDB request failed: 599 `, where an unnamed code would otherwise have abstained.
+- Nothing above the transport changes: the rate limit, the two-request semaphore, the retries and the 10 s per-attempt timeout. Over HTTP/2 both sides multiplex on one connection per host, with a 90 s idle timeout.
+- There is no production knob. A test trusts its local server through `ReqwestTransport::with_root_certificate`, which exists only under `#[cfg(test)]`.
+
+Gates:
+- **Go** (`internal/tmdb/status_text_parity_test.go`):
+  - `TestStatusTextFixture`: the toolchain is `go.mod`'s (`go1.23.6`), and the committed table is byte-identical to its `StatusText` for 100–999.
+  - `TestStatusTextOverHTTP2`: the production `newResty` client calls an `httptest` server running HTTP/2 over TLS, whose certificate is added to resty's TLS config. For 413, 414, 416, 422, 429, 500, 520, 599 and 999, and for the 401 and 404 sentinels:
+    - `res.RawResponse.Proto` is `HTTP/2.0`;
+    - `res.Status()` is the code, a space and the committed table's text, which equals `StatusText`;
+    - the error is `TMDB request failed: ` plus that, and 401 and 404 are `ErrUnauthorized` and `ErrNotFound`.
+  - Afterwards the client's transport is still resty's, with `ForceAttemptHTTP2` set.
+- **Unit** (`bitmagnet-tmdb`):
+  - The table:
+    - its header names the `go.mod` toolchain. The test reads the repository's `go.mod` with `include_str!("../../../../go.mod")`, from outside the crate, as `bitmagnet-bloom`'s parity test does. So `cargo test` needs the full checkout CI uses, and on a bitmagnet-rs-only copy, such as the Docker build context, the crate's tests fail to compile. The crate itself still builds there;
+    - it has 900 rows, one per code, in order;
+    - lookups return Go's text, `""` for an unnamed code, and nothing outside 100–999.
+  - Over HTTP/2:
+    - 304, 413, 414, 416, 422, 429, 500, 503, 520, 599 and 999 render Go's text;
+    - a stray phrase is ignored;
+    - 401, 404 and 2xx are unchanged.
+  - The HTTP/1.x tests are unchanged, and a 413 with hyper's canonical phrase still renders `413 Payload Too Large`.
+  - Over a local TLS server with a throwaway CA (`tls_stub`), the transport records:
+    - HTTP/2 with no phrase from a server that offers only `h2`;
+    - HTTP/1.1 with its phrase from one that offers only `http/1.1`.
+
+    Cleartext stays HTTP/1.1.
+  - Through the whole client over HTTP/2, the Go test's nine codes plus 404 and 401 give Go's text, and keep their status at the seam.
+  - Through the whole client over TLS HTTP/1.1, `413 Payload Too Large` and `599 status code 599` keep the server's line, and `500 ` abstains.
+- **Unit** (`src/live.rs`): over HTTP/2, a 413 and a 599 fail only the torrent, with `413 Request Entity Too Large` and `599 `.
+- **Regression:**
+  - CI on musl PostgreSQL 16.15 passes: the workspace tests (2,049), clippy, fmt, the 1.97.1 MSRV check, cargo-deny, `worker_pg` (47) and `writer_load_pg` (1).
+  - `worker_pg` also passes on glibc PostgreSQL 18.6.
+  - The Go jobs pass: `go test ./...`, the goldens, parity, gofmt and golangci-lint (0 issues).
+  - The Milestone 6 120k differential stays byte-identical: B and C equal A in both rounds (241,982 and 243,179 lines).
+- **Mutations:** 12, all killed:
+  - HTTP/2 uses the HTTP/1.x rule;
+  - HTTP/2 uses hyper's canonical reason;
+  - an unnamed HTTP/2 code is unrenderable;
+  - the trailing space is dropped;
+  - the table lookup is off by one;
+  - the transport does not record the version;
+  - reqwest is built without `http2`;
+  - the HTTP/2 branch runs before the sentinels;
+  - the branch is inverted, so HTTP/1.x uses Go's text;
+  - a hand-edited row (413 as `Payload Too Large`);
+  - a deleted row;
+  - two rows swapped.
+
+  The sentinel-order mutation changes only the variant, not the text. Only the
+  unit test catches it: the error is `Http` instead of `Unauthorized` or
+  `NotFound`.
+
+Known differences from Go:
+- **Malformed `:status`.** Go accepts any `:status` that `strconv.Atoi` parses, such as `0599` or `+200`, and stores it as sent. The h2 crate refuses anything but three digits, so Rust sees a transport error and abstains. TMDB sends three digits.
+- **Refused streams.** Go transparently retries a request whose stream a GOAWAY left unprocessed. If hyper surfaces such a stream as an error, it is a transport error: retried, then abstained.

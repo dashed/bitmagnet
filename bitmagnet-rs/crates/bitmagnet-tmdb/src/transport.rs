@@ -28,12 +28,23 @@
 //! `SetRetryCount(3)` is three *retries* — resty loops `attempt <= maxRetries`,
 //! so up to **four** attempts. The 10s timeout is per attempt on both sides
 //! (Go's `http.Client.Timeout`, reqwest's `ClientBuilder::timeout`).
+//!
+//! # HTTP/2
+//!
+//! resty's transport sets `ForceAttemptHTTP2` (`transport.go:29` in v2.17.2,
+//! `:26-29` in v2.16.5), so Go offers ALPN `h2` then `http/1.1` to a TLS
+//! server, and api.themoviedb.org picks HTTP/2. reqwest is built with `http2`
+//! and makes the same offer in the same order, so both sides get the protocol
+//! the server picks; cleartext is HTTP/1.1 on both. The protocol changes the
+//! status text Go stores, which is why [`HttpResponse`] records it. Both pool
+//! one multiplexed connection per host on HTTP/2, and the timeout, retries,
+//! rate limit and two-request semaphore are unchanged by it.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use reqwest::Url;
+use reqwest::{Url, Version};
 
 use crate::error::TmdbError;
 
@@ -43,8 +54,18 @@ use crate::error::TmdbError;
 #[derive(Debug, Clone, Default)]
 pub struct HttpResponse {
     pub status: u16,
+    /// The protocol the response came over, which decides how Go renders the
+    /// status: on HTTP/2 there is no reason phrase, and Go writes its own
+    /// `StatusText` instead (see [`crate::TmdbError::from_status_line`]).
+    ///
+    /// Go's resty transport offers HTTP/2 to every TLS server
+    /// (`ForceAttemptHTTP2`), and so does this one, so both sides get whatever
+    /// the server picks. The default is HTTP/1.1, which every cleartext
+    /// response is.
+    pub version: Version,
     /// The status line's reason phrase, when it is not the canonical one for
-    /// `status`; `None` means the server sent the canonical phrase.
+    /// `status`; `None` means the server sent the canonical phrase, or the
+    /// response came over HTTP/2, which has none.
     ///
     /// Carried because Go's `res.Status()` is the status line as the server
     /// sent it (`"500 Internal Server Error"`, or `"599 status code 599"` from
@@ -98,8 +119,24 @@ impl ReqwestTransport {
     ///
     /// If the TLS backend cannot be initialised.
     pub fn new(timeout: Duration) -> Result<Self, TmdbError> {
-        let client = reqwest::Client::builder()
-            .timeout(timeout)
+        Self::build(reqwest::Client::builder().timeout(timeout))
+    }
+
+    /// [`Self::new`], also trusting `root`: a test's local TLS server.
+    #[cfg(test)]
+    pub(crate) fn with_root_certificate(
+        timeout: Duration,
+        root: reqwest::Certificate,
+    ) -> Result<Self, TmdbError> {
+        Self::build(
+            reqwest::Client::builder()
+                .timeout(timeout)
+                .add_root_certificate(root),
+        )
+    }
+
+    fn build(builder: reqwest::ClientBuilder) -> Result<Self, TmdbError> {
+        let client = builder
             .build()
             .map_err(|err| TmdbError::Transport(err.without_url().to_string()))?;
 
@@ -122,6 +159,7 @@ impl Transport for ReqwestTransport {
             .map_err(|err| err.without_url().to_string())?;
 
         let status = response.status().as_u16();
+        let version = response.version();
         let reason_phrase = response
             .extensions()
             .get::<hyper::ext::ReasonPhrase>()
@@ -138,6 +176,7 @@ impl Transport for ReqwestTransport {
 
         Ok(HttpResponse {
             status,
+            version,
             reason_phrase,
             content_type,
             body: body.to_vec(),
@@ -246,6 +285,7 @@ pub(crate) async fn execute_with_retry<T: Transport + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tls_stub;
 
     /// With bitmagnet's 2s wait the clamp swallows the whole first draw, so the
     /// first retry is always exactly 2s however the dice fall. A naive
@@ -330,8 +370,39 @@ mod tests {
             server.await.expect("server");
 
             assert_eq!(response.status, status, "{shown}");
+            // Cleartext is HTTP/1.1, with `http2` built in or not.
+            assert_eq!(response.version, Version::HTTP_11, "{shown}");
             assert_eq!(response.reason_phrase.as_deref(), expected, "{shown}");
         }
+    }
+
+    /// Over TLS the server picks the protocol from the same ALPN offer Go
+    /// makes (`h2`, then `http/1.1`), and the response records which it was.
+    /// HTTP/2 carries no reason phrase; HTTP/1.1 keeps hyper's rule.
+    #[tokio::test]
+    async fn the_live_transport_records_the_negotiated_protocol() {
+        let http2 = tls_stub::http2().await;
+        let transport =
+            ReqwestTransport::with_root_certificate(Duration::from_secs(5), http2.root.clone())
+                .expect("transport");
+        let url = Url::parse(&format!("{}/search/movie?query=413", http2.base_url)).expect("url");
+        let response = transport.execute(&url).await.expect("answered");
+        assert_eq!(response.status, 413);
+        assert_eq!(response.version, Version::HTTP_2);
+        assert_eq!(response.reason_phrase, None);
+
+        let http1 = tls_stub::http1(|_| b"HTTP/1.1 413 Request Entity Too Large").await;
+        let transport =
+            ReqwestTransport::with_root_certificate(Duration::from_secs(5), http1.root.clone())
+                .expect("transport");
+        let url = Url::parse(&format!("{}/search/movie?query=413", http1.base_url)).expect("url");
+        let response = transport.execute(&url).await.expect("answered");
+        assert_eq!(response.status, 413);
+        assert_eq!(response.version, Version::HTTP_11);
+        assert_eq!(
+            response.reason_phrase.as_deref(),
+            Some(&b"Request Entity Too Large"[..])
+        );
     }
 
     /// The cap binds beyond the attempts bitmagnet configures, but a change to

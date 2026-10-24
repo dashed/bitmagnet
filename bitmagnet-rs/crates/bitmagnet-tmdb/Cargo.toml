@@ -13,7 +13,11 @@ description = "B′ enrichment parity — live TMDB HTTP client (Go internal/tmd
 # depends on the classifier and nothing depends back — see
 # `bitmagnet-classifier/src/resolver/tmdb.rs`'s module docs.
 bitmagnet-classifier = { path = "../bitmagnet-classifier" }
-reqwest = { workspace = true }
+# `http2`: Go's resty transport sets `ForceAttemptHTTP2`, so Go offers ALPN
+# `h2` and talks HTTP/2 to api.themoviedb.org. Without the feature reqwest
+# offers only `http/1.1`, and the status text Go stores on HTTP/2 (see
+# `src/status_text.rs`) would never be seen. Cleartext stays HTTP/1.1.
+reqwest = { workspace = true, features = ["http2"] }
 # `hyper::ext::ReasonPhrase`: the status line's own reason phrase, which Go's
 # `res.Status()` carries into its error text. reqwest already builds hyper with
 # these features; naming them here only makes the type reachable.
@@ -42,3 +46,10 @@ futures = { workspace = true }
 # replay would compare — not merely a `serde_json` approximation of them.
 bitmagnet-tape = { path = "../bitmagnet-tape" }
 serde_json = { workspace = true, features = ["raw_value"] }
+# A local TLS server for the live transport's HTTP/2 and HTTP/1.1 tests: a
+# throwaway CA and leaf (rcgen), the handshake with ALPN (tokio-rustls, on the
+# `ring` provider reqwest already uses), and the HTTP/2 framing (h2, http).
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+h2 = "0.4"
+http = "1"

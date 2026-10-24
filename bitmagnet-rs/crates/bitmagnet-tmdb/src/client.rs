@@ -454,7 +454,11 @@ impl<T: Transport> TmdbClient<T> {
             .await
             .map_err(TmdbError::Transport)?;
 
-        match TmdbError::from_status_line(response.status, response.reason_phrase.as_deref()) {
+        match TmdbError::from_status_line(
+            response.status,
+            response.version,
+            response.reason_phrase.as_deref(),
+        ) {
             Some(err) => Err(err),
             None => Ok(response),
         }
@@ -539,8 +543,10 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use reqwest::Version;
 
     use super::*;
+    use crate::tls_stub;
 
     const JSON: &str = "application/json;charset=utf-8";
 
@@ -625,12 +631,14 @@ mod tests {
             match canned {
                 Canned::Status(status, body) => Ok(HttpResponse {
                     status,
+                    version: Version::HTTP_11,
                     reason_phrase: None,
                     content_type: Some(JSON.to_owned()),
                     body: body.as_bytes().to_vec(),
                 }),
                 Canned::StatusLine(status, phrase) => Ok(HttpResponse {
                     status,
+                    version: Version::HTTP_11,
                     reason_phrase: Some(phrase.as_bytes().to_vec()),
                     content_type: Some(JSON.to_owned()),
                     body: Vec::new(),
@@ -803,6 +811,90 @@ mod tests {
                 .to_string(),
             "TMDB request failed: 404 Not Found"
         );
+    }
+
+    /// End to end over TLS, against a server that speaks HTTP/2 as
+    /// api.themoviedb.org does: the error is Go's HTTP/2 text, the code and
+    /// Go's `StatusText`, and a code Go has no text for keeps its trailing
+    /// space. Go's `TestStatusTextOverHTTP2` pins the same codes through resty.
+    #[tokio::test]
+    async fn over_http2_the_error_is_gos_status_text() {
+        let stub = tls_stub::http2().await;
+        let client = TmdbClient::with_transport(
+            TmdbConfig {
+                base_url: stub.base_url.clone(),
+                ..test_config()
+            },
+            ReqwestTransport::with_root_certificate(Duration::from_secs(5), stub.root.clone())
+                .expect("transport"),
+        );
+
+        for (status, expected) in [
+            (413, "413 Request Entity Too Large"),
+            (414, "414 Request URI Too Long"),
+            (416, "416 Requested Range Not Satisfiable"),
+            (422, "422 Unprocessable Entity"),
+            (429, "429 Too Many Requests"),
+            (500, "500 Internal Server Error"),
+            (520, "520 "),
+            (599, "599 "),
+            (999, "999 "),
+            (404, "404 Not Found"),
+        ] {
+            let err = client
+                .search_movie(&search(&status.to_string()))
+                .await
+                .expect_err("an error status");
+            assert_eq!(
+                err.to_string(),
+                format!("TMDB request failed: {expected}"),
+                "{status}"
+            );
+            assert!(
+                matches!(err, ResolveError::TmdbStatus { status: s, .. } if s == status),
+                "{err:?}"
+            );
+        }
+        // Last, because it latches the client.
+        let err = client.search_movie(&search("401")).await.expect_err("401");
+        assert_eq!(err.to_string(), "TMDB request failed: 401 Unauthorized");
+    }
+
+    /// The control: the same client against a TLS server that offers only
+    /// HTTP/1.1 keeps the status-line rule, so the protocol alone decides the
+    /// text.
+    #[tokio::test]
+    async fn over_tls_http1_the_error_is_the_status_line() {
+        let stub = tls_stub::http1(|query| match query {
+            "413" => &b"HTTP/1.1 413 Payload Too Large"[..],
+            "599" => b"HTTP/1.1 599 status code 599",
+            _ => b"HTTP/1.1 500 ",
+        })
+        .await;
+        let client = TmdbClient::with_transport(
+            TmdbConfig {
+                base_url: stub.base_url.clone(),
+                ..test_config()
+            },
+            ReqwestTransport::with_root_certificate(Duration::from_secs(5), stub.root.clone())
+                .expect("transport"),
+        );
+
+        for (query, expected) in [
+            ("413", "413 Payload Too Large"),
+            ("599", "599 status code 599"),
+        ] {
+            let err = client
+                .search_movie(&search(query))
+                .await
+                .expect_err("an error status");
+            assert_eq!(err.to_string(), format!("TMDB request failed: {expected}"));
+            assert!(matches!(err, ResolveError::TmdbStatus { .. }), "{err:?}");
+        }
+        // `500 ` arrives as an empty phrase, which Go could have rendered two
+        // ways.
+        let err = client.search_movie(&search("500")).await.expect_err("500");
+        assert!(matches!(err, ResolveError::Tmdb(_)), "{err:?}");
     }
 
     /// 🚨 The latch. Once TMDB has said 401, no further request may leave the
@@ -1014,6 +1106,7 @@ mod tests {
     fn a_non_json_body_is_gos_zero_value_not_an_error() {
         let html = HttpResponse {
             status: 200,
+            version: Version::HTTP_11,
             reason_phrase: None,
             content_type: Some("text/html".to_owned()),
             body: b"<html>nope</html>".to_vec(),
@@ -1025,6 +1118,7 @@ mod tests {
 
         let no_content = HttpResponse {
             status: 204,
+            version: Version::HTTP_11,
             reason_phrase: None,
             content_type: Some(JSON.to_owned()),
             body: Vec::new(),
@@ -1038,6 +1132,7 @@ mod tests {
         // returns one and resty propagates it.
         let broken = HttpResponse {
             status: 200,
+            version: Version::HTTP_11,
             reason_phrase: None,
             content_type: Some(JSON.to_owned()),
             body: b"{".to_vec(),

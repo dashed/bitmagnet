@@ -29,7 +29,7 @@ use bitmagnet_queue::{
 };
 use bitmagnet_resolver::LiveContentResolver;
 use bitmagnet_tmdb::{HttpResponse, RetryPolicy, TmdbClient, TmdbConfig, Transport};
-use reqwest::Url;
+use reqwest::{Url, Version};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -2250,6 +2250,7 @@ type Answer = Result<HttpResponse, String>;
 fn answer(status: u16, reason_phrase: Option<&str>, body: &str) -> Answer {
     Ok(HttpResponse {
         status,
+        version: Version::HTTP_11,
         reason_phrase: reason_phrase.map(|phrase| phrase.as_bytes().to_vec()),
         content_type: Some("application/json".to_owned()),
         body: body.as_bytes().to_vec(),

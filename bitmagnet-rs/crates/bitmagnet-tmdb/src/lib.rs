@@ -61,6 +61,9 @@ pub mod transport;
 
 mod client;
 mod limiter;
+mod status_text;
+#[cfg(test)]
+mod tls_stub;
 
 pub use client::{ApiKey, TmdbClient, TmdbConfig};
 pub use error::TmdbError;

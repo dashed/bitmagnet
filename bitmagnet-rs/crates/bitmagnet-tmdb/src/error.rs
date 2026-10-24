@@ -16,6 +16,9 @@
 //! So: never collapse these into one variant.
 
 use bitmagnet_classifier::ResolveError;
+use reqwest::Version;
+
+use crate::status_text::go_status_text;
 
 /// Go's recorded error kinds (`internal/tmdb/requester_recorder.go`).
 pub const ERROR_KIND_UNAUTHORIZED: &str = "unauthorized";
@@ -51,17 +54,18 @@ pub enum TmdbError {
 
     /// Any other non-2xx.
     ///
-    /// `status_line` is Go's `res.Status()` on HTTP/1.x: the status code and
-    /// the reason phrase the server sent, e.g. `"500 Internal Server Error"`
-    /// or a Go server's `"599 status code 599"`. The text reaches a failed
-    /// job's stored error, so it is rebuilt byte for byte (see
-    /// [`Self::from_status_line`]).
+    /// `status_line` is Go's `res.Status()`. On HTTP/1.x that is the status
+    /// code and the reason phrase the server sent, e.g. `"500 Internal Server
+    /// Error"` or a Go server's `"599 status code 599"`; on HTTP/2 it is the
+    /// code and Go's own `StatusText`, e.g. `"413 Request Entity Too Large"` or
+    /// `"599 "`. The text reaches a failed job's stored error, so it is rebuilt
+    /// byte for byte (see [`Self::from_status_line`]).
     #[error("{status_line}")]
     Http { status: u16, status_line: String },
 
-    /// A non-2xx whose status line cannot be rebuilt as Go would render it: an
-    /// empty reason phrase, one that is not UTF-8, or an unknown status with no
-    /// phrase.
+    /// An HTTP/1.x non-2xx whose status line cannot be rebuilt as Go would
+    /// render it: an empty reason phrase, one that is not UTF-8, or an unknown
+    /// status with no phrase. Every HTTP/2 status renders.
     #[error("{status} with an unrenderable reason phrase")]
     UnrenderableStatus { status: u16 },
 
@@ -101,11 +105,11 @@ impl TmdbError {
         }
     }
 
-    /// [`Self::from_status_line`] for a status line with its canonical
-    /// reason phrase.
+    /// [`Self::from_status_line`] for an HTTP/1.1 status line with its
+    /// canonical reason phrase.
     #[must_use]
     pub fn from_status(status: u16) -> Option<Self> {
-        Self::from_status_line(status, None)
+        Self::from_status_line(status, Version::HTTP_11, None)
     }
 
     /// Maps an HTTP status onto Go's `requester.Request` switch
@@ -115,15 +119,21 @@ impl TmdbError {
     /// survived redirect handling is an error, not a success. 401 and 404 are
     /// Go's sentinels, whose text is fixed whatever phrase the server sent.
     ///
-    /// `reason_phrase` is [`crate::HttpResponse::reason_phrase`]: the server's
-    /// phrase when it is not the canonical one.
+    /// `version` is [`crate::HttpResponse::version`], the protocol the
+    /// response came over, and `reason_phrase` is
+    /// [`crate::HttpResponse::reason_phrase`]: the server's phrase when it is
+    /// not the canonical one, which only HTTP/1.x has.
     #[must_use]
-    pub fn from_status_line(status: u16, reason_phrase: Option<&[u8]>) -> Option<Self> {
+    pub fn from_status_line(
+        status: u16,
+        version: Version,
+        reason_phrase: Option<&[u8]>,
+    ) -> Option<Self> {
         match status {
             200..=299 => None,
             401 => Some(Self::Unauthorized),
             404 => Some(Self::NotFound),
-            _ => Some(match status_line(status, reason_phrase) {
+            _ => Some(match status_line(status, version, reason_phrase) {
                 Some(status_line) => Self::Http {
                     status,
                     status_line,
@@ -134,9 +144,26 @@ impl TmdbError {
     }
 }
 
+/// Go's `res.Status()` for a response that came over `version`.
+fn status_line(status: u16, version: Version, reason_phrase: Option<&[u8]>) -> Option<String> {
+    if version == Version::HTTP_2 {
+        http2_status_line(status)
+    } else {
+        http1_status_line(status, reason_phrase)
+    }
+}
+
+/// Go's HTTP/2 `res.Status()`: the `:status` value, a space, and Go's
+/// `StatusText`, which is empty for a code Go does not name (`"599 "`). The h2
+/// crate accepts only a three-digit `:status`, so that value is the code as
+/// printed here; see [`crate::status_text`].
+fn http2_status_line(status: u16) -> Option<String> {
+    go_status_text(status).map(|text| format!("{status} {text}"))
+}
+
 /// Go's HTTP/1.x `res.Status()`: the code, a space, and the reason phrase as
 /// sent, which is the canonical one unless hyper kept a different phrase.
-fn status_line(status: u16, reason_phrase: Option<&[u8]>) -> Option<String> {
+fn http1_status_line(status: u16, reason_phrase: Option<&[u8]>) -> Option<String> {
     let reason = match reason_phrase {
         // httparse reports `500`, `500 ` and a phrase with obs-text bytes all
         // as an empty phrase. Go renders `"500"`, `"500 "` and the bytes as
@@ -226,7 +253,7 @@ mod tests {
             (503, b"Slow Down", "503 Slow Down"),
         ] {
             assert_eq!(
-                TmdbError::from_status_line(status, Some(phrase)),
+                TmdbError::from_status_line(status, Version::HTTP_11, Some(phrase)),
                 Some(TmdbError::Http {
                     status,
                     status_line: expected.to_owned(),
@@ -236,25 +263,94 @@ mod tests {
         }
         // Go's sentinels have fixed text whatever the server said.
         assert_eq!(
-            TmdbError::from_status_line(401, Some(b"Go Away")),
+            TmdbError::from_status_line(401, Version::HTTP_11, Some(b"Go Away")),
             Some(TmdbError::Unauthorized)
         );
         assert_eq!(
-            TmdbError::from_status_line(404, Some(b"Nope")),
+            TmdbError::from_status_line(404, Version::HTTP_11, Some(b"Nope")),
             Some(TmdbError::NotFound)
         );
         // Text that cannot be Go's byte for byte is not passed off as it.
         assert_eq!(
-            TmdbError::from_status_line(502, Some(b"Bad \xff Gateway")),
+            TmdbError::from_status_line(502, Version::HTTP_11, Some(b"Bad \xff Gateway")),
             Some(TmdbError::UnrenderableStatus { status: 502 })
         );
         // Go's `"500"` or `"500 "`, or an obs-text phrase: hyper cannot say which.
         assert_eq!(
-            TmdbError::from_status_line(500, Some(b"")),
+            TmdbError::from_status_line(500, Version::HTTP_11, Some(b"")),
             Some(TmdbError::UnrenderableStatus { status: 500 })
         );
         assert_eq!(
             TmdbError::from_status(599),
+            Some(TmdbError::UnrenderableStatus { status: 599 })
+        );
+    }
+
+    /// HTTP/2 has no reason phrase: Go's text is the code, a space and its own
+    /// `StatusText`, whatever hyper's table says, and a code Go does not name
+    /// keeps the trailing space. HTTP/1.x renders the same statuses from the
+    /// status line, as before.
+    #[test]
+    fn http2_status_lines_are_gos_status_text() {
+        for (status, expected) in [
+            (413, "413 Request Entity Too Large"),
+            (414, "414 Request URI Too Long"),
+            (416, "416 Requested Range Not Satisfiable"),
+            (422, "422 Unprocessable Entity"),
+            (429, "429 Too Many Requests"),
+            (500, "500 Internal Server Error"),
+            (503, "503 Service Unavailable"),
+            (304, "304 Not Modified"),
+            (520, "520 "),
+            (599, "599 "),
+            (999, "999 "),
+        ] {
+            assert_eq!(
+                TmdbError::from_status_line(status, Version::HTTP_2, None),
+                Some(TmdbError::Http {
+                    status,
+                    status_line: expected.to_owned(),
+                }),
+                "{status}"
+            );
+        }
+        // A phrase cannot arrive over HTTP/2; if one did, Go would not use it.
+        assert_eq!(
+            TmdbError::from_status_line(503, Version::HTTP_2, Some(b"Slow Down")),
+            Some(TmdbError::Http {
+                status: 503,
+                status_line: "503 Service Unavailable".to_owned(),
+            })
+        );
+        // The sentinels and the success range do not depend on the protocol.
+        assert_eq!(
+            TmdbError::from_status_line(401, Version::HTTP_2, None),
+            Some(TmdbError::Unauthorized)
+        );
+        assert_eq!(
+            TmdbError::from_status_line(404, Version::HTTP_2, None),
+            Some(TmdbError::NotFound)
+        );
+        assert_eq!(
+            TmdbError::from_status_line(200, Version::HTTP_2, None),
+            None
+        );
+        assert_eq!(
+            TmdbError::from_status_line(299, Version::HTTP_2, None),
+            None
+        );
+
+        // The same statuses over HTTP/1.x: hyper's canonical phrase for 413,
+        // and no rendering at all for a 599 without one.
+        assert_eq!(
+            TmdbError::from_status(413),
+            Some(TmdbError::Http {
+                status: 413,
+                status_line: "413 Payload Too Large".to_owned(),
+            })
+        );
+        assert_eq!(
+            TmdbError::from_status_line(599, Version::HTTP_10, None),
             Some(TmdbError::UnrenderableStatus { status: 599 })
         );
     }

@@ -21,8 +21,9 @@
 //!   torrent, and burn every job's retries, until a restart;
 //! - a transport failure or timeout after the retries, whose Go text embeds
 //!   the request URL and so the API key;
-//! - a status whose reason phrase cannot be rebuilt: hyper reports a missing,
-//!   empty or obs-text phrase as empty, and Go renders the three differently;
+//! - an HTTP/1.x status whose reason phrase cannot be rebuilt: hyper reports a
+//!   missing, empty or obs-text phrase as empty, and Go renders the three
+//!   differently (over HTTP/2 every status renders, as Go's `StatusText`);
 //! - an undecodable body or a disabled client, whose Go text is Go's own;
 //! - a local search query error, whose Go text is the driver's.
 //!
@@ -298,7 +299,7 @@ mod tests {
     use bitmagnet_model::{Content, ContentType};
     use bitmagnet_queue::{ProcessTorrentParams, ProtocolId};
     use bitmagnet_tmdb::{HttpResponse, RetryPolicy, TmdbClient, TmdbConfig, Transport};
-    use reqwest::Url;
+    use reqwest::{Url, Version};
     use serde_json::Value;
 
     use super::ResolverFailure;
@@ -321,6 +322,7 @@ mod tests {
     fn status(status: u16, body: &str) -> Scripted {
         Ok(HttpResponse {
             status,
+            version: Version::HTTP_11,
             reason_phrase: None,
             content_type: Some("application/json".to_owned()),
             body: body.as_bytes().to_vec(),
@@ -331,6 +333,13 @@ mod tests {
     fn status_line(code: u16, phrase: &[u8]) -> Scripted {
         let mut response = status(code, "{}")?;
         response.reason_phrase = Some(phrase.to_vec());
+        Ok(response)
+    }
+
+    /// A status answered over HTTP/2, which has no reason phrase.
+    fn http2_status(code: u16) -> Scripted {
+        let mut response = status(code, "{}")?;
+        response.version = Version::HTTP_2;
         Ok(response)
     }
 
@@ -603,6 +612,16 @@ mod tests {
                 ..case("the server's own reason phrase")
             },
             Case {
+                expected: failed("413 Request Entity Too Large"),
+                responses: vec![("/search/movie", http2_status(413))],
+                ..case("over HTTP/2, Go's own status text")
+            },
+            Case {
+                expected: failed("599 "),
+                responses: vec![("/search/movie", http2_status(599))],
+                ..case("over HTTP/2, a code Go has no text for")
+            },
+            Case {
                 expected: Expected::Failed(format!("{BY_ID}: TMDB request failed: 404 Not Found")),
                 responses: vec![("/find/tt0000042", status(404, "{}"))],
                 hint: Some(("imdb", "tt0000042")),
@@ -838,6 +857,7 @@ mod tests {
             status(429, "429 Too Many Requests"),
             status(404, "404 Not Found"),
             status(599, "599 status code 599"),
+            status(599, "599 "),
         ] {
             assert!(!super::abstains(&error), "{error:?}");
         }
