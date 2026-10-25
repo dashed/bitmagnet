@@ -812,6 +812,60 @@ jobs:
             --security-opt no-new-privileges --user 65532:65532 "$image" --help \
             | grep -F 'Usage: bitmagnet-process-torrent-batch'
 
+  docker-process-torrent-worker:
+    name: docker build and smoke (process_torrent worker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve exact source identity
+        id: source
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bitmagnet-rs/docker/Dockerfile.process-torrent-worker
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: bitmagnet-process-torrent-worker:ci
+          build-args: |
+            REVISION=${{ steps.source.outputs.commit }}
+            SOURCE_TREE=${{ steps.source.outputs.tree }}
+          cache-from: type=gha,scope=process-torrent-worker
+          cache-to: type=gha,mode=max,scope=process-torrent-worker
+      - name: Verify image contract and executable smoke
+        working-directory: ${{ github.workspace }}
+        env:
+          EXPECTED_COMMIT: ${{ steps.source.outputs.commit }}
+          EXPECTED_TREE: ${{ steps.source.outputs.tree }}
+        run: |
+          image=bitmagnet-process-torrent-worker:ci
+          inspect="$(mktemp)"
+          docker image inspect "$image" | tee "$inspect"
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg tree "$EXPECTED_TREE" '
+            length == 1 and
+            .[0].Os == "linux" and
+            .[0].Architecture == "amd64" and
+            .[0].Config.User == "65532:65532" and
+            .[0].Config.Entrypoint == ["/usr/local/bin/bitmagnet-process-torrent-worker"] and
+            (.[0].Config.Cmd == null or .[0].Config.Cmd == []) and
+            (.[0].Config.ExposedPorts | keys) == ["9090/tcp"] and
+            .[0].Config.Labels["org.opencontainers.image.source"] == "https://github.com/dashed/bitmagnet" and
+            .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
+            .[0].Config.Labels["io.bitmagnet.source-tree"] == $tree and
+            .[0].Config.Labels["io.bitmagnet.queue-consumer"] == "process_torrent" and
+            .[0].Config.Labels["io.bitmagnet.queue-consumer-contract"] == "process_torrent/v1" and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_COMMIT=" + $commit)) != null and
+            (.[0].Config.Env | index("BITMAGNET_SOURCE_TREE=" + $tree)) != null
+          ' "$inspect"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 65532:65532 "$image" --help \
+            | grep -F 'Usage: bitmagnet-process-torrent-worker'
+
   docker-dht-observe:
     name: docker build and smoke (DHT observer)
     runs-on: ubuntu-latest
