@@ -54,8 +54,8 @@ pub use compare::{
 pub use live::ResolverFailure;
 pub use load::{load_torrents, LoadError};
 pub use persist::{
-    persist_write_set, BlockingManager, BoxError, ContentPersistence, ContentPersistenceKey,
-    PersistError, TorrentContentPersistence,
+    persist_write_set, BlockingFailure, BlockingManager, BoxError, ContentPersistence,
+    ContentPersistenceKey, PersistError, TorrentContentPersistence,
 };
 pub use runtime::{
     CausalShadowComparison, MirrorMetrics, ShadowMetrics, ShadowRuntime, ShadowRuntimeError,
@@ -65,9 +65,9 @@ pub use shadow::{
 };
 pub use supported_subset::{check_payload_key_set, PayloadKeySetError};
 pub use worker::{
-    register_worker_metrics, ProcessTorrentWorker, ProcessTorrentWorkerConfig,
-    DEFAULT_ABSTAIN_COOLOFF, DEFAULT_CHECK_INTERVAL, DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED,
-    DEFAULT_SHUTDOWN_GRACE,
+    register_blocking_failure_metrics, register_worker_metrics, ProcessTorrentWorker,
+    ProcessTorrentWorkerConfig, DEFAULT_ABSTAIN_COOLOFF, DEFAULT_CHECK_INTERVAL,
+    DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED, DEFAULT_SHUTDOWN_GRACE,
 };
 pub use writer_compare::{
     WriterCompareError, WriterComparison, WriterDriftField, WriterRowComparison,

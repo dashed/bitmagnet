@@ -51,6 +51,12 @@
 //! Each abstention is counted with a `reason` label: `payload`, `hint`,
 //! `ambiguous`, `resolver`, `conflict`, or `unsupported`.
 //!
+//! A failed whole-torrent block fails the job with Go's text, `blocking
+//! whole-torrent deletes failed`, which names no cause. The worker logs the
+//! cause with the job's ID, the failed step, and the SQLSTATE, and counts it
+//! by step and SQLSTATE class: a missing grant would otherwise show only as
+//! failed jobs.
+//!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
 //! interval, and polls again; the claim transaction rolls back, so the row is
@@ -62,6 +68,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use bitmagnet_blocking::BlockingStoreOp;
 use bitmagnet_queue::{
     AdmittedConsumeOutcome, ConsumeOutcome, DequeuedJob, JobVerdict, ProcessTorrentAdmission,
     ProcessTorrentParams, QueuePgError, QueueStore,
@@ -71,8 +78,9 @@ use prometheus::IntCounterVec;
 
 use crate::writer_plan::load_live_writer_plan;
 use crate::{
-    check_payload_key_set, load_writer_plan, persist_writer_plan, BlockingManager, LoadError,
-    MaterializeError, Materializer, WriterLoadError, WriterPlanError,
+    check_payload_key_set, load_writer_plan, persist_writer_plan, BlockingFailure, BlockingManager,
+    LoadError, MaterializeError, Materializer, PersistWriterPlanError, WriterLoadError,
+    WriterPlanError,
 };
 
 /// Why the worker left a claimed job to Go: the `reason` label of
@@ -182,6 +190,7 @@ pub struct ProcessTorrentWorker {
     config: ProcessTorrentWorkerConfig,
     excluded: Mutex<VecDeque<(String, Instant)>>,
     metrics: Option<IntCounterVec>,
+    blocking_failures: Option<IntCounterVec>,
 }
 
 impl ProcessTorrentWorker {
@@ -199,6 +208,7 @@ impl ProcessTorrentWorker {
             config,
             excluded: Mutex::new(VecDeque::new()),
             metrics: None,
+            blocking_failures: None,
         }
     }
 
@@ -207,6 +217,14 @@ impl ProcessTorrentWorker {
     #[must_use]
     pub fn with_metrics(mut self, metrics: IntCounterVec) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Count whole-torrent blocking failures by `op` and `sqlstate_class`
+    /// (see [`register_blocking_failure_metrics`]).
+    #[must_use]
+    pub fn with_blocking_failure_metrics(mut self, blocking_failures: IntCounterVec) -> Self {
+        self.blocking_failures = Some(blocking_failures);
         self
     }
 
@@ -397,9 +415,32 @@ impl ProcessTorrentWorker {
                     );
                     JobVerdict::Complete
                 }
-                Err(error) => go_handler_failure(&error),
+                Err(error) => self.persist_failure(&job.id, &error),
             },
         )
+    }
+
+    /// Go's handler failure for a persist error. A blocking failure's cause,
+    /// which that text leaves out, is logged and counted first.
+    fn persist_failure(&self, job_id: &str, error: &PersistWriterPlanError) -> JobVerdict {
+        if let PersistWriterPlanError::Persist { source, .. } = error {
+            if let Some(failure) = BlockingFailure::of(source) {
+                let op = failure.op.map_or(OTHER_LABEL, BlockingStoreOp::label);
+                tracing::error!(
+                    job_id = %job_id,
+                    op,
+                    sqlstate = failure.sqlstate.as_deref(),
+                    error = %failure.error,
+                    "blocking whole-torrent deletes failed"
+                );
+                if let Some(blocking_failures) = &self.blocking_failures {
+                    blocking_failures
+                        .with_label_values(&[op, sqlstate_class(failure.sqlstate.as_deref())])
+                        .inc();
+                }
+            }
+        }
+        go_handler_failure(error)
     }
 
     fn excluded_ids(&self) -> Vec<String> {
@@ -467,6 +508,54 @@ pub fn register_worker_metrics(
         ),
         &["outcome", "reason"],
     )?;
+    registry.register(Box::new(counter.clone()))?;
+    Ok(counter)
+}
+
+/// The `op` and `sqlstate_class` label of a failure that names neither.
+const OTHER_LABEL: &str = "other";
+/// The SQLSTATE classes the blocking-failure counter names: connection,
+/// transaction rollback, access rule (`42501` is a missing grant), resources,
+/// and operator intervention. Any other class is `other`.
+const SQLSTATE_CLASSES: [&str; 5] = ["08", "40", "42", "53", "57"];
+/// The `sqlstate_class` of a failure without a SQLSTATE.
+const NO_SQLSTATE_LABEL: &str = "none";
+
+fn sqlstate_class(sqlstate: Option<&str>) -> &'static str {
+    let Some(sqlstate) = sqlstate else {
+        return NO_SQLSTATE_LABEL;
+    };
+    SQLSTATE_CLASSES
+        .into_iter()
+        .find(|class| sqlstate.starts_with(class))
+        .unwrap_or(OTHER_LABEL)
+}
+
+/// Register the worker's whole-torrent blocking-failure counter in
+/// `registry`, with every label pair at zero, so it is scraped before the
+/// first failure.
+pub fn register_blocking_failure_metrics(
+    registry: &prometheus::Registry,
+) -> Result<IntCounterVec, prometheus::Error> {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "bitmagnet_process_torrent_worker_blocking_failures_total",
+            "Whole-torrent blocking failures, each failing its process_torrent job with `blocking whole-torrent deletes failed`, by failed step (transaction, delete_torrents, bloom_filter, other) and SQLSTATE class (08, 40, 42, 53, 57, other, none)",
+        ),
+        &["op", "sqlstate_class"],
+    )?;
+    for op in BlockingStoreOp::ALL
+        .map(BlockingStoreOp::label)
+        .into_iter()
+        .chain([OTHER_LABEL])
+    {
+        for class in SQLSTATE_CLASSES
+            .into_iter()
+            .chain([OTHER_LABEL, NO_SQLSTATE_LABEL])
+        {
+            counter.with_label_values(&[op, class]);
+        }
+    }
     registry.register(Box::new(counter.clone()))?;
     Ok(counter)
 }
@@ -769,6 +858,130 @@ mod tests {
         assert_eq!(
             go_handler_failure(&"missing 2 info hashes"),
             JobVerdict::Fail("job failed to process: missing 2 info hashes".to_owned())
+        );
+    }
+
+    #[test]
+    fn sqlstates_count_by_named_class() {
+        for (sqlstate, class) in [
+            (Some("08006"), "08"),
+            (Some("40001"), "40"),
+            (Some("42501"), "42"),
+            (Some("53100"), "53"),
+            (Some("57014"), "57"),
+            (Some("23505"), "other"),
+            (None, "none"),
+        ] {
+            assert_eq!(sqlstate_class(sqlstate), class, "{sqlstate:?}");
+        }
+    }
+
+    /// A writer the log capture below appends to.
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Without PostgreSQL, a store failure with no SQLSTATE: logged and
+    /// counted as `other`/`none` under Go's job text. Another persist error
+    /// keeps its own text and logs nothing here. `worker_pg` covers the
+    /// PostgreSQL store's permission failures.
+    #[tokio::test]
+    async fn a_blocking_failure_is_logged_and_counted_under_gos_job_text() {
+        let registry = prometheus::Registry::new();
+        let failures = register_blocking_failure_metrics(&registry).unwrap();
+        let exposition = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        let series = |text: &str| {
+            text.lines()
+                .filter(|line| {
+                    line.starts_with("bitmagnet_process_torrent_worker_blocking_failures_total{")
+                })
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(series(&exposition).len(), 4 * 7, "{exposition}");
+        assert!(series(&exposition).iter().all(|line| line.ends_with(" 0")));
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+            .expect("lazy pool");
+        let worker = ProcessTorrentWorker::new(
+            QueueStore::new(pool),
+            Materializer::from_core().expect("compile embedded classifier"),
+            Arc::new(UnusedBlocker),
+            ProcessTorrentWorkerConfig::default(),
+        )
+        .with_blocking_failure_metrics(failures.clone());
+        let blocking = PersistWriterPlanError::Persist {
+            retry: None,
+            source: crate::PersistError::Blocking(Box::new(
+                bitmagnet_blocking::BlockingError::Store(Box::new(std::io::Error::other(
+                    "store unavailable",
+                ))),
+            )),
+        };
+        let database = PersistWriterPlanError::Persist {
+            retry: None,
+            source: crate::PersistError::Database(sqlx::Error::PoolTimedOut),
+        };
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buffer);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || Capture(Arc::clone(&sink)))
+            .finish();
+        let (blocked, failed) = tracing::subscriber::with_default(subscriber, || {
+            (
+                worker.persist_failure("job-1", &blocking),
+                worker.persist_failure("job-2", &database),
+            )
+        });
+
+        assert_eq!(
+            blocked,
+            JobVerdict::Fail("job failed to process: blocking whole-torrent deletes failed".into())
+        );
+        assert_eq!(
+            failed,
+            JobVerdict::Fail(format!(
+                "job failed to process: {}",
+                sqlx::Error::PoolTimedOut
+            ))
+        );
+        let text = String::from_utf8(buffer.lock().expect("capture lock").clone()).unwrap();
+        assert_eq!(
+            text.lines().map(str::trim_start).collect::<Vec<_>>(),
+            [
+                "ERROR bitmagnet_processor::worker: blocking whole-torrent deletes failed \
+                 job_id=job-1 op=\"other\" error=atomic blocking-store commit failed: \
+                 store unavailable"
+            ]
+        );
+        let exposition = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        assert_eq!(
+            series(&exposition)
+                .into_iter()
+                .filter(|line| !line.ends_with(" 0"))
+                .collect::<Vec<_>>(),
+            ["bitmagnet_process_torrent_worker_blocking_failures_total\
+                 {op=\"other\",sqlstate_class=\"none\"} 1"]
         );
     }
 }

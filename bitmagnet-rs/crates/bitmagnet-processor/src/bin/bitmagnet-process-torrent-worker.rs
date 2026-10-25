@@ -22,7 +22,8 @@ use bitmagnet_blocking::BlockingManager as PersistentBlockingManager;
 use bitmagnet_classifier::core_config_digest;
 use bitmagnet_content_search::PgContentSearch;
 use bitmagnet_processor::{
-    register_worker_metrics, Materializer, ProcessTorrentWorker, ProcessTorrentWorkerConfig,
+    register_blocking_failure_metrics, register_worker_metrics, Materializer, ProcessTorrentWorker,
+    ProcessTorrentWorkerConfig,
 };
 use bitmagnet_queue::{QueueStore, PROCESS_TORRENT};
 use bitmagnet_resolver::LiveContentResolver;
@@ -173,6 +174,9 @@ async fn main() -> Result<()> {
 
     let metrics = register_worker_metrics(bitmagnet_common::metrics::registry())
         .context("registering worker metrics")?;
+    let blocking_failures =
+        register_blocking_failure_metrics(bitmagnet_common::metrics::registry())
+            .context("registering blocking-failure metrics")?;
     let _metrics_server = bitmagnet_common::metrics::maybe_spawn_metrics_server()
         .await
         .context("starting process_torrent worker metrics listener")?;
@@ -194,7 +198,8 @@ async fn main() -> Result<()> {
         Arc::new(blocking_manager.clone()),
         config,
     )
-    .with_metrics(metrics);
+    .with_metrics(metrics)
+    .with_blocking_failure_metrics(blocking_failures);
 
     tracing::info!(
         queue = PROCESS_TORRENT,

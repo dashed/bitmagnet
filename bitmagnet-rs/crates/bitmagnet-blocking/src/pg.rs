@@ -7,7 +7,7 @@ use sqlx::postgres::types::Oid;
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 
-use super::{AtomicBlockingStore, BlockingClock, BoxError, CommittedFilter};
+use super::{AtomicBlockingStore, BlockingClock, BlockingStoreOp, BoxError, CommittedFilter};
 
 // SQLx 0.9 has no PostgreSQL large-object descriptor wrapper. Runtime queries
 // therefore use lo_get/lo_create/lo_put inside the same transaction. This is a
@@ -47,7 +47,7 @@ const UPDATE_NULL_FILTER_SQL: &str = "UPDATE public.bloom_filters \
     WHERE key = $3::text";
 
 #[derive(Debug, Error)]
-enum PostgresBlockingStoreError {
+pub(super) enum PostgresBlockingStoreError {
     #[error("failed to begin blocking transaction")]
     Begin(#[source] sqlx::Error),
     #[error("failed to delete blocked torrents")]
@@ -74,6 +74,25 @@ enum PostgresBlockingStoreError {
     Commit(#[source] sqlx::Error),
     #[error("bloom-filter encoded length does not fit a PostgreSQL integer")]
     ReadLengthOverflow,
+}
+
+impl PostgresBlockingStoreError {
+    pub(super) const fn op(&self) -> BlockingStoreOp {
+        match self {
+            Self::Begin(_) | Self::Commit(_) => BlockingStoreOp::Transaction,
+            Self::DeleteTorrents(_) => BlockingStoreOp::DeleteTorrents,
+            Self::LockFilter(_)
+            | Self::SelectObjectId(_)
+            | Self::ReadLargeObject(_)
+            | Self::DecodeFilter(_)
+            | Self::CreateLargeObject(_)
+            | Self::EncodeFilter(_)
+            | Self::WriteLargeObject(_)
+            | Self::InsertMetadata(_)
+            | Self::UpdateNullMetadata(_)
+            | Self::ReadLengthOverflow => BlockingStoreOp::BloomFilter,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,7 +280,7 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::*;
-    use crate::{BlockingManager, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_MAX_FLUSH_WAIT};
+    use crate::{BlockingError, BlockingManager, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_MAX_FLUSH_WAIT};
 
     #[test]
     fn production_geometry_and_bounded_read_are_exact() {
@@ -352,6 +371,56 @@ mod tests {
             "bloom-filter encoded length does not fit a PostgreSQL integer"
         );
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn blocking_errors_name_the_store_op_that_failed() {
+        use PostgresBlockingStoreError as E;
+
+        let database = || sqlx::Error::PoolTimedOut;
+        let codec = || {
+            let geometry = StableBloomGeometry::new(128, 2, 3, 4).unwrap();
+            match decode_filter(&[], geometry).err() {
+                Some(E::DecodeFilter(error)) => error,
+                _ => panic!("an empty object must not decode"),
+            }
+        };
+        for (error, op) in [
+            (E::Begin(database()), BlockingStoreOp::Transaction),
+            (
+                E::DeleteTorrents(database()),
+                BlockingStoreOp::DeleteTorrents,
+            ),
+            (E::LockFilter(database()), BlockingStoreOp::BloomFilter),
+            (E::SelectObjectId(database()), BlockingStoreOp::BloomFilter),
+            (E::ReadLargeObject(database()), BlockingStoreOp::BloomFilter),
+            (E::DecodeFilter(codec()), BlockingStoreOp::BloomFilter),
+            (
+                E::CreateLargeObject(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::EncodeFilter(codec()), BlockingStoreOp::BloomFilter),
+            (
+                E::WriteLargeObject(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::InsertMetadata(database()), BlockingStoreOp::BloomFilter),
+            (
+                E::UpdateNullMetadata(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::ReadLengthOverflow, BlockingStoreOp::BloomFilter),
+            (E::Commit(database()), BlockingStoreOp::Transaction),
+        ] {
+            let error = BlockingError::Store(Box::new(error));
+            assert_eq!(error.store_op(), Some(op), "{error:?}");
+        }
+        let other = BlockingError::Store(Box::new(std::io::Error::other("another store")));
+        assert_eq!(other.store_op(), None);
+        assert_eq!(
+            BlockingStoreOp::ALL.map(BlockingStoreOp::label),
+            ["transaction", "delete_torrents", "bloom_filter"]
+        );
     }
 
     #[tokio::test]

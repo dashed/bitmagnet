@@ -68,6 +68,49 @@ pub enum BlockingError {
     Store(#[source] BoxError),
 }
 
+impl BlockingError {
+    /// The part of the PostgreSQL store's commit that failed, or `None` when
+    /// the failure came from another store.
+    #[must_use]
+    pub fn store_op(&self) -> Option<BlockingStoreOp> {
+        match self {
+            Self::Store(source) => source
+                .downcast_ref::<pg::PostgresBlockingStoreError>()
+                .map(pg::PostgresBlockingStoreError::op),
+        }
+    }
+}
+
+/// The part of the PostgreSQL store's one-transaction commit that failed.
+///
+/// A least-privilege role needs a different grant for each: the delete fires
+/// the `deleted_torrents` audit trigger as the deleting role, and the filter
+/// is a large object with its own ACL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockingStoreOp {
+    /// Beginning or committing the transaction.
+    Transaction,
+    /// `DELETE FROM torrents`, including its `deleted_torrents` audit trigger.
+    DeleteTorrents,
+    /// Locking, reading, or rewriting the `blocked_torrents` filter: its
+    /// `bloom_filters` row and its large object.
+    BloomFilter,
+}
+
+impl BlockingStoreOp {
+    pub const ALL: [Self; 3] = [Self::Transaction, Self::DeleteTorrents, Self::BloomFilter];
+
+    /// The op's log and metric label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Transaction => "transaction",
+            Self::DeleteTorrents => "delete_torrents",
+            Self::BloomFilter => "bloom_filter",
+        }
+    }
+}
+
 /// The observable result of one caller-driven blocking finalization attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockingFinalizeOutcome {

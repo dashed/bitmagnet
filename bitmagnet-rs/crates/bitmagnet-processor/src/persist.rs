@@ -7,9 +7,11 @@
 //! snapshots, associations, and FTS vectors. Exact keyset validation happens
 //! before blocking or opening a transaction.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
+use bitmagnet_blocking::{BlockingError, BlockingStoreOp};
 use bitmagnet_fts::Tsvector;
 use futures::future::BoxFuture;
 use serde_json::{Map, Value};
@@ -257,6 +259,54 @@ pub enum PersistError {
     Database(#[from] sqlx::Error),
     #[error(transparent)]
     InvalidInfoHash(#[from] super::MaterializeError),
+}
+
+/// The cause of a [`PersistError::Blocking`], which Go's job text
+/// (`blocking whole-torrent deletes failed`) leaves out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockingFailure {
+    /// The part of the PostgreSQL store's commit that failed; `None` when the
+    /// failure came from elsewhere.
+    pub op: Option<BlockingStoreOp>,
+    /// The PostgreSQL SQLSTATE, when the server reported one.
+    pub sqlstate: Option<String>,
+    /// The error chain under the job text, joined by `: `.
+    pub error: String,
+}
+
+impl BlockingFailure {
+    /// The cause of a blocking failure; `None` for any other error.
+    #[must_use]
+    pub fn of(error: &PersistError) -> Option<Self> {
+        let PersistError::Blocking(source) = error else {
+            return None;
+        };
+        let source: &(dyn Error + 'static) = &**source;
+        let op = source
+            .downcast_ref::<BlockingError>()
+            .and_then(BlockingError::store_op);
+        let mut chain = Vec::new();
+        let mut sqlstate = None;
+        let mut next = Some(source);
+        while let Some(error) = next {
+            chain.push(error.to_string());
+            if let Some(database) = error.downcast_ref::<sqlx::Error>() {
+                // SQLx's text already carries the server's message, which its
+                // source would repeat.
+                sqlstate = database
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .map(Cow::into_owned);
+                break;
+            }
+            next = error.source();
+        }
+        Some(Self {
+            op,
+            sqlstate,
+            error: chain.join(": "),
+        })
+    }
 }
 
 fn attached_content_key(

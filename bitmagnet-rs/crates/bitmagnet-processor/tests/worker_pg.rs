@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,7 +32,7 @@ use bitmagnet_resolver::LiveContentResolver;
 use bitmagnet_tmdb::{HttpResponse, RetryPolicy, TmdbClient, TmdbConfig, Transport};
 use reqwest::{Url, Version};
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
 const TEST_DATABASE_URL: &str = "BITMAGNET_PROCESSOR_TEST_DATABASE_URL";
@@ -1343,6 +1344,246 @@ async fn concurrent_blocking_flushes_keep_every_writers_hashes() {
         Vec::<InfoHash>::new(),
         "the persisted filter keeps both concurrent writers' hashes"
     );
+}
+
+// --- Blocking failures under a least-privilege role ------------------------
+
+/// The repository's synthetic banned-keyword fixture (the classifier smoke
+/// test's): the core workflow deletes it. Go acknowledges a deletion-only batch
+/// without blocking, so its job also carries a torrent that classifies.
+const BANNED_NAME: &str = "Synthetic paedo marker.txt";
+const PROBE_ROLE: &str = "bitmagnet_blocking_probe";
+const BLOCKING_FAILURES: &str = "bitmagnet_process_torrent_worker_blocking_failures_total";
+
+/// A writer the log capture appends to.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Capture {
+    /// The captured blocking-failure lines, level first, without the
+    /// PostgreSQL source line sqlx appends (` at line N`, which varies by build).
+    fn blocking_lines(&self) -> Vec<String> {
+        let text = String::from_utf8(self.0.lock().expect("capture lock").clone()).unwrap();
+        text.lines()
+            .filter(|line| line.contains("blocking whole-torrent deletes failed"))
+            .map(|line| {
+                let line = line.trim_start();
+                line.rsplit_once(" at line ")
+                    .filter(|(_, number)| {
+                        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .map_or(line, |(head, _)| head)
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The blocking-failure series as scraped, by label set.
+fn scraped_blocking_failures(registry: &prometheus::Registry) -> BTreeMap<String, u64> {
+    let text = prometheus::TextEncoder::new()
+        .encode_to_string(&registry.gather())
+        .expect("encode metrics");
+    text.lines()
+        .filter_map(|line| line.strip_prefix(BLOCKING_FAILURES)?.strip_prefix('{'))
+        .map(|series| {
+            let (labels, value) = series.split_once("} ").expect("series value");
+            (labels.to_owned(), value.parse().expect("integer count"))
+        })
+        .collect()
+}
+
+/// A login role with DML on every public table but `deleted_torrents`, and no
+/// large-object privilege: a worker role missing both blocking grants.
+async fn probe_role_pool(pool: &PgPool) -> PgPool {
+    for sql in [
+        "DO $$ BEGIN \
+         IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'bitmagnet_blocking_probe') THEN \
+           EXECUTE 'DROP OWNED BY bitmagnet_blocking_probe'; \
+           EXECUTE 'DROP ROLE bitmagnet_blocking_probe'; \
+         END IF; END $$",
+        "CREATE ROLE bitmagnet_blocking_probe LOGIN PASSWORD 'blocking-probe-password' \
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT",
+        "GRANT USAGE ON SCHEMA public TO bitmagnet_blocking_probe",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public \
+         TO bitmagnet_blocking_probe",
+        "GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO bitmagnet_blocking_probe",
+        "REVOKE ALL ON deleted_torrents FROM bitmagnet_blocking_probe",
+    ] {
+        sqlx::query(sql)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}`: {error}"));
+    }
+    let options = PgConnectOptions::from_str(&std::env::var(TEST_DATABASE_URL).unwrap())
+        .expect("parse PostgreSQL URL")
+        .username(PROBE_ROLE)
+        .password("blocking-probe-password");
+    PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .expect("connect as the probe role")
+}
+
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
+    let pool = connect().await;
+    reset(&pool).await;
+    seed_torrent(&pool, HASH_A, BANNED_NAME, 1_000).await;
+    seed_torrent(&pool, HASH_B, "Synthetic Story.m4b", 60_000_000).await;
+    let id = enqueue(
+        &QueueStore::new(pool.clone()),
+        &supported_params(&[HASH_A, HASH_B]),
+    )
+    .await;
+    let probe = probe_role_pool(&pool).await;
+    let registry = prometheus::Registry::new();
+    let failures = bitmagnet_processor::register_blocking_failure_metrics(&registry).unwrap();
+    let capture = Capture::default();
+    let sink = capture.clone();
+    let _logs = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || sink.clone())
+            .finish(),
+    );
+    let probe_worker =
+        || worker(&probe, fast_config()).with_blocking_failure_metrics(failures.clone());
+    let go_text = "job failed to process: blocking whole-torrent deletes failed";
+    let line = |op: &str, error: &str| {
+        format!(
+            "ERROR bitmagnet_processor::worker: blocking whole-torrent deletes failed \
+             job_id={id} op=\"{op}\" sqlstate=\"42501\" error=atomic blocking-store commit failed: \
+             {error}"
+        )
+    };
+
+    // Every series exists, at zero, before the first job.
+    let scraped = scraped_blocking_failures(&registry);
+    assert_eq!(scraped.len(), 4 * 7, "{scraped:?}");
+    assert!(scraped.values().all(|count| *count == 0), "{scraped:?}");
+
+    // Without a grant on deleted_torrents, its audit trigger refuses the delete.
+    let outcome = probe_worker().run_once().await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::RetryScheduled { .. })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(job_row(&pool, &id).await.error.as_deref(), Some(go_text));
+    let delete_line = line(
+        "delete_torrents",
+        "failed to delete blocked torrents: error returned from database: \
+         permission denied for table deleted_torrents",
+    );
+    assert_eq!(capture.blocking_lines(), [delete_line.as_str()]);
+
+    // With it, the filter is a large object another role owns.
+    sqlx::query("GRANT SELECT, INSERT, UPDATE ON deleted_torrents TO bitmagnet_blocking_probe")
+        .execute(&pool)
+        .await
+        .expect("grant deleted_torrents");
+    PersistentBlockingManager::new(pool.clone())
+        .block(&[HASH_MISSING.parse().unwrap()], true)
+        .await
+        .expect("the owner persists the filter");
+    let oid: i64 =
+        sqlx::query_scalar("SELECT oid::bigint FROM bloom_filters WHERE key = 'blocked_torrents'")
+            .fetch_one(&pool)
+            .await
+            .expect("read the filter's large object");
+    make_ready(&pool, &id).await;
+    let outcome = probe_worker().run_once().await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::RetryScheduled { .. })
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(job_row(&pool, &id).await.error.as_deref(), Some(go_text));
+    let filter_line = line(
+        "bloom_filter",
+        &format!(
+            "failed to read current bloom-filter large object: error returned from database: \
+             permission denied for large object {oid}"
+        ),
+    );
+    assert_eq!(
+        capture.blocking_lines(),
+        [delete_line.as_str(), filter_line.as_str()]
+    );
+    assert!(live_image(&pool)
+        .await
+        .contains(&format!("torrent {HASH_A}")));
+
+    // With both grants the same job blocks and deletes the torrent.
+    sqlx::query(
+        "DO $$ BEGIN \
+         EXECUTE format('GRANT SELECT, UPDATE ON LARGE OBJECT %s TO bitmagnet_blocking_probe', \
+           (SELECT oid FROM bloom_filters WHERE key = 'blocked_torrents')); \
+         END $$",
+    )
+    .execute(&pool)
+    .await
+    .expect("grant the filter's large object");
+    make_ready(&pool, &id).await;
+    let outcome = probe_worker().run_once().await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            AdmittedConsumeOutcome::Settled(ConsumeOutcome::Processed { .. })
+        ),
+        "{outcome:?}"
+    );
+    let image = live_image(&pool).await;
+    assert!(!image.contains(&format!("torrent {HASH_A}")), "{image:#?}");
+    assert!(image.contains(&format!("torrent {HASH_B}")), "{image:#?}");
+    assert_eq!(capture.blocking_lines().len(), 2);
+
+    let scraped = scraped_blocking_failures(&registry);
+    let counted: BTreeMap<&str, u64> = scraped
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(labels, count)| (labels.as_str(), *count))
+        .collect();
+    assert_eq!(
+        counted,
+        BTreeMap::from([
+            ("op=\"bloom_filter\",sqlstate_class=\"42\"", 1),
+            ("op=\"delete_torrents\",sqlstate_class=\"42\"", 1),
+        ])
+    );
+
+    probe.close().await;
+    for sql in [
+        "DROP OWNED BY bitmagnet_blocking_probe",
+        "DROP ROLE bitmagnet_blocking_probe",
+    ] {
+        sqlx::query(sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|error| panic!("`{sql}`: {error}"));
+    }
 }
 
 // --- The flags-on switch ---------------------------------------------------
