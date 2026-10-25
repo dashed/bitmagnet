@@ -289,16 +289,20 @@ impl BlockingFailure {
         let mut sqlstate = None;
         let mut next = Some(source);
         while let Some(error) = next {
-            chain.push(error.to_string());
             if let Some(database) = error.downcast_ref::<sqlx::Error>() {
-                // SQLx's text already carries the server's message, which its
-                // source would repeat.
-                sqlstate = database
-                    .as_database_error()
-                    .and_then(|error| error.code())
-                    .map(Cow::into_owned);
+                // A server error is its message and SQLSTATE: SQLx's text
+                // appends PostgreSQL's source line (` at line N`). Either text
+                // ends the chain, since its source would repeat it.
+                match database.as_database_error() {
+                    Some(server) => {
+                        chain.push(server.message().to_owned());
+                        sqlstate = server.code().map(Cow::into_owned);
+                    }
+                    None => chain.push(database.to_string()),
+                }
                 break;
             }
+            chain.push(error.to_string());
             next = error.source();
         }
         Some(Self {

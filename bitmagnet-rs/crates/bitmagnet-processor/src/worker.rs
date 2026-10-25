@@ -51,11 +51,11 @@
 //! Each abstention is counted with a `reason` label: `payload`, `hint`,
 //! `ambiguous`, `resolver`, `conflict`, or `unsupported`.
 //!
-//! A failed whole-torrent block fails the job with Go's text, `blocking
+//! A failed whole-torrent block fails the attempt with Go's text, `blocking
 //! whole-torrent deletes failed`, which names no cause. The worker logs the
-//! cause with the job's ID, the failed step, and the SQLSTATE, and counts it
-//! by step and SQLSTATE class: a missing grant would otherwise show only as
-//! failed jobs.
+//! cause with the job's ID, the failed step, and the SQLSTATE, and counts the
+//! attempt by step and SQLSTATE class, with a missing grant (`42501`) apart
+//! from the rest of its class: it would otherwise show only as failed jobs.
 //!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
@@ -514,21 +514,26 @@ pub fn register_worker_metrics(
 
 /// The `op` and `sqlstate_class` label of a failure that names neither.
 const OTHER_LABEL: &str = "other";
+/// The `sqlstate_class` of a missing grant (insufficient_privilege), kept
+/// apart from the rest of class `42`, which is schema drift (`42P01`,
+/// `42703`, ...).
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
 /// The SQLSTATE classes the blocking-failure counter names: connection,
-/// transaction rollback, access rule (`42501` is a missing grant), resources,
-/// and operator intervention. Any other class is `other`.
+/// transaction rollback, access rule, resources, and operator intervention.
+/// Any other class is `other`.
 const SQLSTATE_CLASSES: [&str; 5] = ["08", "40", "42", "53", "57"];
 /// The `sqlstate_class` of a failure without a SQLSTATE.
 const NO_SQLSTATE_LABEL: &str = "none";
 
 fn sqlstate_class(sqlstate: Option<&str>) -> &'static str {
-    let Some(sqlstate) = sqlstate else {
-        return NO_SQLSTATE_LABEL;
-    };
-    SQLSTATE_CLASSES
-        .into_iter()
-        .find(|class| sqlstate.starts_with(class))
-        .unwrap_or(OTHER_LABEL)
+    match sqlstate {
+        None => NO_SQLSTATE_LABEL,
+        Some(INSUFFICIENT_PRIVILEGE) => INSUFFICIENT_PRIVILEGE,
+        Some(sqlstate) => SQLSTATE_CLASSES
+            .into_iter()
+            .find(|class| sqlstate.starts_with(class))
+            .unwrap_or(OTHER_LABEL),
+    }
 }
 
 /// Register the worker's whole-torrent blocking-failure counter in
@@ -540,7 +545,7 @@ pub fn register_blocking_failure_metrics(
     let counter = IntCounterVec::new(
         prometheus::Opts::new(
             "bitmagnet_process_torrent_worker_blocking_failures_total",
-            "Whole-torrent blocking failures, each failing its process_torrent job with `blocking whole-torrent deletes failed`, by failed step (transaction, delete_torrents, bloom_filter, other) and SQLSTATE class (08, 40, 42, 53, 57, other, none)",
+            "Whole-torrent blocking failures per failed process_torrent attempt, each failing it with `blocking whole-torrent deletes failed`, by failed step (transaction, delete_torrents, bloom_filter, other) and SQLSTATE class (08, 40, 42501 = missing grant, 42 = rest of class 42, 53, 57, other, none)",
         ),
         &["op", "sqlstate_class"],
     )?;
@@ -549,8 +554,9 @@ pub fn register_blocking_failure_metrics(
         .into_iter()
         .chain([OTHER_LABEL])
     {
-        for class in SQLSTATE_CLASSES
+        for class in [INSUFFICIENT_PRIVILEGE]
             .into_iter()
+            .chain(SQLSTATE_CLASSES)
             .chain([OTHER_LABEL, NO_SQLSTATE_LABEL])
         {
             counter.with_label_values(&[op, class]);
@@ -866,7 +872,9 @@ mod tests {
         for (sqlstate, class) in [
             (Some("08006"), "08"),
             (Some("40001"), "40"),
-            (Some("42501"), "42"),
+            (Some("42501"), "42501"),
+            (Some("42P01"), "42"),
+            (Some("42703"), "42"),
             (Some("53100"), "53"),
             (Some("57014"), "57"),
             (Some("23505"), "other"),
@@ -912,7 +920,7 @@ mod tests {
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(series(&exposition).len(), 4 * 7, "{exposition}");
+        assert_eq!(series(&exposition).len(), 4 * 8, "{exposition}");
         assert!(series(&exposition).iter().all(|line| line.ends_with(" 0")));
 
         let pool = sqlx::postgres::PgPoolOptions::new()

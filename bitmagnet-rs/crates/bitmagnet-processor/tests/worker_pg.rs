@@ -1374,21 +1374,12 @@ impl Write for Capture {
 }
 
 impl Capture {
-    /// The captured blocking-failure lines, level first, without the
-    /// PostgreSQL source line sqlx appends (` at line N`, which varies by build).
+    /// The captured blocking-failure lines, level first.
     fn blocking_lines(&self) -> Vec<String> {
         let text = String::from_utf8(self.0.lock().expect("capture lock").clone()).unwrap();
         text.lines()
             .filter(|line| line.contains("blocking whole-torrent deletes failed"))
-            .map(|line| {
-                let line = line.trim_start();
-                line.rsplit_once(" at line ")
-                    .filter(|(_, number)| {
-                        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-                    .map_or(line, |(head, _)| head)
-                    .to_owned()
-            })
+            .map(|line| line.trim_start().to_owned())
             .collect()
     }
 }
@@ -1477,7 +1468,7 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
 
     // Every series exists, at zero, before the first job.
     let scraped = scraped_blocking_failures(&registry);
-    assert_eq!(scraped.len(), 4 * 7, "{scraped:?}");
+    assert_eq!(scraped.len(), 4 * 8, "{scraped:?}");
     assert!(scraped.values().all(|count| *count == 0), "{scraped:?}");
 
     // Without a grant on deleted_torrents, its audit trigger refuses the delete.
@@ -1490,10 +1481,10 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
         "{outcome:?}"
     );
     assert_eq!(job_row(&pool, &id).await.error.as_deref(), Some(go_text));
+    // The server's message, without the source line SQLx's text appends.
     let delete_line = line(
         "delete_torrents",
-        "failed to delete blocked torrents: error returned from database: \
-         permission denied for table deleted_torrents",
+        "failed to delete blocked torrents: permission denied for table deleted_torrents",
     );
     assert_eq!(capture.blocking_lines(), [delete_line.as_str()]);
 
@@ -1524,7 +1515,7 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
     let filter_line = line(
         "bloom_filter",
         &format!(
-            "failed to read current bloom-filter large object: error returned from database: \
+            "failed to read current bloom-filter large object: \
              permission denied for large object {oid}"
         ),
     );
@@ -1569,8 +1560,8 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
     assert_eq!(
         counted,
         BTreeMap::from([
-            ("op=\"bloom_filter\",sqlstate_class=\"42\"", 1),
-            ("op=\"delete_torrents\",sqlstate_class=\"42\"", 1),
+            ("op=\"bloom_filter\",sqlstate_class=\"42501\"", 1),
+            ("op=\"delete_torrents\",sqlstate_class=\"42501\"", 1),
         ])
     );
 
