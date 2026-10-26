@@ -1457,6 +1457,9 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
             .with_writer(move || sink.clone())
             .finish(),
     );
+    // A callsite's interest cached before this subscriber existed would hide
+    // its lines.
+    tracing::callsite::rebuild_interest_cache();
     let probe_worker =
         || worker(&probe, fast_config()).with_blocking_failure_metrics(failures.clone());
     let go_text = "job failed to process: blocking whole-torrent deletes failed";
@@ -1779,13 +1782,16 @@ async fn an_empty_timed_flush_writes_nothing() {
         filter_row_version(&pool).await,
     );
 
-    worker
-        .run_until(async {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        worker.run_until(async {
             while recorder.outcomes.lock().expect("outcomes lock").len() < 4 {
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        })
-        .await;
+        }),
+    )
+    .await
+    .expect("four timed flushes");
     let outcomes = recorder.outcomes.lock().expect("outcomes lock").clone();
     assert!(
         outcomes.len() >= 4
@@ -1799,8 +1805,8 @@ async fn an_empty_timed_flush_writes_nothing() {
 }
 
 /// A blocked hash still buffered when the loop stops reaches the filter once,
-/// by the shutdown flush the binary runs after the loop; a second flush finds
-/// nothing.
+/// by the shutdown flush `run_then_flush` runs after the loop, as the binary
+/// does; a second flush finds nothing.
 #[tokio::test]
 #[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
 async fn shutdown_flushes_a_pending_block_exactly_once() {
@@ -1816,21 +1822,31 @@ async fn shutdown_flushes_a_pending_block_exactly_once() {
     assert_eq!(job_status(&pool, &first).await, "processed");
     let before = filter_object_versions(&pool).await;
     let second = enqueue_blocking_job(&pool, HASH_BANNED_LATER, HASH_KEPT_LATER).await;
-    worker
-        .run_until(async {
-            while job_status(&pool, &second).await != "processed" {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await;
+    let flushed_at_stop = Mutex::new(None);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.run_then_flush(
+            async {
+                while job_status(&pool, &second).await != "processed" {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                *flushed_at_stop.lock().expect("versions lock") =
+                    Some(filter_object_versions(&pool).await);
+            },
+            &manager,
+        ),
+    )
+    .await
+    .expect("the loop stops")
+    .expect("the shutdown flush commits");
     assert_eq!(
-        filter_object_versions(&pool).await,
-        before,
-        "still buffered"
+        flushed_at_stop.into_inner().expect("versions lock"),
+        Some(before.clone()),
+        "still buffered when the loop stops"
     );
 
     assert_eq!(
-        manager.finalize().await.unwrap(),
+        outcome,
         BlockingFinalizeOutcome::Flushed {
             unique_hash_count: 1
         }
@@ -1843,6 +1859,333 @@ async fn shutdown_flushes_a_pending_block_exactly_once() {
     );
     assert_eq!(filter_object_versions(&pool).await, after);
 
+    let hashes = [HASH_BANNED_LATER, HASH_KEPT_LATER].map(|hash| hash.parse().unwrap());
+    assert_eq!(
+        PersistentBlockingManager::new(pool.clone())
+            .filter(&hashes)
+            .await
+            .unwrap(),
+        [HASH_KEPT_LATER.parse::<InfoHash>().unwrap()]
+    );
+}
+
+/// Enqueue `jobs` blocking jobs, each with its own banned and kept torrent;
+/// the banned hashes, in order.
+async fn enqueue_blocking_backlog(pool: &PgPool, jobs: usize) -> Vec<InfoHash> {
+    let mut banned = Vec::with_capacity(jobs);
+    for job in 0..jobs {
+        let (hash, kept) = (format!("ab{job:038x}"), format!("cd{job:038x}"));
+        enqueue_blocking_job(pool, &hash, &kept).await;
+        banned.push(hash.parse().expect("info hash"));
+    }
+    banned
+}
+
+async fn processed_jobs(pool: &PgPool) -> usize {
+    let processed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM queue_jobs WHERE status = 'processed'")
+            .fetch_one(pool)
+            .await
+            .expect("count processed jobs");
+    usize::try_from(processed).expect("a count")
+}
+
+/// Locks only a claim transaction holds on `queue_jobs`, from its claim to its
+/// settlement: while one is held, a job is in flight. A plain read's lock is
+/// weaker.
+async fn claim_locks(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks \
+         WHERE relation = 'queue_jobs'::regclass \
+           AND mode IN ('RowShareLock', 'RowExclusiveLock') AND granted",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read claim locks")
+}
+
+/// One finalization: when it began and ended, the jobs processed and the
+/// claim locks held when it began, and its outcome.
+#[derive(Debug, Clone, Copy)]
+struct ObservedFlush {
+    began: tokio::time::Instant,
+    ended: tokio::time::Instant,
+    processed: usize,
+    claim_locks: i64,
+    outcome: BlockingFinalizeOutcome,
+}
+
+/// Finalizes the manager it wraps and records each call. With `hold`, the
+/// first call waits for `release` after signalling `entered`.
+struct ObservedFinalizer {
+    pool: PgPool,
+    manager: PersistentBlockingManager,
+    hold: bool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    flushes: Mutex<Vec<ObservedFlush>>,
+}
+
+impl ObservedFinalizer {
+    fn new(pool: &PgPool, manager: &PersistentBlockingManager, hold: bool) -> Self {
+        Self {
+            pool: pool.clone(),
+            manager: manager.clone(),
+            hold,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            flushes: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn flushes(&self) -> Vec<ObservedFlush> {
+        self.flushes.lock().expect("flushes lock").clone()
+    }
+}
+
+#[async_trait]
+impl BlockingFinalizer for ObservedFinalizer {
+    async fn finalize(&self) -> Result<BlockingFinalizeOutcome, bitmagnet_blocking::BlockingError> {
+        let began = tokio::time::Instant::now();
+        let (processed, claim_locks) = (
+            processed_jobs(&self.pool).await,
+            claim_locks(&self.pool).await,
+        );
+        if self.hold && self.flushes.lock().expect("flushes lock").is_empty() {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        let outcome = self.manager.finalize().await?;
+        self.flushes
+            .lock()
+            .expect("flushes lock")
+            .push(ObservedFlush {
+                began,
+                ended: tokio::time::Instant::now(),
+                processed,
+                claim_locks,
+                outcome,
+            });
+        Ok(outcome)
+    }
+}
+
+const fn flushed_hashes(outcome: BlockingFinalizeOutcome) -> usize {
+    match outcome {
+        BlockingFinalizeOutcome::NothingPending => 0,
+        BlockingFinalizeOutcome::Flushed { unique_hash_count } => unique_hash_count,
+    }
+}
+
+/// A backlog that outlasts the flush period gets timed flushes between its
+/// jobs, never beside one, each a full period after the last ended; with the
+/// shutdown flush, each blocked hash is flushed exactly once.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn timed_flushes_run_between_a_backlogs_jobs_never_beside_one() {
+    const JOBS: usize = 60;
+    const PERIOD: Duration = Duration::from_millis(30);
+    let pool = connect().await;
+    reset(&pool).await;
+    // Only the first `block` flushes; the timer flushes the rest.
+    let manager =
+        PersistentBlockingManager::with_max_flush_wait(pool.clone(), Duration::from_secs(3_600));
+    let finalizer = Arc::new(ObservedFinalizer::new(&pool, &manager, false));
+    let worker =
+        worker_blocking_with(&pool, &manager).with_timed_blocking_flush(finalizer.clone(), PERIOD);
+    let banned = enqueue_blocking_backlog(&pool, JOBS).await;
+
+    let started = tokio::time::Instant::now();
+    let drained = Mutex::new(None);
+    let shutdown = tokio::time::timeout(
+        Duration::from_secs(60),
+        worker.run_then_flush(
+            async {
+                while processed_jobs(&pool).await < JOBS {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                *drained.lock().expect("drained lock") = Some(started.elapsed());
+                // Idle a few periods.
+                tokio::time::sleep(PERIOD * 5).await;
+            },
+            &manager,
+        ),
+    )
+    .await
+    .expect("the loop stops")
+    .expect("the shutdown flush commits");
+    let drained = drained
+        .into_inner()
+        .expect("drained lock")
+        .expect("drained");
+    assert!(
+        drained >= PERIOD * 3,
+        "the backlog outlasts the period: {drained:?}"
+    );
+
+    let flushes = finalizer.flushes();
+    assert!(
+        flushes.iter().all(|flush| flush.claim_locks == 0),
+        "a timed flush began beside a job: {flushes:?}"
+    );
+    assert!(
+        flushes.iter().any(|flush| flush.processed < JOBS
+            && matches!(flush.outcome, BlockingFinalizeOutcome::Flushed { .. })),
+        "no timed flush before the last job settled: {flushes:?}"
+    );
+    assert!(flushes[0].began >= started + PERIOD, "{flushes:?}");
+    for pair in flushes.windows(2) {
+        assert!(
+            pair[1].began >= pair[0].ended + PERIOD,
+            "a timed flush began within a period of the last: {pair:?}"
+        );
+    }
+    // The first job's `block` flushed its own hash.
+    let flushed = flushes
+        .iter()
+        .map(|flush| flushed_hashes(flush.outcome))
+        .sum::<usize>()
+        + flushed_hashes(shutdown);
+    assert_eq!(flushed, JOBS - 1, "{flushes:?} then {shutdown:?}");
+    assert_eq!(
+        PersistentBlockingManager::new(pool.clone())
+            .filter(&banned)
+            .await
+            .unwrap(),
+        Vec::<InfoHash>::new()
+    );
+}
+
+/// A shutdown that arrives while a timed flush runs between a backlog's jobs
+/// lets the flush finish, then claims nothing more: the loop returns with the
+/// rest of the backlog pending, and the shutdown flush finds nothing new.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_shutdown_during_a_timed_flush_between_jobs_claims_nothing_more() {
+    const JOBS: usize = 60;
+    let pool = connect().await;
+    reset(&pool).await;
+    let manager =
+        PersistentBlockingManager::with_max_flush_wait(pool.clone(), Duration::from_secs(3_600));
+    let finalizer = Arc::new(ObservedFinalizer::new(&pool, &manager, true));
+    let worker = worker_blocking_with(&pool, &manager)
+        .with_timed_blocking_flush(finalizer.clone(), Duration::from_millis(30));
+    enqueue_blocking_backlog(&pool, JOBS).await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let run = worker.run_then_flush(
+        async {
+            let _ = stopped.await;
+        },
+        &manager,
+    );
+    tokio::pin!(run);
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            outcome = &mut run => panic!("the loop returned before shutdown: {outcome:?}"),
+            () = finalizer.entered.notified() => {}
+        }
+    })
+    .await
+    .expect("a timed flush starts");
+    let processed = processed_jobs(&pool).await;
+    assert!(
+        (1..JOBS).contains(&processed),
+        "the flush runs between jobs: {processed} of {JOBS} processed"
+    );
+    assert_eq!(claim_locks(&pool).await, 0, "no job in flight");
+    stop.send(()).unwrap();
+    finalizer.release.notify_one();
+    let shutdown = tokio::time::timeout(Duration::from_secs(30), &mut run)
+        .await
+        .expect("the loop returns once the flush completes")
+        .expect("the shutdown flush commits");
+
+    assert_eq!(processed_jobs(&pool).await, processed, "nothing claimed");
+    assert_eq!(claim_locks(&pool).await, 0);
+    // The first job's `block` flushed its own hash; the timed flush the rest.
+    let timed = if processed == 1 {
+        BlockingFinalizeOutcome::NothingPending
+    } else {
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: processed - 1,
+        }
+    };
+    let flushes = finalizer.flushes();
+    assert_eq!(
+        flushes
+            .iter()
+            .map(|flush| (flush.processed, flush.claim_locks, flush.outcome))
+            .collect::<Vec<_>>(),
+        [(processed, 0, timed)]
+    );
+    assert_eq!(shutdown, BlockingFinalizeOutcome::NothingPending);
+}
+
+/// A timed flush waits at most 5 s for the filter's advisory lock, which
+/// another process's flush holds, then fails like any other: counted, with its
+/// buffer kept for the next flush.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_timed_flush_gives_up_on_a_held_filter_lock_and_keeps_its_buffer() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let manager =
+        PersistentBlockingManager::with_max_flush_wait(pool.clone(), Duration::from_secs(3_600));
+    let registry = prometheus::Registry::new();
+    let failures = bitmagnet_processor::register_blocking_failure_metrics(&registry).unwrap();
+    let worker = worker_blocking_with(&pool, &manager)
+        .with_blocking_failure_metrics(failures.clone())
+        .with_timed_blocking_flush(Arc::new(manager.clone()), Duration::from_millis(100));
+    for (banned, kept) in [(HASH_A, HASH_B), (HASH_BANNED_LATER, HASH_KEPT_LATER)] {
+        let id = enqueue_blocking_job(&pool, banned, kept).await;
+        worker.run_once().await.unwrap();
+        assert_eq!(job_status(&pool, &id).await, "processed");
+    }
+    let before = filter_object_versions(&pool).await;
+
+    let mut holder = pool.begin().await.expect("begin the lock holder");
+    sqlx::query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(\
+         pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))",
+    )
+    .execute(&mut *holder)
+    .await
+    .expect("hold the filter's advisory lock");
+    let lock_timeouts = failures.with_label_values(&["bloom_filter", "other"]);
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.run_until(async {
+            while lock_timeouts.get() == 0 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }),
+    )
+    .await
+    .expect("a timed flush gives up");
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_secs(5)..Duration::from_secs(9)).contains(&waited),
+        "{waited:?}"
+    );
+    let counted: BTreeMap<String, u64> = scraped_blocking_failures(&registry)
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    assert_eq!(
+        counted,
+        BTreeMap::from([("op=\"bloom_filter\",sqlstate_class=\"other\"".to_owned(), 1)])
+    );
+    assert_eq!(filter_object_versions(&pool).await, before);
+
+    holder.rollback().await.expect("release the lock");
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 1
+        }
+    );
     let hashes = [HASH_BANNED_LATER, HASH_KEPT_LATER].map(|hash| hash.parse().unwrap());
     assert_eq!(
         PersistentBlockingManager::new(pool.clone())

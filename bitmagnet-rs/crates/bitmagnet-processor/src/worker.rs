@@ -317,7 +317,7 @@ impl ProcessTorrentWorker {
     /// after the loop starts and after each timed flush, and runs between jobs
     /// or while idle: never beside a job, so it cannot wait on a `block` that
     /// job holds, and never cut short by `shutdown`. One in flight at shutdown
-    /// completes before this returns.
+    /// completes, then this returns without claiming another job.
     pub async fn run_until<S>(&self, shutdown: S)
     where
         S: Future<Output = ()>,
@@ -331,7 +331,10 @@ impl ProcessTorrentWorker {
             if (&mut shutdown).now_or_never().is_some() {
                 return;
             }
-            self.flush_if_due(&mut flush_at).await;
+            // A shutdown during the flush claims nothing more.
+            if self.flush_if_due(&mut flush_at).await && (&mut shutdown).now_or_never().is_some() {
+                return;
+            }
             let run = self.run_once();
             tokio::pin!(run);
             let outcome = tokio::select! {
@@ -350,13 +353,42 @@ impl ProcessTorrentWorker {
                         biased;
                         () = &mut shutdown => return,
                         () = tokio::time::sleep_until(poll_at) => break,
-                        () = sleep_until_some(flush_at) => self.flush_if_due(&mut flush_at).await,
+                        () = sleep_until_some(flush_at) => {
+                            self.flush_if_due(&mut flush_at).await;
+                        }
                     }
                 }
             } else {
                 tokio::task::yield_now().await;
             }
         }
+    }
+
+    /// [`Self::run_until`] `shutdown`, then flush `finalizer`, the blocking
+    /// manager, once: Go flushes it when the application stops. A timed flush
+    /// never outlives the loop, so this one never overlaps it and finds only
+    /// what is still buffered.
+    ///
+    /// # Errors
+    ///
+    /// The flush's failure; the manager keeps its buffer.
+    pub async fn run_then_flush<S>(
+        &self,
+        shutdown: S,
+        finalizer: &dyn BlockingFinalizer,
+    ) -> Result<BlockingFinalizeOutcome, bitmagnet_blocking::BlockingError>
+    where
+        S: Future<Output = ()>,
+    {
+        self.run_until(shutdown).await;
+        let outcome = finalizer.finalize().await?;
+        if let BlockingFinalizeOutcome::Flushed { unique_hash_count } = outcome {
+            tracing::info!(
+                unique_hash_count,
+                "flushed buffered whole-torrent blocks on shutdown"
+            );
+        }
+        Ok(outcome)
     }
 
     /// Let the in-flight `run` settle within `shutdown_grace`, else drop it.
@@ -501,15 +533,16 @@ impl ProcessTorrentWorker {
     }
 
     /// Flush the blocking manager's buffer if the timed flush is due, then
-    /// schedule the next one a period after it ends. An empty buffer is not
-    /// flushed. A failure keeps the buffer, as a failed `block` does, for the
-    /// next flush, and is logged and counted like a job's.
-    async fn flush_if_due(&self, flush_at: &mut Option<tokio::time::Instant>) {
+    /// schedule the next one a period after it ends; whether it was due. An
+    /// empty buffer is not flushed. A failure keeps the buffer, as a failed
+    /// `block` does, for the next flush, and is logged and counted like a
+    /// job's.
+    async fn flush_if_due(&self, flush_at: &mut Option<tokio::time::Instant>) -> bool {
         let (Some(timed), Some(at)) = (&self.timed_flush, *flush_at) else {
-            return;
+            return false;
         };
         if tokio::time::Instant::now() < at {
-            return;
+            return false;
         }
         match timed.finalizer.finalize().await {
             Ok(BlockingFinalizeOutcome::NothingPending) => {}
@@ -531,6 +564,7 @@ impl ProcessTorrentWorker {
             }
         }
         *flush_at = Some(tokio::time::Instant::now() + timed.every);
+        true
     }
 
     fn excluded_ids(&self) -> Vec<String> {
@@ -1052,6 +1086,9 @@ mod tests {
             .with_writer(move || Capture(Arc::clone(&sink)))
             .finish();
         let (blocked, failed) = tracing::subscriber::with_default(subscriber, || {
+            // A callsite's interest cached before this subscriber existed, on
+            // another test's thread, would hide its lines.
+            tracing::callsite::rebuild_interest_cache();
             (
                 worker.persist_failure("job-1", &blocking),
                 worker.persist_failure("job-2", &database),
@@ -1131,7 +1168,7 @@ mod tests {
     /// pool's address, so it idles a full `check_interval` after each.
     fn idle_worker(check_interval: Duration) -> ProcessTorrentWorker {
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(200))
+            .acquire_timeout(Duration::from_millis(20))
             .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
             .expect("lazy pool");
         ProcessTorrentWorker::new(
@@ -1182,13 +1219,19 @@ mod tests {
                 .with_writer(move || Capture(Arc::clone(&sink)))
                 .finish(),
         );
-        worker
-            .run_until(async {
+        // A callsite's interest cached before this subscriber existed, on
+        // another test's thread, would hide its lines.
+        tracing::callsite::rebuild_interest_cache();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_until(async {
                 while finalizer.calls() < 4 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-            })
-            .await;
+            }),
+        )
+        .await
+        .expect("four timed flushes");
 
         assert_eq!(
             jobs.with_label_values(&["error", ""]).get(),
@@ -1226,12 +1269,36 @@ mod tests {
         );
     }
 
+    /// With a period shorter than the check interval, as in production (300 s
+    /// against the canary's 600 s), the flushes neither delay nor add polls,
+    /// and each re-arms the timer rather than spinning.
+    #[tokio::test]
+    async fn a_short_period_neither_moves_the_poll_nor_spins() {
+        let registry = prometheus::Registry::new();
+        let jobs = register_worker_metrics(&registry).unwrap();
+        let finalizer = Arc::new(ScriptedFinalizer::default());
+        let worker = idle_worker(Duration::from_millis(200))
+            .with_metrics(jobs.clone())
+            .with_timed_blocking_flush(finalizer.clone(), Duration::from_millis(30));
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.run_until(tokio::time::sleep(Duration::from_secs(1))),
+        )
+        .await
+        .expect("the loop stops at shutdown");
+
+        // One poll per 200 ms interval: at 0, 200, 400, 600, 800 ms, and maybe
+        // at 1 s.
+        let polls = jobs.with_label_values(&["error", ""]).get();
+        assert!((4..=7).contains(&polls), "{polls} polls");
+        // At most one flush per 30 ms period.
+        let flushes = finalizer.calls();
+        assert!((10..=34).contains(&flushes), "{flushes} flushes");
+    }
+
     /// Shutdown does not cut a timed flush short or start another: the loop
     /// returns once the flush in flight completes, after exactly one call.
-    ///
-    /// The flush reports nothing pending, so this test never reaches the
-    /// flushed-hashes log callsite, whose cached interest the capturing test
-    /// above relies on.
     #[tokio::test]
     async fn a_timed_flush_in_flight_at_shutdown_completes_once() {
         let finalizer = Arc::new(ScriptedFinalizer {
@@ -1246,10 +1313,14 @@ mod tests {
         });
         tokio::pin!(run);
 
-        tokio::select! {
-            () = &mut run => panic!("the loop returned before shutdown"),
-            () = finalizer.entered.notified() => {}
-        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                () = &mut run => panic!("the loop returned before shutdown"),
+                () = finalizer.entered.notified() => {}
+            }
+        })
+        .await
+        .expect("a timed flush starts");
         stop.send(()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(200), &mut run)

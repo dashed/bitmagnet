@@ -219,16 +219,15 @@ async fn main() -> Result<()> {
         blocking_flush_interval_seconds = blocking_manager.max_flush_wait().as_secs(),
         "starting persisting Rust process_torrent worker"
     );
+    // The flush runs before the pool closes.
     worker
-        .run_until(bitmagnet_common::serve::shutdown_signal())
-        .await;
-    // Go flushes the blocking buffer when the application stops; do the same
-    // before the pool closes. A timed flush never outlives `run_until`, so
-    // this one never overlaps it and finds only what is still buffered.
-    blocking_manager
-        .flush()
+        .run_then_flush(
+            bitmagnet_common::serve::shutdown_signal(),
+            &blocking_manager,
+        )
         .await
-        .context("flushing blocked info hashes on shutdown")
+        .context("flushing blocked info hashes on shutdown")?;
+    Ok(())
 }
 
 /// The core classifier, over a live local-search + TMDB resolver with

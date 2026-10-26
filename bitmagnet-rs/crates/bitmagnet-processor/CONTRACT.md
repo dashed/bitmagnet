@@ -403,10 +403,11 @@ job is dropped and its claim transaction rolls back, so the row keeps its
 status, retries, and error and is claimed again later. Go behaves the same way:
 stopping the queue server cancels the handler's context, the settle update
 fails, and the claim rolls back. Side effects the writer already committed stay
-in place, and the next run of the job redoes them. The 20-second default plus
-the blocking-manager flush fits Kubernetes' default 30-second
-`terminationGracePeriodSeconds`. Without the bound, a job could run for up to
-its ten-minute timeout and be `SIGKILL`ed mid-write, without the flush.
+in place, and the next run of the job redoes them. The deployment's 60-second
+`terminationGracePeriodSeconds` covers the 20-second default plus the final
+blocking-manager flush, which the server bounds (below). Without the bound, a
+job could run for up to its ten-minute timeout and be `SIGKILL`ed mid-write,
+without the flush.
 
 The worker also flushes the blocking manager on a timer. A job deletes the
 torrents it blocks in its own transaction, as Go's `persist` does, right after
@@ -443,12 +444,34 @@ the already-deleted torrents is a no-op. Deliberate differences from Go:
   flush interval`, with the step, SQLSTATE and cause chain but no job ID, and
   counted in `bitmagnet_process_torrent_worker_blocking_failures_total`.
 - Shutdown never cuts a timed flush short. One in flight when `SIGTERM`
-  arrives completes before `run_until` returns, and the binary's shutdown flush
-  then finds only what is still buffered: the two never overlap or repeat a
-  commit.
+  arrives completes, nothing more is claimed, and `run_until` returns. The
+  binary's shutdown flush (`run_then_flush`, logged at info as `flushed
+  buffered whole-torrent blocks on shutdown` when it commits) then finds only
+  what is still buffered: the two never overlap or repeat a commit.
+- Every blocking-store transaction (a job's `block` flush, a timed flush, or
+  the shutdown flush) bounds itself with `lock_timeout` 5 s and
+  `statement_timeout` 10 s, set for that transaction only; the role's settings
+  are untouched. Go sets neither and waits as long as the server does.
+  Rewriting the 25 MB filter takes about 0.15 s on HEL1's NVMe (`lo_get`
+  11-15 ms, `lo_put` 106-112 ms, commit 2-30 ms), so the bounds cut only a
+  flush stuck behind another process's advisory lock or a stalled server. Such
+  a flush fails like any other and keeps its buffer: a lock timeout (`55P03`)
+  is counted under `sqlstate_class="other"`, a statement timeout (`57014`)
+  under `"57"`, and a job whose `block` flush fails this way is retried with
+  Go's text. A stuck flush thus ends within about 10 s, and shutdown takes at
+  most the 20 s job grace or one timed flush in flight, then the final flush
+  and up to the pool's 5 s acquire timeout: about 35 s of the 60 s grace.
 
-No job outcome, row text, or label changes. A timed flush only moves earlier
-a filter update the shutdown flush would otherwise make.
+With a healthy store the timer changes no job outcome, row text, or label: it
+only moves earlier a filter update that a later `block` or the shutdown flush
+would otherwise make. When flushes fail it can. A timed flush that succeeds
+resets the manager's last-flush time, so a job's `block` inside the following
+`max_flush_wait` only buffers, and does not flush, where it would have flushed
+without the timer. If the store then fails, the failure lands on the next timed
+flush, logged and counted without a job, instead of failing that job with
+`blocking whole-torrent deletes failed` and scheduling its retry. Failures can
+therefore move from job outcomes (`jobs_total{outcome="retry"}` and `"failed"`)
+to job-less timed-flush counts.
 
 Migration-backed gates (`tests/worker_pg.rs`) prove: a processed job leaves
 exactly the live image the direct `load_writer_plan` + `persist_writer_plan`
