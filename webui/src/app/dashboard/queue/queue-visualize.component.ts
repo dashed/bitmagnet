@@ -6,6 +6,7 @@ import { BreakpointsService } from "../../layout/breakpoints.service";
 import { ErrorsService } from "../../errors/errors.service";
 import { AppModule } from "../../app.module";
 import { DocumentTitleComponent } from "../../layout/document-title.component";
+import { MetricsLiveStatusComponent } from "../metrics-live-status.component";
 import {
   autoRefreshIntervalNames,
   availableQueueNames,
@@ -29,6 +30,7 @@ import { QueueChartAdapterTimeline } from "./queue-chart-adapter.timeline";
     GraphQLModule,
     QueueModule,
     DocumentTitleComponent,
+    MetricsLiveStatusComponent,
   ],
 })
 export class QueueVisualizeComponent implements OnInit, OnDestroy {
@@ -42,7 +44,7 @@ export class QueueVisualizeComponent implements OnInit, OnDestroy {
         multiplier: "AUTO",
         timeframe: "all",
       },
-      autoRefresh: "seconds_30",
+      autoRefresh: "seconds_10",
     },
     inject(ErrorsService),
   );

@@ -1,0 +1,751 @@
+.root {
+  display: grid;
+  gap: 24px;
+  margin: 0 auto;
+  max-width: 1200px;
+  padding: 8px 0 40px;
+  width: 100%;
+}
+
+.header {
+  align-items: end;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.header h1,
+.sectionHeader h2,
+.chartPanel h3,
+.emptyState h3,
+.detailBlock h4,
+.dialog h3 {
+  color: var(--mantine-color-text);
+  line-height: 1.2;
+  margin: 0;
+}
+
+.header h1 {
+  font-size: 24px;
+}
+
+.header p,
+.sectionHeader p {
+  color: var(--mantine-color-dimmed);
+  margin: 8px 0 0;
+}
+
+.sectionNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sectionNav a {
+  align-items: center;
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  display: inline-flex;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+  min-height: 38px;
+  padding: 0 12px;
+  text-decoration: none;
+}
+
+.sectionNav a:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.section {
+  border-top: 1px solid var(--mantine-color-default-border);
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 24px 0 0;
+  scroll-margin-top: 18px;
+}
+
+.sectionHeader {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.sectionHeader h2 {
+  font-size: 20px;
+}
+
+.sectionKicker {
+  align-items: center;
+  background: var(--mantine-color-default-hover);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.chartGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.chartPanel,
+.jobsControls,
+.adminPanel,
+.emptyState {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+}
+
+.chartPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.chartPanel h3 {
+  font-size: var(--mantine-font-size-md);
+}
+
+.chartFallback {
+  align-items: center;
+  border: 1px dashed var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-dimmed);
+  display: grid;
+  min-height: 160px;
+  padding: 24px;
+}
+
+.jobsControls,
+.adminPanel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.facetGroup {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.facetGroup > span,
+.jobsToolbar label > span,
+.pagination label > span {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  align-items: center;
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+}
+
+.chip[data-active="true"] {
+  border-color: var(--mantine-primary-color-filled);
+  box-shadow: inset 0 0 0 1px var(--mantine-primary-color-filled);
+}
+
+.chip span,
+.chip small {
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+}
+
+.chip small {
+  color: var(--mantine-color-dimmed);
+}
+
+.jobsToolbar,
+.adminActions,
+.pagination,
+.paginationButtons,
+.dialogActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.jobsToolbar {
+  justify-content: flex-end;
+}
+
+.jobsToolbar label,
+.pagination label {
+  display: grid;
+  gap: 4px;
+  min-width: 160px;
+}
+
+.jobsToolbar select,
+.pagination select {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.secondaryButton,
+.dangerButton {
+  align-items: center;
+  border-radius: var(--mantine-radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.secondaryButton {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  color: var(--mantine-color-text);
+}
+
+.secondaryButton:hover:not(:disabled) {
+  background: var(--mantine-color-default-hover);
+}
+
+.dangerButton {
+  background: var(--mantine-color-red-filled);
+  border: 1px solid var(--mantine-color-red-filled);
+  color: var(--mantine-color-white);
+}
+
+.dangerButton:hover:not(:disabled) {
+  background: var(--mantine-color-red-filled-hover);
+}
+
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.busyBar {
+  background: transparent;
+  block-size: 3px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.busyBar[data-active="true"] {
+  background: var(--mantine-primary-color-filled);
+}
+
+.emptyState {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.emptyState h3 {
+  font-size: 18px;
+}
+
+.emptyState p {
+  color: var(--mantine-color-dimmed);
+  margin: 0;
+}
+
+.tableScroll {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  overflow-x: auto;
+}
+
+.jobsTable {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 920px;
+  width: 100%;
+}
+
+.jobsTable th,
+.jobsTable td {
+  border-top: 1px solid var(--mantine-color-default-border);
+  padding: 10px 12px;
+  text-align: start;
+  vertical-align: top;
+}
+
+.jobsTable thead th {
+  background: var(--mantine-color-default-hover);
+  border-top: 0;
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.summaryRow {
+  cursor: pointer;
+}
+
+.summaryRow:hover td,
+.summaryRow[data-expanded="true"] td {
+  background: var(--mantine-color-default-hover);
+}
+
+.idCell {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 240px;
+}
+
+.idCell code {
+  color: var(--mantine-color-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.expandButton {
+  align-items: center;
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0;
+}
+
+.queueCell,
+.priorityCell,
+.timeCell {
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+}
+
+.errorCell {
+  color: var(--mantine-color-red-text);
+  font-size: var(--mantine-font-size-sm);
+  max-width: 240px;
+}
+
+.errorCell span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.statusBadge {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--mantine-radius-sm);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.statusBadge[data-status="pending"] {
+  background: var(--mantine-color-blue-light);
+  color: var(--mantine-color-blue-light-color);
+}
+
+.statusBadge[data-status="processed"] {
+  background: var(--mantine-color-green-light);
+  color: var(--mantine-color-green-light-color);
+}
+
+.statusBadge[data-status="retry"] {
+  background: var(--mantine-color-yellow-light);
+  color: var(--mantine-color-yellow-light-color);
+}
+
+.statusBadge[data-status="failed"] {
+  background: var(--mantine-color-red-light);
+  color: var(--mantine-color-red-light-color);
+}
+
+.detailRow > td {
+  background: var(--mantine-color-body);
+  padding: 0;
+}
+
+.jobDetail {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.detailGrid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.detailGrid div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detailGrid dt {
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.detailGrid dd {
+  color: var(--mantine-color-text);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.detailBlock {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detailBlock h4 {
+  font-size: var(--mantine-font-size-sm);
+}
+
+.detailBlock pre {
+  background: var(--mantine-color-default-hover);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  color: var(--mantine-color-text);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pagination {
+  justify-content: space-between;
+}
+
+.paginationButtons span {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+  min-width: 120px;
+  text-align: center;
+}
+
+.adminActions {
+  border-top: 1px solid var(--mantine-color-default-border);
+  justify-content: space-between;
+  padding-top: 14px;
+}
+
+.panelText,
+.warningText {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  margin: 0;
+}
+
+.warningText {
+  color: var(--mantine-color-red-text);
+  font-weight: 800;
+}
+
+.dialogBackdrop {
+  align-items: center;
+  background: color-mix(in srgb, var(--mantine-color-black), transparent 45%);
+  display: grid;
+  inset: 0;
+  justify-items: center;
+  padding: 16px;
+  position: fixed;
+  z-index: 60;
+}
+
+.dialog {
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  box-shadow: var(--mantine-shadow-lg);
+  display: grid;
+  gap: 12px;
+  max-width: 480px;
+  padding: 18px;
+  width: min(100%, 480px);
+}
+
+:global([data-mantine-color-scheme="dark"]) .dialog {
+  box-shadow: none;
+}
+
+.dialog h3 {
+  font-size: 18px;
+}
+
+.dialogForm {
+  display: grid;
+  gap: 10px;
+}
+
+.checkboxRow {
+  align-items: center;
+  color: var(--mantine-color-text);
+  cursor: pointer;
+  display: grid;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 800;
+  gap: 8px;
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.checkboxRow input {
+  accent-color: var(--mantine-primary-color-filled);
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
+.dialogActions {
+  justify-content: flex-end;
+}
+
+@media (min-width: 48em) {
+  .header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .jobsControls,
+  .adminPanel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .jobsToolbar,
+  .adminActions {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 70em) {
+  .chartGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chartPanel:first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 47.999em) {
+  .root {
+    gap: 20px;
+    padding-bottom: 72px;
+  }
+
+  .sectionHeader,
+  .jobsToolbar,
+  .adminActions,
+  .pagination,
+  .paginationButtons,
+  .dialogActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sectionKicker {
+    align-self: start;
+  }
+
+  .sectionNav a,
+  .chip,
+  .secondaryButton,
+  .dangerButton,
+  .checkboxRow {
+    min-height: 44px;
+  }
+
+  .sectionNav a,
+  .jobsToolbar label,
+  .pagination label,
+  .jobsToolbar select,
+  .pagination select,
+  .secondaryButton,
+  .dangerButton,
+  .dialogActions > * {
+    width: 100%;
+  }
+
+  .jobsToolbar select,
+  .pagination select {
+    min-height: 44px;
+  }
+
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .tableScroll {
+    border: 0;
+    overflow: visible;
+  }
+
+  .jobsTable,
+  .jobsTable tbody {
+    display: grid;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .jobsTable thead {
+    display: none;
+  }
+
+  .jobsTable tbody {
+    gap: 10px;
+  }
+
+  .summaryRow {
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+    cursor: pointer;
+    display: grid;
+    gap: 8px 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 12px;
+  }
+
+  .summaryRow:hover td,
+  .summaryRow[data-expanded="true"] td {
+    background: transparent;
+  }
+
+  .summaryRow[data-expanded="true"] {
+    border-color: var(--mantine-primary-color-filled);
+  }
+
+  .jobsTable td {
+    border: 0;
+    padding: 0;
+  }
+
+  .idCell,
+  .priorityCell,
+  .errorCell,
+  .timeCell {
+    grid-column: 1 / -1;
+  }
+
+  .idCell {
+    min-width: 0;
+  }
+
+  .queueCell {
+    grid-column: 1;
+    overflow-wrap: anywhere;
+  }
+
+  .statusCell {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .priorityCell,
+  .errorCell,
+  .timeCell {
+    align-items: start;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    max-width: none;
+  }
+
+  .priorityCell::before,
+  .errorCell::before,
+  .timeCell::before {
+    color: var(--mantine-color-dimmed);
+    content: attr(data-label);
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .errorCell span {
+    max-width: 65%;
+    text-align: right;
+  }
+
+  .detailRow {
+    display: block;
+  }
+
+  .detailRow > td {
+    display: block;
+  }
+
+  .jobDetail {
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-sm);
+  }
+
+  .dialog {
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+  }
+
+  .checkboxRow {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .checkboxRow input {
+    height: 20px;
+    width: 20px;
+  }
+}

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<caps>
+  <server title="bitmagnet"></server>
+  <limits max="100" default="100"></limits>
+  <searching>
+    <search available="yes" supportedParams="q,imdbid,tmdbid"></search>
+    <tv-search available="yes" supportedParams="q,imdbid,tmdbid,season,ep"></tv-search>
+    <movie-search available="yes" supportedParams="q,imdbid,tmdbid"></movie-search>
+    <music-search available="yes" supportedParams="q"></music-search>
+    <audio-search available="no"></audio-search>
+    <book-search available="yes" supportedParams="q"></book-search>
+  </searching>
+  <categories>
+    <category id="2000" name="Movies">
+      <subcat id="2030" name="Movies/SD"></subcat>
+      <subcat id="2040" name="Movies/HD"></subcat>
+      <subcat id="2045" name="Movies/UHD"></subcat>
+      <subcat id="2060" name="Movies/3D"></subcat>
+    </category>
+    <category id="3000" name="Audio">
+      <subcat id="3030" name="Audio/Audiobook"></subcat>
+    </category>
+    <category id="4000" name="PC">
+      <subcat id="4050" name="PC/Games"></subcat>
+    </category>
+    <category id="5000" name="TV">
+      <subcat id="5030" name="TV/SD"></subcat>
+      <subcat id="5040" name="TV/HD"></subcat>
+      <subcat id="5045" name="TV/UHD"></subcat>
+    </category>
+    <category id="6000" name="XXX">
+      <subcat id="6070" name="XXX/Other"></subcat>
+    </category>
+    <category id="7000" name="Books">
+      <subcat id="7020" name="Books/EBook"></subcat>
+      <subcat id="7030" name="Books/Comics"></subcat>
+    </category>
+    <category id="8000" name="Other"></category>
+  </categories>
+  <tags></tags>
+</caps>

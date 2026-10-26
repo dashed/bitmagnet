@@ -33,6 +33,11 @@
       "processed": "処理済み",
       "updated": "更新済み"
     },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "すべて",
       "days": "日",
@@ -51,8 +56,17 @@
       "seconds_30": "30秒",
       "weeks_1": "1週間"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "イベント",
+      "no_data": "__missing__",
       "resolution": "解像度",
       "throughput": "スループット",
       "timeframe": "期間",
@@ -84,6 +98,22 @@
       "total_counts_by_status": "ステータスごとの総数"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "コンテンツタイプ",
     "file_type": "ファイルタイプ",
@@ -109,6 +139,7 @@
   },
   "general": {
     "all": "すべて",
+    "apply": "__missing__",
     "dismiss": "閉じる",
     "error": "エラー",
     "none": "なし",
@@ -239,12 +270,17 @@
   "torrents": {
     "classification": "分類",
     "clear_search": "検索をクリア",
+    "clear_size_filter": "__missing__",
     "copy": "コピー",
     "copy_to_clipboard": "クリップボードにコピー",
     "delete": "削除",
     "delete_action_cannot_be_undone": "この操作は元に戻せません",
     "delete_are_you_sure": "このトレントを削除してもよろしいですか？",
     "deselect_all": "すべての選択を解除",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "タグを編集",
     "episodes": "エピソード",
     "external_links": "外部リンク",
@@ -263,6 +299,8 @@
     "leechers": "リーチャー",
     "magnet": "マグネット",
     "magnet_links": "マグネットリンク",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "新しいタグ",
     "order_by": "並び替え",
     "order_direction_toggle": "並び順を切り替え",
@@ -281,6 +319,7 @@
     "permalink": "パーマリンク",
     "poster": "ポスター",
     "published": "公開済み",
+    "published_date_filter": "__missing__",
     "rating": "評価",
     "refresh": "結果を更新",
     "reprocess": {
@@ -295,6 +334,17 @@
     "select_all": "すべて選択",
     "showing_x_of_y_files": "{{x}} 件中 {{y}} 件表示",
     "size": "サイズ",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "トレントソース",
     "summary": "概要",
     "tags": {
@@ -308,6 +358,7 @@
     },
     "title": "タイトル",
     "toggle_drawer": "引き出しを切り替え",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} 票"
   },
   "version": {

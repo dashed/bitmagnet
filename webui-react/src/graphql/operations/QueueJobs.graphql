@@ -1,0 +1,33 @@
+query QueueJobs($input: QueueJobsQueryInput!) {
+  queue {
+    jobs(input: $input) {
+      items {
+        id
+        queue
+        status
+        payload
+        priority
+        retries
+        maxRetries
+        runAfter
+        ranAt
+        error
+        createdAt
+      }
+      totalCount
+      hasNextPage
+      aggregations {
+        queue {
+          value
+          label
+          count
+        }
+        status {
+          value
+          label
+          count
+        }
+      }
+    }
+  }
+}

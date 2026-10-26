@@ -10,13 +10,17 @@ import (
 )
 
 type prometheusCollector struct {
-	queryDuration     *prometheus.HistogramVec
-	querySuccessTotal *prometheus.CounterVec
-	queryErrorTotal   *prometheus.CounterVec
-	queryConcurrency  *prometheus.GaugeVec
+	queryDuration        *prometheus.HistogramVec
+	querySuccessTotal    *prometheus.CounterVec
+	queryErrorTotal      *prometheus.CounterVec
+	queryConcurrency     *prometheus.GaugeVec
+	responseDroppedTotal *prometheus.CounterVec
 }
 
-const labelQuery = "query"
+const (
+	labelQuery  = "query"
+	labelReason = "reason"
+)
 
 var labelNames = []string{labelQuery}
 
@@ -47,6 +51,12 @@ func newPrometheusCollector() prometheusCollector {
 			Name:      "query_concurrency",
 			Help:      "Number of concurrent DHT queries.",
 		}, labelNames),
+		responseDroppedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "response_dropped_total",
+			Help:      "A counter of DHT responses dropped before delivery, by reason.",
+		}, []string{labelReason}),
 	}
 }
 

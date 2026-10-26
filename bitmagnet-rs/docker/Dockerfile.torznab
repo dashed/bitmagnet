@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for the bitmagnet Torznab HTTP adapter.
+#
+#   docker build -f bitmagnet-rs/docker/Dockerfile.torznab -t bitmagnet-torznab bitmagnet-rs
+#
+# Builder and runtime are both pinned to Debian bookworm so the glibc the binary
+# is linked against matches the runtime image.
+
+# ---- builder ----------------------------------------------------------------
+FROM rust:1.95-slim-bookworm AS builder
+
+WORKDIR /build
+
+# Copy the whole workspace; .dockerignore keeps target/ and VCS noise out.
+COPY . .
+
+RUN cargo build --release -p bitmagnet-torznab
+
+# ---- runtime ----------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# SQLx uses rustls, so only the CA roots are needed for TLS to PostgreSQL.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user (uid/gid 65532, the conventional "nonroot" id).
+RUN groupadd --system --gid 65532 bitmagnet \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home --home /nonexistent bitmagnet
+
+COPY --from=builder /build/target/release/bitmagnet-torznab /usr/local/bin/bitmagnet-torznab
+
+# Prometheus metrics remain disabled unless BITMAGNET_METRICS_ADDR is set.
+ENV LISTEN_ADDR=0.0.0.0:3336
+
+USER 65532:65532
+EXPOSE 3336
+ENTRYPOINT ["/usr/local/bin/bitmagnet-torznab"]

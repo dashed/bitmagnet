@@ -24,6 +24,15 @@
     }
   },
   "dashboard": {
+    "event": {
+      "created": "__missing__",
+      "updated": "__missing__"
+    },
+    "home": {
+      "queue_jobs": "__missing__",
+      "queue_metrics": "__missing__",
+      "torrent_metrics": "__missing__"
+    },
     "interval": {
       "all": "Tot",
       "days": "Dies",
@@ -42,8 +51,17 @@
       "seconds_30": "30 segons",
       "weeks_1": "1 setmana"
     },
+    "live": {
+      "auto_refresh": "__missing__",
+      "last_updated": "__missing__",
+      "paused": "__missing__",
+      "refresh_now": "__missing__",
+      "title": "__missing__",
+      "waiting_for_data": "__missing__"
+    },
     "metrics": {
       "event": "Esdeveniment",
+      "no_data": "__missing__",
       "resolution": "Resolució",
       "throughput": "Rendiment",
       "timeframe": "Període de temps",
@@ -70,6 +88,22 @@
       "total_counts_by_status": "Recompte total per estat"
     }
   },
+  "dates": {
+    "custom": "__missing__",
+    "custom_time_hint": "__missing__",
+    "date_range": "__missing__",
+    "date_range_hint": "__missing__",
+    "end_date": "__missing__",
+    "invalid_end_date": "__missing__",
+    "invalid_start_date": "__missing__",
+    "more_presets": "__missing__",
+    "quick_presets": "__missing__",
+    "select_date_range": "__missing__",
+    "start_date": "__missing__",
+    "time_frame": "__missing__",
+    "time_frame_error": "__missing__",
+    "time_frame_placeholder": "__missing__"
+  },
   "facets": {
     "content_type": "Tipus de Contingut",
     "file_type": "Tipus de Fitxer",
@@ -93,6 +127,7 @@
   },
   "general": {
     "all": "Tot",
+    "apply": "__missing__",
     "dismiss": "Descarta",
     "error": "Error",
     "none": "Cap",
@@ -219,12 +254,17 @@
   "torrents": {
     "classification": "Classificació",
     "clear_search": "Esborrar la cerca",
+    "clear_size_filter": "__missing__",
     "copy": "Copiar",
     "copy_to_clipboard": "Copia al porta-retalls",
     "delete": "Esborrar",
     "delete_action_cannot_be_undone": "Aquesta acció no es pot desfer",
     "delete_are_you_sure": "Estàs segur que vols esborrar aquest torrent?",
     "deselect_all": "Desselecciona-ho tot",
+    "dht_first_seen": "__missing__",
+    "dht_last_seen": "__missing__",
+    "dht_seen": "__missing__",
+    "dht_seen_count": "__missing__",
     "edit_tags": "Edita l'etiqueta",
     "episodes": "Episodis",
     "external_links": "Enllaços externs",
@@ -241,6 +281,8 @@
     "leechers": "Sangoneres",
     "magnet": "Magnet",
     "magnet_links": "Enllaços magnet",
+    "max_size": "__missing__",
+    "min_size": "__missing__",
     "new_tag": "Etiqueta nova",
     "order_by": "Ordenar per",
     "order_direction_toggle": "Commuta la direcció",
@@ -259,6 +301,7 @@
     "permalink": "Enllaç permanent",
     "poster": "Pòster",
     "published": "Publicat",
+    "published_date_filter": "__missing__",
     "rating": "Valoració",
     "refresh": "Actualitza els resultats",
     "reprocess": {
@@ -273,6 +316,17 @@
     "select_all": "Seleccionar-ho tot",
     "showing_x_of_y_files": "Mostrant {{x}} de {{y}} fitxers",
     "size": "Mida",
+    "size_filter": "__missing__",
+    "size_units": {
+      "gb": "__missing__",
+      "gib": "__missing__",
+      "kb": "__missing__",
+      "kib": "__missing__",
+      "mb": "__missing__",
+      "mib": "__missing__",
+      "tb": "__missing__",
+      "tib": "__missing__"
+    },
     "source": "Origen del torrent",
     "summary": "Resum",
     "tags": {
@@ -286,6 +340,7 @@
     },
     "title": "Títol",
     "toggle_drawer": "Mostra o oculta el calaix",
+    "unit": "__missing__",
     "votes_count_n": "{{count}} vots"
   },
   "version": {

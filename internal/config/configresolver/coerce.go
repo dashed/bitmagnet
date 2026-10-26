@@ -30,6 +30,11 @@ func coerceStringValue(stringValue string, valueType reflect.Type) (interface{},
 		return strconv.Atoi(stringValue)
 	case reflect.Uint, reflect.Uint16, reflect.Uint64:
 		return strconv.ParseUint(stringValue, 10, 64)
+	case reflect.Float32, reflect.Float64:
+		// Upstream gap (the switch predates any float config field): without
+		// this case every float env — e.g. SEARCH_SAMPLE_RATE=0.05 — failed
+		// config resolution and crash-looped the app at startup.
+		return strconv.ParseFloat(stringValue, 64)
 	case reflect.Slice:
 		strValues := strings.Split(stringValue, ",")
 		values := make([]interface{}, len(strValues))

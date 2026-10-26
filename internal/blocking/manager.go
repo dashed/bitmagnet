@@ -89,6 +89,14 @@ func (m *manager) Flush(ctx context.Context) error {
 
 const blockedTorrentsBloomFilterKey = "blocked_torrents"
 
+// blockedTorrentsBloomFilterLockSQL serializes the read-modify-write of the
+// shared filter across processes, including the Rust blocking manager, which
+// takes the same lock. Without it, concurrent flushes each start from the same
+// filter and the last commit drops the other flushes' hashes. An advisory lock
+// needs no privilege beyond the writers' existing column grants.
+const blockedTorrentsBloomFilterLockSQL = "SELECT pg_catalog.pg_advisory_xact_lock(" +
+	"pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))"
+
 func (m *manager) flush(ctx context.Context) error {
 	hashes := slices.Collect(maps.Keys(m.buffer))
 
@@ -108,6 +116,11 @@ func (m *manager) flush(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to delete from torrents table: %w", err)
 		}
+	}
+
+	_, err = tx.Exec(ctx, blockedTorrentsBloomFilterLockSQL)
+	if err != nil {
+		return fmt.Errorf("failed to lock bloom filter: %w", err)
 	}
 
 	bf := bloom.NewDefaultStableBloomFilter()

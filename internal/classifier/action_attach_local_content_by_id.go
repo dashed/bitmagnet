@@ -3,6 +3,7 @@ package classifier
 import (
 	"github.com/bitmagnet-io/bitmagnet/internal/classifier/classification"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
+	"github.com/bitmagnet-io/bitmagnet/internal/tape"
 )
 
 const attachLocalContentByIDName = "attach_local_content_by_id"
@@ -25,6 +26,9 @@ func (attachLocalContentByIDAction) compileAction(ctx compilerContext) (action, 
 
 	return action{
 		run: func(ctx executionContext) (classification.Result, error) {
+			if err := tape.EnterAction(ctx.Context, attachLocalContentByIDName); err != nil {
+				return ctx.result, err
+			}
 			cl := ctx.result
 			if ctx.torrent.Hint.IsNil() || !ctx.torrent.Hint.ContentSource.Valid {
 				return cl, classification.ErrUnmatched

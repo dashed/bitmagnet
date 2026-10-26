@@ -1,0 +1,6 @@
+# Raw production sampling exports (hex-encoded name/size/files_count TSVs) are
+# intermediate inputs to the freeze step, not part of the frozen corpus.
+# names.jsonl + PROVENANCE.md fully preserve regeneration, so the raw TSVs are
+# excluded from version control (14M+ each).
+raw-sample-1.tsv
+raw-unclassified.tsv

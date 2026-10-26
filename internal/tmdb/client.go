@@ -11,6 +11,15 @@ type client struct {
 	requester Requester
 }
 
+// NewClient returns a Client that issues its calls through requester.
+//
+// Every Client is built this way, so the tape seam is always in the chain. It
+// costs a context lookup per request and does nothing unless a recording or
+// replay session is on the context.
+func NewClient(requester Requester) Client {
+	return client{requester: requesterRecorder{requester: requester}}
+}
+
 func newError(msg string) error {
 	return fmt.Errorf("TMDB request failed: %s", msg)
 }

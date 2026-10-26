@@ -9,6 +9,7 @@ import {
   MatCardHeader,
   MatCardTitle,
 } from "@angular/material/card";
+import { MatIconButton } from "@angular/material/button";
 import { MatIcon } from "@angular/material/icon";
 import { MatTooltip } from "@angular/material/tooltip";
 import { ThemeInfoService } from "../themes/theme-info.service";
@@ -24,6 +25,7 @@ import { ChartAdapter } from "./types";
     MatCardContent,
     MatCardHeader,
     MatCardTitle,
+    MatIconButton,
     TranslocoDirective,
     MatIcon,
     MatTooltip,
@@ -49,6 +51,12 @@ export class ChartComponent<Data = unknown, Type extends ChartType = ChartType>
   private data: Data;
 
   protected legend = true;
+
+  protected get hasData() {
+    return !!this.chartConfig?.data.datasets.some(
+      (dataset) => dataset.data.length,
+    );
+  }
 
   ngOnInit() {
     this.updateChart();

@@ -2,15 +2,18 @@ package dhtcrawler
 
 import (
 	"context"
+	"database/sql/driver"
+	"strings"
 	"time"
 
+	"github.com/bitmagnet-io/bitmagnet/internal/blobmigration"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/prometheus/client_golang/prometheus"
-	"gorm.io/gen"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -27,6 +30,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 			var torrentFilesToPersist []*model.TorrentFile
 
+			var torrentFileSummariesToPersist []*model.TorrentFileSummary
+
 			var torrentSourcesToPersist []*model.TorrentsTorrentSource
 
 			var torrentPiecesToPersist []*model.TorrentPieces
@@ -36,6 +41,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			hashMap := make(map[protocol.ID]infoHashWithMetaInfo, len(is))
 
 			var hashesToClassify []protocol.ID
+
+			now := time.Now()
 
 			flushHashesToClassify := func() {
 				if len(hashesToClassify) > 0 {
@@ -56,7 +63,18 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			}
 			flushHashesToClassify()
 
-			for _, i := range is {
+			// Collapse hybrid torrents discovered under BOTH their v1 and truncated-v2
+			// infohashes into a single row (first-one-wins). Only hybrids can reach this:
+			// pure-v2 re-discoveries share one truncated primary key (handled by the
+			// ON CONFLICT upsert) and v1-only torrents carry no v2 hash.
+			existingV2 := c.lookupExistingV2(ctx, is)
+
+			kept, droppedV2 := filterV2Duplicates(is, existingV2)
+			if droppedV2 > 0 {
+				c.torrentsDropped.WithLabelValues("v2_duplicate").Add(float64(droppedV2))
+			}
+
+			for _, i := range kept {
 				if _, ok := hashMap[i.infoHash]; ok {
 					continue
 				}
@@ -70,6 +88,22 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 					for _, f := range t.Files {
 						fc := f
 						torrentFilesToPersist = append(torrentFilesToPersist, &fc)
+					}
+
+					if len(t.Files) > 0 {
+						// t.FilesData is the exact blob written to torrents.files_data in
+						// this same transaction, so compressed_bytes tracks octet_length.
+						//
+						// Staleness note: a summary is written ONLY when this crawl has
+						// files. A re-crawl that transitions a torrent to ZERO files leaves
+						// the torrents row's files_data set to NULL (DoUpdates) but skips
+						// this block, so a prior summary row keeps a stale file_count AND
+						// compressed_bytes. This is a pre-existing staleness class (it
+						// already applied to file_count) and is near-impossible in practice:
+						// the infohash is a deterministic digest of the file set, so the
+						// same infohash re-crawling with a different file set does not occur.
+						summary := buildTorrentFileSummary(i.infoHash, t.Files, t.FilesData, now)
+						torrentFileSummariesToPersist = append(torrentFileSummariesToPersist, &summary)
 					}
 
 					t.Files = nil
@@ -104,6 +138,8 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 						string(c.dao.Torrent.FilesStatus.ColumnName()),
 						string(c.dao.Torrent.FilesCount.ColumnName()),
 						string(c.dao.Torrent.UpdatedAt.ColumnName()),
+						"files_data",
+						"file_extensions",
 					}),
 				}).CreateInBatches(torrentsToPersist, 100); err != nil {
 					return err
@@ -112,6 +148,12 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 					if err := tx.WithContext(ctx).TorrentFile.Clauses(clause.OnConflict{
 						DoNothing: true,
 					}).CreateInBatches(torrentFilesToPersist, 100); err != nil {
+						return err
+					}
+				}
+				if len(torrentFileSummariesToPersist) > 0 {
+					if err := torrentFileSummaryPersistQuery(ctx, tx).
+						CreateInBatches(torrentFileSummariesToPersist, 100).Error; err != nil {
 						return err
 					}
 				}
@@ -147,12 +189,32 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 	}
 }
 
+func torrentFileSummaryPersistQuery(ctx context.Context, tx *dao.Query) *gorm.DB {
+	return tx.Torrent.UnderlyingDB().WithContext(ctx).
+		Table(model.TableNameTorrentFileSummary).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "info_hash"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"file_count",
+				"total_size",
+				"largest_file_size",
+				"extensions",
+				"has_video",
+				"has_subtitle",
+				"has_audio",
+				"compressed_bytes",
+				"updated_at",
+			}),
+		})
+}
+
 func createTorrentModel(
 	hash protocol.ID,
-	info metainfo.Info,
+	parsed metainfo.ParsedInfo,
 	savePieces bool,
 	saveFilesThreshold uint,
 ) (model.Torrent, error) {
+	info := parsed.Info
 	name := info.BestName()
 
 	private := false
@@ -162,26 +224,55 @@ func createTorrentModel(
 
 	var filesCount model.NullUint
 
+	var files []model.TorrentFile
+
+	// Classify single vs multi. For v1, info.IsDir() == (len(info.Files) != 0), so
+	// v1 behaviour is unchanged. For v2 (BEP 52) the file tree root is always a
+	// directory keyed by the file name, so IsDir() is true even for a single
+	// top-level file; treat "exactly one top-level file" as single so v2 / hybrid
+	// single-file torrents match v1 single-file behaviour (no file rows; the
+	// extension is indexed from the name in the Tantivy document builder).
 	filesStatus := model.FilesStatusSingle
-	if len(info.Files) > 0 {
-		filesStatus = model.FilesStatusMulti
-		filesCount = model.NewNullUint(uint(len(info.Files)))
+
+	if info.IsDir() {
+		// UpvertedFiles yields the file list for both v1 (info.Files) and v2
+		// (file tree) torrents.
+		upvertedFiles := info.UpvertedFiles()
+
+		isV2Single := info.HasV2() &&
+			len(upvertedFiles) == 1 &&
+			len(upvertedFiles[0].Path) <= 1
+
+		if !isV2Single {
+			filesStatus = model.FilesStatusMulti
+			filesCount = model.NewNullUint(uint(len(upvertedFiles)))
+			files = make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(upvertedFiles)))
+
+			for i, file := range upvertedFiles {
+				if i >= int(saveFilesThreshold) {
+					filesStatus = model.FilesStatusOverThreshold
+					break
+				}
+
+				files = append(files, model.TorrentFile{
+					InfoHash: hash,
+					Index:    uint(i),
+					Path:     file.DisplayPath(&info),
+					Size:     uint(file.Length),
+				})
+			}
+		}
 	}
 
-	files := make([]model.TorrentFile, 0, min(int(saveFilesThreshold), len(info.Files)))
+	var filesData []byte
 
-	for i, file := range info.Files {
-		if i >= int(saveFilesThreshold) {
-			filesStatus = model.FilesStatusOverThreshold
-			break
+	var fileExts []string
+
+	if len(files) > 0 {
+		if blobData, blobErr := blobmigration.SerializeFiles(files); blobErr == nil {
+			filesData = blobData
+			fileExts = blobmigration.ExtractUniqueExtensions(files)
 		}
-
-		files = append(files, model.TorrentFile{
-			InfoHash: hash,
-			Index:    uint(i),
-			Path:     file.DisplayPath(&info),
-			Size:     uint(file.Length),
-		})
 	}
 
 	var pieces model.TorrentPieces
@@ -195,11 +286,16 @@ func createTorrentModel(
 
 	return model.Torrent{
 		InfoHash:    hash,
+		InfoHashV1:  parsed.InfoHashV1,
+		InfoHashV2:  parsed.InfoHashV2,
+		MetaVersion: model.NewNullUint16(uint16(parsed.MetaVersion)),
 		Name:        name,
 		Size:        uint(info.TotalLength()),
 		Private:     private,
 		Pieces:      pieces,
 		Files:       files,
+		FilesData:   filesData,
+		FileExts:    fileExts,
 		FilesStatus: filesStatus,
 		FilesCount:  filesCount,
 		Sources: []model.TorrentsTorrentSource{
@@ -211,7 +307,131 @@ func createTorrentModel(
 	}, nil
 }
 
+func buildTorrentFileSummary(
+	infoHash protocol.ID,
+	files []model.TorrentFile,
+	filesData []byte,
+	now time.Time,
+) model.TorrentFileSummary {
+	summary := blobmigration.BuildFileSummary(infoHash, files, len(filesData))
+	// If serialization failed upstream, files_data is written as SQL NULL; keep
+	// compressed_bytes NULL too (not 0) so the invariant compressed_bytes ==
+	// octet_length(files_data) holds and the L3 read path treats it as a miss.
+	if filesData == nil {
+		summary.CompressedBytes = model.NullInt{}
+	}
+
+	summary.CreatedAt = now
+	summary.UpdatedAt = now
+
+	return summary
+}
+
 const classifyBatchSize = 100
+
+// v2LookupChunkSize bounds the number of v2 hashes per dedup lookup query. The
+// persist batch is currently capped at 1000 (factory.go), so this is defensive
+// insurance should that cap ever be raised.
+const v2LookupChunkSize = 1000
+
+// dropV2Duplicate reports whether a discovery should be dropped as a cross-primary-key
+// v2 duplicate: a hybrid torrent already represented under a DIFFERENT primary key
+// (first-one-wins). The stored != pk check is essential — it preserves a legitimate
+// same-primary-key re-discovery (which must upsert) while dropping only true cross-PK
+// collisions.
+func dropV2Duplicate(
+	v2 protocol.InfoHashV2,
+	pk protocol.ID,
+	existing, batch map[protocol.InfoHashV2]protocol.ID,
+) bool {
+	if stored, ok := existing[v2]; ok && stored != pk {
+		return true
+	}
+
+	if stored, ok := batch[v2]; ok && stored != pk {
+		return true
+	}
+
+	return false
+}
+
+// filterV2Duplicates removes hybrid torrents discovered under a second infohash when
+// the same full v2 identity is already represented under another primary key — either
+// already in the database (existing) or earlier in this batch. It returns the kept
+// items and the number dropped.
+func filterV2Duplicates(
+	is []infoHashWithMetaInfo,
+	existing map[protocol.InfoHashV2]protocol.ID,
+) (kept []infoHashWithMetaInfo, dropped int) {
+	batch := make(map[protocol.InfoHashV2]protocol.ID)
+	kept = make([]infoHashWithMetaInfo, 0, len(is))
+
+	for _, i := range is {
+		if v2 := i.metaInfo.InfoHashV2; v2 != nil {
+			if dropV2Duplicate(*v2, i.infoHash, existing, batch) {
+				dropped++
+
+				continue
+			}
+
+			batch[*v2] = i.infoHash
+		}
+
+		kept = append(kept, i)
+	}
+
+	return kept, dropped
+}
+
+// lookupExistingV2 returns, for the full v2 hashes present in the batch, the primary
+// key of any torrent already stored under each v2 hash. On error it logs and returns
+// what it has (fail-open: dedup is skipped for the batch, never blocking persistence).
+func (c *crawler) lookupExistingV2(
+	ctx context.Context,
+	is []infoHashWithMetaInfo,
+) map[protocol.InfoHashV2]protocol.ID {
+	v2Set := make(map[protocol.InfoHashV2]struct{})
+
+	for _, i := range is {
+		if v2 := i.metaInfo.InfoHashV2; v2 != nil {
+			v2Set[*v2] = struct{}{}
+		}
+	}
+
+	existing := make(map[protocol.InfoHashV2]protocol.ID, len(v2Set))
+	if len(v2Set) == 0 {
+		return existing
+	}
+
+	values := make([]driver.Valuer, 0, len(v2Set))
+	for v2 := range v2Set {
+		values = append(values, v2)
+	}
+
+	t := c.dao.Torrent
+
+	for start := 0; start < len(values); start += v2LookupChunkSize {
+		end := min(start+v2LookupChunkSize, len(values))
+
+		rows, err := t.WithContext(ctx).
+			Select(t.InfoHash, t.InfoHashV2).
+			Where(t.InfoHashV2.In(values[start:end]...)).
+			Find()
+		if err != nil {
+			c.logger.Errorf("error looking up existing v2 infohashes: %s", err.Error())
+
+			return existing
+		}
+
+		for _, row := range rows {
+			if row.InfoHashV2 != nil {
+				existing[*row.InfoHashV2] = row.InfoHash
+			}
+		}
+	}
+
+	return existing
+}
 
 // runPersistSources waits on the persistSources channel for scraped torrents, and persists sources
 // (which includes discovery date, seeders and leechers) to the database in batches.
@@ -238,27 +458,7 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 				}
 			}
 
-			if persistErr := c.dao.WithContext(ctx).TorrentsTorrentSource.Clauses(
-				clause.OnConflict{
-					Columns: []clause.Column{
-						{Name: string(c.dao.TorrentsTorrentSource.InfoHash.ColumnName())},
-						{Name: string(c.dao.TorrentsTorrentSource.Source.ColumnName())},
-					},
-					DoUpdates: clause.AssignmentColumns([]string{
-						string(c.dao.TorrentsTorrentSource.Seeders.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.Leechers.ColumnName()),
-						// sets to null, fixes torrents indexed before 0.8.0 with published_at
-						// 0001-01-01 00:00:00+00:
-						string(c.dao.TorrentsTorrentSource.PublishedAt.ColumnName()),
-						string(c.dao.TorrentsTorrentSource.UpdatedAt.ColumnName()),
-					}),
-				},
-			).Where(
-				// check that the torrent record hasn't been deleted:
-				gen.Exists(c.dao.WithContext(ctx).Torrent.Where(
-					c.dao.Torrent.InfoHash.EqCol(c.dao.TorrentsTorrentSource.InfoHash),
-				)),
-			).CreateInBatches(srcs, 100); persistErr != nil {
+			if persistErr := persistScrapedTorrentSources(ctx, c.dao, srcs); persistErr != nil {
 				c.logger.Errorf("error persisting torrent sources: %s", persistErr.Error())
 			} else {
 				c.persistedTotal.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
@@ -268,6 +468,73 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 	}
 }
 
+func persistScrapedTorrentSources(
+	ctx context.Context,
+	q *dao.Query,
+	srcs []*model.TorrentsTorrentSource,
+) error {
+	const batchSize = 100
+
+	now := time.Now()
+	db := q.Torrent.UnderlyingDB().WithContext(ctx)
+
+	for start := 0; start < len(srcs); start += batchSize {
+		end := min(start+batchSize, len(srcs))
+		batch := srcs[start:end]
+
+		b := strings.Builder{}
+		args := make([]any, 0, len(batch)*8)
+
+		_, _ = b.WriteString("INSERT INTO torrents_torrent_sources " +
+			"(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ")
+		_, _ = b.WriteString("SELECT v.source, decode(v.info_hash, 'hex'), v.seeders, v.leechers, " +
+			"v.published_at, v.seen_count, v.created_at, v.updated_at FROM (VALUES ")
+
+		for i, src := range batch {
+			if i > 0 {
+				_, _ = b.WriteString(",")
+			}
+
+			_, _ = b.WriteString(
+				"(?,?,?::integer,?::integer,?::timestamptz,?::integer,?::timestamptz,?::timestamptz)",
+			)
+
+			args = append(
+				args,
+				src.Source,
+				src.InfoHash.String(),
+				src.Seeders,
+				src.Leechers,
+				src.PublishedAt,
+				src.SeenCount,
+				now,
+				now,
+			)
+		}
+
+		_, _ = b.WriteString(
+			") AS v(source, info_hash, seeders, leechers, published_at, seen_count, created_at, updated_at) ",
+		)
+		_, _ = b.WriteString(
+			"WHERE EXISTS (SELECT 1 FROM torrents t WHERE t.info_hash = decode(v.info_hash, 'hex')) ",
+		)
+		_, _ = b.WriteString("ON CONFLICT (info_hash, source) DO UPDATE SET " +
+			"seeders = excluded.seeders, " +
+			"leechers = excluded.leechers, " +
+			// sets to null, fixes torrents indexed before 0.8.0 with published_at
+			// 0001-01-01 00:00:00+00:
+			"published_at = excluded.published_at, " +
+			"updated_at = excluded.updated_at, " +
+			"seen_count = torrents_torrent_sources.seen_count + 1")
+
+		if err := db.Exec(b.String(), args...).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func createTorrentSourceModel(
 	result infoHashWithScrape,
 ) (model.TorrentsTorrentSource, error) {
@@ -275,9 +542,10 @@ func createTorrentSourceModel(
 	leechers := model.NewNullUint(uint(result.bfpe.ApproximatedSize()))
 
 	return model.TorrentsTorrentSource{
-		Source:   "dht",
-		InfoHash: result.infoHash,
-		Seeders:  seeders,
-		Leechers: leechers,
+		Source:    "dht",
+		InfoHash:  result.infoHash,
+		Seeders:   seeders,
+		Leechers:  leechers,
+		SeenCount: 1,
 	}, nil
 }

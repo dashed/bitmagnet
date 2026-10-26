@@ -1,0 +1,528 @@
+use async_trait::async_trait;
+use bitmagnet_bloom::{
+    DecrementStartSource, StableBloomCodecError, StableBloomFilter, StableBloomGeometry,
+};
+use bitmagnet_model::InfoHash;
+use sqlx::postgres::types::Oid;
+use sqlx::{PgPool, Row};
+use thiserror::Error;
+
+use super::{AtomicBlockingStore, BlockingClock, BlockingStoreOp, BoxError, CommittedFilter};
+
+// SQLx 0.9 has no PostgreSQL large-object descriptor wrapper. Runtime queries
+// therefore use lo_get/lo_create/lo_put inside the same transaction. This is a
+// data-equivalence claim for fresh objects and strictly decoded exact-length
+// objects, not descriptor-call parity. The adapter adds no truncation behavior
+// absent from Go; an oversized existing object is rejected by the bounded
+// strict decode before any write.
+//
+// Before reading the filter, both this adapter and Go's manager take the same
+// transaction-scoped advisory lock (LOCK_FILTER_SQL), so concurrent flushes
+// from any process apply their hashes one after another instead of each
+// overwriting the filter it started from. An advisory lock needs no grant
+// beyond the writers' existing column privileges, unlike SELECT ... FOR UPDATE.
+
+const BLOCKED_TORRENTS_KEY: &str = "blocked_torrents";
+const CELL_COUNT: usize = 100_000_000;
+const BITS_PER_CELL: u8 = 2;
+const HASH_FUNCTIONS: usize = 5;
+const DECREMENT_CELLS: usize = 49;
+const ENCODED_BYTES: usize = 25_000_091;
+const BOUNDED_READ_BYTES: usize = ENCODED_BYTES + 1;
+
+const BEGIN_TRANSACTION_SQL: &str = "BEGIN READ WRITE";
+/// Bounds each statement of one flush on the server, for its transaction
+/// only; the role's settings are untouched. Waiting over 5 s for a lock (the
+/// filter's advisory lock, which another process's flush holds for its own
+/// read-modify-write, or a row lock) or running any one statement over 10 s
+/// aborts the flush, which keeps its buffer for the next. Rewriting the 25 MB
+/// filter takes about 0.15 s on HEL1's NVMe (`lo_get` 11-15 ms, `lo_put`
+/// 106-112 ms, commit 2-30 ms), so 10 s leaves ample headroom for a contended
+/// disk. The bound restarts with every statement (PostgreSQL 16 has no
+/// `transaction_timeout`), so it does not bound the whole flush: a caller
+/// that needs that bound times the flush out itself, as the worker does.
+const BOUND_TRANSACTION_SQL: &str = "SELECT pg_catalog.set_config('lock_timeout', '5s', true), \
+    pg_catalog.set_config('statement_timeout', '10s', true)";
+const DELETE_TORRENTS_SQL: &str = "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])";
+/// Byte-identical to Go's `blockedTorrentsBloomFilterLockSQL`.
+const LOCK_FILTER_SQL: &str = "SELECT pg_catalog.pg_advisory_xact_lock(\
+    pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))";
+const SELECT_FILTER_OID_SQL: &str = "SELECT oid FROM public.bloom_filters WHERE key = $1::text";
+const READ_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_get($1::oid, 0::bigint, $2::integer)";
+const CREATE_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_create(0::oid)";
+const WRITE_LARGE_OBJECT_SQL: &str = "SELECT pg_catalog.lo_put($1::oid, 0::bigint, $2::bytea)";
+const INSERT_FILTER_SQL: &str = "INSERT INTO public.bloom_filters \
+    (key, oid, created_at, updated_at) \
+    VALUES ($1::text, $2::oid, $3::timestamptz, $3::timestamptz)";
+const UPDATE_NULL_FILTER_SQL: &str = "UPDATE public.bloom_filters \
+    SET oid = $1::oid, updated_at = $2::timestamptz \
+    WHERE key = $3::text";
+
+#[derive(Debug, Error)]
+pub(super) enum PostgresBlockingStoreError {
+    #[error("failed to begin blocking transaction")]
+    Begin(#[source] sqlx::Error),
+    #[error("failed to bound blocking transaction")]
+    BoundTransaction(#[source] sqlx::Error),
+    #[error("failed to delete blocked torrents")]
+    DeleteTorrents(#[source] sqlx::Error),
+    #[error("failed to lock bloom filter")]
+    LockFilter(#[source] sqlx::Error),
+    #[error("failed to get bloom-filter object ID")]
+    SelectObjectId(#[source] sqlx::Error),
+    #[error("failed to read current bloom-filter large object")]
+    ReadLargeObject(#[source] sqlx::Error),
+    #[error("current bloom-filter large object is invalid")]
+    DecodeFilter(#[source] StableBloomCodecError),
+    #[error("failed to create bloom-filter large object")]
+    CreateLargeObject(#[source] sqlx::Error),
+    #[error("failed to encode bloom filter")]
+    EncodeFilter(#[source] StableBloomCodecError),
+    #[error("failed to write bloom-filter large object")]
+    WriteLargeObject(#[source] sqlx::Error),
+    #[error("failed to save new bloom-filter record")]
+    InsertMetadata(#[source] sqlx::Error),
+    #[error("failed to repair bloom-filter record with a NULL object ID")]
+    UpdateNullMetadata(#[source] sqlx::Error),
+    #[error("failed to commit blocking transaction")]
+    Commit(#[source] sqlx::Error),
+    #[error("bloom-filter encoded length does not fit a PostgreSQL integer")]
+    ReadLengthOverflow,
+}
+
+impl PostgresBlockingStoreError {
+    pub(super) const fn op(&self) -> BlockingStoreOp {
+        match self {
+            Self::Begin(_) | Self::BoundTransaction(_) | Self::Commit(_) => {
+                BlockingStoreOp::Transaction
+            }
+            Self::DeleteTorrents(_) => BlockingStoreOp::DeleteTorrents,
+            Self::LockFilter(_)
+            | Self::SelectObjectId(_)
+            | Self::ReadLargeObject(_)
+            | Self::DecodeFilter(_)
+            | Self::CreateLargeObject(_)
+            | Self::EncodeFilter(_)
+            | Self::WriteLargeObject(_)
+            | Self::InsertMetadata(_)
+            | Self::UpdateNullMetadata(_)
+            | Self::ReadLengthOverflow => BlockingStoreOp::BloomFilter,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MetadataState {
+    Missing,
+    NullObjectId,
+    ExistingObjectId(Oid),
+}
+
+pub(super) struct PostgresAtomicBlockingStore {
+    pool: PgPool,
+    geometry: StableBloomGeometry,
+    clock: std::sync::Arc<dyn BlockingClock>,
+}
+
+impl PostgresAtomicBlockingStore {
+    pub(super) fn new(pool: PgPool, clock: std::sync::Arc<dyn BlockingClock>) -> Self {
+        Self {
+            pool,
+            geometry: production_geometry(),
+            clock,
+        }
+    }
+}
+
+#[async_trait]
+impl AtomicBlockingStore for PostgresAtomicBlockingStore {
+    async fn commit(
+        &mut self,
+        blocked: &[InfoHash],
+        decrement_starts: &mut (dyn DecrementStartSource + Send),
+    ) -> Result<CommittedFilter, BoxError> {
+        let mut transaction = self
+            .pool
+            .begin_with(BEGIN_TRANSACTION_SQL)
+            .await
+            .map_err(PostgresBlockingStoreError::Begin)?;
+        sqlx::query(BOUND_TRANSACTION_SQL)
+            .execute(&mut *transaction)
+            .await
+            .map_err(PostgresBlockingStoreError::BoundTransaction)?;
+
+        if !blocked.is_empty() {
+            let raw_hashes = blocked
+                .iter()
+                .map(|hash| hash.as_slice().to_vec())
+                .collect::<Vec<_>>();
+            sqlx::query(DELETE_TORRENTS_SQL)
+                .bind(raw_hashes)
+                .execute(&mut *transaction)
+                .await
+                .map_err(PostgresBlockingStoreError::DeleteTorrents)?;
+        }
+
+        sqlx::query(LOCK_FILTER_SQL)
+            .execute(&mut *transaction)
+            .await
+            .map_err(PostgresBlockingStoreError::LockFilter)?;
+
+        let oid_row = sqlx::query(SELECT_FILTER_OID_SQL)
+            .bind(BLOCKED_TORRENTS_KEY)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(PostgresBlockingStoreError::SelectObjectId)?;
+        let oid_row = oid_row
+            .map(|row| row.try_get::<Option<Oid>, _>("oid"))
+            .transpose()
+            .map_err(PostgresBlockingStoreError::SelectObjectId)?;
+        let metadata_state = classify_metadata_state(oid_row);
+
+        let mut filter = match metadata_state {
+            MetadataState::ExistingObjectId(oid) => {
+                let bounded_read = i32::try_from(BOUNDED_READ_BYTES)
+                    .map_err(|_| PostgresBlockingStoreError::ReadLengthOverflow)?;
+                let bytes = sqlx::query_scalar::<_, Vec<u8>>(READ_LARGE_OBJECT_SQL)
+                    .bind(oid)
+                    .bind(bounded_read)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(PostgresBlockingStoreError::ReadLargeObject)?;
+                decode_filter(&bytes, self.geometry)?
+            }
+            MetadataState::Missing | MetadataState::NullObjectId => {
+                StableBloomFilter::new(self.geometry)
+            }
+        };
+
+        let oid = match metadata_state {
+            MetadataState::ExistingObjectId(oid) => oid,
+            MetadataState::Missing | MetadataState::NullObjectId => {
+                sqlx::query_scalar::<_, Oid>(CREATE_LARGE_OBJECT_SQL)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(PostgresBlockingStoreError::CreateLargeObject)?
+            }
+        };
+
+        for hash in blocked {
+            filter.add(hash.as_slice(), decrement_starts);
+        }
+
+        let encoded = encode_filter(&filter)?;
+        sqlx::query(WRITE_LARGE_OBJECT_SQL)
+            .bind(oid)
+            .bind(encoded)
+            .execute(&mut *transaction)
+            .await
+            .map_err(PostgresBlockingStoreError::WriteLargeObject)?;
+
+        // Go samples once after the BF write and before metadata work and the
+        // transaction commit. Instant drives manager policy; UTC is persisted.
+        let clock_sample = self.clock.now();
+        match metadata_state {
+            MetadataState::Missing => {
+                sqlx::query(INSERT_FILTER_SQL)
+                    .bind(BLOCKED_TORRENTS_KEY)
+                    .bind(oid)
+                    .bind(clock_sample.wall)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(PostgresBlockingStoreError::InsertMetadata)?;
+            }
+            MetadataState::NullObjectId => {
+                sqlx::query(UPDATE_NULL_FILTER_SQL)
+                    .bind(oid)
+                    .bind(clock_sample.wall)
+                    .bind(BLOCKED_TORRENTS_KEY)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(PostgresBlockingStoreError::UpdateNullMetadata)?;
+            }
+            MetadataState::ExistingObjectId(_) => {}
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(PostgresBlockingStoreError::Commit)?;
+        Ok(CommittedFilter {
+            filter,
+            flushed_at: clock_sample.monotonic,
+        })
+    }
+}
+
+fn production_geometry() -> StableBloomGeometry {
+    let geometry =
+        StableBloomGeometry::new(CELL_COUNT, BITS_PER_CELL, HASH_FUNCTIONS, DECREMENT_CELLS)
+            .expect("production blocking geometry is statically valid");
+    debug_assert_eq!(geometry.encoded_bytes(), ENCODED_BYTES);
+    geometry
+}
+
+pub(super) fn validate_go_blocked_torrents_filter(
+    bytes: &[u8],
+) -> Result<(), StableBloomCodecError> {
+    StableBloomFilter::from_bytes(bytes, production_geometry()).map(|_| ())
+}
+
+fn classify_metadata_state(oid_row: Option<Option<Oid>>) -> MetadataState {
+    match oid_row {
+        None => MetadataState::Missing,
+        Some(None) => MetadataState::NullObjectId,
+        Some(Some(oid)) => MetadataState::ExistingObjectId(oid),
+    }
+}
+
+fn decode_filter(
+    bytes: &[u8],
+    geometry: StableBloomGeometry,
+) -> Result<StableBloomFilter, PostgresBlockingStoreError> {
+    StableBloomFilter::from_bytes(bytes, geometry).map_err(PostgresBlockingStoreError::DecodeFilter)
+}
+
+fn encode_filter(filter: &StableBloomFilter) -> Result<Vec<u8>, PostgresBlockingStoreError> {
+    let mut encoded = Vec::with_capacity(filter.geometry().encoded_bytes());
+    filter
+        .write_to(&mut encoded)
+        .map_err(PostgresBlockingStoreError::EncodeFilter)?;
+    Ok(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+    use std::num::NonZeroUsize;
+
+    use bitmagnet_bloom::StableBloomGeometry;
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
+    use crate::{BlockingError, BlockingManager, DEFAULT_MAX_BUFFER_SIZE, DEFAULT_MAX_FLUSH_WAIT};
+
+    #[test]
+    fn production_geometry_and_bounded_read_are_exact() {
+        let geometry = production_geometry();
+        assert_eq!(geometry.cell_count(), CELL_COUNT);
+        assert_eq!(geometry.bits_per_cell(), BITS_PER_CELL);
+        assert_eq!(geometry.hash_functions(), HASH_FUNCTIONS);
+        assert_eq!(geometry.decrement_cells(), DECREMENT_CELLS);
+        assert_eq!(geometry.encoded_bytes(), ENCODED_BYTES);
+        assert_eq!(BOUNDED_READ_BYTES, 25_000_092);
+        assert_eq!(i32::try_from(BOUNDED_READ_BYTES).unwrap(), 25_000_092);
+    }
+
+    #[test]
+    fn runtime_queries_pin_tables_functions_and_parameter_casts() {
+        assert_eq!(BEGIN_TRANSACTION_SQL, "BEGIN READ WRITE");
+        assert_eq!(
+            DELETE_TORRENTS_SQL,
+            "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])"
+        );
+        assert_eq!(
+            LOCK_FILTER_SQL,
+            "SELECT pg_catalog.pg_advisory_xact_lock(\
+             pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))"
+        );
+        assert_eq!(
+            SELECT_FILTER_OID_SQL,
+            "SELECT oid FROM public.bloom_filters WHERE key = $1::text"
+        );
+        assert_eq!(
+            READ_LARGE_OBJECT_SQL,
+            "SELECT pg_catalog.lo_get($1::oid, 0::bigint, $2::integer)"
+        );
+        assert_eq!(
+            CREATE_LARGE_OBJECT_SQL,
+            "SELECT pg_catalog.lo_create(0::oid)"
+        );
+        assert_eq!(
+            WRITE_LARGE_OBJECT_SQL,
+            "SELECT pg_catalog.lo_put($1::oid, 0::bigint, $2::bytea)"
+        );
+        assert!(INSERT_FILTER_SQL.contains("$3::timestamptz, $3::timestamptz"));
+        assert!(UPDATE_NULL_FILTER_SQL.contains("SET oid = $1::oid"));
+        assert!(UPDATE_NULL_FILTER_SQL.contains("WHERE key = $3::text"));
+    }
+
+    #[test]
+    fn metadata_rows_distinguish_missing_null_and_existing_object_ids() {
+        assert_eq!(classify_metadata_state(None), MetadataState::Missing);
+        assert_eq!(
+            classify_metadata_state(Some(None)),
+            MetadataState::NullObjectId
+        );
+        assert_eq!(
+            classify_metadata_state(Some(Some(Oid(41)))),
+            MetadataState::ExistingObjectId(Oid(41))
+        );
+        assert_eq!(
+            classify_metadata_state(Some(Some(Oid(0)))),
+            MetadataState::ExistingObjectId(Oid(0)),
+            "OID zero is non-NULL and must take the existing-object read branch"
+        );
+    }
+
+    #[test]
+    fn strict_codec_helper_rejects_truncated_and_trailing_objects() {
+        let geometry = StableBloomGeometry::new(128, 2, 3, 4).unwrap();
+        let filter = StableBloomFilter::new(geometry);
+        let encoded = encode_filter(&filter).unwrap();
+        assert!(decode_filter(&encoded, geometry).is_ok());
+        assert!(matches!(
+            decode_filter(&encoded[..encoded.len() - 1], geometry),
+            Err(PostgresBlockingStoreError::DecodeFilter(_))
+        ));
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(matches!(
+            decode_filter(&trailing, geometry),
+            Err(PostgresBlockingStoreError::DecodeFilter(_))
+        ));
+    }
+
+    #[test]
+    fn error_surface_retains_stage_and_source() {
+        let error = PostgresBlockingStoreError::ReadLengthOverflow;
+        assert_eq!(
+            error.to_string(),
+            "bloom-filter encoded length does not fit a PostgreSQL integer"
+        );
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn blocking_errors_name_the_store_op_that_failed() {
+        use PostgresBlockingStoreError as E;
+
+        let database = || sqlx::Error::PoolTimedOut;
+        let codec = || {
+            let geometry = StableBloomGeometry::new(128, 2, 3, 4).unwrap();
+            match decode_filter(&[], geometry).err() {
+                Some(E::DecodeFilter(error)) => error,
+                _ => panic!("an empty object must not decode"),
+            }
+        };
+        for (error, op) in [
+            (E::Begin(database()), BlockingStoreOp::Transaction),
+            (
+                E::BoundTransaction(database()),
+                BlockingStoreOp::Transaction,
+            ),
+            (
+                E::DeleteTorrents(database()),
+                BlockingStoreOp::DeleteTorrents,
+            ),
+            (E::LockFilter(database()), BlockingStoreOp::BloomFilter),
+            (E::SelectObjectId(database()), BlockingStoreOp::BloomFilter),
+            (E::ReadLargeObject(database()), BlockingStoreOp::BloomFilter),
+            (E::DecodeFilter(codec()), BlockingStoreOp::BloomFilter),
+            (
+                E::CreateLargeObject(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::EncodeFilter(codec()), BlockingStoreOp::BloomFilter),
+            (
+                E::WriteLargeObject(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::InsertMetadata(database()), BlockingStoreOp::BloomFilter),
+            (
+                E::UpdateNullMetadata(database()),
+                BlockingStoreOp::BloomFilter,
+            ),
+            (E::ReadLengthOverflow, BlockingStoreOp::BloomFilter),
+            (E::Commit(database()), BlockingStoreOp::Transaction),
+        ] {
+            let error = BlockingError::Store(Box::new(error));
+            assert_eq!(error.store_op(), Some(op), "{error:?}");
+        }
+        let other = BlockingError::Store(Box::new(std::io::Error::other("another store")));
+        assert_eq!(other.store_op(), None);
+        assert_eq!(
+            BlockingStoreOp::ALL.map(BlockingStoreOp::label),
+            ["transaction", "delete_torrents", "bloom_filter"]
+        );
+    }
+
+    #[tokio::test]
+    async fn public_constructor_is_lazy_and_owns_default_uninitialized_state() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let manager = BlockingManager::new(pool);
+        assert_eq!(manager.config.max_buffer_size, DEFAULT_MAX_BUFFER_SIZE);
+        assert_eq!(manager.config.max_flush_wait, DEFAULT_MAX_FLUSH_WAIT);
+
+        let mut inner = manager.inner.lock().await;
+        assert!(inner.buffer.is_empty());
+        assert!(inner.filter.is_none());
+        assert!(inner.last_flushed_at.is_none());
+        let start = inner
+            .decrement_starts
+            .next_start(NonZeroUsize::new(CELL_COUNT).unwrap());
+        assert!(start < CELL_COUNT);
+    }
+
+    #[test]
+    fn source_order_pins_delete_load_mutate_write_timestamp_metadata_commit() {
+        let source = include_str!("pg.rs");
+        let implementation = source
+            .split_once("impl AtomicBlockingStore for PostgresAtomicBlockingStore")
+            .unwrap()
+            .1
+            .split_once("fn production_geometry")
+            .unwrap()
+            .0;
+        let positions = [
+            "BEGIN_TRANSACTION_SQL",
+            "DELETE_TORRENTS_SQL",
+            "LOCK_FILTER_SQL",
+            "SELECT_FILTER_OID_SQL",
+            "READ_LARGE_OBJECT_SQL",
+            "for hash in blocked",
+            "WRITE_LARGE_OBJECT_SQL",
+            "let clock_sample = self.clock.now()",
+            "sqlx::query(INSERT_FILTER_SQL)",
+            ".commit()",
+        ]
+        .map(|needle| implementation.find(needle).unwrap());
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(implementation.contains("MetadataState::ExistingObjectId(_) => {}"));
+        assert_eq!(implementation.matches("self.clock.now()").count(), 1);
+
+        let constructor_source = include_str!("lib.rs");
+        assert!(
+            constructor_source.contains("PostgresAtomicBlockingStore::new(pool, clock.clone())")
+        );
+        assert!(constructor_source
+            .contains("decrement_starts: Box::new(RandomDecrementStartSource::new())"));
+    }
+
+    #[test]
+    fn lock_statement_is_the_one_go_takes() {
+        let go = include_str!("../../../../internal/blocking/manager.go");
+        let go_sql = go
+            .split_once("const blockedTorrentsBloomFilterLockSQL = ")
+            .expect("Go declares the bloom-filter lock statement")
+            .1
+            .split("\n\n")
+            .next()
+            .unwrap()
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<String>();
+        assert_eq!(go_sql, LOCK_FILTER_SQL);
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn manager_and_store_error_are_send_sync() {
+        assert_send_sync::<BlockingManager>();
+        assert_send_sync::<PostgresBlockingStoreError>();
+    }
+}

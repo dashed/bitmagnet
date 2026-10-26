@@ -1,0 +1,402 @@
+[
+  {
+    "id": "no-sources",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "No Sources",
+        "createdAtMicros": 1700000000123456,
+        "files": [],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1700000000123456,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'no':3A 'sources':4A"
+    }
+  },
+  {
+    "id": "source-zero-is-present",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Zero Counts",
+        "createdAtMicros": 2000000000000000,
+        "files": [],
+        "sources": [
+          {
+            "seeders": 0,
+            "leechers": 0,
+            "publishedAtMicros": null,
+            "createdAtMicros": 1500000000000000
+          }
+        ]
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": 0,
+      "leechers": 0,
+      "publishedAtMicros": 1500000000000000,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'counts':4A 'zero':3A"
+    }
+  },
+  {
+    "id": "source-maxima-and-null-fallback",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Source Aggregate",
+        "createdAtMicros": 2000000000000000,
+        "files": [],
+        "sources": [
+          {
+            "seeders": 0,
+            "leechers": null,
+            "publishedAtMicros": null,
+            "createdAtMicros": 1500000000000000
+          },
+          {
+            "seeders": 7,
+            "leechers": 0,
+            "publishedAtMicros": 1600000000000000,
+            "createdAtMicros": 1800000000000000
+          },
+          {
+            "seeders": null,
+            "leechers": 11,
+            "publishedAtMicros": 1700000000000000,
+            "createdAtMicros": 1900000000000000
+          }
+        ]
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": 7,
+      "leechers": 11,
+      "publishedAtMicros": 1500000000000000,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'aggregate':4A 'source':3A"
+    }
+  },
+  {
+    "id": "source-maxima-permuted",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Source Aggregate",
+        "createdAtMicros": 2000000000000000,
+        "files": [],
+        "sources": [
+          {
+            "seeders": null,
+            "leechers": 11,
+            "publishedAtMicros": 1700000000000000,
+            "createdAtMicros": 1900000000000000
+          },
+          {
+            "seeders": 7,
+            "leechers": 0,
+            "publishedAtMicros": 1600000000000000,
+            "createdAtMicros": 1800000000000000
+          },
+          {
+            "seeders": 0,
+            "leechers": null,
+            "publishedAtMicros": null,
+            "createdAtMicros": 1500000000000000
+          }
+        ]
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": 7,
+      "leechers": 11,
+      "publishedAtMicros": 1500000000000000,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'aggregate':4A 'source':3A"
+    }
+  },
+  {
+    "id": "published-at-exact-cutoff-falls-back",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Exact Cutoff",
+        "createdAtMicros": 2000000000000000,
+        "files": [],
+        "sources": [
+          {
+            "seeders": null,
+            "leechers": null,
+            "publishedAtMicros": 946684800000000,
+            "createdAtMicros": 1500000000000000
+          }
+        ]
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1500000000000000,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'cutoff':4A 'exact':3A"
+    }
+  },
+  {
+    "id": "published-at-cutoff-plus-one-microsecond",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "After Cutoff",
+        "createdAtMicros": 2000000000000000,
+        "files": [],
+        "sources": [
+          {
+            "seeders": null,
+            "leechers": null,
+            "publishedAtMicros": 946684800000001,
+            "createdAtMicros": 1500000000000000
+          }
+        ]
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 946684800000001,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'after':3A 'cutoff':4A"
+    }
+  },
+  {
+    "id": "video-v1080p-and-v3dsbs",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Example Movie",
+        "createdAtMicros": 1,
+        "files": [],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": "V1080p",
+        "videoSource": "BluRay",
+        "videoCodec": "x265",
+        "video3d": "V3DSBS",
+        "videoModifier": "Remux",
+        "releaseGroup": "GROUP"
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':13A '1080p':1C '3d':7C 'bluray':3C 'example':15A 'group':11C 'movie':16A 'remux':9C 'x265':5C"
+    }
+  },
+  {
+    "id": "video-v3dou-literal",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Three Dee OU",
+        "createdAtMicros": 1,
+        "files": [],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": "V3DOU",
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':3A '3d':1C 'dee':6A 'ou':7A 'three':5A"
+    }
+  },
+  {
+    "id": "paths-ascii-reduction",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Path Matrix",
+        "createdAtMicros": 1,
+        "files": [
+          "root/file.txt",
+          "root",
+          "root",
+          "Album/Disc 2/Track 03.flac",
+          "Album/Disc 1/Track 02.flac",
+          "Album/Disc 1/Track 01.flac",
+          "Album/Disc 1/Track 02.flac",
+          "   "
+        ],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'01':10 '0123456789abcdef0123456789abcdef01234567':1A '02':13 '03':17 '1':8 '2':15 'album':6 'disc':7 'file':21 'flac':11 'matrix':4A 'path':3A 'root':19 'track':9,16 'txt':22"
+    }
+  },
+  {
+    "id": "paths-utf8-prefix-split",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "UTF Prefix",
+        "createdAtMicros": 1,
+        "files": [
+          "一alpha",
+          "丁bravo"
+        ],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'Yi':6 'alpha':7 'bravo':9 'prefix':4A 'utf':3A"
+    }
+  },
+  {
+    "id": "paths-utf8-suffix-split",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "UTF Suffix",
+        "createdAtMicros": 1,
+        "files": [
+          "Aé",
+          "BΩ"
+        ],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'ae':6 'b':8 'suffix':4A 'utf':3A"
+    }
+  },
+  {
+    "id": "paths-overlong-lexeme-then-normal",
+    "input": {
+      "torrent": {
+        "infoHash": "0123456789abcdef0123456789abcdef01234567",
+        "name": "Bounded Path",
+        "createdAtMicros": 1,
+        "files": [
+          "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz/keep.mkv"
+        ],
+        "sources": []
+      },
+      "classification": {
+        "contentType": "movie",
+        "videoResolution": null,
+        "videoSource": null,
+        "videoCodec": null,
+        "video3d": null,
+        "videoModifier": null,
+        "releaseGroup": null
+      }
+    },
+    "expected": {
+      "seeders": null,
+      "leechers": null,
+      "publishedAtMicros": 1,
+      "tsv": "'0123456789abcdef0123456789abcdef01234567':1A 'bounded':3A 'keep':6 'mkv':7 'path':4A"
+    }
+  }
+]

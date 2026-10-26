@@ -15,6 +15,10 @@ type TorrentFilesSearch interface {
 }
 
 func (s search) TorrentFiles(ctx context.Context, options ...query.Option) (TorrentFilesResult, error) {
+	if err := FeatureFlagsValue().CheckLegacyTorrentFilesReadAllowed("Search.TorrentFiles"); err != nil {
+		return TorrentFilesResult{}, err
+	}
+
 	return query.GenericQuery[model.TorrentFile](
 		ctx,
 		s.q,

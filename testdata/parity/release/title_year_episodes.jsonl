@@ -1,0 +1,15 @@
+{"id":"movie_year","name":"The.Matrix.1999.1080p.BluRay.x264-GROUP","hint":"","matched":true,"title":"The Matrix","year":1999,"episodes":"","rest":"1080p.BluRay.x264-GROUP"}
+{"id":"movie_year_dots","name":"Inception.2010.720p.mkv","hint":"","matched":true,"title":"Inception","year":2010,"episodes":"","rest":"720p.mkv"}
+{"id":"tv_episode","name":"Breaking.Bad.S01E01.720p.HDTV.x264","hint":"","matched":true,"title":"Breaking Bad","year":0,"episodes":"S01E01","rest":".720p.HDTV.x264"}
+{"id":"tv_hint","name":"Breaking.Bad.S01E01.720p.HDTV.x264","hint":"tv_show","matched":true,"title":"Breaking Bad","year":0,"episodes":"S01E01","rest":".720p.HDTV.x264"}
+{"id":"tv_xformat","name":"The.Show.1x05.HDTV","hint":"","matched":true,"title":"The Show","year":0,"episodes":"S01E05","rest":".HDTV"}
+{"id":"movie_hint","name":"Some.Movie.2020.1080p","hint":"movie","matched":true,"title":"Some Movie","year":2020,"episodes":"","rest":"1080p"}
+{"id":"no_year_no_ep","name":"Just.A.Title.Here.mkv","hint":"","matched":true,"title":"Just A Title Here mkv","year":0,"episodes":"","rest":""}
+{"id":"title_year_ep","name":"Show.Name.2019.S02E03.1080p","hint":"","matched":true,"title":"Show Name","year":2019,"episodes":"S02E03","rest":".1080p"}
+{"id":"bracketed","name":"[Group].Movie.Title.2018.1080p","hint":"","matched":true,"title":"Movie Title","year":2018,"episodes":"","rest":"1080p"}
+{"id":"season_only","name":"The.Series.S03.COMPLETE.1080p","hint":"","matched":true,"title":"The Series","year":0,"episodes":"S03","rest":".COMPLETE.1080p"}
+{"id":"year_in_title","name":"2012.2009.720p.BluRay","hint":"","matched":true,"title":"2012","year":2009,"episodes":"","rest":"720p.BluRay"}
+{"id":"cjk_bracket","name":"【字幕组】The.Movie.2021.1080p","hint":"","matched":true,"title":"The Movie","year":2021,"episodes":"","rest":"1080p"}
+{"id":"apostrophe","name":"Ocean's.Eleven.2001.720p","hint":"","matched":true,"title":"Ocean's Eleven","year":2001,"episodes":"","rest":"720p"}
+{"id":"hyphen_title","name":"Spider-Man.2002.1080p.BluRay","hint":"","matched":true,"title":"Spider-Man","year":2002,"episodes":"","rest":"1080p.BluRay"}
+{"id":"tv_range","name":"Show.S01E01-E05.720p","hint":"","matched":true,"title":"Show","year":0,"episodes":"S01E01-05","rest":".720p"}

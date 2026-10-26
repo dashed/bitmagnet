@@ -1,0 +1,58 @@
+# Throwaway dev/bench crate for the file-grained Tantivy index smoke pass.
+# NOT a member of the bitmagnet-rs workspace (own [workspace] table below makes
+# it a standalone single-crate workspace), so it modifies no app crate. It
+# path-depends on the shipped crates purely to reuse their public APIs:
+#   - bitmagnet-db::stream_torrents_with_files  (the real data source)
+#   - bitmagnet-model::{deserialize_files, file_extension_from_path, ...}
+# See docs/dev/file-index-size-latency-bench-spec.md.
+[package]
+name = "bitmagnet-search-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "bench-file-index"
+path = "src/main.rs"
+
+[workspace]
+
+# EXP-D `lindera` path tokenizer is OPTIONAL and OFF by default, so a heavy or
+# tantivy-incompatible lindera build can NEVER block the dict-free
+# default-vs-ngram core (the claim-proving result). Build it with:
+#   cargo build --release --features lindera
+# If lindera-tantivy does not resolve against tantivy 0.26, leave it off and the
+# `--tokenizer lindera` arm errors cleanly (see schema::register_path_tokenizer).
+#
+# STATUS 2026-06-07: SKIPPED — lindera-tantivy 0.43 transitively pins
+# `tantivy-tokenizer-api 0.5.0`, but tantivy 0.26.1 uses `0.7.0`. The two
+# `Tokenizer` traits differ, so `TextAnalyzer::from(LinderaTokenizer)` fails to
+# compile (E0277, "multiple versions of tantivy_tokenizer_api"). No published
+# lindera-tantivy was found that targets tokenizer-api 0.7 / tantivy 0.26. The
+# dict-free default-vs-ngram result (which proves the CJK claim) is unaffected.
+# To revisit: find/patch a lindera-tantivy release built against tantivy 0.26.
+[features]
+default = []
+lindera = ["dep:lindera-tantivy"]
+
+[dependencies]
+bitmagnet-db = { path = "../bitmagnet-rs/crates/bitmagnet-db" }
+bitmagnet-model = { path = "../bitmagnet-rs/crates/bitmagnet-model" }
+bitmagnet-common = { path = "../bitmagnet-rs/crates/bitmagnet-common" }
+tantivy = "0.26"
+# Optional CJK morphological tokenizer (feature `lindera`, off by default).
+# Pulls an embedded IPADIC dictionary; version chosen to track tantivy 0.26.
+lindera-tantivy = { version = "0.43", optional = true, features = ["ipadic"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+# Direct sqlx for the torrent_files-direct source (the dump predates the blob
+# backfill → blobs empty, torrent_files fully present). Same features as the
+# bitmagnet-rs workspace pin so it shares the already-compiled artifact.
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "macros",
+] }

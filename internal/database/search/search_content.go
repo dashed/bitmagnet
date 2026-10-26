@@ -95,7 +95,9 @@ func ContentDefaultPreload() query.Option {
 	return query.Preload(func(query *dao.Query) []field.RelationField {
 		return []field.RelationField{
 			query.Content.MetadataSource.RelationField,
-			query.Content.Attributes.RelationField,
+			// Ordered, because the attribute order decides tsvector positions;
+			// see ContentAttributeOrderBy.
+			query.Content.Attributes.Clauses(ContentAttributeOrderBy()),
 			query.Content.Attributes.MetadataSource.RelationField,
 		}
 	})

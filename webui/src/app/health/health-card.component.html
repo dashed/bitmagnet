@@ -14,6 +14,12 @@
           }}
         </h3>
       </mat-card-title>
+      @if (health.result.lastUpdatedAt) {
+        <mat-card-subtitle>
+          {{ t("dashboard.live.last_updated") }}
+          {{ health.result.lastUpdatedAt | timeAgo }}
+        </mat-card-subtitle>
+      }
     </mat-card-header>
     <mat-card-content class="dashboard-card-content">
       <app-health-summary></app-health-summary>

@@ -5,6 +5,7 @@ import { ChartComponent } from "../../charting/chart.component";
 import { BreakpointsService } from "../../layout/breakpoints.service";
 import { ErrorsService } from "../../errors/errors.service";
 import { AppModule } from "../../app.module";
+import { MetricsLiveStatusComponent } from "../metrics-live-status.component";
 import {
   autoRefreshIntervalNames,
   defaultBucketParams,
@@ -20,7 +21,12 @@ import { TorrentChartAdapterTimeline } from "./torrent-chart-adapter.timeline";
   standalone: true,
   templateUrl: "./torrent-metrics.component.html",
   styleUrl: "./torrent-metrics.component.scss",
-  imports: [AppModule, ChartComponent, GraphQLModule],
+  imports: [
+    AppModule,
+    ChartComponent,
+    GraphQLModule,
+    MetricsLiveStatusComponent,
+  ],
 })
 export class TorrentMetricsComponent implements OnDestroy {
   breakpoints = inject(BreakpointsService);
@@ -29,7 +35,7 @@ export class TorrentMetricsComponent implements OnDestroy {
     this.apollo,
     {
       buckets: defaultBucketParams,
-      autoRefresh: "seconds_30",
+      autoRefresh: "seconds_10",
     },
     inject(ErrorsService),
   );

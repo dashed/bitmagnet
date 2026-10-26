@@ -1,0 +1,89 @@
+input FileSearchInput {
+  query: String
+  extensions: [String!]
+  minSize: Int
+  maxSize: Int
+  infoHash: Hash20
+  sort: [FileSearchSortInput!]
+  limit: Int
+  offset: Int
+  """
+  When false, skip the exact L2 count RPC and return totalCount as 0.
+  Omitted defaults to true for compatibility with existing callers.
+  """
+  totalCount: Boolean
+}
+
+input FileSearchSortInput {
+  field: String!
+  descending: Boolean
+}
+
+type FileSearchItem {
+  infoHash: Hash20!
+  index: Int!
+  path: String!
+  extension: String!
+  size: Int!
+  torrentContent: TorrentContent!
+}
+
+type FileSearchResult {
+  totalCount: Int!
+  """
+  totalCountIsEstimate is true when totalCount is an approximation rather than an
+  exact matching-file count. The L3 pathsearch text route returns candidate_total
+  (a torrent-doc recall upper bound), so it is true; the L2 sidecar route counts
+  files exactly, so it is false. Mirrors TorrentContentSearchResult.
+  """
+  totalCountIsEstimate: Boolean!
+  hasNextPage: Boolean!
+  items: [FileSearchItem!]!
+}
+
+input PathTypeaheadInput {
+  prefix: String!
+  limit: Int
+}
+
+type PathTypeaheadResult {
+  suggestions: [String!]!
+}
+
+enum FileFacetField {
+  extension
+}
+
+input FileSearchFacetsInput {
+  query: String
+  extensions: [String!]
+  minSize: Int
+  maxSize: Int
+  """
+  Which facet fields to aggregate. v1 supports only `extension`; unknown values
+  are ignored. Omitted/empty requests the default set (extension).
+  """
+  facets: [FileFacetField!]
+}
+
+"""
+One aggregated facet value and its exact match count. totalSize is the summed
+byte size of the matching files in the bucket. isEstimate mirrors the
+torrentContent aggregation contract; L2 facet counts are exact so it is always
+false in v1.
+"""
+type FileFacetBucketAgg {
+  value: String!
+  count: Int!
+  totalSize: Int!
+  isEstimate: Boolean!
+}
+
+type FileFacetAgg {
+  field: FileFacetField!
+  buckets: [FileFacetBucketAgg!]!
+}
+
+type FileSearchFacetsResult {
+  facets: [FileFacetAgg!]!
+}

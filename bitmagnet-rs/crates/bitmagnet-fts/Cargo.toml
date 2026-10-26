@@ -1,0 +1,13 @@
+[package]
+name = "bitmagnet-fts"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# `Tsvector` is a field of `bitmagnet_model::Content`, which is (de)serialised
+# via serde/MessagePack, so the vector itself must round-trip.
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

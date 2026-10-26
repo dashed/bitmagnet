@@ -52,10 +52,11 @@ type crawler struct {
 	blockingManager blocking.Manager
 	// soughtNodeID is a random node ID used as the target for find_node and sample_infohashes requests.
 	// It is rotated every 10 seconds.
-	soughtNodeID   *concurrency.AtomicValue[protocol.ID]
-	stopped        chan struct{}
-	persistedTotal *prometheus.CounterVec
-	logger         *zap.SugaredLogger
+	soughtNodeID    *concurrency.AtomicValue[protocol.ID]
+	stopped         chan struct{}
+	persistedTotal  *prometheus.CounterVec
+	torrentsDropped *prometheus.CounterVec
+	logger          *zap.SugaredLogger
 }
 
 func (c *crawler) start() {
@@ -87,7 +88,7 @@ type nodeHasPeersForHash struct {
 
 type infoHashWithMetaInfo struct {
 	nodeHasPeersForHash
-	metaInfo metainfo.Info
+	metaInfo metainfo.ParsedInfo
 }
 
 type infoHashWithPeers struct {

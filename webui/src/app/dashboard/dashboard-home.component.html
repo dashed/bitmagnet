@@ -1,20 +1,42 @@
 <ng-container *transloco="let t">
   <app-document-title [parts]="[t('routes.dashboard')]" />
-  <mat-card class="dashboard-card">
-    <mat-card-header>
-      <mat-toolbar>
-        <h2><mat-icon>dashboard</mat-icon>{{ t("routes.dashboard") }}</h2>
-      </mat-toolbar>
-    </mat-card-header>
-    <mat-card-content>
-      <mat-divider></mat-divider>
-      <div class="grid-container">
-        <mat-grid-list cols="1" rowHeight="500px">
-          <mat-grid-tile [colspan]="1" [rowspan]="1">
-            <app-health-card></app-health-card>
-          </mat-grid-tile>
-        </mat-grid-list>
+  <section class="dashboard-home">
+    <header class="dashboard-header">
+      <div>
+        <h1><mat-icon>dashboard</mat-icon>{{ t("routes.dashboard") }}</h1>
       </div>
-    </mat-card-content>
-  </mat-card>
+      <div class="dashboard-header-actions">
+        <a mat-button routerLink="queues/visualize">
+          <mat-icon>monitoring</mat-icon>{{ t("routes.queues") }}
+        </a>
+        <a mat-button routerLink="torrents">
+          <mat-icon>query_stats</mat-icon>{{ t("routes.torrents") }}
+        </a>
+      </div>
+    </header>
+
+    <div class="dashboard-layout">
+      <app-health-card></app-health-card>
+      <div class="dashboard-shortcuts">
+        <a class="shortcut-card" routerLink="queues/visualize">
+          <mat-icon>monitoring</mat-icon>
+          <span>
+            <strong>{{ t("dashboard.home.queue_metrics") }}</strong>
+          </span>
+        </a>
+        <a class="shortcut-card" routerLink="queues/jobs">
+          <mat-icon>toc</mat-icon>
+          <span>
+            <strong>{{ t("dashboard.home.queue_jobs") }}</strong>
+          </span>
+        </a>
+        <a class="shortcut-card" routerLink="torrents">
+          <mat-icon>query_stats</mat-icon>
+          <span>
+            <strong>{{ t("dashboard.home.torrent_metrics") }}</strong>
+          </span>
+        </a>
+      </div>
+    </div>
+  </section>
 </ng-container>

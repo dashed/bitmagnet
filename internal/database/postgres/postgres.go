@@ -63,7 +63,17 @@ func New(p Params) (Result, error) {
 			if err != nil {
 				return nil, err
 			}
-			return stdlib.OpenDBFromPool(pool), nil
+
+			db := stdlib.OpenDBFromPool(pool)
+
+			// Match the database/sql layer to the pgx pool so it neither imposes a tighter cap (its
+			// default MaxIdleConns=2 churns connections every chunk) nor exceeds what the pool serves.
+			if p.Config.PoolMaxConns > 0 {
+				db.SetMaxOpenConns(int(p.Config.PoolMaxConns))
+				db.SetMaxIdleConns(int(p.Config.PoolMaxConns))
+			}
+
+			return db, nil
 		}),
 		PgxPoolWait: waitGroup,
 		AppHook: fx.Hook{

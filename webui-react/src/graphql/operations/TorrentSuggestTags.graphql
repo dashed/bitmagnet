@@ -1,0 +1,10 @@
+query TorrentSuggestTags($input: SuggestTagsQueryInput!) {
+  torrent {
+    suggestTags(input: $input) {
+      suggestions {
+        name
+        count
+      }
+    }
+  }
+}
