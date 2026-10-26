@@ -2196,6 +2196,155 @@ async fn a_timed_flush_gives_up_on_a_held_filter_lock_and_keeps_its_buffer() {
     );
 }
 
+/// An error and its sources, outermost first, as `anyhow` prints them.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+    std::iter::successors(Some(error), |error| error.source())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Sessions of the test database inside a transaction, and advisory locks
+/// held or awaited, other than the session asking.
+async fn open_transactions_and_advisory_locks(pool: &PgPool) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT \
+           (SELECT count(*) FROM pg_stat_activity \
+            WHERE datname = current_database() AND pid <> pg_backend_pid() \
+              AND state LIKE 'idle in transaction%'), \
+           (SELECT count(*) FROM pg_locks \
+            WHERE locktype = 'advisory' AND pid <> pg_backend_pid())",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read open transactions and advisory locks")
+}
+
+/// A flush that outlives the flush timeout, here waiting on the filter's
+/// advisory lock that another process holds, is abandoned at the timeout,
+/// well before the server's 5 s `lock_timeout`: a timed one is counted and a
+/// shutdown one fails with the error the binary exits with, and both keep the
+/// buffer. Each abandoned transaction still waits on the server until the lock
+/// is free, then rolls back and releases it.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn a_flush_past_the_flush_timeout_is_abandoned_and_keeps_its_buffer() {
+    const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+    let pool = connect().await;
+    reset(&pool).await;
+    // The lock holder and every check use their own pool.
+    let observer = connect().await;
+    let manager =
+        PersistentBlockingManager::with_max_flush_wait(pool.clone(), Duration::from_secs(3_600));
+    let registry = prometheus::Registry::new();
+    let failures = bitmagnet_processor::register_blocking_failure_metrics(&registry).unwrap();
+    let worker = ProcessTorrentWorker::new(
+        QueueStore::new(pool.clone()),
+        Materializer::from_core().expect("compile embedded classifier"),
+        Arc::new(manager.clone()),
+        ProcessTorrentWorkerConfig {
+            flush_timeout: FLUSH_TIMEOUT,
+            ..fast_config()
+        },
+    )
+    .with_blocking_failure_metrics(failures.clone())
+    .with_timed_blocking_flush(Arc::new(manager.clone()), Duration::from_millis(100));
+    for (banned, kept) in [(HASH_A, HASH_B), (HASH_BANNED_LATER, HASH_KEPT_LATER)] {
+        let id = enqueue_blocking_job(&pool, banned, kept).await;
+        worker.run_once().await.unwrap();
+        assert_eq!(job_status(&pool, &id).await, "processed");
+    }
+    let before = filter_object_versions(&observer).await;
+
+    let mut holder = observer.begin().await.expect("begin the lock holder");
+    sqlx::query(
+        "SELECT pg_catalog.pg_advisory_xact_lock(\
+         pg_catalog.hashtextextended('bloom_filters:blocked_torrents', 0))",
+    )
+    .execute(&mut *holder)
+    .await
+    .expect("hold the filter's advisory lock");
+    let started = tokio::time::Instant::now();
+    let timeouts = failures.with_label_values(&["other", "none"]);
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.run_until(async {
+            while timeouts.get() == 0 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }),
+    )
+    .await
+    .expect("a timed flush times out");
+    let waited = started.elapsed();
+    assert!(
+        (FLUSH_TIMEOUT..Duration::from_secs(3)).contains(&waited),
+        "{waited:?}"
+    );
+    let counted: BTreeMap<String, u64> = scraped_blocking_failures(&registry)
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .collect();
+    assert_eq!(
+        counted,
+        BTreeMap::from([("op=\"other\",sqlstate_class=\"none\"".to_owned(), 1)])
+    );
+
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        worker.run_then_flush(std::future::ready(()), &manager),
+    )
+    .await
+    .expect("the shutdown flush ends")
+    .expect_err("the shutdown flush times out");
+    let waited = started.elapsed();
+    assert!(
+        (FLUSH_TIMEOUT..Duration::from_secs(3)).contains(&waited),
+        "{waited:?}"
+    );
+    assert_eq!(
+        error_chain(&error),
+        [
+            "flushing blocked info hashes on shutdown",
+            "blocking flush timed out after 1s",
+        ]
+    );
+    assert_eq!(filter_object_versions(&observer).await, before);
+    // Both abandoned flushes still wait for the lock on the server.
+    let (_, advisory) = open_transactions_and_advisory_locks(&observer).await;
+    assert_eq!(advisory, 1 + 2, "the holder's lock and two waiters");
+
+    holder.rollback().await.expect("release the lock");
+    let settled = async {
+        loop {
+            if open_transactions_and_advisory_locks(&observer).await == (0, 0) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the abandoned flushes roll back and release the lock");
+    assert_eq!(filter_object_versions(&observer).await, before);
+
+    // The buffer was kept.
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 1
+        }
+    );
+    let hashes = [HASH_BANNED_LATER, HASH_KEPT_LATER].map(|hash| hash.parse().unwrap());
+    assert_eq!(
+        PersistentBlockingManager::new(pool.clone())
+            .filter(&hashes)
+            .await
+            .unwrap(),
+        [HASH_KEPT_LATER.parse::<InfoHash>().unwrap()]
+    );
+}
+
 // --- The flags-on switch ---------------------------------------------------
 
 const FLAGS_ON: &str =

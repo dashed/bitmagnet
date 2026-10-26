@@ -405,7 +405,7 @@ stopping the queue server cancels the handler's context, the settle update
 fails, and the claim rolls back. Side effects the writer already committed stay
 in place, and the next run of the job redoes them. The deployment's 60-second
 `terminationGracePeriodSeconds` covers the 20-second default plus the final
-blocking-manager flush, which the server bounds (below). Without the bound, a
+blocking-manager flush, which the worker bounds (below). Without the bound, a
 job could run for up to its ten-minute timeout and be `SIGKILL`ed mid-write,
 without the flush.
 
@@ -444,12 +444,11 @@ the already-deleted torrents is a no-op. Deliberate differences from Go:
   flush interval`, with the step, SQLSTATE and cause chain but no job ID, and
   counted in `bitmagnet_process_torrent_worker_blocking_failures_total`.
 - Shutdown never cuts a timed flush short. One in flight when `SIGTERM`
-  arrives completes, nothing more is claimed, and `run_until` returns. The
-  binary's shutdown flush (`run_then_flush`, logged at info as `flushed
-  buffered whole-torrent blocks on shutdown` when it commits) then finds only
-  what is still buffered: the two never overlap or repeat a commit.
+  arrives completes (or times out, below), nothing more is claimed, and
+  `run_until` returns. The binary's shutdown flush (`run_then_flush`) then
+  finds only what is still buffered; the worker never runs the two at once.
 - Every blocking-store transaction (a job's `block` flush, a timed flush, or
-  the shutdown flush) bounds itself with `lock_timeout` 5 s and
+  the shutdown flush) bounds its statements with `lock_timeout` 5 s and
   `statement_timeout` 10 s, set for that transaction only; the role's settings
   are untouched. Go sets neither and waits as long as the server does.
   Rewriting the 25 MB filter takes about 0.15 s on HEL1's NVMe (`lo_get`
@@ -458,9 +457,38 @@ the already-deleted torrents is a no-op. Deliberate differences from Go:
   a flush fails like any other and keeps its buffer: a lock timeout (`55P03`)
   is counted under `sqlstate_class="other"`, a statement timeout (`57014`)
   under `"57"`, and a job whose `block` flush fails this way is retried with
-  Go's text. A stuck flush thus ends within about 10 s, and shutdown takes at
-  most the 20 s job grace or one timed flush in flight, then the final flush
-  and up to the pool's 5 s acquire timeout: about 35 s of the 60 s grace.
+  Go's text.
+- The server bounds are per statement, not per flush: `statement_timeout`
+  restarts with every statement, and PostgreSQL 16 has no
+  `transaction_timeout`. A flush runs about eight statements (`BEGIN`, the
+  bounds, the `DELETE`, the lock, the `oid` lookup, `lo_get`, `lo_put`,
+  `COMMIT`), so after the pool's 5 s acquire timeout a pathological server
+  could hold one for over a minute. The worker therefore abandons a timed or
+  shutdown flush after `flush_timeout`, 15 s: one full acquire wait plus one
+  statement stalled to its bound. An abandoned flush keeps its buffer, as a
+  failed one does. Timed, it is logged as `blocking whole-torrent deletes
+  failed on the flush interval` with `error=blocking flush timed out after
+  15s` and counted under `op="other",sqlstate_class="none"` (no step and no
+  SQLSTATE: the label set is unchanged). Abandoning is safe: the manager
+  changes its buffer and filter only after `COMMIT` returns. SQLx queues a
+  `ROLLBACK` for the dropped transaction, and its connection rejoins the pool
+  only after the server has ended the abandoned statement (within the server
+  bounds) and rolled back, which also releases the filter's advisory lock; a
+  later flush waits on that lock meanwhile. If the timeout lands after a
+  `COMMIT` the server completes, the next flush adds the same hashes again,
+  which the filter absorbs. A job's own `block` flush has no client timeout:
+  the job timeout and the shutdown grace bound it.
+- Shutdown takes at most the 20 s job grace or one timed flush in flight
+  (15 s), then the final flush (15 s): 35 s of the deployment's 60 s
+  `terminationGracePeriodSeconds`.
+- Every graceful shutdown leaves exactly one sign of how its final flush
+  ended: `flushed buffered whole-torrent blocks on shutdown` with
+  `unique_hash_count` (info) when it commits, `no buffered whole-torrent
+  blocks to flush on shutdown` (info) when nothing is buffered, or, when it
+  fails or times out, the binary's exit error `flushing blocked info hashes on
+  shutdown` with its cause chain. A worker that leaves none of the three was
+  killed before its flush ended, and whatever it had buffered is not in the
+  filter.
 
 With a healthy store the timer changes no job outcome, row text, or label: it
 only moves earlier a filter update that a later `block` or the shutdown flush

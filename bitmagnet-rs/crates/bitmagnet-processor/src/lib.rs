@@ -65,9 +65,10 @@ pub use shadow::{
 };
 pub use supported_subset::{check_payload_key_set, PayloadKeySetError};
 pub use worker::{
-    register_blocking_failure_metrics, register_worker_metrics, ProcessTorrentWorker,
-    ProcessTorrentWorkerConfig, DEFAULT_ABSTAIN_COOLOFF, DEFAULT_CHECK_INTERVAL,
-    DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED, DEFAULT_SHUTDOWN_GRACE,
+    register_blocking_failure_metrics, register_worker_metrics, FlushError, ProcessTorrentWorker,
+    ProcessTorrentWorkerConfig, ShutdownFlushError, DEFAULT_ABSTAIN_COOLOFF,
+    DEFAULT_CHECK_INTERVAL, DEFAULT_FLUSH_TIMEOUT, DEFAULT_JOB_TIMEOUT, DEFAULT_MAX_EXCLUDED,
+    DEFAULT_SHUTDOWN_GRACE,
 };
 pub use writer_compare::{
     WriterCompareError, WriterComparison, WriterDriftField, WriterRowComparison,

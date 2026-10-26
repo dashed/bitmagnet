@@ -190,6 +190,7 @@ async fn main() -> Result<()> {
         organic_max_priority: organic_max_priority(&args),
         ..ProcessTorrentWorkerConfig::default()
     };
+    let flush_timeout = config.flush_timeout;
     let worker = ProcessTorrentWorker::new(
         QueueStore::new(pool.clone()),
         materializer(&args, &pool)?
@@ -217,16 +218,17 @@ async fn main() -> Result<()> {
         job_timeout_seconds = args.job_timeout_seconds,
         shutdown_grace_seconds = args.shutdown_grace_seconds,
         blocking_flush_interval_seconds = blocking_manager.max_flush_wait().as_secs(),
+        blocking_flush_timeout_seconds = flush_timeout.as_secs(),
         "starting persisting Rust process_torrent worker"
     );
-    // The flush runs before the pool closes.
+    // The flush runs before the pool closes. Its error reads `flushing blocked
+    // info hashes on shutdown`, which the rollback runbook searches for.
     worker
         .run_then_flush(
             bitmagnet_common::serve::shutdown_signal(),
             &blocking_manager,
         )
-        .await
-        .context("flushing blocked info hashes on shutdown")?;
+        .await?;
     Ok(())
 }
 

@@ -31,15 +31,16 @@ const ENCODED_BYTES: usize = 25_000_091;
 const BOUNDED_READ_BYTES: usize = ENCODED_BYTES + 1;
 
 const BEGIN_TRANSACTION_SQL: &str = "BEGIN READ WRITE";
-/// Bounds one flush on the server, for its transaction only; the role's
-/// settings are untouched. Waiting over 5 s for a lock (the filter's advisory
-/// lock, which another process's flush holds for its own read-modify-write,
-/// or a row lock) or running any statement over 10 s aborts the flush, which
-/// keeps its buffer for the next. Rewriting the 25 MB filter takes about
-/// 0.15 s on HEL1's NVMe (`lo_get` 11-15 ms, `lo_put` 106-112 ms, commit
-/// 2-30 ms), so 10 s leaves ample headroom for a contended disk. A stuck
-/// flush therefore ends within about 10 s, and shutdown (the job's 20 s grace
-/// or a flush in flight, then the final flush) fits a 60 s grace.
+/// Bounds each statement of one flush on the server, for its transaction
+/// only; the role's settings are untouched. Waiting over 5 s for a lock (the
+/// filter's advisory lock, which another process's flush holds for its own
+/// read-modify-write, or a row lock) or running any one statement over 10 s
+/// aborts the flush, which keeps its buffer for the next. Rewriting the 25 MB
+/// filter takes about 0.15 s on HEL1's NVMe (`lo_get` 11-15 ms, `lo_put`
+/// 106-112 ms, commit 2-30 ms), so 10 s leaves ample headroom for a contended
+/// disk. The bound restarts with every statement (PostgreSQL 16 has no
+/// `transaction_timeout`), so it does not bound the whole flush: a caller
+/// that needs that bound times the flush out itself, as the worker does.
 const BOUND_TRANSACTION_SQL: &str = "SELECT pg_catalog.set_config('lock_timeout', '5s', true), \
     pg_catalog.set_config('statement_timeout', '10s', true)";
 const DELETE_TORRENTS_SQL: &str = "DELETE FROM public.torrents WHERE info_hash = ANY($1::bytea[])";
