@@ -478,6 +478,22 @@ the already-deleted torrents is a no-op. Deliberate differences from Go:
   `COMMIT` the server completes, the next flush adds the same hashes again,
   which the filter absorbs. A job's own `block` flush has no client timeout:
   the job timeout and the shutdown grace bound it.
+- A failed or abandoned flush leaves the manager's last-flush time where the
+  last successful flush set it, as Go's does (`lastFlushedAt` is set only
+  after `COMMIT`). Once `max_flush_wait` has passed since that success, every
+  `block` is due, so during a stall every job that blocks something (a mixed
+  batch with deletions) flushes in its own attempt. Each such attempt fails
+  with `blocking whole-torrent deletes failed`, is counted per attempt, and
+  is retried with Go's backoff. Its torrents stay, because its `DELETE`
+  rolls back with the flush, and its hashes stay buffered. The timed flush
+  fails each period alongside. Such a job attempt is not under `flush_timeout`:
+  it waits for the server bounds on the statement that is stuck, typically
+  5 s for a held lock or 10 s for a stalled statement after an acquire of up
+  to 5 s, and on a pathological server up to about 10 s per statement. Only
+  the 600 s job timeout caps the attempt as a whole, and at shutdown the 20 s
+  grace. Go's attempts fail the same way, but without server bounds. The
+  first flush that succeeds, timed or a job's, resets the last-flush time,
+  and later blocks buffer again.
 - Shutdown takes at most the 20 s job grace or one timed flush in flight
   (15 s), then the final flush (15 s): 35 s of the deployment's 60 s
   `terminationGracePeriodSeconds`.
