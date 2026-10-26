@@ -7,10 +7,11 @@
 //!
 //! Construction does not connect to PostgreSQL, create or migrate its schema,
 //! or validate large-object permissions. The manager supplies only in-process
-//! serialization: it adds no cross-process locking, automatic retry, shutdown
-//! flush, consumer wiring, or application lifecycle registration. An ambiguous
-//! commit outcome is reported as failure and never publishes new in-memory
-//! state, but this is not a claim that the server could not have committed.
+//! serialization: it adds no cross-process locking, automatic retry, timed or
+//! shutdown flush, consumer wiring, or application lifecycle registration. An
+//! ambiguous commit outcome is reported as failure and never publishes new
+//! in-memory state, but this is not a claim that the server could not have
+//! committed.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -211,7 +212,18 @@ impl BlockingManager {
     /// first policy operation that needs a checkpoint performs the transaction.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        let config = BlockingConfig::default();
+        Self::with_max_flush_wait(pool, DEFAULT_MAX_FLUSH_WAIT)
+    }
+
+    /// Construct a PostgreSQL-backed blocking manager whose operations flush
+    /// once `max_flush_wait` has passed since the last flush (Go's is five
+    /// minutes), keeping Go's buffer bound.
+    #[must_use]
+    pub fn with_max_flush_wait(pool: PgPool, max_flush_wait: Duration) -> Self {
+        let config = BlockingConfig {
+            max_flush_wait,
+            ..BlockingConfig::default()
+        };
         let clock: Arc<dyn BlockingClock> = Arc::new(SystemBlockingClock);
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -256,6 +268,14 @@ impl BlockingManager {
             flush_locked(&mut inner).await?;
         }
         Ok(())
+    }
+
+    /// The delay after a flush past which the next operation flushes too.
+    /// Nothing flushes a buffered hash on time alone: a caller without
+    /// frequent operations finalizes on this period itself.
+    #[must_use]
+    pub const fn max_flush_wait(&self) -> Duration {
+        self.config.max_flush_wait
     }
 
     /// Persist a non-empty buffer, discarding the typed finalization outcome.

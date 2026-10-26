@@ -281,7 +281,17 @@ impl BlockingFailure {
         let PersistError::Blocking(source) = error else {
             return None;
         };
-        let source: &(dyn Error + 'static) = &**source;
+        Some(Self::of_source(&**source))
+    }
+
+    /// The cause of a failed flush called on the blocking manager directly,
+    /// such as the worker's timed flush.
+    #[must_use]
+    pub fn of_flush(error: &BlockingError) -> Self {
+        Self::of_source(error)
+    }
+
+    fn of_source(source: &(dyn Error + 'static)) -> Self {
         let op = source
             .downcast_ref::<BlockingError>()
             .and_then(BlockingError::store_op);
@@ -305,11 +315,11 @@ impl BlockingFailure {
             chain.push(error.to_string());
             next = error.source();
         }
-        Some(Self {
+        Self {
             op,
             sqlstate,
             error: chain.join(": "),
-        })
+        }
     }
 }
 

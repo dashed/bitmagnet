@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bitmagnet_blocking::BlockingManager as PersistentBlockingManager;
+use bitmagnet_blocking::{
+    BlockingFinalizeOutcome, BlockingFinalizer, BlockingManager as PersistentBlockingManager,
+};
 use bitmagnet_classifier::resolver::tmdb;
 use bitmagnet_classifier::{ContentResolver, ContentResultItem, ResolveError};
 use bitmagnet_content_search::PgContentSearch;
@@ -1575,6 +1577,280 @@ async fn a_blocking_failure_logs_and_counts_its_cause_and_keeps_gos_job_text() {
             .await
             .unwrap_or_else(|error| panic!("`{sql}`: {error}"));
     }
+}
+
+// --- The timed blocking flush ------------------------------------------------
+
+/// A later job's banned torrent and the torrent it is batched with.
+const HASH_BANNED_LATER: &str = "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7";
+const HASH_KEPT_LATER: &str = "b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8";
+
+/// Seed and enqueue a job that blocks and deletes `banned` beside a torrent
+/// that classifies (Go acknowledges a deletion-only batch without blocking).
+async fn enqueue_blocking_job(pool: &PgPool, banned: &str, kept: &str) -> String {
+    seed_torrent(pool, banned, BANNED_NAME, 1_000).await;
+    seed_torrent(pool, kept, "Synthetic Story.m4b", 60_000_000).await;
+    enqueue(
+        &QueueStore::new(pool.clone()),
+        &supported_params(&[banned, kept]),
+    )
+    .await
+}
+
+fn worker_blocking_with(
+    pool: &PgPool,
+    manager: &PersistentBlockingManager,
+) -> ProcessTorrentWorker {
+    ProcessTorrentWorker::new(
+        QueueStore::new(pool.clone()),
+        Materializer::from_core().expect("compile embedded classifier"),
+        Arc::new(manager.clone()),
+        fast_config(),
+    )
+}
+
+async fn torrent_exists(pool: &PgPool, info_hash: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT FROM torrents WHERE info_hash = decode($1, 'hex'))")
+        .bind(info_hash)
+        .fetch_one(pool)
+        .await
+        .expect("read torrent existence")
+}
+
+/// The filter's large-object page versions: every write replaces them, even
+/// one that leaves the bytes unchanged.
+async fn filter_object_versions(pool: &PgPool) -> Vec<String> {
+    let versions: Vec<String> = sqlx::query_scalar(
+        "SELECT xmin::text FROM pg_largeobject \
+         WHERE loid = (SELECT oid FROM bloom_filters WHERE key = 'blocked_torrents') \
+         ORDER BY pageno",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read the filter's large-object pages");
+    assert!(!versions.is_empty(), "the filter has a large object");
+    versions
+}
+
+async fn filter_row_version(pool: &PgPool) -> String {
+    sqlx::query_scalar("SELECT xmin::text FROM bloom_filters WHERE key = 'blocked_torrents'")
+        .fetch_one(pool)
+        .await
+        .expect("read the filter row's version")
+}
+
+async fn job_status(pool: &PgPool, id: &str) -> String {
+    job_row(pool, id).await.status
+}
+
+/// Records each finalization of the manager it wraps.
+struct RecordingFinalizer {
+    manager: PersistentBlockingManager,
+    outcomes: Mutex<Vec<BlockingFinalizeOutcome>>,
+}
+
+#[async_trait]
+impl BlockingFinalizer for RecordingFinalizer {
+    async fn finalize(&self) -> Result<BlockingFinalizeOutcome, bitmagnet_blocking::BlockingError> {
+        let outcome = self.manager.finalize().await?;
+        self.outcomes.lock().expect("outcomes lock").push(outcome);
+        Ok(outcome)
+    }
+}
+
+/// Two blocking jobs inside `max_flush_wait`. Each job deletes its banned
+/// torrent itself, but only the first job's block flushes: the second's hash
+/// stays buffered, out of the persisted filter, until the worker's timed flush
+/// adds it, with no third job and no shutdown. The shutdown flush then finds
+/// nothing to do.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn the_timed_flush_persists_a_later_jobs_blocked_hash_before_shutdown() {
+    const WAIT: Duration = Duration::from_secs(3);
+    let pool = connect().await;
+    reset(&pool).await;
+    let manager = PersistentBlockingManager::with_max_flush_wait(pool.clone(), WAIT);
+    let worker = worker_blocking_with(&pool, &manager)
+        .with_timed_blocking_flush(Arc::new(manager.clone()), manager.max_flush_wait());
+
+    // The manager's first block flushes.
+    let first = enqueue_blocking_job(&pool, HASH_A, HASH_B).await;
+    worker.run_once().await.unwrap();
+    assert_eq!(job_status(&pool, &first).await, "processed");
+    assert!(!torrent_exists(&pool, HASH_A).await);
+    let first_flush = filter_object_versions(&pool).await;
+
+    let second = enqueue_blocking_job(&pool, HASH_BANNED_LATER, HASH_KEPT_LATER).await;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let started = tokio::time::Instant::now();
+    let run = worker.run_until(async {
+        let _ = stopped.await;
+    });
+    tokio::pin!(run);
+
+    // Inside the wait, the second job deletes its banned torrent, as Go's
+    // does, but its block only buffers: the filter is as the first left it.
+    let processed = async {
+        for _ in 0..400 {
+            if job_status(&pool, &second).await == "processed" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for the second job");
+    };
+    tokio::select! {
+        () = run.as_mut() => panic!("the worker loop returned before shutdown"),
+        () = processed => {}
+    }
+    assert!(
+        started.elapsed() < WAIT,
+        "the second job ran inside the wait"
+    );
+    assert!(!torrent_exists(&pool, HASH_BANNED_LATER).await);
+    assert!(torrent_exists(&pool, HASH_KEPT_LATER).await);
+    assert_eq!(filter_object_versions(&pool).await, first_flush);
+
+    // The timed flush rewrites the filter while the loop idles.
+    let rewritten = async {
+        for _ in 0..400 {
+            if filter_object_versions(&pool).await != first_flush {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for the timed flush");
+    };
+    tokio::select! {
+        () = run.as_mut() => panic!("the worker loop returned before shutdown"),
+        () = rewritten => {}
+    }
+    assert!(started.elapsed() >= WAIT, "rewritten by the timed flush");
+    let timed_flush = filter_object_versions(&pool).await;
+    let queued: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM queue_jobs WHERE status IN ('pending', 'retry')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(queued, 0, "no third job");
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the loop stops");
+    // What the binary's shutdown flush does: nothing is left.
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::NothingPending
+    );
+    assert_eq!(filter_object_versions(&pool).await, timed_flush);
+
+    // The persisted filter holds both jobs' blocked hashes.
+    let hashes = [HASH_A, HASH_BANNED_LATER, HASH_KEPT_LATER].map(|hash| hash.parse().unwrap());
+    assert_eq!(
+        PersistentBlockingManager::new(pool.clone())
+            .filter(&hashes)
+            .await
+            .unwrap(),
+        [HASH_KEPT_LATER.parse::<InfoHash>().unwrap()]
+    );
+}
+
+/// A timed flush with nothing buffered neither writes the filter's large
+/// object nor touches its `bloom_filters` row.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn an_empty_timed_flush_writes_nothing() {
+    const WAIT: Duration = Duration::from_millis(200);
+    let pool = connect().await;
+    reset(&pool).await;
+    let manager = PersistentBlockingManager::with_max_flush_wait(pool.clone(), WAIT);
+    let recorder = Arc::new(RecordingFinalizer {
+        manager: manager.clone(),
+        outcomes: Mutex::new(Vec::new()),
+    });
+    let worker = worker_blocking_with(&pool, &manager)
+        .with_timed_blocking_flush(recorder.clone(), manager.max_flush_wait());
+    let id = enqueue_blocking_job(&pool, HASH_A, HASH_B).await;
+    worker.run_once().await.unwrap();
+    assert_eq!(job_status(&pool, &id).await, "processed");
+    let (object, row) = (
+        filter_object_versions(&pool).await,
+        filter_row_version(&pool).await,
+    );
+
+    worker
+        .run_until(async {
+            while recorder.outcomes.lock().expect("outcomes lock").len() < 4 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+    let outcomes = recorder.outcomes.lock().expect("outcomes lock").clone();
+    assert!(
+        outcomes.len() >= 4
+            && outcomes
+                .iter()
+                .all(|outcome| *outcome == BlockingFinalizeOutcome::NothingPending),
+        "{outcomes:?}"
+    );
+    assert_eq!(filter_object_versions(&pool).await, object);
+    assert_eq!(filter_row_version(&pool).await, row);
+}
+
+/// A blocked hash still buffered when the loop stops reaches the filter once,
+/// by the shutdown flush the binary runs after the loop; a second flush finds
+/// nothing.
+#[tokio::test]
+#[ignore = "requires BITMAGNET_PROCESSOR_TEST_DATABASE_URL pointing at disposable migrated PostgreSQL"]
+async fn shutdown_flushes_a_pending_block_exactly_once() {
+    let pool = connect().await;
+    reset(&pool).await;
+    let manager =
+        PersistentBlockingManager::with_max_flush_wait(pool.clone(), Duration::from_secs(3_600));
+    let worker = worker_blocking_with(&pool, &manager)
+        .with_timed_blocking_flush(Arc::new(manager.clone()), manager.max_flush_wait());
+
+    let first = enqueue_blocking_job(&pool, HASH_A, HASH_B).await;
+    worker.run_once().await.unwrap();
+    assert_eq!(job_status(&pool, &first).await, "processed");
+    let before = filter_object_versions(&pool).await;
+    let second = enqueue_blocking_job(&pool, HASH_BANNED_LATER, HASH_KEPT_LATER).await;
+    worker
+        .run_until(async {
+            while job_status(&pool, &second).await != "processed" {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+    assert_eq!(
+        filter_object_versions(&pool).await,
+        before,
+        "still buffered"
+    );
+
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::Flushed {
+            unique_hash_count: 1
+        }
+    );
+    let after = filter_object_versions(&pool).await;
+    assert_ne!(after, before);
+    assert_eq!(
+        manager.finalize().await.unwrap(),
+        BlockingFinalizeOutcome::NothingPending
+    );
+    assert_eq!(filter_object_versions(&pool).await, after);
+
+    let hashes = [HASH_BANNED_LATER, HASH_KEPT_LATER].map(|hash| hash.parse().unwrap());
+    assert_eq!(
+        PersistentBlockingManager::new(pool.clone())
+            .filter(&hashes)
+            .await
+            .unwrap(),
+        [HASH_KEPT_LATER.parse::<InfoHash>().unwrap()]
+    );
 }
 
 // --- The flags-on switch ---------------------------------------------------

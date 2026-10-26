@@ -57,6 +57,12 @@
 //! attempt by step and SQLSTATE class, with a missing grant (`42501`) apart
 //! from the rest of its class: it would otherwise show only as failed jobs.
 //!
+//! The binary also flushes the blocking manager's buffer on its
+//! `max_flush_wait`, between jobs or while idle. A blocked hash then reaches
+//! the persisted filter Go's crawler reads within that period, without
+//! another blocking job or a shutdown. A failed timed flush is logged and
+//! counted the same way, without a job.
+//!
 //! A database error while claiming or settling never stops the worker. Like
 //! Go's `serverHandler`, it logs `error handling job`, waits one check
 //! interval, and polls again; the claim transaction rolls back, so the row is
@@ -68,7 +74,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use bitmagnet_blocking::BlockingStoreOp;
+use bitmagnet_blocking::{BlockingFinalizeOutcome, BlockingFinalizer, BlockingStoreOp};
 use bitmagnet_queue::{
     AdmittedConsumeOutcome, ConsumeOutcome, DequeuedJob, JobVerdict, ProcessTorrentAdmission,
     ProcessTorrentParams, QueuePgError, QueueStore,
@@ -191,6 +197,14 @@ pub struct ProcessTorrentWorker {
     excluded: Mutex<VecDeque<(String, Instant)>>,
     metrics: Option<IntCounterVec>,
     blocking_failures: Option<IntCounterVec>,
+    timed_flush: Option<TimedFlush>,
+}
+
+/// The blocking manager's flush on a timer: see
+/// [`ProcessTorrentWorker::with_timed_blocking_flush`].
+struct TimedFlush {
+    finalizer: Arc<dyn BlockingFinalizer>,
+    every: Duration,
 }
 
 impl ProcessTorrentWorker {
@@ -209,7 +223,28 @@ impl ProcessTorrentWorker {
             excluded: Mutex::new(VecDeque::new()),
             metrics: None,
             blocking_failures: None,
+            timed_flush: None,
         }
+    }
+
+    /// Flush `finalizer`, the worker's blocking manager, every `every` (the
+    /// manager's `max_flush_wait`) while [`Self::run_until`] runs.
+    ///
+    /// A job deletes the torrents it blocks itself, but the manager adds
+    /// their hashes to the persisted filter only when an operation finds the
+    /// wait elapsed. This worker's only operation is a job's `block`, so
+    /// without the timer a hash stays out of the filter until the next
+    /// blocking job or shutdown. Meanwhile Go's crawler, which reloads the
+    /// filter, can re-admit the torrent. Go's own crawler bounds that with
+    /// frequent `Filter` calls. A zero period leaves it off.
+    #[must_use]
+    pub fn with_timed_blocking_flush(
+        mut self,
+        finalizer: Arc<dyn BlockingFinalizer>,
+        every: Duration,
+    ) -> Self {
+        self.timed_flush = (!every.is_zero()).then_some(TimedFlush { finalizer, every });
+        self
     }
 
     /// Count settled and abstained jobs by `outcome` label, and abstained ones
@@ -277,15 +312,26 @@ impl ProcessTorrentWorker {
     /// claimed again later. This is what Go does when its queue context is
     /// cancelled on stop; side effects already committed by the writer stay,
     /// and the next run of the job redoes them.
+    ///
+    /// With [`Self::with_timed_blocking_flush`], a flush falls due a period
+    /// after the loop starts and after each timed flush, and runs between jobs
+    /// or while idle: never beside a job, so it cannot wait on a `block` that
+    /// job holds, and never cut short by `shutdown`. One in flight at shutdown
+    /// completes before this returns.
     pub async fn run_until<S>(&self, shutdown: S)
     where
         S: Future<Output = ()>,
     {
         tokio::pin!(shutdown);
+        let mut flush_at = self
+            .timed_flush
+            .as_ref()
+            .map(|timed| tokio::time::Instant::now() + timed.every);
         loop {
             if (&mut shutdown).now_or_never().is_some() {
                 return;
             }
+            self.flush_if_due(&mut flush_at).await;
             let run = self.run_once();
             tokio::pin!(run);
             let outcome = tokio::select! {
@@ -297,10 +343,15 @@ impl ProcessTorrentWorker {
                 outcome,
                 Ok(AdmittedConsumeOutcome::Settled(ConsumeOutcome::Empty)) | Err(_)
             ) {
-                tokio::select! {
-                    biased;
-                    () = &mut shutdown => return,
-                    () = tokio::time::sleep(self.config.check_interval) => {}
+                // A timed flush due while idle runs without moving the poll.
+                let poll_at = tokio::time::Instant::now() + self.config.check_interval;
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = &mut shutdown => return,
+                        () = tokio::time::sleep_until(poll_at) => break,
+                        () = sleep_until_some(flush_at) => self.flush_if_due(&mut flush_at).await,
+                    }
                 }
             } else {
                 tokio::task::yield_now().await;
@@ -425,7 +476,7 @@ impl ProcessTorrentWorker {
     fn persist_failure(&self, job_id: &str, error: &PersistWriterPlanError) -> JobVerdict {
         if let PersistWriterPlanError::Persist { source, .. } = error {
             if let Some(failure) = BlockingFailure::of(source) {
-                let op = failure.op.map_or(OTHER_LABEL, BlockingStoreOp::label);
+                let op = self.count_blocking_failure(&failure);
                 tracing::error!(
                     job_id = %job_id,
                     op,
@@ -433,14 +484,53 @@ impl ProcessTorrentWorker {
                     error = %failure.error,
                     "blocking whole-torrent deletes failed"
                 );
-                if let Some(blocking_failures) = &self.blocking_failures {
-                    blocking_failures
-                        .with_label_values(&[op, sqlstate_class(failure.sqlstate.as_deref())])
-                        .inc();
-                }
             }
         }
         go_handler_failure(error)
+    }
+
+    /// Count `failure` by step and SQLSTATE class; returns its `op` label.
+    fn count_blocking_failure(&self, failure: &BlockingFailure) -> &'static str {
+        let op = failure.op.map_or(OTHER_LABEL, BlockingStoreOp::label);
+        if let Some(blocking_failures) = &self.blocking_failures {
+            blocking_failures
+                .with_label_values(&[op, sqlstate_class(failure.sqlstate.as_deref())])
+                .inc();
+        }
+        op
+    }
+
+    /// Flush the blocking manager's buffer if the timed flush is due, then
+    /// schedule the next one a period after it ends. An empty buffer is not
+    /// flushed. A failure keeps the buffer, as a failed `block` does, for the
+    /// next flush, and is logged and counted like a job's.
+    async fn flush_if_due(&self, flush_at: &mut Option<tokio::time::Instant>) {
+        let (Some(timed), Some(at)) = (&self.timed_flush, *flush_at) else {
+            return;
+        };
+        if tokio::time::Instant::now() < at {
+            return;
+        }
+        match timed.finalizer.finalize().await {
+            Ok(BlockingFinalizeOutcome::NothingPending) => {}
+            Ok(BlockingFinalizeOutcome::Flushed { unique_hash_count }) => {
+                tracing::info!(
+                    unique_hash_count,
+                    "flushed buffered whole-torrent blocks on the flush interval"
+                );
+            }
+            Err(error) => {
+                let failure = BlockingFailure::of_flush(&error);
+                let op = self.count_blocking_failure(&failure);
+                tracing::error!(
+                    op,
+                    sqlstate = failure.sqlstate.as_deref(),
+                    error = %failure.error,
+                    "blocking whole-torrent deletes failed on the flush interval"
+                );
+            }
+        }
+        *flush_at = Some(tokio::time::Instant::now() + timed.every);
     }
 
     fn excluded_ids(&self) -> Vec<String> {
@@ -545,7 +635,7 @@ pub fn register_blocking_failure_metrics(
     let counter = IntCounterVec::new(
         prometheus::Opts::new(
             "bitmagnet_process_torrent_worker_blocking_failures_total",
-            "Whole-torrent blocking failures per failed process_torrent attempt, each failing it with `blocking whole-torrent deletes failed`, by failed step (transaction, delete_torrents, bloom_filter, other) and SQLSTATE class (08, 40, 42501 = missing grant, 42 = rest of class 42, 53, 57, other, none)",
+            "Whole-torrent blocking failures per failed process_torrent attempt, each failing it with `blocking whole-torrent deletes failed`, and per failed timed flush, by failed step (transaction, delete_torrents, bloom_filter, other) and SQLSTATE class (08, 40, 42501 = missing grant, 42 = rest of class 42, 53, 57, other, none)",
         ),
         &["op", "sqlstate_class"],
     )?;
@@ -564,6 +654,14 @@ pub fn register_blocking_failure_metrics(
     }
     registry.register(Box::new(counter.clone()))?;
     Ok(counter)
+}
+
+/// Sleep until `at`, or forever without one.
+async fn sleep_until_some(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 fn go_handler_failure(error: &dyn std::fmt::Display) -> JobVerdict {
@@ -991,5 +1089,178 @@ mod tests {
             ["bitmagnet_process_torrent_worker_blocking_failures_total\
                  {op=\"other\",sqlstate_class=\"none\"} 1"]
         );
+    }
+
+    /// A finalizer that returns scripted outcomes, then `NothingPending`. With
+    /// `hold`, its first call waits for `release` after signalling `entered`.
+    #[derive(Default)]
+    struct ScriptedFinalizer {
+        outcomes:
+            Mutex<VecDeque<Result<BlockingFinalizeOutcome, bitmagnet_blocking::BlockingError>>>,
+        calls: std::sync::atomic::AtomicUsize,
+        hold: bool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl ScriptedFinalizer {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockingFinalizer for ScriptedFinalizer {
+        async fn finalize(
+            &self,
+        ) -> Result<BlockingFinalizeOutcome, bitmagnet_blocking::BlockingError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.hold && call == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.outcomes
+                .lock()
+                .expect("outcomes lock")
+                .pop_front()
+                .unwrap_or(Ok(BlockingFinalizeOutcome::NothingPending))
+        }
+    }
+
+    /// A worker whose every poll fails at once: no server listens on the
+    /// pool's address, so it idles a full `check_interval` after each.
+    fn idle_worker(check_interval: Duration) -> ProcessTorrentWorker {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+            .expect("lazy pool");
+        ProcessTorrentWorker::new(
+            QueueStore::new(pool),
+            Materializer::from_core().expect("compile embedded classifier"),
+            Arc::new(UnusedBlocker),
+            ProcessTorrentWorkerConfig {
+                check_interval,
+                ..ProcessTorrentWorkerConfig::default()
+            },
+        )
+    }
+
+    /// While idle the timed flush runs every period without an extra poll; a
+    /// failure is logged and counted without a job, and the next period
+    /// retries; a flush is logged with its hash count; an empty one is silent.
+    #[tokio::test]
+    async fn the_timed_flush_runs_while_idle_logs_counts_and_retries() {
+        let registry = prometheus::Registry::new();
+        let jobs = register_worker_metrics(&registry).unwrap();
+        let failures = register_blocking_failure_metrics(&registry).unwrap();
+        let finalizer = Arc::new(ScriptedFinalizer {
+            outcomes: Mutex::new(VecDeque::from([
+                Err(bitmagnet_blocking::BlockingError::Store(Box::new(
+                    std::io::Error::other("store unavailable"),
+                ))),
+                Ok(BlockingFinalizeOutcome::Flushed {
+                    unique_hash_count: 2,
+                }),
+            ])),
+            ..ScriptedFinalizer::default()
+        });
+        let worker = idle_worker(Duration::from_secs(3_600))
+            .with_metrics(jobs.clone())
+            .with_blocking_failure_metrics(failures)
+            .with_timed_blocking_flush(finalizer.clone(), Duration::from_millis(40));
+        assert!(idle_worker(Duration::from_secs(1))
+            .with_timed_blocking_flush(finalizer.clone(), Duration::ZERO)
+            .timed_flush
+            .is_none());
+
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buffer);
+        let _logs = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || Capture(Arc::clone(&sink)))
+                .finish(),
+        );
+        worker
+            .run_until(async {
+                while finalizer.calls() < 4 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+
+        assert_eq!(
+            jobs.with_label_values(&["error", ""]).get(),
+            1,
+            "one poll: the flushes did not move it"
+        );
+        let text = String::from_utf8(buffer.lock().expect("capture lock").clone()).unwrap();
+        let flush_lines = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.contains("flush interval"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            flush_lines,
+            [
+                "ERROR bitmagnet_processor::worker: blocking whole-torrent deletes failed \
+                 on the flush interval op=\"other\" error=atomic blocking-store commit \
+                 failed: store unavailable",
+                "INFO bitmagnet_processor::worker: flushed buffered whole-torrent blocks \
+                 on the flush interval unique_hash_count=2",
+            ]
+        );
+        let exposition = prometheus::TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line
+                    .starts_with("bitmagnet_process_torrent_worker_blocking_failures_total{"))
+                .filter(|line| !line.ends_with(" 0"))
+                .collect::<Vec<_>>(),
+            ["bitmagnet_process_torrent_worker_blocking_failures_total\
+                 {op=\"other\",sqlstate_class=\"none\"} 1"]
+        );
+    }
+
+    /// Shutdown does not cut a timed flush short or start another: the loop
+    /// returns once the flush in flight completes, after exactly one call.
+    ///
+    /// The flush reports nothing pending, so this test never reaches the
+    /// flushed-hashes log callsite, whose cached interest the capturing test
+    /// above relies on.
+    #[tokio::test]
+    async fn a_timed_flush_in_flight_at_shutdown_completes_once() {
+        let finalizer = Arc::new(ScriptedFinalizer {
+            hold: true,
+            ..ScriptedFinalizer::default()
+        });
+        let worker = idle_worker(Duration::from_secs(3_600))
+            .with_timed_blocking_flush(finalizer.clone(), Duration::from_millis(20));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let run = worker.run_until(async {
+            let _ = stopped.await;
+        });
+        tokio::pin!(run);
+
+        tokio::select! {
+            () = &mut run => panic!("the loop returned before shutdown"),
+            () = finalizer.entered.notified() => {}
+        }
+        stop.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut run)
+                .await
+                .is_err(),
+            "shutdown waits for the flush in flight"
+        );
+        finalizer.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), &mut run)
+            .await
+            .expect("the loop returns once the flush completes");
+        assert_eq!(finalizer.calls(), 1);
     }
 }

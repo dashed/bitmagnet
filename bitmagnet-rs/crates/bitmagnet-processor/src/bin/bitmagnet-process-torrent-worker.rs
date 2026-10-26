@@ -199,7 +199,11 @@ async fn main() -> Result<()> {
         config,
     )
     .with_metrics(metrics)
-    .with_blocking_failure_metrics(blocking_failures);
+    .with_blocking_failure_metrics(blocking_failures)
+    .with_timed_blocking_flush(
+        Arc::new(blocking_manager.clone()),
+        blocking_manager.max_flush_wait(),
+    );
 
     tracing::info!(
         queue = PROCESS_TORRENT,
@@ -212,13 +216,15 @@ async fn main() -> Result<()> {
         check_interval_seconds = args.check_interval_seconds,
         job_timeout_seconds = args.job_timeout_seconds,
         shutdown_grace_seconds = args.shutdown_grace_seconds,
+        blocking_flush_interval_seconds = blocking_manager.max_flush_wait().as_secs(),
         "starting persisting Rust process_torrent worker"
     );
     worker
         .run_until(bitmagnet_common::serve::shutdown_signal())
         .await;
     // Go flushes the blocking buffer when the application stops; do the same
-    // before the pool closes.
+    // before the pool closes. A timed flush never outlives `run_until`, so
+    // this one never overlaps it and finds only what is still buffered.
     blocking_manager
         .flush()
         .await

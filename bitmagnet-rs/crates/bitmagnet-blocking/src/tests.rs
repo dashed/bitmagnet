@@ -258,6 +258,22 @@ async fn defaults_empty_public_flush_traits_and_drop_are_taskless() {
 }
 
 #[tokio::test]
+async fn postgres_managers_take_a_flush_wait_and_keep_gos_buffer_bound() {
+    let pool = || {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/unreachable")
+            .unwrap()
+    };
+    let go = BlockingManager::new(pool());
+    assert_eq!(go.config, BlockingConfig::default());
+    assert_eq!(go.max_flush_wait(), Duration::from_secs(300));
+
+    let short = BlockingManager::with_max_flush_wait(pool(), Duration::from_secs(2));
+    assert_eq!(short.config, config(1_000, Duration::from_secs(2)));
+    assert_eq!(short.clone().max_flush_wait(), Duration::from_secs(2));
+}
+
+#[tokio::test]
 async fn finalizer_trait_object_reports_empty_without_a_store_attempt() {
     assert_send_sync::<Box<dyn BlockingFinalizer>>();
     assert_send_sync::<BlockingFinalizeOutcome>();

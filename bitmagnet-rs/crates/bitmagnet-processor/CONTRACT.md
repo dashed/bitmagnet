@@ -408,6 +408,48 @@ the blocking-manager flush fits Kubernetes' default 30-second
 `terminationGracePeriodSeconds`. Without the bound, a job could run for up to
 its ten-minute timeout and be `SIGKILL`ed mid-write, without the flush.
 
+The worker also flushes the blocking manager on a timer. A job deletes the
+torrents it blocks in its own transaction, as Go's `persist` does, right after
+`block` buffers their hashes. The hashes reach the persisted
+`blocked_torrents` filter only when the manager flushes. The manager flushes
+only when an operation finds `max_flush_wait` (Go's five minutes) elapsed since
+the last flush, or the buffer full. Go's manager has no timer either. But in
+Go's application the DHT crawler calls `Filter` on the same manager
+continually, so a buffered hash is filtered at once and flushed within about
+five minutes. This worker's only operation is a job's `block`. Without a timer,
+a hash blocked within five minutes of a flush would stay out of the persisted
+filter until the next blocking job (hours at canary volume) or shutdown. During
+that time Go's crawler, which reloads the filter only on its own flushes, could
+re-admit the deleted torrent from the DHT and make it searchable again until
+another job deletes it. So `run_until` finalizes the manager every
+`max_flush_wait`, timed from the loop's start and from the end of each timed
+flush. That bounds the lag to the period, plus up to the crawler's own five
+minutes to reload. The flush uses the same one-transaction commit as `block`,
+under the same `bloom_filters:blocked_torrents` advisory lock; its `DELETE` of
+the already-deleted torrents is a no-op. Deliberate differences from Go:
+
+- An empty buffer is not flushed. Go's time-due `Filter` rewrites the filter's
+  large object every five minutes even with nothing new, to refresh its
+  in-memory copy. The worker never filters, so a timed flush with nothing
+  buffered neither touches the database nor rewrites the large object.
+- The timer runs between jobs and while idle, never beside a job, so it cannot
+  wait on a `block` that a job holds. A running job delays it until the job
+  settles (at most the job timeout). Its period is measured from the timer's
+  own last run, not from the last flush, so a timed flush can follow a
+  block-driven one by less than `max_flush_wait`. That costs at most one extra
+  commit per period, and only when hashes are buffered.
+- A failed timed flush keeps the buffer, as a failed `block` does, for the next
+  flush. It is logged at error as `blocking whole-torrent deletes failed on the
+  flush interval`, with the step, SQLSTATE and cause chain but no job ID, and
+  counted in `bitmagnet_process_torrent_worker_blocking_failures_total`.
+- Shutdown never cuts a timed flush short. One in flight when `SIGTERM`
+  arrives completes before `run_until` returns, and the binary's shutdown flush
+  then finds only what is still buffered: the two never overlap or repeat a
+  commit.
+
+No job outcome, row text, or label changes. A timed flush only moves earlier
+a filter update the shutdown flush would otherwise make.
+
 Migration-backed gates (`tests/worker_pg.rs`) prove: a processed job leaves
 exactly the live image the direct `load_writer_plan` + `persist_writer_plan`
 path leaves; non-admitted payloads are never touched and Go's claim still
